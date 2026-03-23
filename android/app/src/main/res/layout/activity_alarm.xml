@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:gravity="center"
+    android:padding="32dp"
+    android:background="#B71C1C">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="&#x26A0;&#xFE0F;"
+        android:textSize="72sp"
+        android:layout_marginBottom="16dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="CRITICAL ALARM"
+        android:textSize="32sp"
+        android:textColor="#FFFFFF"
+        android:textStyle="bold"
+        android:layout_marginBottom="8dp" />
+
+    <TextView
+        android:id="@+id/alarmSeverity"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="SEVERITY: CRITICAL"
+        android:textSize="14sp"
+        android:textColor="#FFCDD2"
+        android:layout_marginBottom="24dp" />
+
+    <TextView
+        android:id="@+id/alarmId"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Alarm #0"
+        android:textSize="14sp"
+        android:textColor="#FFCDD2"
+        android:layout_marginBottom="16dp" />
+
+    <TextView
+        android:id="@+id/alarmTitle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Alarm Title"
+        android:textSize="24sp"
+        android:textColor="#FFFFFF"
+        android:textStyle="bold"
+        android:textAlignment="center"
+        android:layout_marginBottom="12dp" />
+
+    <TextView
+        android:id="@+id/alarmMessage"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Alarm description"
+        android:textSize="16sp"
+        android:textColor="#FFEBEE"
+        android:textAlignment="center"
+        android:layout_marginBottom="48dp" />
+
+    <Button
+        android:id="@+id/ackButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="&#x2705; ACKNOWLEDGE ALARM"
+        android:padding="20dp"
+        android:backgroundTint="#4CAF50"
+        android:textColor="#FFFFFF"
+        android:textSize="18sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Acknowledging will suspend this alarm for 30 minutes"
+        android:textSize="12sp"
+        android:textColor="#FFCDD2"
+        android:layout_marginTop="12dp" />
+</LinearLayout>
