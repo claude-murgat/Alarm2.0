@@ -48,6 +48,13 @@
 - → L'astreinte est alertée par la sonnerie de perte de connexion, mais ne sait pas POURQUOI
 - → **Point de défaillance unique identifié**
 
+### Défaillance backend cloud (VPS)
+- Le fournisseur cloud a des onduleurs, du RAID, de la supervision — mais pas de garantie zéro
+- Exemple réel : incendie OVH SBG2 (mars 2021) → destruction totale d'un datacenter, aucun préavis
+- SLA typique 99,9% = 8h de downtime/an toléré contractuellement
+- **Ce que ça change vs on-site** : c'est le fournisseur qui gère le hardware (pas nous), mais la probabilité zéro n'existe pas
+- → Mitigation : dead man's switch (P2) + restart Docker automatique
+
 ## Trous identifiés et couverture
 
 | # | Risque | Couvert ? | Par quoi |
@@ -65,8 +72,10 @@
 - **Pourquoi** : élimine le point de défaillance unique (panne hardware sur site)
 - **Comment** : déplacer le backend (FastAPI + PostgreSQL) sur VPS cloud (OVH, Scaleway ~5-10€/mois)
 - **Interaction** : remplace l'instance on-site, pas de doublon — instance unique dans le cloud
-- **Protège contre** : panne hardware site, maintenance serveur, sinistre physique
-- **Ne protège pas** : coupure connectivité totale (mais Starlink couvre ça)
+- **Protège contre** : panne hardware site, maintenance serveur, sinistre physique local
+- **Ne protège pas** : coupure connectivité totale (mais Starlink couvre ça), sinistre datacenter cloud (improbable mais réel)
+- **Goulots restants** : le VPS lui-même (crash, OOM, migration ratée) + le modem/routeur de sortie internet sur site
+  - Starlink ayant son propre routeur intégré, il peut sortir directement sans passer par le modem principal → le modem n'est plus un SPOF si Starlink est câblé en parallèle (pas en série)
 
 ### P2 — Dead man's switch externe
 - **Pourquoi** : si le backend cloud lui-même tombe, plus personne ne sait
@@ -76,9 +85,16 @@
 
 ### P3 — SMS/appel de secours (Twilio ou OVH SMS)
 - **Pourquoi** : indépendant de l'app Android (si app tuée par OS, SMS passe quand même)
-- **Déclenchement** : alarme non acquittée après N minutes → SMS envoyé par le backend
-- **Coût** : Twilio ~0.08€/SMS, OVH SMS ~0.06€/SMS
+- **Déclenchement** : alarme non acquittée après N minutes → SMS envoyé par le backend via API Twilio
+- **Flux** : backend cloud → HTTPS vers api.twilio.com → réseau SS7/téléphonie → SMS sur téléphone astreinte
+  - Le téléphone n'a besoin que du signal GSM/SMS, **pas de data internet**
+- **Implémentation** : 3 lignes Python dans la boucle d'escalade existante (`twilio.rest.Client.messages.create()`)
+  - Colonne `phone_number` à ajouter dans la table `users`
+  - Variables d'env : `TWILIO_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`
+  - Numéro loué chez Twilio : ~1€/mois ; SMS sortant France : ~0.08€/SMS (~0.24€ par incident à 3 personnes)
 - **Protège contre** : app Android tuée par OS, téléphone sans données internet mais avec signal voix/SMS
+- **Limite** : si le backend lui-même est mort → le SMS ne peut plus partir (c'est le backend qui appelle Twilio)
+  - C'est pour ça que P2 (dead man's switch) est complémentaire : il fonctionne à l'envers (silence du backend → Healthchecks.io déclenche l'alerte)
 
 ### P4 — UPS dédié Starlink (si pas déjà fait)
 - S'assurer que l'antenne Starlink a sa propre batterie de secours
