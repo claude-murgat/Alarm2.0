@@ -27,7 +27,8 @@ data class AlarmResponse(
     val acknowledged_by_name: String?,
     val suspended_until: String?,
     val escalation_count: Int,
-    val created_at: String
+    val created_at: String,
+    val ack_remaining_seconds: Int? = null
 )
 
 data class DeviceRegister(val device_token: String)

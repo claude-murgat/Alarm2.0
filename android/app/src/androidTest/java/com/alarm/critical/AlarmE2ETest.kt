@@ -699,4 +699,175 @@ class AlarmE2ETest {
 
         scenario.close()
     }
+
+    // ── 19. Alarme acquittée par un autre utilisateur ────────────────────────
+
+    @Test
+    fun test19_ackedByOtherUserShowsStatusNoSoundNoButton() {
+        // Alarme acquittée par user2, nous sommes user1
+        val ackedByOther = fakeAlarm.copy(
+            status = "acknowledged",
+            acknowledged_at = "2026-01-01T00:01:00",
+            acknowledged_by_name = "user2",
+            suspended_until = "2026-01-01T00:31:00",
+            ack_remaining_seconds = 1500
+        )
+
+        fakeApi.myAlarmsResponses = mutableListOf(
+            Response.success(listOf(ackedByOther)),
+            Response.success(listOf(ackedByOther)),
+            Response.success(listOf(ackedByOther))
+        )
+        waitForPolls(2)
+
+        val scenario = launchDashboard()
+
+        // Titre visible
+        onView(withId(R.id.alarmTitle))
+            .check(matches(withText("Serveur en panne")))
+
+        // Status indique acquittée par user2
+        onView(withId(R.id.ackStatusText))
+            .check(matches(withEffectiveVisibility(Visibility.VISIBLE)))
+        onView(withId(R.id.ackStatusText))
+            .check(matches(withSubstring("user2")))
+
+        // Bouton acquitter masqué
+        onView(withId(R.id.dashboardAckButton))
+            .check(matches(withEffectiveVisibility(Visibility.GONE)))
+
+        // Temps restant visible
+        onView(withId(R.id.ackRemainingTime))
+            .check(matches(withEffectiveVisibility(Visibility.VISIBLE)))
+        onView(withId(R.id.ackRemainingTime))
+            .check(matches(withSubstring("min")))
+
+        scenario.close()
+    }
+
+    // ── 20. Countdown se met à jour à chaque poll ────────────────────────────
+
+    @Test
+    fun test20_ackCountdownUpdatesOnEachPoll() {
+        // Phase 1 : alarme active
+        fakeApi.myAlarmsResponses = mutableListOf(
+            Response.success(listOf(fakeAlarm)),
+            Response.success(listOf(fakeAlarm))
+        )
+        waitForPolls(2)
+
+        val scenario = launchDashboard()
+
+        onView(withId(R.id.dashboardAckButton))
+            .check(matches(withEffectiveVisibility(Visibility.VISIBLE)))
+        unregisterAll()
+
+        // User acquitte
+        onView(withId(R.id.dashboardAckButton)).perform(click())
+
+        // Phase 2 : alarme acknowledged avec 1800s restantes
+        val acked1800 = fakeAlarm.copy(
+            status = "acknowledged",
+            acknowledged_at = "2026-01-01T00:01:00",
+            acknowledged_by_name = "user1",
+            suspended_until = "2026-01-01T00:31:00",
+            ack_remaining_seconds = 1800
+        )
+        fakeApi.myAlarmsResponses = mutableListOf(
+            Response.success(listOf(acked1800)),
+            Response.success(listOf(acked1800))
+        )
+        fakeApi.resetCallCount()
+        waitForPolls(2)
+
+        onView(withId(R.id.ackRemainingTime))
+            .check(matches(withSubstring("30 min")))
+        unregisterAll()
+
+        // Phase 3 : après un moment, 1740s restantes (29 min)
+        val acked1740 = acked1800.copy(ack_remaining_seconds = 1740)
+        fakeApi.myAlarmsResponses = mutableListOf(
+            Response.success(listOf(acked1740)),
+            Response.success(listOf(acked1740))
+        )
+        fakeApi.resetCallCount()
+        waitForPolls(2)
+
+        onView(withId(R.id.ackRemainingTime))
+            .check(matches(withSubstring("29 min")))
+
+        scenario.close()
+    }
+
+    // ── 21. Nouvelle alarme après résolution reset l'ack et sonne ────────────
+
+    @Test
+    fun test21_newAlarmAfterResolvedResetsAckAndRings() {
+        // Phase 1 : alarme active id=42
+        fakeApi.myAlarmsResponses = mutableListOf(
+            Response.success(listOf(fakeAlarm)),
+            Response.success(listOf(fakeAlarm))
+        )
+        waitForPolls(2)
+
+        val scenario = launchDashboard()
+
+        onView(withId(R.id.dashboardAckButton))
+            .check(matches(withEffectiveVisibility(Visibility.VISIBLE)))
+        unregisterAll()
+
+        // User acquitte
+        onView(withId(R.id.dashboardAckButton)).perform(click())
+
+        // Phase 2 : alarme acknowledged puis résolue (disparaît)
+        val ackedAlarm = fakeAlarm.copy(
+            status = "acknowledged",
+            acknowledged_at = "2026-01-01T00:01:00",
+            acknowledged_by_name = "user1",
+            suspended_until = "2026-01-01T00:31:00",
+            ack_remaining_seconds = 1800
+        )
+        fakeApi.myAlarmsResponses = mutableListOf(
+            Response.success(listOf(ackedAlarm)),
+            Response.success(emptyList()),  // Alarme résolue
+            Response.success(emptyList())
+        )
+        fakeApi.resetCallCount()
+        waitForPolls(3)
+
+        onView(withId(R.id.currentAlarmLine))
+            .check(matches(withSubstring("\u26AA")))  // ⚪ inactive
+        unregisterAll()
+
+        // Phase 3 : NOUVELLE alarme id=99
+        val newAlarm = AlarmResponse(
+            id = 99,
+            title = "Nouvelle alarme",
+            message = "Un nouveau problème",
+            severity = "critical",
+            status = "active",
+            assigned_user_id = 1,
+            acknowledged_at = null,
+            acknowledged_by_name = null,
+            suspended_until = null,
+            escalation_count = 0,
+            created_at = "2026-01-01T01:00:00"
+        )
+        fakeApi.myAlarmsResponses = mutableListOf(
+            Response.success(listOf(newAlarm)),
+            Response.success(listOf(newAlarm))
+        )
+        fakeApi.resetCallCount()
+        waitForPolls(2)
+
+        // Le bouton ack doit être visible (l'ack précédent est reset car ID différent)
+        onView(withId(R.id.dashboardAckButton))
+            .check(matches(withEffectiveVisibility(Visibility.VISIBLE)))
+        onView(withId(R.id.alarmTitle))
+            .check(matches(withText("Nouvelle alarme")))
+        onView(withId(R.id.currentAlarmLine))
+            .check(matches(withSubstring("\uD83D\uDD34")))  // 🔴 active
+
+        scenario.close()
+    }
 }

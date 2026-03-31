@@ -99,23 +99,19 @@ def active_alarms(db: Session = Depends(get_db)):
 
 @router.get("/mine", response_model=List[AlarmResponse])
 def my_alarms(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Get active alarms where the current user has been notified (cumulative escalation)."""
-    now = clock_now()
-    # Chercher toutes les alarmes actives/escaladées
+    """Get alarms where the current user has been notified (cumulative escalation).
+    Includes acknowledged alarms so clients can display ack status and countdown."""
     alarms = (
         db.query(Alarm)
-        .filter(Alarm.status.in_(["active", "escalated"]))
+        .filter(Alarm.status.in_(["active", "escalated", "acknowledged"]))
         .all()
     )
     result = []
     for a in alarms:
-        # Vérifier si l'utilisateur est dans la liste des notifiés
         raw = a.notified_user_ids or ""
         notified = [int(x) for x in raw.split(",") if x.strip()]
         if current_user.id in notified:
-            # Exclure les alarmes en suspension
-            if not a.suspended_until or a.suspended_until <= now:
-                result.append(_alarm_response(a, db))
+            result.append(_alarm_response(a, db))
     return result
 
 

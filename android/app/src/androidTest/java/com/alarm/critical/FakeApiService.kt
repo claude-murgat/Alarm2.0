@@ -29,7 +29,7 @@ class FakeApiService : ApiService {
     private var myAlarmsCallCount = 0
 
     var acknowledgeResponse: Response<AlarmResponse> = Response.success(
-        AlarmResponse(42, "Test", "msg", "critical", "acknowledged", 1, "2026-01-01T00:01:00", "user1", "2026-01-01T00:31:00", 0, "2026-01-01T00:00:00")
+        AlarmResponse(42, "Test", "msg", "critical", "acknowledged", 1, "2026-01-01T00:01:00", "user1", "2026-01-01T00:31:00", 0, "2026-01-01T00:00:00", ack_remaining_seconds = 1800)
     )
 
     var alarmHistoryResponse: Response<List<AlarmResponse>> = Response.success(emptyList())

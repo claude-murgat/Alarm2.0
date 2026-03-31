@@ -31,6 +31,7 @@ class DashboardActivity : AppCompatActivity() {
     private var currentAlarm: AlarmResponse? = null
     private var isAcknowledged = false
     private var alarmGoneDuringAck = false  // true quand l'alarme a disparu après ack (suspension)
+    private var acknowledgedAlarmId: Int? = null  // ID de l'alarme acquittée par cet utilisateur
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -143,13 +144,50 @@ class DashboardActivity : AppCompatActivity() {
             val ackStatus = findViewById<TextView>(R.id.ackStatusText)
             val ackRemaining = findViewById<TextView>(R.id.ackRemainingTime)
 
+            val currentUserName = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
+                .getString("user_name", "") ?: ""
+
+            // Reset ack si une AUTRE alarme arrive (ID différent)
+            if (alarm != null && isAcknowledged && alarm.id != acknowledgedAlarmId) {
+                isAcknowledged = false
+                alarmGoneDuringAck = false
+                acknowledgedAlarmId = null
+            }
+
             // Si l'alarme revient après avoir disparu pendant l'ack → fin de suspension
             if (alarm != null && isAcknowledged && alarmGoneDuringAck) {
                 isAcknowledged = false
                 alarmGoneDuringAck = false
             }
 
-            if (alarm != null && !isAcknowledged) {
+            if (alarm != null && alarm.status == "acknowledged" && !isAcknowledged) {
+                // Alarme acquittée par quelqu'un d'autre → afficher info, pas de son, pas de bouton
+                currentAlarm = alarm
+                val ackerName = alarm.acknowledged_by_name ?: "?"
+                alarmLine.text = "\uD83D\uDD34 Alarme active"  // 🔴
+
+                titleView.text = alarm.title
+                titleView.visibility = View.VISIBLE
+                messageView.text = alarm.message
+                messageView.visibility = View.VISIBLE
+
+                val duration = computeDuration(alarm.created_at)
+                durationView.text = "Active depuis $duration"
+                durationView.visibility = View.VISIBLE
+
+                ackButton.visibility = View.GONE
+
+                ackStatus.text = "\u2705 Acquitt\u00e9e par $ackerName"
+                ackStatus.visibility = View.VISIBLE
+
+                val remaining = alarm.ack_remaining_seconds ?: 0
+                val min = remaining / 60
+                ackRemaining.text = "$min min restantes"
+                ackRemaining.visibility = View.VISIBLE
+
+                soundManager?.stopAlarmSound()
+
+            } else if (alarm != null && !isAcknowledged) {
                 // Alarme active et non acquittée → afficher alarme + sonnerie
                 currentAlarm = alarm
 
@@ -175,7 +213,7 @@ class DashboardActivity : AppCompatActivity() {
                 soundManager?.startAlarmSound()
 
             } else if (alarm != null && isAcknowledged) {
-                // Alarme active mais acquittée → garder l'affichage acquitté, pas de sonnerie
+                // Alarme acquittée par nous → garder l'affichage, countdown dynamique
                 currentAlarm = alarm
                 alarmLine.text = "\uD83D\uDD34 Alarme active"  // 🔴
 
@@ -189,10 +227,15 @@ class DashboardActivity : AppCompatActivity() {
                 durationView.visibility = View.VISIBLE
 
                 ackButton.visibility = View.GONE
-                // ackStatus et ackRemaining restent tels quels (visibles)
+
+                // Mettre à jour le countdown depuis le serveur
+                val remaining = alarm.ack_remaining_seconds ?: 0
+                val min = remaining / 60
+                ackRemaining.text = "$min min restantes"
+                ackRemaining.visibility = View.VISIBLE
 
             } else if (alarm == null && isAcknowledged) {
-                // Alarme disparue du polling (suspendue) → garder l'affichage acquitté
+                // Alarme disparue (résolue pendant ack) → garder l'affichage acquitté
                 alarmGoneDuringAck = true
                 alarmLine.text = "\u26AA Aucune alarme"  // ⚪
                 titleView.visibility = View.GONE
@@ -232,18 +275,21 @@ class DashboardActivity : AppCompatActivity() {
                 if (response.isSuccessful) {
                     soundManager?.stopAlarmSound()
                     isAcknowledged = true
+                    acknowledgedAlarmId = alarm.id
                     runOnUiThread {
                         // Masquer le bouton
                         findViewById<Button>(R.id.dashboardAckButton).visibility = View.GONE
 
                         // Afficher statut acquitté
                         val statusText = findViewById<TextView>(R.id.ackStatusText)
-                        statusText.text = "\u2705 Acquittée"
+                        statusText.text = "\u2705 Acquitt\u00e9e"
                         statusText.visibility = View.VISIBLE
 
-                        // Afficher temps restant
+                        // Afficher temps restant (dynamique depuis la réponse)
                         val remainingText = findViewById<TextView>(R.id.ackRemainingTime)
-                        remainingText.text = "Suspendue pour 30 min restantes"
+                        val remaining = response.body()?.ack_remaining_seconds ?: 1800
+                        val min = remaining / 60
+                        remainingText.text = "$min min restantes"
                         remainingText.visibility = View.VISIBLE
                     }
                 } else {

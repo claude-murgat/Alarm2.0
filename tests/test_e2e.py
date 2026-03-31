@@ -220,7 +220,8 @@ class TestAlarmAcknowledgement:
         assert r.json()["acknowledged_at"] is not None
         assert r.json()["suspended_until"] is not None
 
-    def test_suspended_alarm_not_in_mine(self):
+    def test_suspended_alarm_visible_in_mine_as_acknowledged(self):
+        """Une alarme acquittée reste visible dans /mine avec status acknowledged."""
         r = requests.post(f"{API}/alarms/send", json={
             "title": "Suspend", "message": "m", "severity": "critical",
             "assigned_user_id": self.user1_id,
@@ -229,8 +230,9 @@ class TestAlarmAcknowledgement:
         requests.post(f"{API}/alarms/{alarm_id}/ack", headers=self.headers)
 
         r = requests.get(f"{API}/alarms/mine", headers=self.headers)
-        active = [a for a in r.json() if a["id"] == alarm_id]
-        assert len(active) == 0
+        acked = [a for a in r.json() if a["id"] == alarm_id]
+        assert len(acked) == 1, "L'alarme acquittée doit rester visible dans /mine"
+        assert acked[0]["status"] == "acknowledged"
 
     def test_acknowledge_stores_user_name(self):
         """L'acquittement doit enregistrer le nom de l'utilisateur."""
@@ -275,9 +277,11 @@ class TestAlarmAcknowledgement:
         # Acquitter
         requests.post(f"{API}/alarms/{alarm_id}/ack", headers=self.headers)
 
-        # Vérifier que l'alarme est suspendue
+        # Vérifier que l'alarme est visible mais acknowledged
         r = requests.get(f"{API}/alarms/mine", headers=self.headers)
-        assert len([a for a in r.json() if a["id"] == alarm_id]) == 0
+        acked = [a for a in r.json() if a["id"] == alarm_id]
+        assert len(acked) == 1
+        assert acked[0]["status"] == "acknowledged"
 
         # Avancer de 31 min (suspension = 30 min)
         requests.post(f"{API}/test/advance-clock", params={"minutes": 31})
@@ -1247,6 +1251,109 @@ class TestNotifiedUsersVisibility:
         assert "notified_user_names" in alarm, \
             "Le champ notified_user_names doit être dans la réponse"
         assert "user1" in alarm["notified_user_names"]
+
+
+# ── Visibilité alarme acquittée + countdown ─────────────────────────────────
+
+class TestAckedAlarmVisibility:
+    """Un utilisateur connecté doit voir une alarme acquittée par quelqu'un d'autre,
+    et le champ ack_remaining_seconds doit décompter."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        requests.post(f"{API}/test/reset-clock")
+        requests.post(f"{API}/test/reset")
+        requests.post(f"{API}/alarms/reset")
+
+        # Login user1 et user2
+        r1 = requests.post(f"{API}/auth/login", json={
+            "name": USER1_NAME, "password": USER1_PASSWORD
+        })
+        self.token1 = r1.json()["access_token"]
+        self.headers1 = {"Authorization": f"Bearer {self.token1}"}
+        self.user1_id = r1.json()["user"]["id"]
+
+        r2 = requests.post(f"{API}/auth/login", json={
+            "name": USER2_NAME, "password": USER2_PASSWORD
+        })
+        self.token2 = r2.json()["access_token"]
+        self.headers2 = {"Authorization": f"Bearer {self.token2}"}
+        self.user2_id = r2.json()["user"]["id"]
+
+        yield
+        requests.post(f"{API}/test/reset-clock")
+
+    def test_acked_alarm_visible_to_other_notified_user(self):
+        """User2 doit voir une alarme acquittée par user1 avec status acknowledged."""
+        # Créer alarme assignée à user1
+        r = requests.post(f"{API}/alarms/send", json={
+            "title": "Visible Ack", "message": "m", "severity": "critical",
+            "assigned_user_id": self.user1_id,
+        })
+        alarm_id = r.json()["id"]
+
+        # Escalader vers user2 pour qu'il soit dans notified_user_ids
+        requests.post(f"{API}/test/trigger-escalation")
+
+        # Rafraîchir heartbeats après escalade
+        requests.post(f"{API}/devices/heartbeat", headers=self.headers1)
+        requests.post(f"{API}/devices/heartbeat", headers=self.headers2)
+
+        # user1 acquitte
+        requests.post(f"{API}/alarms/{alarm_id}/ack", headers=self.headers1)
+
+        # user2 doit voir l'alarme acquittée
+        r = requests.get(f"{API}/alarms/mine", headers=self.headers2)
+        alarms = r.json()
+        acked = [a for a in alarms if a["id"] == alarm_id]
+        assert len(acked) == 1, f"User2 devrait voir l'alarme acquittée, got {len(acked)}"
+        assert acked[0]["status"] == "acknowledged"
+        assert acked[0]["acknowledged_by_name"] == USER1_NAME
+
+    def test_ack_remaining_seconds_in_response(self):
+        """Le champ ack_remaining_seconds doit être présent et décompter avec le temps."""
+        r = requests.post(f"{API}/alarms/send", json={
+            "title": "Countdown Test", "message": "m", "severity": "critical",
+            "assigned_user_id": self.user1_id,
+        })
+        alarm_id = r.json()["id"]
+
+        # Acquitter
+        requests.post(f"{API}/alarms/{alarm_id}/ack", headers=self.headers1)
+
+        # Vérifier ack_remaining_seconds ~1800
+        r = requests.get(f"{API}/alarms/mine", headers=self.headers1)
+        alarms = [a for a in r.json() if a["id"] == alarm_id]
+        assert len(alarms) == 1, "L'alarme acquittée devrait être visible dans /mine"
+        remaining = alarms[0]["ack_remaining_seconds"]
+        assert remaining is not None, "ack_remaining_seconds doit être présent"
+        assert 1750 <= remaining <= 1810, f"ack_remaining_seconds devrait être ~1800, got {remaining}"
+
+        # Avancer de 10 minutes
+        requests.post(f"{API}/test/advance-clock", params={"minutes": 10})
+
+        # Vérifier ack_remaining_seconds ~1200
+        r = requests.get(f"{API}/alarms/mine", headers=self.headers1)
+        alarms = [a for a in r.json() if a["id"] == alarm_id]
+        assert len(alarms) == 1
+        remaining2 = alarms[0]["ack_remaining_seconds"]
+        assert 1150 <= remaining2 <= 1210, f"Après 10 min, devrait être ~1200, got {remaining2}"
+
+    def test_acked_alarm_visible_to_acker_too(self):
+        """L'utilisateur qui a acquitté doit aussi voir l'alarme dans /mine."""
+        r = requests.post(f"{API}/alarms/send", json={
+            "title": "Self Ack Visible", "message": "m", "severity": "critical",
+            "assigned_user_id": self.user1_id,
+        })
+        alarm_id = r.json()["id"]
+
+        requests.post(f"{API}/alarms/{alarm_id}/ack", headers=self.headers1)
+
+        r = requests.get(f"{API}/alarms/mine", headers=self.headers1)
+        alarms = [a for a in r.json() if a["id"] == alarm_id]
+        assert len(alarms) == 1, "L'acker doit voir son alarme acquittée dans /mine"
+        assert alarms[0]["status"] == "acknowledged"
+        assert alarms[0]["ack_remaining_seconds"] is not None
 
 
 # Tests Android E2E dans Espresso (android/app/src/androidTest/).

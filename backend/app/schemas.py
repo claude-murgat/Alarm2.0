@@ -59,6 +59,7 @@ class AlarmResponse(BaseModel):
     acknowledged_by: Optional[int]
     acknowledged_by_name: Optional[str] = None
     suspended_until: Optional[datetime]
+    ack_remaining_seconds: Optional[int] = None
     notified_user_ids: list[int] = []
     notified_user_names: list[str] = []
     is_oncall_alarm: bool = False
@@ -72,6 +73,7 @@ class AlarmResponse(BaseModel):
     @classmethod
     def from_alarm(cls, alarm, db=None):
         """Build AlarmResponse with parsed notified_user_ids and resolved names."""
+        from .clock import now as clock_now
         raw_ids = alarm.notified_user_ids or ""
         parsed_ids = [int(x) for x in raw_ids.split(",") if x.strip()]
         names = []
@@ -80,6 +82,10 @@ class AlarmResponse(BaseModel):
             users = db.query(User).filter(User.id.in_(parsed_ids)).all()
             id_to_name = {u.id: u.name for u in users}
             names = [id_to_name.get(uid, "?") for uid in parsed_ids]
+        ack_remaining = None
+        if alarm.suspended_until and alarm.status == "acknowledged":
+            remaining = (alarm.suspended_until - clock_now()).total_seconds()
+            ack_remaining = max(0, int(remaining))
         return cls(
             id=alarm.id, title=alarm.title, message=alarm.message,
             severity=alarm.severity, status=alarm.status,
@@ -88,6 +94,7 @@ class AlarmResponse(BaseModel):
             acknowledged_by=alarm.acknowledged_by,
             acknowledged_by_name=alarm.acknowledged_by_name,
             suspended_until=alarm.suspended_until,
+            ack_remaining_seconds=ack_remaining,
             notified_user_ids=parsed_ids,
             notified_user_names=names,
             is_oncall_alarm=alarm.is_oncall_alarm or False,

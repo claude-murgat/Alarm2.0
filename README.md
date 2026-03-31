@@ -44,10 +44,16 @@ Système d'astreinte avec notification mobile, sonnerie continue, acquittement t
 
 **Règles :**
 - **Une seule alarme active à la fois** (HTTP 409 si on en envoie une 2e)
-- **Acquittement** = arrêt de la sonnerie + suspension 30 min
+- **Acquittement** = arrêt de la sonnerie pour celui qui acquitte + suspension 30 min
 - **Expiration de l'acquittement** = l'alarme redevient ACTIVE (sonnerie reprend)
 - **Résolution** = alarme terminée, passe dans l'historique
 - **Historisation** : qui a acquitté (nom) + quand
+- **Alarme acquittée visible par tous les notifiés** : les autres utilisateurs voient l'alarme
+  avec le statut "Acquittée par [nom]" — pas de son, pas de bouton ack
+- **Countdown dynamique** : le temps restant de la suspension est mis à jour à chaque poll
+  (ex: "29 min restantes", "28 min restantes"…)
+- **Nouvelle alarme = nouvelle sonnerie** : si une alarme est résolue puis qu'une nouvelle
+  arrive, elle sonne même si l'utilisateur avait acquitté la précédente (reset par ID)
 
 ### 2. Escalade cumulative
 
@@ -60,9 +66,12 @@ Système d'astreinte avec notification mobile, sonnerie continue, acquittement t
   │ (pos. 1) │  🔊 SONNE        │ (pos. 2) │  🔊      │ (pos. 3) │
   │ 🔊 SONNE │  TOUJOURS        │ 🔊 SONNE │  AUSSI   │ 🔊 SONNE │
   └─────────┘                   └─────────┘          └────┬─────┘
-       ▲                                                   │ 15 min
-       └───────────────────────────────────────────────────┘
-                        Rebouclage (wrap-around)
+                                                          │ 15 min (si toujours pas ack)
+                                                          ▼
+                                                   Rebouclage vers
+                                                   le prochain online
+                                                   (effet limité : tout
+                                                   le monde sonne déjà)
 
   ★ CUMULATIVE : chaque utilisateur appelé CONTINUE de sonner.
     N'importe lequel peut acquitter l'alarme.
@@ -74,7 +83,7 @@ Système d'astreinte avec notification mobile, sonnerie continue, acquittement t
 - **N'importe qui** parmi les notifiés peut acquitter (pas seulement le dernier)
 - **Liste des notifiés** visible (`notified_user_ids` + `notified_user_names`)
 - **Skip des utilisateurs offline** (heartbeat connu + is_online=false)
-- **Rebouclage** après le dernier → retour au premier
+- **Rebouclage** après le dernier → continue à tourner (effet limité si tout le monde sonne déjà)
 - **Pas d'escalade** si alarme acquittée
 - **Reprise d'escalade** si ack expire et alarme redevient active
 - **Chaîne vide** → email à `direction_technique@charlesmurgat.com` (configurable)
@@ -196,18 +205,13 @@ docker compose up --build -d
 ### 2. App Android (Émulateur)
 
 ```bash
-export ANDROID_HOME="C:/Users/<user>/Android/Sdk"
-export JAVA_HOME="C:/Program Files/Eclipse Adoptium/jdk-17.0.18.8-hotspot"
-
-# Démarrer l'émulateur
-emulator -avd alarm_test -gpu swiftshader_indirect &
-
 # Build + install
 cd android && ./gradlew assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb reverse tcp:8000 tcp:8000
-adb shell am start -n com.alarm.critical/.MainActivity
 ```
+
+Ou en un clic : **double-cliquer sur `launch.bat`** à la racine du projet.
 
 ## Comptes de test
 
@@ -219,7 +223,7 @@ adb shell am start -n com.alarm.critical/.MainActivity
 
 ## Tests E2E
 
-### Backend (59 tests — nécessite Docker Compose up)
+### Backend (62 tests — nécessite Docker Compose up)
 
 ```bash
 python -m pytest tests/test_e2e.py -v
@@ -230,7 +234,7 @@ python -m pytest tests/test_e2e.py -v
 | Health & Web UI | 2 | Serveur up, interface chargée |
 | Login | 7 | Admin, case-insensitive, invalide, espaces rejetés, stockage lowercase |
 | Alarme unique | 4 | Envoi, 409 si doublon, envoi après résolution, réception user |
-| Acquittement | 5 | Statut, suspension, historisation nom, expiration → réactivation, reprise escalade |
+| Acquittement | 5 | Statut, suspension visible + acknowledged, historisation nom, expiration → réactivation, reprise escalade |
 | Escalade manuelle | 6 | Chaîne complète, skip offline, rebouclage, wrap continu, pas si ack, pas si vide |
 | Escalade timing | 3 | Pas avant délai, après délai, à la limite exacte (horloge injectable) |
 | Watchdog | 3 | Heartbeat, détection offline, affichage récent en secondes |
@@ -245,8 +249,9 @@ python -m pytest tests/test_e2e.py -v
 | Escalade cumulative | 3 | Alarme visible par tous les notifiés, n'importe qui peut ack, liste des notifiés |
 | Astreinte hors connexion | 5 | Alarme auto après 15min, auto-résolution, escalade, pas pour #2+, email si personne |
 | Visibilité notifiés | 1 | notified_user_names dans la réponse API |
+| Visibilité alarme acquittée | 3 | Alarme ack visible par autres notifiés, countdown ack_remaining_seconds, visible par l'acker aussi |
 
-### Android Espresso (18 tests — aucun backend nécessaire)
+### Android Espresso (21 tests — aucun backend nécessaire)
 
 ```bash
 cd android && ./gradlew connectedAndroidTest
@@ -272,8 +277,11 @@ cd android && ./gradlew connectedAndroidTest
 | 16 | Refresh token automatique | Nouveau token dans SharedPrefs |
 | 17 | Échec refresh → sonnerie + message | ⚠️ permanent + son continu |
 | 18 | Escalade visible (alarme disparaît) | ⚪ quand escaladée |
+| 19 | Alarme ack par autre → affichage info | "Acquittée par X", pas de bouton, pas de son |
+| 20 | Countdown mis à jour à chaque poll | "30 min" → "29 min" |
+| 21 | Nouvelle alarme après résolution sonne | 🔴 + bouton ack reset même si ack précédent |
 
-**Total : 77 tests E2E (59 backend + 18 mobile)**
+**Total : 83 tests E2E (62 backend + 21 mobile)**
 
 ## Stack technique
 
@@ -292,7 +300,6 @@ cd android && ./gradlew connectedAndroidTest
 
 - **Docker ne démarre pas** : Nécessite WSL2 + reboot après installation
 - **bcrypt error** : `pip install bcrypt==4.0.1`
-- **Émulateur lent** : `-gpu swiftshader_indirect`
 - **App ne se connecte pas** : `adb reverse tcp:8000 tcp:8000`
 - **Tests flaky** : Fermer les émulateurs/navigateurs qui envoient des heartbeats pendant les tests
 
@@ -300,5 +307,5 @@ cd android && ./gradlew connectedAndroidTest
 
 - Communication par HTTP polling (pas de push/FCM)
 - Pas de HTTPS/TLS (développement uniquement)
-- Max 10 utilisateurs
+- Backend hébergé sur site = point de défaillance unique (voir analyse redondance)
 - L'alarme d'astreinte ne peut pas coexister avec une alarme manuelle (contrainte alarme unique)
