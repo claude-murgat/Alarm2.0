@@ -12,7 +12,7 @@ interface ApiService {
     suspend fun registerDevice(
         @Header("Authorization") auth: String,
         @Body device: DeviceRegister
-    ): Response<DeviceResponse>
+    ): Response<Map<String, String>>
 
     @POST("api/devices/heartbeat")
     suspend fun heartbeat(@Header("Authorization") auth: String): Response<HeartbeatResponse>
@@ -25,4 +25,10 @@ interface ApiService {
         @Header("Authorization") auth: String,
         @Path("id") alarmId: Int
     ): Response<AlarmResponse>
+
+    @GET("api/alarms/")
+    suspend fun getAlarmHistory(@Header("Authorization") auth: String): Response<List<AlarmResponse>>
+
+    @POST("api/auth/refresh")
+    suspend fun refreshToken(@Header("Authorization") auth: String): Response<TokenResponse>
 }

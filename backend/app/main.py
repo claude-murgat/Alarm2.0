@@ -27,9 +27,9 @@ def seed_data():
     try:
         if db.query(User).count() == 0:
             users = [
-                User(email="admin@alarm.local", hashed_password=hash_password("admin123"), name="Admin", is_admin=True),
-                User(email="user1@alarm.local", hashed_password=hash_password("user123"), name="User 1"),
-                User(email="user2@alarm.local", hashed_password=hash_password("user123"), name="User 2"),
+                User(hashed_password=hash_password("admin123"), name="admin", is_admin=True),
+                User(hashed_password=hash_password("user123"), name="user1"),
+                User(hashed_password=hash_password("user123"), name="user2"),
             ]
             db.add_all(users)
             db.commit()

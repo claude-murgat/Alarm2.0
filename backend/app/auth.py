@@ -1,4 +1,5 @@
 import os
+import uuid
 from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -26,7 +27,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 def create_access_token(user_id: int) -> str:
     expire = datetime.now(timezone.utc) + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
-    to_encode = {"sub": str(user_id), "exp": expire}
+    to_encode = {"sub": str(user_id), "exp": expire, "jti": str(uuid.uuid4())}
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 

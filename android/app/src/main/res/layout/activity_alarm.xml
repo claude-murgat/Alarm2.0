@@ -17,7 +17,7 @@
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="CRITICAL ALARM"
+        android:text="ALARME CRITIQUE"
         android:textSize="32sp"
         android:textColor="#FFFFFF"
         android:textStyle="bold"
@@ -27,7 +27,7 @@
         android:id="@+id/alarmSeverity"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="SEVERITY: CRITICAL"
+        android:text="GRAVITÉ : CRITIQUE"
         android:textSize="14sp"
         android:textColor="#FFCDD2"
         android:layout_marginBottom="24dp" />
@@ -36,7 +36,7 @@
         android:id="@+id/alarmId"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Alarm #0"
+        android:text="Alarme #0"
         android:textSize="14sp"
         android:textColor="#FFCDD2"
         android:layout_marginBottom="16dp" />
@@ -45,7 +45,7 @@
         android:id="@+id/alarmTitle"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Alarm Title"
+        android:text="Titre de l'alarme"
         android:textSize="24sp"
         android:textColor="#FFFFFF"
         android:textStyle="bold"
@@ -56,7 +56,7 @@
         android:id="@+id/alarmMessage"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Alarm description"
+        android:text="Description de l'alarme"
         android:textSize="16sp"
         android:textColor="#FFEBEE"
         android:textAlignment="center"
@@ -66,7 +66,8 @@
         android:id="@+id/ackButton"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="&#x2705; ACKNOWLEDGE ALARM"
+        android:text="ACQUITTER L'ALARME"
+        android:contentDescription="ACKNOWLEDGE_ALARM"
         android:padding="20dp"
         android:backgroundTint="#4CAF50"
         android:textColor="#FFFFFF"
@@ -76,8 +77,29 @@
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Acknowledging will suspend this alarm for 30 minutes"
+        android:text="L'acquittement suspendra cette alarme pendant 30 minutes"
         android:textSize="12sp"
         android:textColor="#FFCDD2"
         android:layout_marginTop="12dp" />
+
+    <TextView
+        android:id="@+id/ackStatusText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text=""
+        android:textSize="18sp"
+        android:textColor="#FFFFFF"
+        android:textStyle="bold"
+        android:visibility="gone"
+        android:layout_marginTop="24dp" />
+
+    <TextView
+        android:id="@+id/ackRemainingTime"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text=""
+        android:textSize="16sp"
+        android:textColor="#FFCDD2"
+        android:visibility="gone"
+        android:layout_marginTop="8dp" />
 </LinearLayout>

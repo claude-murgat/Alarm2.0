@@ -1,21 +1,29 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from datetime import datetime
 from typing import Optional
+import re
 
 
 class UserCreate(BaseModel):
-    email: str
-    password: str
     name: str
+    password: str
     is_admin: bool = False
+
+    @field_validator("name")
+    @classmethod
+    def name_no_spaces(cls, v: str) -> str:
+        if " " in v:
+            raise ValueError("Le nom ne doit pas contenir d'espaces")
+        return v.lower()
 
 
 class UserResponse(BaseModel):
     id: int
-    email: str
     name: str
     is_admin: bool
     is_active: bool
+    is_online: bool = False
+    last_heartbeat: Optional[datetime] = None
     created_at: datetime
 
     class Config:
@@ -23,7 +31,7 @@ class UserResponse(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    email: str
+    name: str
     password: str
 
 
@@ -31,21 +39,6 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserResponse
-
-
-class DeviceRegister(BaseModel):
-    device_token: str
-
-
-class DeviceResponse(BaseModel):
-    id: int
-    user_id: int
-    device_token: str
-    last_heartbeat: Optional[datetime]
-    is_online: bool
-
-    class Config:
-        from_attributes = True
 
 
 class AlarmCreate(BaseModel):
@@ -64,13 +57,44 @@ class AlarmResponse(BaseModel):
     assigned_user_id: Optional[int]
     acknowledged_at: Optional[datetime]
     acknowledged_by: Optional[int]
+    acknowledged_by_name: Optional[str] = None
     suspended_until: Optional[datetime]
+    notified_user_ids: list[int] = []
+    notified_user_names: list[str] = []
+    is_oncall_alarm: bool = False
     escalation_count: int
     created_at: datetime
     updated_at: datetime
 
     class Config:
         from_attributes = True
+
+    @classmethod
+    def from_alarm(cls, alarm, db=None):
+        """Build AlarmResponse with parsed notified_user_ids and resolved names."""
+        raw_ids = alarm.notified_user_ids or ""
+        parsed_ids = [int(x) for x in raw_ids.split(",") if x.strip()]
+        names = []
+        if db and parsed_ids:
+            from .models import User
+            users = db.query(User).filter(User.id.in_(parsed_ids)).all()
+            id_to_name = {u.id: u.name for u in users}
+            names = [id_to_name.get(uid, "?") for uid in parsed_ids]
+        return cls(
+            id=alarm.id, title=alarm.title, message=alarm.message,
+            severity=alarm.severity, status=alarm.status,
+            assigned_user_id=alarm.assigned_user_id,
+            acknowledged_at=alarm.acknowledged_at,
+            acknowledged_by=alarm.acknowledged_by,
+            acknowledged_by_name=alarm.acknowledged_by_name,
+            suspended_until=alarm.suspended_until,
+            notified_user_ids=parsed_ids,
+            notified_user_names=names,
+            is_oncall_alarm=alarm.is_oncall_alarm or False,
+            escalation_count=alarm.escalation_count,
+            created_at=alarm.created_at,
+            updated_at=alarm.updated_at,
+        )
 
 
 class EscalationConfigCreate(BaseModel):

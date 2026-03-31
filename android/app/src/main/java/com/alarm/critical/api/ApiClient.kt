@@ -7,8 +7,8 @@ import retrofit2.converter.gson.GsonConverterFactory
 import java.util.concurrent.TimeUnit
 
 object ApiClient {
-    // 10.0.2.2 is the host machine's localhost from the Android emulator
-    private const val BASE_URL = "http://10.0.2.2:8000/"
+    // Use localhost with adb reverse tcp:8000 tcp:8000 for reliable emulator connectivity
+    private const val BASE_URL = "http://127.0.0.1:8000/"
 
     private val loggingInterceptor = HttpLoggingInterceptor().apply {
         level = HttpLoggingInterceptor.Level.BODY

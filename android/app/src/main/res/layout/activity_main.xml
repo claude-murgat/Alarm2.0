@@ -10,7 +10,7 @@
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="&#x1F6A8; Critical Alarm"
+        android:text="&#x1F6A8; Alarme Critique"
         android:textSize="28sp"
         android:textColor="#FF4444"
         android:textStyle="bold"
@@ -19,17 +19,17 @@
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Login to start monitoring"
+        android:text="Connectez-vous pour commencer"
         android:textSize="14sp"
         android:textColor="#888888"
         android:layout_marginBottom="32dp" />
 
     <EditText
-        android:id="@+id/emailInput"
+        android:id="@+id/nameInput"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:hint="Email"
-        android:inputType="textEmailAddress"
+        android:hint="Nom d'utilisateur"
+        android:inputType="textPersonName"
         android:padding="16dp"
         android:layout_marginBottom="12dp"
         android:background="#2a2a3e"
@@ -40,7 +40,7 @@
         android:id="@+id/passwordInput"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:hint="Password"
+        android:hint="Mot de passe"
         android:inputType="textPassword"
         android:padding="16dp"
         android:layout_marginBottom="24dp"
@@ -52,7 +52,7 @@
         android:id="@+id/loginButton"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Login"
+        android:text="Connexion"
         android:padding="16dp"
         android:backgroundTint="#D32F2F"
         android:textColor="#FFFFFF"

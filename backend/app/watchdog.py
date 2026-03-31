@@ -1,9 +1,10 @@
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from sqlalchemy.orm import Session
 from .database import SessionLocal
-from .models import Device
+from .models import User
+from .clock import now as clock_now
 
 logger = logging.getLogger("watchdog")
 
@@ -11,22 +12,22 @@ WATCHDOG_TIMEOUT_SECONDS = 60
 
 
 async def watchdog_loop():
-    """Background task that checks device heartbeats and marks devices offline."""
+    """Background task that checks user heartbeats and marks users offline."""
     while True:
         try:
             db: Session = SessionLocal()
             try:
-                now = datetime.utcnow()
+                now = clock_now()
                 threshold = now - timedelta(seconds=WATCHDOG_TIMEOUT_SECONDS)
 
-                devices = db.query(Device).filter(Device.is_online == True).all()
-                for device in devices:
-                    if device.last_heartbeat and device.last_heartbeat < threshold:
+                users = db.query(User).filter(User.is_online == True).all()
+                for user in users:
+                    if user.last_heartbeat and user.last_heartbeat < threshold:
                         logger.warning(
-                            f"Device {device.id} (user {device.user_id}) missed heartbeat. "
-                            f"Last: {device.last_heartbeat}"
+                            f"User {user.id} ({user.name}) missed heartbeat. "
+                            f"Last: {user.last_heartbeat}"
                         )
-                        device.is_online = False
+                        user.is_online = False
                         db.commit()
             finally:
                 db.close()

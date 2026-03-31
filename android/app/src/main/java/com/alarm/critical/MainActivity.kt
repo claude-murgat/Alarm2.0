@@ -6,10 +6,9 @@ import android.os.Bundle
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
-import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
-import com.alarm.critical.api.ApiClient
+import com.alarm.critical.api.ApiProvider
 import com.alarm.critical.model.DeviceRegister
 import com.alarm.critical.model.LoginRequest
 import kotlinx.coroutines.launch
@@ -24,55 +23,52 @@ class MainActivity : AppCompatActivity() {
 
         prefs = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
 
-        // Check if already logged in
         val savedToken = prefs.getString("token", null)
         if (savedToken != null) {
             goToDashboard(savedToken)
             return
         }
 
-        val emailInput = findViewById<EditText>(R.id.emailInput)
+        val nameInput = findViewById<EditText>(R.id.nameInput)
         val passwordInput = findViewById<EditText>(R.id.passwordInput)
         val loginButton = findViewById<Button>(R.id.loginButton)
         val statusText = findViewById<TextView>(R.id.statusText)
 
-        // Pre-fill for testing
-        emailInput.setText("user1@alarm.local")
+        // Pré-rempli pour les tests
+        nameInput.setText("user1")
         passwordInput.setText("user123")
 
         loginButton.setOnClickListener {
-            val email = emailInput.text.toString().trim()
+            val name = nameInput.text.toString().trim()
             val password = passwordInput.text.toString().trim()
 
-            if (email.isEmpty() || password.isEmpty()) {
-                statusText.text = "Please enter email and password"
+            if (name.isEmpty() || password.isEmpty()) {
+                statusText.text = "Veuillez entrer votre nom et mot de passe"
                 return@setOnClickListener
             }
 
             loginButton.isEnabled = false
-            statusText.text = "Logging in..."
+            statusText.text = "Connexion en cours..."
 
             lifecycleScope.launch {
                 try {
-                    val response = ApiClient.service.login(LoginRequest(email, password))
+                    val response = ApiProvider.service.login(LoginRequest(name, password))
                     if (response.isSuccessful) {
                         val tokenResponse = response.body()!!
                         val token = tokenResponse.access_token
 
-                        // Save token
                         prefs.edit()
                             .putString("token", token)
                             .putString("user_name", tokenResponse.user.name)
-                            .putString("user_email", tokenResponse.user.email)
                             .putInt("user_id", tokenResponse.user.id)
                             .apply()
 
-                        // Register device
+                        // Register (no-op côté serveur, gardé pour compat)
                         val deviceToken = prefs.getString("device_token", null)
                             ?: UUID.randomUUID().toString().also {
                                 prefs.edit().putString("device_token", it).apply()
                             }
-                        ApiClient.service.registerDevice(
+                        ApiProvider.service.registerDevice(
                             "Bearer $token",
                             DeviceRegister(deviceToken)
                         )
@@ -80,13 +76,13 @@ class MainActivity : AppCompatActivity() {
                         goToDashboard(token)
                     } else {
                         runOnUiThread {
-                            statusText.text = "Login failed: ${response.code()}"
+                            statusText.text = "Échec de connexion : ${response.code()}"
                             loginButton.isEnabled = true
                         }
                     }
                 } catch (e: Exception) {
                     runOnUiThread {
-                        statusText.text = "Connection error: ${e.message}"
+                        statusText.text = "Erreur de connexion : ${e.message}"
                         loginButton.isEnabled = true
                     }
                 }

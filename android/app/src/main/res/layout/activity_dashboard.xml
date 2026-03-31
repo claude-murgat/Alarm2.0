@@ -1,89 +1,196 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:padding="24dp"
     android:background="#1a1a2e">
-
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="&#x1F6A8; Critical Alarm System"
-        android:textSize="22sp"
-        android:textColor="#FF4444"
-        android:textStyle="bold"
-        android:layout_marginBottom="24dp" />
-
-    <TextView
-        android:id="@+id/userNameText"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Welcome, User"
-        android:textSize="18sp"
-        android:textColor="#FFFFFF"
-        android:layout_marginBottom="4dp" />
-
-    <TextView
-        android:id="@+id/userEmailText"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text=""
-        android:textSize="14sp"
-        android:textColor="#888888"
-        android:layout_marginBottom="32dp" />
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:background="#2a2a3e"
-        android:padding="20dp"
-        android:layout_marginBottom="16dp">
+        android:padding="24dp">
 
-        <TextView
-            android:layout_width="wrap_content"
+        <!-- En-tête : nom utilisateur + déconnexion -->
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="System Status"
-            android:textSize="16sp"
-            android:textColor="#FFFFFF"
-            android:textStyle="bold"
-            android:layout_marginBottom="12dp" />
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="20dp">
 
+            <TextView
+                android:id="@+id/userNameText"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="User"
+                android:textSize="20sp"
+                android:textColor="#FFFFFF"
+                android:textStyle="bold" />
+
+            <Button
+                android:id="@+id/logoutButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Déconnexion"
+                android:padding="8dp"
+                android:backgroundTint="#555555"
+                android:textColor="#FFFFFF"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <!-- Statut connexion serveur -->
         <TextView
             android:id="@+id/connectionStatus"
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Connection: Checking..."
+            android:text="Connexion : Vérification..."
             android:textSize="14sp"
-            android:textColor="#4CAF50"
-            android:layout_marginBottom="8dp" />
+            android:textColor="#94a3b8"
+            android:layout_marginBottom="16dp" />
 
+        <!-- Alerte connexion perdue (visible après timeout heartbeat) -->
+        <TextView
+            android:id="@+id/connectionLostAlert"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="\u26A0\uFE0F Connexion perdue avec le serveur"
+            android:textSize="16sp"
+            android:textColor="#ef4444"
+            android:textStyle="bold"
+            android:background="#3b1111"
+            android:padding="12dp"
+            android:visibility="gone"
+            android:layout_marginBottom="12dp" />
+
+        <!-- Ligne alarme en cours -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="#2a2a3e"
+            android:padding="16dp"
+            android:layout_marginBottom="12dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Alarme en cours"
+                android:textSize="14sp"
+                android:textColor="#94a3b8"
+                android:textStyle="bold"
+                android:layout_marginBottom="8dp" />
+
+            <TextView
+                android:id="@+id/currentAlarmLine"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="\u26AA Aucune alarme"
+                android:textSize="16sp"
+                android:textColor="#FFFFFF" />
+
+            <TextView
+                android:id="@+id/alarmTitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text=""
+                android:textSize="18sp"
+                android:textColor="#FFFFFF"
+                android:textStyle="bold"
+                android:visibility="gone"
+                android:layout_marginTop="8dp" />
+
+            <TextView
+                android:id="@+id/alarmMessage"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text=""
+                android:textSize="14sp"
+                android:textColor="#cbd5e1"
+                android:visibility="gone"
+                android:layout_marginTop="4dp" />
+
+            <TextView
+                android:id="@+id/alarmDuration"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text=""
+                android:textSize="13sp"
+                android:textColor="#f59e0b"
+                android:visibility="gone"
+                android:layout_marginTop="4dp" />
+
+            <TextView
+                android:id="@+id/ackStatusText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text=""
+                android:textSize="16sp"
+                android:textColor="#22c55e"
+                android:textStyle="bold"
+                android:visibility="gone"
+                android:layout_marginTop="8dp" />
+
+            <TextView
+                android:id="@+id/ackRemainingTime"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text=""
+                android:textSize="13sp"
+                android:textColor="#94a3b8"
+                android:visibility="gone"
+                android:layout_marginTop="4dp" />
+
+            <Button
+                android:id="@+id/dashboardAckButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="ACQUITTER"
+                android:padding="12dp"
+                android:backgroundTint="#4CAF50"
+                android:textColor="#FFFFFF"
+                android:textStyle="bold"
+                android:visibility="gone"
+                android:layout_marginTop="12dp" />
+
+        </LinearLayout>
+
+        <!-- Statut service -->
         <TextView
             android:id="@+id/serviceStatus"
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Service: Starting..."
-            android:textSize="14sp"
-            android:textColor="#2196F3"
-            android:layout_marginBottom="8dp" />
+            android:text="Service : Démarrage..."
+            android:textSize="12sp"
+            android:textColor="#64748b"
+            android:layout_marginBottom="20dp" />
 
-        <TextView
-            android:id="@+id/alarmStatus"
-            android:layout_width="wrap_content"
+        <!-- Historique des alarmes -->
+        <LinearLayout
+            android:id="@+id/alarmHistorySection"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Active Alarms: 0"
-            android:textSize="14sp"
-            android:textColor="#FF9800" />
+            android:orientation="vertical"
+            android:background="#2a2a3e"
+            android:padding="16dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Historique"
+                android:textSize="14sp"
+                android:textColor="#94a3b8"
+                android:textStyle="bold"
+                android:layout_marginBottom="8dp" />
+
+            <LinearLayout
+                android:id="@+id/alarmHistoryList"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical" />
+
+        </LinearLayout>
+
     </LinearLayout>
-
-    <Button
-        android:id="@+id/logoutButton"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Logout"
-        android:padding="12dp"
-        android:backgroundTint="#555555"
-        android:textColor="#FFFFFF"
-        android:layout_marginTop="24dp" />
-</LinearLayout>
+</ScrollView>

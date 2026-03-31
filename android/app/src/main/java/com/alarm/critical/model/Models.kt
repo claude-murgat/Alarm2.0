@@ -1,6 +1,6 @@
 package com.alarm.critical.model
 
-data class LoginRequest(val email: String, val password: String)
+data class LoginRequest(val name: String, val password: String)
 
 data class TokenResponse(
     val access_token: String,
@@ -24,18 +24,12 @@ data class AlarmResponse(
     val status: String,
     val assigned_user_id: Int?,
     val acknowledged_at: String?,
+    val acknowledged_by_name: String?,
     val suspended_until: String?,
     val escalation_count: Int,
     val created_at: String
 )
 
 data class DeviceRegister(val device_token: String)
-
-data class DeviceResponse(
-    val id: Int,
-    val user_id: Int,
-    val device_token: String,
-    val is_online: Boolean
-)
 
 data class HeartbeatResponse(val status: String, val timestamp: String)

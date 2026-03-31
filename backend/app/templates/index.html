@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="fr">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Critical Alarm System - Admin</title>
+    <title>Système d'alarmes critiques - Admin</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; }
@@ -50,6 +50,8 @@
         .btn-success { background: #22c55e; color: white; }
         .btn-success:hover { background: #16a34a; }
         .btn-sm { padding: 4px 10px; font-size: 0.8rem; }
+        .btn-paused { background: #8b5cf6; color: white; }
+        .btn-paused:hover { background: #7c3aed; }
         input, select { padding: 8px 12px; border: 1px solid #334155; border-radius: 6px; background: #0f172a; color: #e2e8f0; font-size: 0.9rem; }
         input:focus, select:focus { outline: none; border-color: #3b82f6; }
         .form-row { display: flex; gap: 12px; margin-bottom: 12px; align-items: end; }
@@ -67,92 +69,91 @@
 </head>
 <body>
     <div class="header">
-        <h1>&#x1F6A8; Critical Alarm System</h1>
+        <h1>&#x1F6A8; Alarmes Critiques</h1>
         <div class="status">
-            <span><span class="status-dot online" id="serverStatus"></span> Server</span>
-            <span id="deviceCount">Devices: -</span>
-            <span id="alarmCount">Active: -</span>
+            <span><span class="status-dot online" id="serverStatus"></span> Serveur</span>
+            <span id="userCount">Utilisateurs : -</span>
+            <span id="alarmCount">Active : -</span>
         </div>
     </div>
 
     <div class="tabs">
-        <div class="tab active" data-tab="dashboard">Dashboard</div>
-        <div class="tab" data-tab="users">Users</div>
-        <div class="tab" data-tab="alarms">Alarms</div>
-        <div class="tab" data-tab="escalation">Escalation</div>
+        <div class="tab active" data-tab="dashboard">Tableau de bord</div>
+        <div class="tab" data-tab="users">Utilisateurs</div>
+        <div class="tab" data-tab="alarms">Alarmes</div>
+        <div class="tab" data-tab="escalation">Escalade</div>
         <div class="tab" data-tab="tests">Tests</div>
     </div>
 
     <div class="content">
-        <!-- Dashboard -->
+        <!-- Tableau de bord -->
         <div class="panel active" id="dashboard">
             <div class="grid" id="statsGrid"></div>
             <div class="card">
-                <h3>Active Alarms</h3>
-                <table><thead><tr><th>ID</th><th>Title</th><th>Severity</th><th>Status</th><th>Assigned To</th><th>Created</th><th>Actions</th></tr></thead>
+                <h3>Alarme en cours</h3>
+                <table><thead><tr><th>ID</th><th>Titre</th><th>Gravité</th><th>Statut</th><th>Assignée à</th><th>Acquittée par</th><th>Créée</th><th>Actions</th></tr></thead>
                 <tbody id="activeAlarmsTable"></tbody></table>
             </div>
             <div class="card">
-                <h3>Connected Devices</h3>
-                <table><thead><tr><th>ID</th><th>User</th><th>Status</th><th>Last Heartbeat</th></tr></thead>
+                <h3>Utilisateurs connectés</h3>
+                <table><thead><tr><th>ID</th><th>Nom</th><th>Statut</th><th>Dernier heartbeat</th></tr></thead>
                 <tbody id="devicesTable"></tbody></table>
             </div>
         </div>
 
-        <!-- Users -->
+        <!-- Utilisateurs -->
         <div class="panel" id="users">
             <div class="card">
-                <h3>Add User</h3>
+                <h3>Ajouter un utilisateur</h3>
                 <div class="form-row">
-                    <div class="form-group"><label>Name</label><input id="newUserName" placeholder="Name"></div>
-                    <div class="form-group"><label>Email</label><input id="newUserEmail" placeholder="email@example.com"></div>
-                    <div class="form-group"><label>Password</label><input id="newUserPassword" type="password" placeholder="Password"></div>
-                    <div class="form-group"><label>Admin</label><select id="newUserAdmin"><option value="false">No</option><option value="true">Yes</option></select></div>
-                    <button class="btn-primary" onclick="addUser()">Add User</button>
+                    <div class="form-group"><label>Nom (sans espaces)</label><input id="newUserName" placeholder="nom"></div>
+                    <div class="form-group"><label>Mot de passe</label><input id="newUserPassword" type="password" placeholder="Mot de passe"></div>
+                    <div class="form-group"><label>Admin</label><select id="newUserAdmin"><option value="false">Non</option><option value="true">Oui</option></select></div>
+                    <button class="btn-primary" onclick="addUser()">Ajouter</button>
                 </div>
             </div>
             <div class="card">
-                <h3>Users</h3>
-                <table><thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Admin</th><th>Actions</th></tr></thead>
+                <h3>Utilisateurs</h3>
+                <table><thead><tr><th>ID</th><th>Nom</th><th>Admin</th><th>En ligne</th><th>Actions</th></tr></thead>
                 <tbody id="usersTable"></tbody></table>
             </div>
         </div>
 
-        <!-- Alarms -->
+        <!-- Alarmes -->
         <div class="panel" id="alarms">
             <div class="card">
-                <h3>Send Alarm</h3>
+                <h3>Envoyer une alarme</h3>
                 <div class="form-row">
-                    <div class="form-group"><label>Title</label><input id="alarmTitle" placeholder="Alarm title"></div>
+                    <div class="form-group"><label>Titre</label><input id="alarmTitle" placeholder="Titre de l'alarme"></div>
                     <div class="form-group"><label>Message</label><input id="alarmMessage" placeholder="Description" style="width:300px"></div>
-                    <div class="form-group"><label>Severity</label>
-                        <select id="alarmSeverity"><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select>
+                    <div class="form-group"><label>Gravité</label>
+                        <select id="alarmSeverity"><option value="critical">Critique</option><option value="high">Haute</option><option value="medium">Moyenne</option><option value="low">Basse</option></select>
                     </div>
-                    <div class="form-group"><label>Assign To</label><select id="alarmUser"></select></div>
-                    <button class="btn-danger" onclick="sendAlarm()">Send Alarm</button>
+                    <div class="form-group"><label>Assigner à</label><select id="alarmUser"></select></div>
+                    <button class="btn-danger" onclick="sendAlarm()">Envoyer</button>
                 </div>
             </div>
             <div class="card">
-                <h3>All Alarms</h3>
-                <table><thead><tr><th>ID</th><th>Title</th><th>Message</th><th>Severity</th><th>Status</th><th>Assigned</th><th>Escalations</th><th>Created</th><th>Actions</th></tr></thead>
+                <h3>Toutes les alarmes</h3>
+                <table><thead><tr><th>ID</th><th>Titre</th><th>Message</th><th>Gravité</th><th>Statut</th><th>Assignée</th><th>Acquittée par</th><th>Créée</th><th>Actions</th></tr></thead>
                 <tbody id="allAlarmsTable"></tbody></table>
             </div>
         </div>
 
-        <!-- Escalation -->
+        <!-- Escalade -->
         <div class="panel" id="escalation">
             <div class="card">
-                <h3>Add Escalation Rule</h3>
+                <h3>Ajouter une règle d'escalade</h3>
                 <div class="form-row">
                     <div class="form-group"><label>Position</label><input id="escPosition" type="number" min="1" value="1"></div>
-                    <div class="form-group"><label>User</label><select id="escUser"></select></div>
-                    <div class="form-group"><label>Delay (min)</label><input id="escDelay" type="number" min="0.1" step="0.1" value="15"></div>
-                    <button class="btn-primary" onclick="addEscalation()">Add Rule</button>
+                    <div class="form-group"><label>Utilisateur</label><select id="escUser"></select></div>
+                    <div class="form-group"><label>Délai (min)</label><input id="escDelay" type="number" min="0.1" step="0.1" value="15"></div>
+                    <button class="btn-primary" onclick="addEscalation()">Ajouter</button>
                 </div>
             </div>
             <div class="card">
-                <h3>Escalation Chain</h3>
-                <table><thead><tr><th>Position</th><th>User</th><th>Delay (min)</th><th>Actions</th></tr></thead>
+                <h3>Chaîne d'escalade</h3>
+                <table><thead><tr><th>Position</th><th>Utilisateur</th><th>Délai (min)</th><th>Actions</th></tr></thead>
                 <tbody id="escalationTable"></tbody></table>
             </div>
         </div>
@@ -160,16 +161,16 @@
         <!-- Tests -->
         <div class="panel" id="tests">
             <div class="card">
-                <h3>Test Controls</h3>
+                <h3>Contrôles de test</h3>
                 <div class="test-buttons">
-                    <button class="btn-danger" onclick="testSendAlarm()">&#x1F6A8; Send Test Alarm</button>
-                    <button class="btn-warning" onclick="testWatchdog()">&#x23F1; Simulate Watchdog Failure</button>
-                    <button class="btn-warning" onclick="testConnectionLoss()">&#x1F4E1; Simulate Connection Loss</button>
-                    <button class="btn-success" onclick="testReset()">&#x1F504; Reset All</button>
+                    <button class="btn-danger" onclick="testSendAlarm()">&#x1F6A8; Envoyer alarme test</button>
+                    <button class="btn-warning" onclick="testWatchdog()">&#x23F1; Simuler panne watchdog</button>
+                    <button class="btn-warning" id="btnHeartbeatPause" onclick="toggleHeartbeatPause()">&#x1F4E1; Simuler perte connexion</button>
+                    <button class="btn-success" onclick="testReset()">&#x1F504; Tout réinitialiser</button>
                 </div>
             </div>
             <div class="card">
-                <h3>Test Log</h3>
+                <h3>Journal de test</h3>
                 <div class="log-area" id="testLog"></div>
             </div>
         </div>
@@ -178,8 +179,8 @@
     <script>
         const API = '';
         let users = [];
+        let heartbeatPaused = false;
 
-        // Tab switching
         document.querySelectorAll('.tab').forEach(tab => {
             tab.addEventListener('click', () => {
                 document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -196,20 +197,20 @@
             });
             if (!res.ok) {
                 const err = await res.json().catch(() => ({ detail: res.statusText }));
-                throw new Error(err.detail || 'Request failed');
+                throw new Error(err.detail || 'Requête échouée');
             }
             return res.json();
         }
 
         function timeAgo(dateStr) {
-            if (!dateStr) return 'Never';
-            const d = new Date(dateStr);
+            if (!dateStr) return 'Jamais';
+            const d = new Date(dateStr.endsWith('Z') ? dateStr : dateStr + 'Z');
             const now = new Date();
             const diff = (now - d) / 1000;
-            if (diff < 60) return Math.floor(diff) + 's ago';
-            if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
-            if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
-            return d.toLocaleDateString();
+            if (diff < 60) return 'il y a ' + Math.floor(diff) + 's';
+            if (diff < 3600) return 'il y a ' + Math.floor(diff / 60) + 'min';
+            if (diff < 86400) return 'il y a ' + Math.floor(diff / 3600) + 'h';
+            return d.toLocaleDateString('fr-FR');
         }
 
         function getUserName(id) {
@@ -217,18 +218,24 @@
             return u ? u.name : 'N/A';
         }
 
+        const statusLabels = {
+            active: 'Active', acknowledged: 'Acquittée', resolved: 'Résolue', escalated: 'Escaladée'
+        };
+        const severityLabels = {
+            critical: 'Critique', high: 'Haute', medium: 'Moyenne', low: 'Basse'
+        };
+
         async function loadStatus() {
             try {
                 const s = await api('/api/test/status');
-                document.getElementById('deviceCount').textContent = `Devices: ${s.devices.online}/${s.devices.total}`;
-                document.getElementById('alarmCount').textContent = `Active: ${s.alarms.active}`;
+                document.getElementById('userCount').textContent = `Utilisateurs : ${s.connected_users}/${s.users}`;
+                document.getElementById('alarmCount').textContent = `Active : ${s.alarms.active}`;
                 document.getElementById('statsGrid').innerHTML = `
-                    <div class="card stat"><div class="value">${s.users}</div><div class="label">Users</div></div>
-                    <div class="card stat"><div class="value">${s.devices.online}/${s.devices.total}</div><div class="label">Devices Online</div></div>
-                    <div class="card stat"><div class="value ${s.alarms.active > 0 ? 'pulsing' : ''}">${s.alarms.active}</div><div class="label">Active Alarms</div></div>
-                    <div class="card stat"><div class="value">${s.alarms.acknowledged}</div><div class="label">Acknowledged</div></div>
-                    <div class="card stat"><div class="value">${s.alarms.resolved}</div><div class="label">Resolved</div></div>
-                    <div class="card stat"><div class="value">${s.escalation_rules}</div><div class="label">Escalation Rules</div></div>`;
+                    <div class="card stat"><div class="value">${s.users}</div><div class="label">Utilisateurs</div></div>
+                    <div class="card stat"><div class="value">${s.connected_users}/${s.users}</div><div class="label">Utilisateurs connectés</div></div>
+                    <div class="card stat"><div class="value ${s.alarms.active > 0 ? 'pulsing' : ''}">${s.alarms.active}</div><div class="label">Alarme active</div></div>
+                    <div class="card stat"><div class="value">${s.alarms.acknowledged}</div><div class="label">Acquittées</div></div>
+                    <div class="card stat"><div class="value">${s.alarms.resolved}</div><div class="label">Résolues</div></div>`;
             } catch (e) {
                 document.getElementById('serverStatus').classList.replace('online', 'offline');
             }
@@ -238,12 +245,13 @@
             users = await api('/api/users/');
             const sel1 = document.getElementById('alarmUser');
             const sel2 = document.getElementById('escUser');
-            sel1.innerHTML = '<option value="">Auto (escalation chain)</option>' + users.map(u => `<option value="${u.id}">${u.name}</option>`).join('');
+            sel1.innerHTML = '<option value="">Auto (chaîne d\'escalade)</option>' + users.map(u => `<option value="${u.id}">${u.name}</option>`).join('');
             sel2.innerHTML = users.map(u => `<option value="${u.id}">${u.name}</option>`).join('');
             document.getElementById('usersTable').innerHTML = users.map(u => `
-                <tr><td>${u.id}</td><td>${u.name}</td><td>${u.email}</td>
-                <td>${u.is_admin ? 'Yes' : 'No'}</td>
-                <td><button class="btn-danger btn-sm" onclick="deleteUser(${u.id})">Delete</button></td></tr>`).join('');
+                <tr><td>${u.id}</td><td>${u.name}</td>
+                <td>${u.is_admin ? 'Oui' : 'Non'}</td>
+                <td><span class="badge ${u.is_online ? 'online' : 'offline'}">${u.is_online ? 'Oui' : 'Non'}</span></td>
+                <td><button class="btn-danger btn-sm" onclick="deleteUser(${u.id})">Supprimer</button></td></tr>`).join('');
         }
 
         async function loadAlarms() {
@@ -251,28 +259,29 @@
             const active = alarms.filter(a => ['active', 'escalated'].includes(a.status));
             document.getElementById('activeAlarmsTable').innerHTML = active.map(a => `
                 <tr><td>${a.id}</td><td>${a.title}</td>
-                <td><span class="badge ${a.severity}">${a.severity}</span></td>
-                <td><span class="badge ${a.status}">${a.status}</span></td>
+                <td><span class="badge ${a.severity}">${severityLabels[a.severity] || a.severity}</span></td>
+                <td><span class="badge ${a.status}">${statusLabels[a.status] || a.status}</span></td>
                 <td>${getUserName(a.assigned_user_id)}</td>
+                <td>${a.acknowledged_by_name || '-'}</td>
                 <td>${timeAgo(a.created_at)}</td>
-                <td><button class="btn-success btn-sm" onclick="resolveAlarm(${a.id})">Resolve</button></td></tr>`).join('') || '<tr><td colspan="7" style="text-align:center;color:#94a3b8">No active alarms</td></tr>';
+                <td><button class="btn-success btn-sm" onclick="resolveAlarm(${a.id})">Résoudre</button></td></tr>`).join('') || '<tr><td colspan="8" style="text-align:center;color:#94a3b8">Aucune alarme active</td></tr>';
 
             document.getElementById('allAlarmsTable').innerHTML = alarms.map(a => `
                 <tr><td>${a.id}</td><td>${a.title}</td><td>${a.message}</td>
-                <td><span class="badge ${a.severity}">${a.severity}</span></td>
-                <td><span class="badge ${a.status}">${a.status}</span></td>
+                <td><span class="badge ${a.severity}">${severityLabels[a.severity] || a.severity}</span></td>
+                <td><span class="badge ${a.status}">${statusLabels[a.status] || a.status}</span></td>
                 <td>${getUserName(a.assigned_user_id)}</td>
-                <td>${a.escalation_count}</td>
+                <td>${a.acknowledged_by_name || '-'}</td>
                 <td>${timeAgo(a.created_at)}</td>
-                <td>${a.status !== 'resolved' ? `<button class="btn-success btn-sm" onclick="resolveAlarm(${a.id})">Resolve</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="9" style="text-align:center;color:#94a3b8">No alarms</td></tr>';
+                <td>${a.status !== 'resolved' ? `<button class="btn-success btn-sm" onclick="resolveAlarm(${a.id})">Résoudre</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="9" style="text-align:center;color:#94a3b8">Aucune alarme</td></tr>';
         }
 
         async function loadDevices() {
-            const devices = await api('/api/devices/');
-            document.getElementById('devicesTable').innerHTML = devices.map(d => `
-                <tr><td>${d.id}</td><td>${getUserName(d.user_id)}</td>
-                <td><span class="badge ${d.is_online ? 'online' : 'offline'}">${d.is_online ? 'Online' : 'Offline'}</span></td>
-                <td>${timeAgo(d.last_heartbeat)}</td></tr>`).join('') || '<tr><td colspan="4" style="text-align:center;color:#94a3b8">No devices</td></tr>';
+            const usersList = await api('/api/users/');
+            document.getElementById('devicesTable').innerHTML = usersList.map(u => `
+                <tr><td>${u.id}</td><td>${u.name}</td>
+                <td><span class="badge ${u.is_online ? 'online' : 'offline'}">${u.is_online ? 'En ligne' : 'Hors ligne'}</span></td>
+                <td>${timeAgo(u.last_heartbeat)}</td></tr>`).join('') || '<tr><td colspan="4" style="text-align:center;color:#94a3b8">Aucun utilisateur</td></tr>';
         }
 
         async function loadEscalation() {
@@ -280,13 +289,12 @@
             document.getElementById('escalationTable').innerHTML = esc.map(e => `
                 <tr><td>${e.position}</td><td>${getUserName(e.user_id)}</td>
                 <td>${e.delay_minutes}</td>
-                <td><button class="btn-danger btn-sm" onclick="deleteEscalation(${e.id})">Delete</button></td></tr>`).join('') || '<tr><td colspan="4" style="text-align:center;color:#94a3b8">No rules configured</td></tr>';
+                <td><button class="btn-danger btn-sm" onclick="deleteEscalation(${e.id})">Supprimer</button></td></tr>`).join('') || '<tr><td colspan="4" style="text-align:center;color:#94a3b8">Aucune règle configurée</td></tr>';
         }
 
         async function addUser() {
             await api('/api/auth/register', { method: 'POST', body: JSON.stringify({
                 name: document.getElementById('newUserName').value,
-                email: document.getElementById('newUserEmail').value,
                 password: document.getElementById('newUserPassword').value,
                 is_admin: document.getElementById('newUserAdmin').value === 'true',
             })});
@@ -297,12 +305,16 @@
 
         async function sendAlarm() {
             const userId = document.getElementById('alarmUser').value;
-            await api('/api/alarms/send', { method: 'POST', body: JSON.stringify({
-                title: document.getElementById('alarmTitle').value,
-                message: document.getElementById('alarmMessage').value,
-                severity: document.getElementById('alarmSeverity').value,
-                assigned_user_id: userId ? parseInt(userId) : null,
-            })});
+            try {
+                await api('/api/alarms/send', { method: 'POST', body: JSON.stringify({
+                    title: document.getElementById('alarmTitle').value,
+                    message: document.getElementById('alarmMessage').value,
+                    severity: document.getElementById('alarmSeverity').value,
+                    assigned_user_id: userId ? parseInt(userId) : null,
+                })});
+            } catch (e) {
+                alert(e.message);
+            }
             loadAll();
         }
 
@@ -321,45 +333,59 @@
 
         function log(msg, type = 'info') {
             const el = document.getElementById('testLog');
-            const ts = new Date().toLocaleTimeString();
+            const ts = new Date().toLocaleTimeString('fr-FR');
             el.innerHTML += `<div class="log-entry ${type}">[${ts}] ${msg}</div>`;
             el.scrollTop = el.scrollHeight;
         }
 
         async function testSendAlarm() {
-            log('Sending test alarm...', 'info');
+            log('Envoi alarme de test...', 'info');
             try {
                 const r = await api('/api/test/send-alarm', { method: 'POST' });
-                log(`Test alarm sent! ID: ${r.alarm_id}, Assigned to user: ${r.assigned_to}`, 'success');
+                log(`Alarme envoyée ! ID: ${r.alarm_id}, Assignée à : ${r.assigned_to}`, 'success');
                 loadAll();
-            } catch (e) { log(`Error: ${e.message}`, 'error'); }
+            } catch (e) { log(`Erreur : ${e.message}`, 'error'); }
         }
 
         async function testWatchdog() {
-            log('Simulating watchdog failure...', 'info');
+            log('Simulation panne watchdog...', 'info');
             try {
                 const r = await api('/api/test/simulate-watchdog-failure', { method: 'POST' });
-                log(`Watchdog failure simulated! ${r.devices_affected} devices affected`, 'success');
+                log(`Panne simulée ! ${r.users_affected} utilisateurs affectés`, 'success');
                 loadAll();
-            } catch (e) { log(`Error: ${e.message}`, 'error'); }
+            } catch (e) { log(`Erreur : ${e.message}`, 'error'); }
         }
 
-        async function testConnectionLoss() {
-            log('Simulating connection loss...', 'info');
+        async function toggleHeartbeatPause() {
             try {
-                const r = await api('/api/test/simulate-connection-loss', { method: 'POST' });
-                log(`Connection loss simulated! ${r.devices_affected} devices affected`, 'success');
+                const r = await api('/api/test/toggle-heartbeat-pause', { method: 'POST' });
+                heartbeatPaused = r.paused;
+                const btn = document.getElementById('btnHeartbeatPause');
+                if (heartbeatPaused) {
+                    btn.textContent = '\u23F8\uFE0F Heartbeat en pause';
+                    btn.className = 'btn-paused';
+                    log('Heartbeat mis en pause — le watchdog marquera les utilisateurs hors ligne', 'info');
+                } else {
+                    btn.textContent = '\uD83D\uDCE1 Simuler perte connexion';
+                    btn.className = 'btn-warning';
+                    log('Heartbeat repris', 'success');
+                }
                 loadAll();
-            } catch (e) { log(`Error: ${e.message}`, 'error'); }
+            } catch (e) { log(`Erreur : ${e.message}`, 'error'); }
         }
 
         async function testReset() {
-            log('Resetting all alarms and devices...', 'info');
+            log('Réinitialisation...', 'info');
             try {
                 await api('/api/test/reset', { method: 'POST' });
-                log('All reset!', 'success');
+                log('Tout réinitialisé !', 'success');
+                // Also reset heartbeat pause state
+                heartbeatPaused = false;
+                const btn = document.getElementById('btnHeartbeatPause');
+                btn.textContent = '\uD83D\uDCE1 Simuler perte connexion';
+                btn.className = 'btn-warning';
                 loadAll();
-            } catch (e) { log(`Error: ${e.message}`, 'error'); }
+            } catch (e) { log(`Erreur : ${e.message}`, 'error'); }
         }
 
         function loadAll() {

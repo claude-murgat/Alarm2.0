@@ -1,13 +1,14 @@
 package com.alarm.critical
 
 import android.os.Bundle
+import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
-import com.alarm.critical.api.ApiClient
+import com.alarm.critical.api.ApiProvider
 import com.alarm.critical.service.AlarmSoundManager
 import kotlinx.coroutines.launch
 
@@ -29,7 +30,7 @@ class AlarmActivity : AppCompatActivity() {
         setContentView(R.layout.activity_alarm)
 
         alarmId = intent.getIntExtra("alarm_id", 0)
-        val title = intent.getStringExtra("alarm_title") ?: "CRITICAL ALARM"
+        val title = intent.getStringExtra("alarm_title") ?: "ALARME CRITIQUE"
         val message = intent.getStringExtra("alarm_message") ?: ""
         val severity = intent.getStringExtra("alarm_severity") ?: "critical"
         token = intent.getStringExtra("token")
@@ -37,8 +38,8 @@ class AlarmActivity : AppCompatActivity() {
 
         findViewById<TextView>(R.id.alarmTitle).text = title
         findViewById<TextView>(R.id.alarmMessage).text = message
-        findViewById<TextView>(R.id.alarmSeverity).text = "SEVERITY: ${severity.uppercase()}"
-        findViewById<TextView>(R.id.alarmId).text = "Alarm #$alarmId"
+        findViewById<TextView>(R.id.alarmSeverity).text = "GRAVITÉ : ${severity.uppercase()}"
+        findViewById<TextView>(R.id.alarmId).text = "Alarme #$alarmId"
 
         // Start alarm sound
         soundManager = AlarmSoundManager(this)
@@ -52,28 +53,34 @@ class AlarmActivity : AppCompatActivity() {
 
     private fun acknowledgeAlarm() {
         if (token == null) {
-            Toast.makeText(this, "Not authenticated", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Non authentifié", Toast.LENGTH_SHORT).show()
             return
         }
 
         lifecycleScope.launch {
             try {
-                val response = ApiClient.service.acknowledgeAlarm("Bearer $token", alarmId)
+                val response = ApiProvider.service.acknowledgeAlarm("Bearer $token", alarmId)
                 if (response.isSuccessful) {
                     soundManager.stopAlarmSound()
                     runOnUiThread {
-                        Toast.makeText(
-                            this@AlarmActivity,
-                            "Alarm acknowledged. Suspended for 30 minutes.",
-                            Toast.LENGTH_LONG
-                        ).show()
-                        finish()
+                        // Masquer le bouton acquitter
+                        findViewById<Button>(R.id.ackButton).visibility = View.GONE
+
+                        // Afficher le statut acquitté
+                        val statusText = findViewById<TextView>(R.id.ackStatusText)
+                        statusText.text = "\u2705 Acquittée"
+                        statusText.visibility = View.VISIBLE
+
+                        // Afficher le temps restant (30 min de suspension)
+                        val remainingText = findViewById<TextView>(R.id.ackRemainingTime)
+                        remainingText.text = "Suspendue pour 30 min restantes"
+                        remainingText.visibility = View.VISIBLE
                     }
                 } else {
                     runOnUiThread {
                         Toast.makeText(
                             this@AlarmActivity,
-                            "Failed to acknowledge: ${response.code()}",
+                            "Échec de l'acquittement : ${response.code()}",
                             Toast.LENGTH_SHORT
                         ).show()
                     }
@@ -82,7 +89,7 @@ class AlarmActivity : AppCompatActivity() {
                 runOnUiThread {
                     Toast.makeText(
                         this@AlarmActivity,
-                        "Error: ${e.message}",
+                        "Erreur : ${e.message}",
                         Toast.LENGTH_SHORT
                     ).show()
                 }

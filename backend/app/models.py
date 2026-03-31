@@ -7,27 +7,15 @@ from .database import Base
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, index=True, nullable=False)
     hashed_password = Column(String, nullable=False)
-    name = Column(String, nullable=False)
+    name = Column(String, unique=True, index=True, nullable=False)
     is_admin = Column(Boolean, default=False)
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-    devices = relationship("Device", back_populates="user")
-    alarms = relationship("Alarm", back_populates="assigned_user", foreign_keys="Alarm.assigned_user_id")
-
-
-class Device(Base):
-    __tablename__ = "devices"
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    device_token = Column(String, unique=True, nullable=False)
     last_heartbeat = Column(DateTime, nullable=True)
     is_online = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    user = relationship("User", back_populates="devices")
+    alarms = relationship("Alarm", back_populates="assigned_user", foreign_keys="Alarm.assigned_user_id")
 
 
 class Alarm(Base):
@@ -40,7 +28,10 @@ class Alarm(Base):
     assigned_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     acknowledged_at = Column(DateTime, nullable=True)
     acknowledged_by = Column(Integer, nullable=True)
+    acknowledged_by_name = Column(String, nullable=True)
     suspended_until = Column(DateTime, nullable=True)
+    notified_user_ids = Column(String, default="")  # Comma-separated IDs of all notified users
+    is_oncall_alarm = Column(Boolean, default=False)  # True if auto-generated for on-call disconnection
     escalation_count = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
