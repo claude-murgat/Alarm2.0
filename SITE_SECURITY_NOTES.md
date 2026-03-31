@@ -68,18 +68,22 @@
 
 ## Améliorations recommandées (priorisées)
 
-### P1 — Backend cloud redondant (2 VPS + DB managée)
+### P1 — Backend cloud redondant (2 VPS + réplication PostgreSQL)
 - **Pourquoi** : maintenir la pleine fonctionnalité même en cas de panne hardware d'un backend
   - SMS/dead man's switch seuls = mode dégradé (perte des fonctionnalités app)
   - Doublon backend = bascule transparente en ~10s, fonctionnalité complète maintenue
-- **Architecture** :
-  - VPS1 chez OVH Paris + VPS2 chez Scaleway Amsterdam (fournisseurs et datacenters différents)
-  - Base de données PostgreSQL managée partagée (Supabase free tier — 500 Mo, hot standby intégré)
-  - L'app Android essaie VPS1, bascule sur VPS2 après 3 échecs consécutifs (~9 secondes)
-  - La boucle d'escalade utilise un verrou PostgreSQL advisory (`pg_try_advisory_lock`) → un seul backend escalade à chaque tick, l'autre est en attente froide
-- **Goulot restant unique** : la DB managée (Supabase) — mais elle a sa propre redondance interne
+- **Attention** : 2 VPS + DB managée partagée (Supabase) déplace simplement le SPOF sur la DB
+  - Si Supabase tombe → les deux VPS perdent leur DB simultanément → pire qu'un seul VPS
+  - La vraie solution : **chaque VPS a sa propre PostgreSQL, synchronisées par streaming replication**
+- **Architecture recommandée** :
+  - VPS1 (OVH Paris) : FastAPI + PostgreSQL PRIMARY → écrit et lit localement
+  - VPS2 (Scaleway Amsterdam) : FastAPI + PostgreSQL REPLICA → reçoit le WAL en continu (~ms de lag)
+  - En cas de mort de VPS1 : app bascule sur VPS2 (~10s) + promotion du replica en primary (1 commande)
+  - La boucle d'escalade utilise un verrou PostgreSQL advisory (`pg_try_advisory_lock`) → un seul backend escalade à chaque tick
+- **SPOF résiduel** : les deux datacenters tombent simultanément → probabilité infime
+- **Split-brain** (lien VPS1↔VPS2 coupé mais les deux vivants) : les deux bases divergent temporairement mais **aucune ne tombe** — resynchronisation à la reconnexion
 - **Starlink** : câbler en parallèle (pas en série derrière le modem principal) → le modem n'est plus un SPOF
-- **Coût** : ~8 €/mois (VPS1 ~3,50€ + VPS2 ~3,60€ + Supabase 0€ + Healthchecks.io 0€)
+- **Coût** : ~8 €/mois (VPS1 ~3,50€ + VPS2 ~3,60€ — pas de DB externe payante)
 
 ### P2 — Dead man's switch externe (filet de sécurité ultime)
 - **Pourquoi** : si les deux backends tombent simultanément (ou la DB managée), l'app est silencieuse sans que personne ne le sache
