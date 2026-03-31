@@ -85,25 +85,29 @@
 - **Starlink** : câbler en parallèle (pas en série derrière le modem principal) → le modem n'est plus un SPOF
 - **Coût** : ~8 €/mois (VPS1 ~3,50€ + VPS2 ~3,60€ — pas de DB externe payante)
 
-### P2 — Dead man's switch externe (filet de sécurité ultime)
-- **Pourquoi** : si les deux backends tombent simultanément (ou la DB managée), l'app est silencieuse sans que personne ne le sache
-- **Comment** : chaque backend ping Healthchecks.io toutes les 5 min ; si silence des DEUX → SMS automatique
-- **Coût** : gratuit (Healthchecks.io plan free)
-- **Rôle** : dernier filet uniquement — ne se déclenche que dans le scénario catastrophe (les deux VPS + DB simultanément HS)
+### P2+P3 — Machine on-site (clé USB GSM) : gateway SMS + health monitor
+- **Hardware** : PC ou Raspberry Pi sur onduleur + clé USB GSM (ex: Huawei E3372, ~20€) + SIM forfait SMS illimité (~5€/mois)
+- **Double rôle — aucune dépendance externe** :
 
-### P3 — SMS self-hosted (gateway Android on-site)
-- **Pourquoi** : indépendant de l'app Android astreinte (app tuée par OS → SMS passe quand même) + aucune dépendance fournisseur tiers + coût fixe prévisible
-- **Hardware** : vieux Android sur onduleur, SIM forfait SMS (~5€/mois, SMS illimités inclus)
-- **Connectivité** : modèle pull — la gateway poll le VPS toutes les 30s pour récupérer les SMS à envoyer
+  **Rôle 1 — Gateway SMS (alarmes)**
+  - Modèle pull : poll `GET /internal/sms/pending` sur les VPS toutes les 30s
+  - Envoie les SMS via la clé GSM (gammu-smsd ou python-gammu)
   - Aucun port entrant à ouvrir sur le réseau site
-  - Si WiFi site tombe : la gateway utilise les données 4G de sa propre SIM pour continuer à poller le VPS
-- **Implémentation backend** : table `sms_queue` dans PostgreSQL (répliquée entre VPS1 et VPS2)
-  - La boucle d'escalade écrit dans `sms_queue` au lieu d'appeler Twilio
-  - Endpoint `GET /internal/sms/pending` + `POST /internal/sms/{id}/sent` pour la gateway
-- **App gateway** : android-sms-gateway (open source, github.com/capcom6/android-sms-gateway)
-- **Coût** : ~5€/mois (SIM) vs Twilio ~1€/mois + 0.08€/SMS — rentable dès ~8 incidents/mois, aucune facturation variable
-- **Protège contre** : app Android tuée par OS, téléphone sans données internet mais avec signal voix/SMS
-- **Limite** : si les deux backends ET la gateway sont HS simultanément → dead man's switch (P2) prend le relais
+  - Si internet site tombe : la clé GSM peut aussi fournir les données mobiles pour continuer à poller
+
+  **Rôle 2 — Health monitor (remplace Healthchecks.io)**
+  - Poll `GET /health` sur VPS1 ET VPS2 toutes les 5 min
+  - Si les DEUX ne répondent plus → envoie SMS d'alerte directement via la clé GSM
+  - Aucun service externe nécessaire (Healthchecks.io supprimé)
+  - L'endpoint `/health` est enrichi côté backend : vérifie DB joignable + boucle d'escalade active (retourne 503 si boucle bloquée → détecte bugs internes, pas seulement crashes)
+
+- **Implémentation backend** : table `sms_queue` dans PostgreSQL (répliquée VPS1↔VPS2)
+  - La boucle d'escalade écrit dans `sms_queue`
+  - Endpoints : `GET /internal/sms/pending` + `POST /internal/sms/{id}/sent`
+- **Coût** : ~20€ une fois (clé USB) + ~5€/mois (SIM) — zéro dépendance externe, zéro coût variable
+- **SPOF résiduel** : la machine on-site elle-même — si elle tombe, on perd le SMS et le monitoring
+  - Acceptable : le système principal (app Android + VPS) continue de fonctionner normalement
+  - La sirène câblée PLC reste active indépendamment
 
 ### P4 — UPS dédié Starlink (si pas déjà fait)
 - S'assurer que l'antenne Starlink a sa propre batterie de secours
@@ -116,8 +120,8 @@
 | Crash process backend | Bascule ~10s, pleine fonctionnalité | P1 (VPS2) |
 | Panne hardware VPS1 | Bascule ~10s, pleine fonctionnalité | P1 (VPS2) |
 | Incendie datacenter VPS1 | Bascule ~10s, pleine fonctionnalité | P1 (VPS2, datacenter différent) |
-| Les 2 VPS morts simultanément | Mode dégradé SMS | P2 (dead man) + P3 (gateway SMS on-site) |
-| App Android tuée par l'OS | SMS reçu même sans data | P3 (gateway → GSM) |
+| Les 2 VPS morts simultanément | SMS d'alerte + mode dégradé | Machine on-site (health monitor → GSM) |
+| App Android tuée par l'OS | SMS reçu même sans data | Machine on-site (gateway → GSM) |
 | Fibre + mobile coupés | Starlink prend le relais | Infrastructure existante |
 | Coupure courant totale | Sirène locale uniquement | Limites physiques irréductibles |
 
