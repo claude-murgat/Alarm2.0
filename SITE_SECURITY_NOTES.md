@@ -68,20 +68,24 @@
 
 ## Améliorations recommandées (priorisées)
 
-### P1 — Backend cloud (hors site)
-- **Pourquoi** : élimine le point de défaillance unique (panne hardware sur site)
-- **Comment** : déplacer le backend (FastAPI + PostgreSQL) sur VPS cloud (OVH, Scaleway ~5-10€/mois)
-- **Interaction** : remplace l'instance on-site, pas de doublon — instance unique dans le cloud
-- **Protège contre** : panne hardware site, maintenance serveur, sinistre physique local
-- **Ne protège pas** : coupure connectivité totale (mais Starlink couvre ça), sinistre datacenter cloud (improbable mais réel)
-- **Goulots restants** : le VPS lui-même (crash, OOM, migration ratée) + le modem/routeur de sortie internet sur site
-  - Starlink ayant son propre routeur intégré, il peut sortir directement sans passer par le modem principal → le modem n'est plus un SPOF si Starlink est câblé en parallèle (pas en série)
+### P1 — Backend cloud redondant (2 VPS + DB managée)
+- **Pourquoi** : maintenir la pleine fonctionnalité même en cas de panne hardware d'un backend
+  - SMS/dead man's switch seuls = mode dégradé (perte des fonctionnalités app)
+  - Doublon backend = bascule transparente en ~10s, fonctionnalité complète maintenue
+- **Architecture** :
+  - VPS1 chez OVH Paris + VPS2 chez Scaleway Amsterdam (fournisseurs et datacenters différents)
+  - Base de données PostgreSQL managée partagée (Supabase free tier — 500 Mo, hot standby intégré)
+  - L'app Android essaie VPS1, bascule sur VPS2 après 3 échecs consécutifs (~9 secondes)
+  - La boucle d'escalade utilise un verrou PostgreSQL advisory (`pg_try_advisory_lock`) → un seul backend escalade à chaque tick, l'autre est en attente froide
+- **Goulot restant unique** : la DB managée (Supabase) — mais elle a sa propre redondance interne
+- **Starlink** : câbler en parallèle (pas en série derrière le modem principal) → le modem n'est plus un SPOF
+- **Coût** : ~8 €/mois (VPS1 ~3,50€ + VPS2 ~3,60€ + Supabase 0€ + Healthchecks.io 0€)
 
-### P2 — Dead man's switch externe
-- **Pourquoi** : si le backend cloud lui-même tombe, plus personne ne sait
-- **Comment** : backend ping Healthchecks.io toutes les 5 min ; si silence → SMS automatique
+### P2 — Dead man's switch externe (filet de sécurité ultime)
+- **Pourquoi** : si les deux backends tombent simultanément (ou la DB managée), l'app est silencieuse sans que personne ne le sache
+- **Comment** : chaque backend ping Healthchecks.io toutes les 5 min ; si silence des DEUX → SMS automatique
 - **Coût** : gratuit (Healthchecks.io plan free)
-- **Protège contre** : crash du backend cloud, bug infini, OOM, etc.
+- **Rôle** : dernier filet uniquement — ne se déclenche que dans le scénario catastrophe (les deux VPS + DB simultanément HS)
 
 ### P3 — SMS/appel de secours (Twilio ou OVH SMS)
 - **Pourquoi** : indépendant de l'app Android (si app tuée par OS, SMS passe quand même)
@@ -93,12 +97,24 @@
   - Variables d'env : `TWILIO_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`
   - Numéro loué chez Twilio : ~1€/mois ; SMS sortant France : ~0.08€/SMS (~0.24€ par incident à 3 personnes)
 - **Protège contre** : app Android tuée par OS, téléphone sans données internet mais avec signal voix/SMS
-- **Limite** : si le backend lui-même est mort → le SMS ne peut plus partir (c'est le backend qui appelle Twilio)
-  - C'est pour ça que P2 (dead man's switch) est complémentaire : il fonctionne à l'envers (silence du backend → Healthchecks.io déclenche l'alerte)
+- **Limite** : si les deux backends sont morts → les SMS ne peuvent plus partir (c'est le backend qui appelle Twilio)
+  - C'est pour ça que P2 (dead man's switch) reste le filet ultime
 
 ### P4 — UPS dédié Starlink (si pas déjà fait)
 - S'assurer que l'antenne Starlink a sa propre batterie de secours
 - Indépendant du double secours du site pour maximiser la résilience
+
+## Matrice de résilience finale (P1+P2+P3 implémentés)
+
+| Scénario | Impact | Couvert par |
+|---|---|---|
+| Crash process backend | Bascule ~10s, pleine fonctionnalité | P1 (VPS2) |
+| Panne hardware VPS1 | Bascule ~10s, pleine fonctionnalité | P1 (VPS2) |
+| Incendie datacenter VPS1 | Bascule ~10s, pleine fonctionnalité | P1 (VPS2, datacenter différent) |
+| Les 2 VPS morts simultanément | Mode dégradé SMS | P2 (dead man) + P3 (SMS direct) |
+| App Android tuée par l'OS | SMS reçu même sans data | P3 (Twilio → GSM) |
+| Fibre + mobile coupés | Starlink prend le relais | Infrastructure existante |
+| Coupure courant totale | Sirène locale uniquement | Limites physiques irréductibles |
 
 ## Ce que l'infrastructure ne couvrira jamais
 - Coupure simultanée courant + toutes connectivités → sirène locale uniquement
