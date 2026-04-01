@@ -8,6 +8,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import com.alarm.critical.AlarmActivity
+import com.alarm.critical.api.ApiClient
 import com.alarm.critical.api.ApiProvider
 import kotlinx.coroutines.*
 
@@ -74,6 +75,7 @@ class AlarmPollingService : Service() {
                 try {
                     val response = ApiProvider.service.getMyAlarms("Bearer $token")
                     if (response.isSuccessful) {
+                        ApiClient.consecutiveFailures = 0  // Réinitialiser le compteur sur succès
                         lastConnectionStatus = "Connected"
                         val alarms = response.body() ?: emptyList()
                         activeAlarmCount = alarms.size
@@ -92,12 +94,10 @@ class AlarmPollingService : Service() {
                             return@launch
                         }
                     } else {
-                        lastConnectionStatus = "Error: ${response.code()}"
-                        Log.w(TAG, "Poll failed: ${response.code()}")
+                        onPollFailure("Error: ${response.code()}")
                     }
                 } catch (e: Exception) {
-                    lastConnectionStatus = "Disconnected"
-                    Log.e(TAG, "Poll error: ${e.message}")
+                    onPollFailure("Disconnected: ${e.message}")
                 }
                 delay(3000) // Poll every 3 seconds
             }
@@ -125,6 +125,20 @@ class AlarmPollingService : Service() {
                 }
                 delay(3000)
             }
+        }
+    }
+
+    /**
+     * Appelée sur chaque échec de polling (non-401).
+     * Incrémente le compteur et déclenche un failover après 3 échecs consécutifs.
+     */
+    private fun onPollFailure(reason: String) {
+        lastConnectionStatus = reason
+        Log.w(TAG, "Poll failure: $reason")
+        ApiClient.consecutiveFailures++
+        if (ApiClient.consecutiveFailures >= 3) {
+            Log.w(TAG, "3 échecs consécutifs — bascule vers l'URL secondaire")
+            ApiClient.switchToNextUrl()
         }
     }
 

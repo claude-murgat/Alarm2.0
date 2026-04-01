@@ -4,9 +4,10 @@ import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from .database import engine, Base, SessionLocal
+from sqlalchemy import text
+from .database import engine, Base, SessionLocal, run_migrations
 from .models import User, EscalationConfig, SystemConfig
 from .auth import hash_password
 from .api.users import router as auth_router, users_router
@@ -14,6 +15,7 @@ from .api.alarms import router as alarms_router
 from .api.devices import router as devices_router
 from .api.config import router as config_router
 from .api.test_api import router as test_router
+from .api.sms import router as sms_router
 from .escalation import escalation_loop
 from .watchdog import watchdog_loop
 
@@ -60,6 +62,7 @@ async def lifespan(app: FastAPI):
     # Startup
     os.makedirs("data", exist_ok=True)
     Base.metadata.create_all(bind=engine)
+    run_migrations(engine)
     seed_data()
 
     escalation_task = asyncio.create_task(escalation_loop())
@@ -90,6 +93,7 @@ app.include_router(alarms_router)
 app.include_router(devices_router)
 app.include_router(config_router)
 app.include_router(test_router)
+app.include_router(sms_router)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -101,4 +105,28 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    from .escalation import last_tick_at
+    from .clock import now as clock_now
+
+    # Vérifier que la DB est accessible
+    db_ok = False
+    try:
+        db = SessionLocal()
+        db.execute(text("SELECT 1"))
+        db_ok = True
+        db.close()
+    except Exception:
+        pass
+
+    # Vérifier que la boucle d'escalade tourne (dernier tick < 120s)
+    loop_ok = (
+        last_tick_at is not None
+        and (clock_now() - last_tick_at).total_seconds() < 120
+    )
+
+    if not db_ok or not loop_ok:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "degraded", "db": db_ok, "escalation_loop": loop_ok}
+        )
+    return {"status": "ok", "db": True, "escalation_loop": True}

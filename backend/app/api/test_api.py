@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
-from datetime import timedelta
+from datetime import timedelta, datetime
 from ..clock import now as clock_now
 from .. import clock as clock_module
 from ..database import get_db
-from ..models import Alarm, User, EscalationConfig
+from ..models import Alarm, User, EscalationConfig, SmsQueue
 
 router = APIRouter(prefix="/api/test", tags=["test"])
 
@@ -219,3 +219,32 @@ def reset_clock():
     """Remet l'horloge à l'heure réelle."""
     clock_module.reset()
     return {"status": "ok", "offset_seconds": 0}
+
+
+@router.post("/reset-sms-queue")
+def reset_sms_queue(db: Session = Depends(get_db)):
+    """Vide la table sms_queue (pour les tests)."""
+    db.query(SmsQueue).delete()
+    db.commit()
+    return {"status": "ok"}
+
+
+@router.post("/insert-sms")
+def insert_sms(payload: dict, db: Session = Depends(get_db)):
+    """Insère un SMS directement dans sms_queue (pour les tests)."""
+    row = SmsQueue(
+        to_number=payload["to_number"],
+        body=payload["body"],
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"id": row.id}
+
+
+@router.post("/simulate-loop-stall")
+def simulate_loop_stall():
+    """Simule une boucle d'escalade bloquée en mettant last_tick_at à une date passée."""
+    from .. import escalation as esc_module
+    esc_module.last_tick_at = datetime(2020, 1, 1)
+    return {"status": "ok", "last_tick_at": "2020-01-01T00:00:00"}

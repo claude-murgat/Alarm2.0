@@ -7,6 +7,10 @@ android {
     namespace = "com.alarm.critical"
     compileSdk = 34
 
+    buildFeatures {
+        buildConfig = true
+    }
+
     defaultConfig {
         applicationId = "com.alarm.critical"
         minSdk = 26
@@ -14,6 +18,11 @@ android {
         versionCode = 1
         versionName = "1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // URLs backend : primaire (VPS1) et secondaire (VPS2)
+        // Pour l'émulateur Android, 10.0.2.2 est l'IP du host local
+        buildConfigField("String", "PRIMARY_BACKEND_URL", "\"http://10.0.2.2:8000/\"")
+        buildConfigField("String", "FALLBACK_BACKEND_URL", "\"http://10.0.2.2:8000/\"")
     }
 
     buildTypes {

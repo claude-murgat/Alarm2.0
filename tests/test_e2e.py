@@ -1356,5 +1356,178 @@ class TestAckedAlarmVisibility:
         assert alarms[0]["ack_remaining_seconds"] is not None
 
 
+# ── SMS queue + /health ──────────────────────────────────────────────────────
+
+class TestSmsAndHealth:
+    """Tests pour la gateway SMS self-hosted et l'endpoint /health enrichi."""
+
+    GATEWAY_KEY = os.getenv("GATEWAY_KEY", "changeme-in-prod")
+    GATEWAY_HEADERS = {"X-Gateway-Key": GATEWAY_KEY}
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        requests.post(f"{API}/test/reset-clock")
+        requests.post(f"{API}/test/reset")
+        requests.post(f"{API}/alarms/reset")
+        requests.post(f"{API}/test/reset-sms-queue")
+        yield
+        requests.post(f"{API}/test/reset-clock")
+        requests.post(f"{API}/test/reset-sms-queue")
+
+    def _get_user_id(self, name):
+        users = requests.get(f"{API}/users/").json()
+        return next(u["id"] for u in users if u["name"] == name)
+
+    # ── /health ─────────────────────────────────────────────────────────────
+
+    def test_health_endpoint_returns_ok(self):
+        """GET /health retourne 200 avec status ok quand tout va bien."""
+        r = requests.get(f"{BASE_URL}/health")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["status"] == "ok"
+        assert data["db"] is True
+        assert data["escalation_loop"] is True
+
+    def test_health_endpoint_returns_503_if_loop_stalled(self):
+        """GET /health retourne 503 si la boucle d'escalade est bloquée."""
+        # Helper de test qui met last_tick_at à une date passée
+        r = requests.post(f"{API}/test/simulate-loop-stall")
+        assert r.status_code == 200
+
+        r = requests.get(f"{BASE_URL}/health")
+        assert r.status_code == 503
+        data = r.json()
+        assert data["status"] == "degraded"
+        assert data["escalation_loop"] is False
+
+    # ── /internal/sms/* ──────────────────────────────────────────────────────
+
+    def test_sms_pending_requires_gateway_key(self):
+        """GET /internal/sms/pending sans clé retourne 401."""
+        r = requests.get(f"{BASE_URL}/internal/sms/pending")
+        assert r.status_code == 401
+
+    def test_sms_pending_wrong_key_returns_401(self):
+        """GET /internal/sms/pending avec mauvaise clé retourne 401."""
+        r = requests.get(
+            f"{BASE_URL}/internal/sms/pending",
+            headers={"X-Gateway-Key": "mauvaise-cle"}
+        )
+        assert r.status_code == 401
+
+    def test_sms_pending_returns_empty_with_key(self):
+        """GET /internal/sms/pending avec bonne clé retourne [] si vide."""
+        r = requests.get(
+            f"{BASE_URL}/internal/sms/pending",
+            headers=self.GATEWAY_HEADERS
+        )
+        assert r.status_code == 200
+        assert r.json() == []
+
+    def test_sms_written_to_queue_on_escalation(self):
+        """Après escalade, un SMS est écrit dans sms_queue pour les users avec phone_number."""
+        user1_id = self._get_user_id(USER1_NAME)
+
+        # Enregistrer un numéro de téléphone pour user1
+        r = requests.patch(f"{API}/users/{user1_id}", json={"phone_number": "+33600000001"})
+        assert r.status_code == 200
+
+        # Envoyer une alarme assignée à user1
+        requests.post(f"{API}/alarms/send", json={
+            "title": "SMS Test", "message": "m", "severity": "critical",
+            "assigned_user_id": user1_id,
+        })
+
+        # Avancer de 16 min (dépasse le seuil d'escalade de 15 min)
+        requests.post(f"{API}/test/advance-clock", params={"minutes": 16})
+        time.sleep(12)  # Attendre un tick de la boucle d'escalade
+
+        r = requests.get(
+            f"{BASE_URL}/internal/sms/pending",
+            headers=self.GATEWAY_HEADERS
+        )
+        assert r.status_code == 200
+        pending = r.json()
+        assert len(pending) >= 1, f"Au moins 1 SMS attendu, got {len(pending)}"
+        numbers = [s["to_number"] for s in pending]
+        assert "+33600000001" in numbers, f"SMS attendu pour +33600000001, got {numbers}"
+
+    def test_sms_marked_sent(self):
+        """POST /internal/sms/{id}/sent marque le SMS comme envoyé."""
+        # Insérer un SMS via helper de test
+        r = requests.post(
+            f"{API}/test/insert-sms",
+            json={"to_number": "+33600000002", "body": "Test SMS envoi"}
+        )
+        assert r.status_code == 200
+        sms_id = r.json()["id"]
+
+        # Marquer comme envoyé
+        r = requests.post(
+            f"{BASE_URL}/internal/sms/{sms_id}/sent",
+            headers=self.GATEWAY_HEADERS
+        )
+        assert r.status_code == 200
+
+        # Ne doit plus apparaître dans /pending
+        r = requests.get(
+            f"{BASE_URL}/internal/sms/pending",
+            headers=self.GATEWAY_HEADERS
+        )
+        ids = [s["id"] for s in r.json()]
+        assert sms_id not in ids, f"SMS {sms_id} devrait être absent de /pending après /sent"
+
+    def test_sms_marked_error(self):
+        """POST /internal/sms/{id}/error incrémente retries et enregistre l'erreur."""
+        r = requests.post(
+            f"{API}/test/insert-sms",
+            json={"to_number": "+33600000003", "body": "Test SMS erreur"}
+        )
+        assert r.status_code == 200
+        sms_id = r.json()["id"]
+
+        r = requests.post(
+            f"{BASE_URL}/internal/sms/{sms_id}/error",
+            json={"error": "MODEM_BUSY"},
+            headers=self.GATEWAY_HEADERS
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["retries"] == 1
+        assert data["error"] == "MODEM_BUSY"
+
+        # Toujours dans /pending (retries=1 < 3)
+        r = requests.get(
+            f"{BASE_URL}/internal/sms/pending",
+            headers=self.GATEWAY_HEADERS
+        )
+        ids = [s["id"] for s in r.json()]
+        assert sms_id in ids, "SMS avec retries=1 doit encore être dans /pending"
+
+    def test_sms_excluded_after_max_retries(self):
+        """Un SMS avec retries >= 3 n'apparaît plus dans /pending."""
+        r = requests.post(
+            f"{API}/test/insert-sms",
+            json={"to_number": "+33600000004", "body": "Test max retries"}
+        )
+        sms_id = r.json()["id"]
+
+        # Simuler 3 erreurs
+        for _ in range(3):
+            requests.post(
+                f"{BASE_URL}/internal/sms/{sms_id}/error",
+                json={"error": "TIMEOUT"},
+                headers=self.GATEWAY_HEADERS
+            )
+
+        r = requests.get(
+            f"{BASE_URL}/internal/sms/pending",
+            headers=self.GATEWAY_HEADERS
+        )
+        ids = [s["id"] for s in r.json()]
+        assert sms_id not in ids, "SMS avec retries=3 ne doit plus apparaître dans /pending"
+
+
 # Tests Android E2E dans Espresso (android/app/src/androidTest/).
 # Lancer avec : cd android && ./gradlew connectedAndroidTest

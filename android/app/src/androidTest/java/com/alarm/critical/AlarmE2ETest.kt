@@ -870,4 +870,41 @@ class AlarmE2ETest {
 
         scenario.close()
     }
+
+    // ── 22. Failover vers URL secondaire après 3 échecs consécutifs ──────────
+
+    @Test
+    fun test22_failoverToSecondaryUrlAfterThreeFailures() {
+        // Réinitialiser l'état failover avant le test
+        com.alarm.critical.api.ApiClient.consecutiveFailures = 0
+        com.alarm.critical.api.ApiClient.currentUrlIndex = 0
+
+        val errorResponse: retrofit2.Response<List<AlarmResponse>> =
+            retrofit2.Response.error(503, okhttp3.ResponseBody.create(null, "Service Unavailable"))
+
+        // 3 polls en erreur 503 → doit déclencher switchToNextUrl()
+        // puis 1 succès sur l'URL secondaire
+        fakeApi.myAlarmsResponses = mutableListOf(
+            errorResponse,
+            errorResponse,
+            errorResponse,
+            retrofit2.Response.success(emptyList())
+        )
+
+        waitForPolls(4)
+        val scenario = launchDashboard()
+
+        // Après 3 échecs, l'URL doit avoir basculé vers l'index 1
+        assertEquals(
+            "currentUrlIndex devrait être 1 après 3 échecs",
+            1, com.alarm.critical.api.ApiClient.currentUrlIndex
+        )
+        // Le compteur d'échecs est resetté après le switch
+        assertEquals(
+            "consecutiveFailures devrait être 0 après le switch",
+            0, com.alarm.critical.api.ApiClient.consecutiveFailures
+        )
+
+        scenario.close()
+    }
 }

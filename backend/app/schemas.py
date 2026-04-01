@@ -24,6 +24,7 @@ class UserResponse(BaseModel):
     is_active: bool
     is_online: bool = False
     last_heartbeat: Optional[datetime] = None
+    phone_number: Optional[str] = None
     created_at: datetime
 
     class Config:
@@ -123,3 +124,16 @@ class EscalationConfigResponse(BaseModel):
 class SystemConfigUpdate(BaseModel):
     key: str
     value: str
+
+
+class SmsQueueItem(BaseModel):
+    id: int
+    to_number: str
+    body: str
+    retries: int
+    created_at: datetime
+    sent_at: Optional[datetime] = None
+    error: Optional[str] = None
+
+    class Config:
+        from_attributes = True

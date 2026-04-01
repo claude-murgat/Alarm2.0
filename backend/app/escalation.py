@@ -1,15 +1,19 @@
 import asyncio
 import logging
 from datetime import timedelta
+from typing import Optional
 from sqlalchemy.orm import Session
 from .database import SessionLocal
-from .models import Alarm, EscalationConfig, User, SystemConfig
+from .models import Alarm, EscalationConfig, User, SystemConfig, SmsQueue
 from .clock import now as clock_now
 from .email_service import send_alert_email
 
 logger = logging.getLogger("escalation")
 
 ONCALL_OFFLINE_DELAY_MINUTES = 15.0
+
+# Mis à jour à chaque tick — utilisé par /health pour détecter une boucle bloquée
+last_tick_at: Optional[object] = None
 
 
 def _add_notified_user(alarm, user_id: int):
@@ -21,13 +25,38 @@ def _add_notified_user(alarm, user_id: int):
     alarm.notified_user_ids = ",".join(str(x) for x in current_ids)
 
 
+def _enqueue_sms_for_user(db: Session, user: User, alarm: Alarm):
+    """Enqueue un SMS pour un utilisateur qui a un numéro de téléphone.
+    Guard anti-doublon : ne crée pas de SMS si un identique non-envoyé existe déjà."""
+    if not user.phone_number:
+        return
+    body = f"ALARME {alarm.severity.upper()}: {alarm.title}"
+    existing = (
+        db.query(SmsQueue)
+        .filter(
+            SmsQueue.to_number == user.phone_number,
+            SmsQueue.body == body,
+            SmsQueue.sent_at == None,
+            SmsQueue.retries < 3,
+        )
+        .first()
+    )
+    if existing:
+        return  # SMS déjà en attente pour cet utilisateur/alarme
+    sms = SmsQueue(to_number=user.phone_number, body=body)
+    db.add(sms)
+    logger.info(f"SMS enqueued for {user.name} ({user.phone_number}) — alarm {alarm.id}")
+
+
 async def escalation_loop():
     """Background task: ack expiry, escalation, and on-call monitoring."""
+    global last_tick_at
     while True:
         try:
             db: Session = SessionLocal()
             try:
                 now = clock_now()
+                last_tick_at = now  # Mis à jour à chaque tick pour /health
 
                 # --- 1. Ack expiry: reactivate acknowledged alarms ---
                 ack_alarms = (
@@ -89,7 +118,17 @@ async def escalation_loop():
                             _add_notified_user(alarm, next_user.user_id)
                             alarm.status = "escalated"
                             alarm.escalation_count += 1
-                            db.commit()
+
+                        # Toujours notifier via SMS tous les utilisateurs déjà dans la chaîne
+                        # quand le seuil est atteint (le guard anti-doublon évite les doublons)
+                        notified_ids = [
+                            int(x) for x in (alarm.notified_user_ids or "").split(",") if x.strip()
+                        ]
+                        for uid in notified_ids:
+                            u = db.query(User).filter(User.id == uid).first()
+                            if u:
+                                _enqueue_sms_for_user(db, u, alarm)
+                        db.commit()
 
                 # --- 3. On-call monitoring: user #1 heartbeat ---
                 _check_oncall_heartbeat(db, now, escalation_chain)

@@ -13,6 +13,7 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     last_heartbeat = Column(DateTime, nullable=True)
     is_online = Column(Boolean, default=False)
+    phone_number = Column(String, nullable=True)  # For SMS gateway notifications
     created_at = Column(DateTime, default=datetime.utcnow)
 
     alarms = relationship("Alarm", back_populates="assigned_user", foreign_keys="Alarm.assigned_user_id")
@@ -54,3 +55,14 @@ class SystemConfig(Base):
     id = Column(Integer, primary_key=True, index=True)
     key = Column(String, unique=True, nullable=False)
     value = Column(String, nullable=False)
+
+
+class SmsQueue(Base):
+    __tablename__ = "sms_queue"
+    id = Column(Integer, primary_key=True, index=True)
+    to_number = Column(String, nullable=False)
+    body = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    sent_at = Column(DateTime, nullable=True)
+    error = Column(String, nullable=True)
+    retries = Column(Integer, default=0)

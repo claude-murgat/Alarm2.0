@@ -102,3 +102,16 @@ def refresh_token(current_user: User = Depends(get_current_user)):
         "access_token": new_token,
         "token_type": "bearer",
     }
+
+
+@users_router.patch("/{user_id}", response_model=UserResponse)
+def update_user(user_id: int, payload: dict, db: Session = Depends(get_db)):
+    """Met à jour les champs d'un utilisateur (ex: phone_number)."""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
+    if "phone_number" in payload:
+        user.phone_number = payload["phone_number"]
+    db.commit()
+    db.refresh(user)
+    return user
