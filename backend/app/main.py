@@ -22,6 +22,10 @@ from .watchdog import watchdog_loop
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("alarm_system")
 
+# When ESCALATION_DISABLED=1, this node acts as a secondary (API-only, no background tasks).
+# Realistic production pattern: only one node runs the escalation + watchdog loops.
+ESCALATION_DISABLED = os.getenv("ESCALATION_DISABLED", "0") == "1"
+
 
 def seed_data():
     """Create default users and escalation config if DB is empty."""
@@ -65,15 +69,22 @@ async def lifespan(app: FastAPI):
     run_migrations(engine)
     seed_data()
 
-    escalation_task = asyncio.create_task(escalation_loop())
-    watchdog_task = asyncio.create_task(watchdog_loop())
-    logger.info("Background tasks started: escalation + watchdog")
+    if ESCALATION_DISABLED:
+        logger.info("ESCALATION_DISABLED=1 — secondary node, background tasks skipped")
+        escalation_task = None
+        watchdog_task = None
+    else:
+        escalation_task = asyncio.create_task(escalation_loop())
+        watchdog_task = asyncio.create_task(watchdog_loop())
+        logger.info("Background tasks started: escalation + watchdog")
 
     yield
 
     # Shutdown
-    escalation_task.cancel()
-    watchdog_task.cancel()
+    if escalation_task:
+        escalation_task.cancel()
+    if watchdog_task:
+        watchdog_task.cancel()
 
 
 app = FastAPI(title="Critical Alarm System", version="1.0.0", lifespan=lifespan)
@@ -119,14 +130,20 @@ async def health():
         pass
 
     # Vérifier que la boucle d'escalade tourne (dernier tick < 120s)
-    loop_ok = (
-        last_tick_at is not None
-        and (clock_now() - last_tick_at).total_seconds() < 120
-    )
+    # Les nœuds secondaires (ESCALATION_DISABLED=1) n'ont pas de boucle → ok par définition
+    if ESCALATION_DISABLED:
+        loop_ok = True
+    else:
+        loop_ok = (
+            last_tick_at is not None
+            and (clock_now() - last_tick_at).total_seconds() < 120
+        )
+
+    role = "secondary" if ESCALATION_DISABLED else "primary"
 
     if not db_ok or not loop_ok:
         return JSONResponse(
             status_code=503,
-            content={"status": "degraded", "db": db_ok, "escalation_loop": loop_ok}
+            content={"status": "degraded", "db": db_ok, "escalation_loop": loop_ok, "role": role}
         )
-    return {"status": "ok", "db": True, "escalation_loop": True}
+    return {"status": "ok", "db": True, "escalation_loop": True, "role": role}

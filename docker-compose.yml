@@ -45,5 +45,29 @@ services:
       timeout: 10s
       retries: 3
 
+  backend2:
+    build: ./backend
+    ports:
+      - "8001:8000"
+    environment:
+      - SECRET_KEY=alarm-secret-key-change-in-prod
+      - DATABASE_URL=postgresql://alarm:alarm_secret@db:5432/alarm_db
+      - SMTP_HOST=mailhog
+      - SMTP_PORT=1025
+      - SMTP_FROM=alarmes@alarm.local
+      - GATEWAY_KEY=${GATEWAY_KEY:-changeme-in-prod}
+      - ESCALATION_DISABLED=1
+    depends_on:
+      db:
+        condition: service_healthy
+      mailhog:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
 volumes:
   pgdata:

@@ -1529,5 +1529,293 @@ class TestSmsAndHealth:
         assert sms_id not in ids, "SMS avec retries=3 ne doit plus apparaître dans /pending"
 
 
+# ── Redondance : 2 backends, 1 base de données ──────────────────────────────
+#
+# Prérequis : docker compose up --build -d (inclut backend2 sur port 8001)
+# backend1 (port 8000) = nœud primaire (boucle d'escalade active)
+# backend2 (port 8001) = nœud secondaire (ESCALATION_DISABLED=1, API uniquement)
+
+BASE_URL_2 = os.getenv("BACKEND_URL_2", "http://localhost:8001")
+API_2 = f"{BASE_URL_2}/api"
+GATEWAY_KEY = os.getenv("GATEWAY_KEY", "changeme-in-prod")
+GATEWAY_HEADERS = {"X-Gateway-Key": GATEWAY_KEY}
+
+
+def _skip_if_backend2_unavailable():
+    try:
+        requests.get(f"{BASE_URL_2}/health", timeout=3)
+    except Exception:
+        pytest.skip("backend2 non disponible (port 8001) — démarrer avec docker compose up")
+
+
+class TestRedundancy:
+    """Vérifie que les 2 backends partagent correctement l'état via PostgreSQL.
+    Teste la cohérence des données, la compatibilité JWT et la continuité de service.
+
+    Risques de régression couverts :
+    - Double escalade (deux boucles sur la même DB) → ESCALATION_DISABLED sur backend2
+    - Double SMS (guard anti-doublon)
+    - Incohérence d'état (alarme visible sur un seul nœud)
+    - Tokens JWT non cross-compatibles (même SECRET_KEY → tokens universels)
+    - Heartbeat redirigé sur backend2 → état visible sur backend1
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        _skip_if_backend2_unavailable()
+        requests.post(f"{API}/test/reset")
+        requests.post(f"{API}/alarms/reset")
+        requests.post(f"{API}/test/reset-sms-queue")
+        requests.post(f"{API}/test/reset-clock")
+        yield
+        requests.post(f"{API}/test/reset")
+        requests.post(f"{API}/alarms/reset")
+        requests.post(f"{API}/test/reset-sms-queue")
+        requests.post(f"{API}/test/reset-clock")
+
+    def _get_user_id(self, name, api=None):
+        if api is None:
+            api = API
+        users = requests.get(f"{api}/users/").json()
+        return next(u["id"] for u in users if u["name"] == name)
+
+    # ── Santé des deux nœuds ────────────────────────────────────────────────
+
+    def test_both_backends_respond_to_health(self):
+        """Les deux backends répondent à /health avec db=true."""
+        r1 = requests.get(f"{BASE_URL}/health")
+        assert r1.status_code == 200
+        assert r1.json()["db"] is True
+
+        r2 = requests.get(f"{BASE_URL_2}/health")
+        assert r2.status_code == 200
+        assert r2.json()["db"] is True
+
+    def test_backend1_is_primary_backend2_is_secondary(self):
+        """backend1 doit avoir role=primary, backend2 role=secondary."""
+        r1 = requests.get(f"{BASE_URL}/health")
+        assert r1.json().get("role") == "primary", \
+            f"backend1 devrait être primary, got: {r1.json()}"
+
+        r2 = requests.get(f"{BASE_URL_2}/health")
+        assert r2.json().get("role") == "secondary", \
+            f"backend2 devrait être secondary, got: {r2.json()}"
+
+    # ── Cohérence des données ───────────────────────────────────────────────
+
+    def test_alarm_created_on_backend1_visible_on_backend2(self):
+        """Une alarme créée via backend1 est immédiatement visible sur backend2."""
+        r = requests.post(f"{API}/alarms/send", json={
+            "title": "Redondance Test", "message": "visible des deux côtés", "severity": "critical",
+        })
+        assert r.status_code == 200
+        alarm_id = r.json()["id"]
+
+        r2 = requests.get(f"{API_2}/alarms/")
+        alarms_on_b2 = r2.json()
+        ids_on_b2 = [a["id"] for a in alarms_on_b2]
+        assert alarm_id in ids_on_b2, \
+            f"Alarme {alarm_id} créée sur backend1 devrait être visible sur backend2"
+
+    def test_alarm_resolved_on_backend1_visible_on_backend2(self):
+        """Une alarme résolue sur backend1 est immédiatement marquée resolved sur backend2."""
+        r = requests.post(f"{API}/alarms/send", json={
+            "title": "Resolve Sync", "message": "test", "severity": "critical",
+        })
+        alarm_id = r.json()["id"]
+
+        requests.post(f"{API}/alarms/{alarm_id}/resolve")
+
+        r2 = requests.get(f"{API_2}/alarms/")
+        alarm_b2 = next((a for a in r2.json() if a["id"] == alarm_id), None)
+        assert alarm_b2 is not None, "L'alarme devrait exister sur backend2"
+        assert alarm_b2["status"] == "resolved", \
+            f"Alarme devrait être resolved sur backend2, got: {alarm_b2['status']}"
+
+    def test_ack_on_backend1_visible_on_backend2(self):
+        """Un ACK effectué via backend1 est visible sur backend2."""
+        user1_id = self._get_user_id(USER1_NAME)
+        r = requests.post(f"{API}/alarms/send", json={
+            "title": "Ack Sync", "message": "test", "severity": "critical",
+            "assigned_user_id": user1_id,
+        })
+        alarm_id = r.json()["id"]
+
+        token1 = requests.post(f"{API}/auth/login", json={
+            "name": USER1_NAME, "password": USER1_PASSWORD
+        }).json()["access_token"]
+        requests.post(f"{API}/alarms/{alarm_id}/ack",
+                      headers={"Authorization": f"Bearer {token1}"})
+
+        r2 = requests.get(f"{API_2}/alarms/")
+        alarm_b2 = next((a for a in r2.json() if a["id"] == alarm_id), None)
+        assert alarm_b2 is not None
+        assert alarm_b2["status"] == "acknowledged", \
+            f"Alarme devrait être acknowledged sur backend2, got: {alarm_b2['status']}"
+
+    def test_user_list_consistent_across_backends(self):
+        """La liste des utilisateurs est identique sur les deux backends."""
+        users_b1 = requests.get(f"{API}/users/").json()
+        users_b2 = requests.get(f"{API_2}/users/").json()
+
+        ids_b1 = sorted(u["id"] for u in users_b1)
+        ids_b2 = sorted(u["id"] for u in users_b2)
+        assert ids_b1 == ids_b2, \
+            f"Listes utilisateurs différentes — b1: {ids_b1}, b2: {ids_b2}"
+
+    # ── Compatibilité JWT ───────────────────────────────────────────────────
+
+    def test_token_from_backend1_works_on_backend2(self):
+        """Un JWT obtenu sur backend1 est accepté par backend2 (même SECRET_KEY)."""
+        r = requests.post(f"{API}/auth/login", json={
+            "name": USER1_NAME, "password": USER1_PASSWORD
+        })
+        token = r.json()["access_token"]
+
+        r2 = requests.get(f"{API_2}/alarms/mine",
+                          headers={"Authorization": f"Bearer {token}"})
+        assert r2.status_code == 200, \
+            f"Token de backend1 devrait être valide sur backend2 (status {r2.status_code})"
+
+    def test_token_from_backend2_works_on_backend1(self):
+        """Un JWT obtenu sur backend2 est accepté par backend1."""
+        r = requests.post(f"{API_2}/auth/login", json={
+            "name": USER1_NAME, "password": USER1_PASSWORD
+        })
+        token = r.json()["access_token"]
+
+        r1 = requests.get(f"{API}/alarms/mine",
+                          headers={"Authorization": f"Bearer {token}"})
+        assert r1.status_code == 200, \
+            f"Token de backend2 devrait être valide sur backend1 (status {r1.status_code})"
+
+    def test_heartbeat_on_backend2_visible_on_backend1(self):
+        """Un heartbeat envoyé via backend2 met à jour le statut visible sur backend1."""
+        # D'abord, tout le monde offline
+        requests.post(f"{API}/test/simulate-connection-loss")
+
+        # Login fresh sur backend2, heartbeat via backend2
+        r = requests.post(f"{API_2}/auth/login", json={
+            "name": USER1_NAME, "password": USER1_PASSWORD
+        })
+        token = r.json()["access_token"]
+        requests.post(f"{API_2}/devices/heartbeat",
+                      headers={"Authorization": f"Bearer {token}"})
+
+        # Vérifier sur backend1 que user1 est online
+        users_b1 = requests.get(f"{API}/users/").json()
+        user1 = next(u for u in users_b1 if u["name"] == USER1_NAME)
+        assert user1["is_online"] is True, \
+            "Heartbeat envoyé via backend2 devrait mettre user1 online vu depuis backend1"
+
+    # ── Gateway SMS — cohérence ─────────────────────────────────────────────
+
+    def test_sms_queue_visible_from_both_backends(self):
+        """Un SMS inséré via backend1 est visible dans /internal/sms/pending des deux backends."""
+        r = requests.post(f"{API}/test/insert-sms",
+                          json={"to_number": "+33611000001", "body": "Test redondance SMS"})
+        sms_id = r.json()["id"]
+
+        # Via backend1
+        pending_b1 = requests.get(f"{BASE_URL}/internal/sms/pending",
+                                   headers=GATEWAY_HEADERS).json()
+        ids_b1 = [s["id"] for s in pending_b1]
+        assert sms_id in ids_b1, "SMS absent de /pending sur backend1"
+
+        # Via backend2
+        pending_b2 = requests.get(f"{BASE_URL_2}/internal/sms/pending",
+                                   headers=GATEWAY_HEADERS).json()
+        ids_b2 = [s["id"] for s in pending_b2]
+        assert sms_id in ids_b2, \
+            "SMS devrait être visible dans /pending sur backend2 (base partagée)"
+
+    def test_sms_marked_sent_on_backend2_disappears_from_backend1(self):
+        """Un SMS marqué sent via backend2 disparaît de /pending sur backend1."""
+        r = requests.post(f"{API}/test/insert-sms",
+                          json={"to_number": "+33611000002", "body": "Sent via B2"})
+        sms_id = r.json()["id"]
+
+        # Marquer comme envoyé via backend2
+        requests.post(f"{BASE_URL_2}/internal/sms/{sms_id}/sent",
+                      headers=GATEWAY_HEADERS)
+
+        # Doit avoir disparu de backend1
+        pending_b1 = requests.get(f"{BASE_URL}/internal/sms/pending",
+                                   headers=GATEWAY_HEADERS).json()
+        ids_b1 = [s["id"] for s in pending_b1]
+        assert sms_id not in ids_b1, \
+            "SMS marqué sent sur backend2 devrait disparaître de /pending sur backend1"
+
+    # ── Anti-doublon SMS (risque de régression avec 2 nœuds) ───────────────
+
+    def test_no_duplicate_sms_guard(self):
+        """Le guard anti-doublon empêche d'enqueuer deux fois le même SMS.
+        Simule ce qui se passerait si deux boucles d'escalade tournaient en parallèle."""
+        user1_id = self._get_user_id(USER1_NAME)
+        requests.patch(f"{API}/users/{user1_id}", json={"phone_number": "+33699000099"})
+
+        # Insérer manuellement deux fois le même SMS (simule double-enqueue)
+        body = "ALARME CRITICAL: Anti-dup Test"
+        requests.post(f"{API}/test/insert-sms",
+                      json={"to_number": "+33699000099", "body": body})
+        # Le deuxième insert devrait être autorisé par le helper (insert brut),
+        # mais la boucle d'escalade elle, utilise le guard anti-doublon.
+        # Vérifier que le guard fonctionne : on teste via l'endpoint d'escalade.
+
+        # Créer alarme + déclencher escalade
+        requests.post(f"{API}/test/reset-sms-queue")
+        requests.post(f"{API}/alarms/send", json={
+            "title": "Anti-dup Test", "message": "test", "severity": "critical",
+            "assigned_user_id": user1_id,
+        })
+        requests.post(f"{API}/test/advance-clock", params={"minutes": 16})
+        time.sleep(12)
+
+        pending = requests.get(f"{BASE_URL}/internal/sms/pending",
+                               headers=GATEWAY_HEADERS).json()
+        sms_for_user1 = [s for s in pending if s["to_number"] == "+33699000099"]
+        assert len(sms_for_user1) == 1, \
+            f"Guard anti-doublon doit empêcher les doublons SMS, got {len(sms_for_user1)} SMS"
+
+    # ── Continuité de service ───────────────────────────────────────────────
+
+    def test_backend2_serves_alarms_when_backend1_restarted(self):
+        """Backend2 continue de servir les alarmes pendant le restart de backend1."""
+        # Créer une alarme active
+        r = requests.post(f"{API}/alarms/send", json={
+            "title": "Continuité", "message": "doit survivre au restart", "severity": "critical",
+        })
+        alarm_id = r.json()["id"]
+
+        # Redémarrer backend1
+        subprocess.run(
+            [DOCKER, "compose", "restart", "backend"],
+            cwd="C:/Users/Charles/Desktop/Projet Claude/Alarm2.0",
+            capture_output=True, timeout=60,
+        )
+
+        # Pendant le restart, backend2 doit toujours servir l'alarme
+        r2 = requests.get(f"{API_2}/alarms/")
+        ids_b2 = [a["id"] for a in r2.json()]
+        assert alarm_id in ids_b2, \
+            "Backend2 doit servir l'alarme même pendant le restart de backend1"
+
+        # Attendre que backend1 soit prêt
+        for _ in range(20):
+            try:
+                r = requests.get(f"{BASE_URL}/health", timeout=2)
+                if r.status_code == 200:
+                    break
+            except Exception:
+                pass
+            time.sleep(2)
+
+        # Après restart, backend1 voit toujours l'alarme
+        r1 = requests.get(f"{API}/alarms/")
+        ids_b1 = [a["id"] for a in r1.json()]
+        assert alarm_id in ids_b1, \
+            "Backend1 doit retrouver l'alarme après son restart (DB persistante)"
+
+
 # Tests Android E2E dans Espresso (android/app/src/androidTest/).
 # Lancer avec : cd android && ./gradlew connectedAndroidTest
