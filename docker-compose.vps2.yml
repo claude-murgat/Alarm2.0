@@ -1,0 +1,37 @@
+# Simule le VPS secondaire (ex: Scaleway).
+#
+# Démarrage :
+#   docker compose -f docker-compose.vps2.yml -p alarm-vps2 up -d
+#
+# Ce compose partage la base PostgreSQL et Mailhog avec le compose principal
+# via le réseau Docker "alarm_shared_net" (créé par docker-compose.yml).
+# Le backend concourt pour le lock advisory PostgreSQL :
+#   - Si VPS1 tourne        → VPS1 = primaire, VPS2 = secondaire (standby)
+#   - Si VPS1 tombe         → VPS2 acquiert le lock en <20s → devient primaire
+#   - Si VPS1 revient       → le premier arrivé garde le lock
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8001:8000"
+    environment:
+      - SECRET_KEY=alarm-secret-key-change-in-prod
+      - DATABASE_URL=postgresql://alarm:alarm_secret@db:5432/alarm_db
+      - SMTP_HOST=mailhog
+      - SMTP_PORT=1025
+      - SMTP_FROM=alarmes@alarm.local
+      - GATEWAY_KEY=${GATEWAY_KEY:-changeme-in-prod}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - alarm_net
+
+networks:
+  alarm_net:
+    external: true
+    name: alarm_shared_net

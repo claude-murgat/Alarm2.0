@@ -18,13 +18,11 @@ from .api.test_api import router as test_router
 from .api.sms import router as sms_router
 from .escalation import escalation_loop
 from .watchdog import watchdog_loop
+from .leader_election import leader_election_loop, is_leader
+from .database import DATABASE_URL
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("alarm_system")
-
-# When ESCALATION_DISABLED=1, this node acts as a secondary (API-only, no background tasks).
-# Realistic production pattern: only one node runs the escalation + watchdog loops.
-ESCALATION_DISABLED = os.getenv("ESCALATION_DISABLED", "0") == "1"
 
 
 def seed_data():
@@ -69,22 +67,18 @@ async def lifespan(app: FastAPI):
     run_migrations(engine)
     seed_data()
 
-    if ESCALATION_DISABLED:
-        logger.info("ESCALATION_DISABLED=1 — secondary node, background tasks skipped")
-        escalation_task = None
-        watchdog_task = None
-    else:
-        escalation_task = asyncio.create_task(escalation_loop())
-        watchdog_task = asyncio.create_task(watchdog_loop())
-        logger.info("Background tasks started: escalation + watchdog")
+    # Démarrer l'élection de leader en premier — les autres coroutines attendent l'event
+    election_task = asyncio.create_task(leader_election_loop(DATABASE_URL))
+    escalation_task = asyncio.create_task(escalation_loop())
+    watchdog_task = asyncio.create_task(watchdog_loop())
+    logger.info("Background tasks started: leader_election + escalation + watchdog")
 
     yield
 
     # Shutdown
-    if escalation_task:
-        escalation_task.cancel()
-    if watchdog_task:
-        watchdog_task.cancel()
+    election_task.cancel()
+    escalation_task.cancel()
+    watchdog_task.cancel()
 
 
 app = FastAPI(title="Critical Alarm System", version="1.0.0", lifespan=lifespan)
@@ -130,16 +124,13 @@ async def health():
         pass
 
     # Vérifier que la boucle d'escalade tourne (dernier tick < 120s)
-    # Les nœuds secondaires (ESCALATION_DISABLED=1) n'ont pas de boucle → ok par définition
-    if ESCALATION_DISABLED:
-        loop_ok = True
-    else:
-        loop_ok = (
-            last_tick_at is not None
-            and (clock_now() - last_tick_at).total_seconds() < 120
-        )
+    loop_ok = (
+        last_tick_at is not None
+        and (clock_now() - last_tick_at).total_seconds() < 120
+    )
 
-    role = "secondary" if ESCALATION_DISABLED else "primary"
+    # Le rôle dépend du lock advisory — peut changer dynamiquement
+    role = "primary" if is_leader.is_set() else "secondary"
 
     if not db_ok or not loop_ok:
         return JSONResponse(

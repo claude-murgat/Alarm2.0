@@ -49,14 +49,26 @@ def _enqueue_sms_for_user(db: Session, user: User, alarm: Alarm):
 
 
 async def escalation_loop():
-    """Background task: ack expiry, escalation, and on-call monitoring."""
+    """Background task: ack expiry, escalation, and on-call monitoring.
+
+    Ce nœud n'exécute la logique d'escalade que s'il est primaire (advisory lock acquis).
+    En secondaire, la coroutine tourne mais dort — last_tick_at est toujours mis à jour
+    pour que /health signale correctement que la boucle est vivante.
+    """
     global last_tick_at
+    from .leader_election import is_leader
     while True:
         try:
+            now = clock_now()
+            last_tick_at = now  # Toujours mis à jour — permet à /health de détecter un blocage
+
+            if not is_leader.is_set():
+                # Nœud secondaire : standby, pas d'escalade
+                await asyncio.sleep(10)
+                continue
+
             db: Session = SessionLocal()
             try:
-                now = clock_now()
-                last_tick_at = now  # Mis à jour à chaque tick pour /health
 
                 # --- 1. Ack expiry: reactivate acknowledged alarms ---
                 ack_alarms = (
