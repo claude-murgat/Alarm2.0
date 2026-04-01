@@ -1,4 +1,7 @@
-from fastapi import APIRouter, Depends
+import os
+import urllib.parse
+import urllib.request
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from datetime import timedelta, datetime
 from ..clock import now as clock_now
@@ -7,6 +10,26 @@ from ..database import get_db
 from ..models import Alarm, User, EscalationConfig, SmsQueue
 
 router = APIRouter(prefix="/api/test", tags=["test"])
+
+# URL du nœud pair (ex: VPS2) pour broadcaster les opérations de test sensibles
+# (horloge, simulate-connection-loss, reset).  Vide = pas de pair = mode solo.
+_PEER_TEST_URL = os.getenv("PEER_TEST_URL", "").rstrip("/")
+
+
+def _broadcast(path: str, params: dict | None = None):
+    """Envoie la même requête POST au nœud pair (best-effort, sans bloquer).
+    Le paramètre peer=false est ajouté pour éviter les boucles infinies."""
+    if not _PEER_TEST_URL:
+        return
+    try:
+        p = dict(params or {})
+        p["peer"] = "false"
+        qs = urllib.parse.urlencode(p)
+        url = f"{_PEER_TEST_URL}{path}?{qs}"
+        req = urllib.request.Request(url, data=b"", method="POST")
+        urllib.request.urlopen(req, timeout=2)
+    except Exception:
+        pass
 
 
 @router.post("/send-alarm")
@@ -38,7 +61,8 @@ def send_test_alarm(db: Session = Depends(get_db)):
 
 
 @router.post("/simulate-watchdog-failure")
-def simulate_watchdog_failure(db: Session = Depends(get_db)):
+def simulate_watchdog_failure(db: Session = Depends(get_db),
+                              peer: bool = Query(True)):
     """Simulate watchdog failure by setting all user heartbeats to old."""
     users = db.query(User).all()
     old_time = clock_now() - timedelta(minutes=5)
@@ -46,11 +70,14 @@ def simulate_watchdog_failure(db: Session = Depends(get_db)):
         user.last_heartbeat = old_time
         user.is_online = False
     db.commit()
+    if peer:
+        _broadcast("/api/test/simulate-watchdog-failure")
     return {"status": "simulated", "users_affected": len(users)}
 
 
 @router.post("/simulate-connection-loss")
-def simulate_connection_loss(db: Session = Depends(get_db)):
+def simulate_connection_loss(db: Session = Depends(get_db),
+                             peer: bool = Query(True)):
     """Simulate connection loss by marking all users offline.
     Stocke aussi un timestamp Unix pour bloquer les heartbeats des tokens anciens
     (ex: app Android en arrière-plan) — seuls les fresh logins peuvent rétablir le heartbeat."""
@@ -62,11 +89,14 @@ def simulate_connection_loss(db: Session = Depends(get_db)):
     db.commit()
     # Bloquer les tokens émis STRICTEMENT AVANT cette seconde
     devices_module.connection_loss_time_int = int(_time.time())
+    if peer:
+        _broadcast("/api/test/simulate-connection-loss")
     return {"status": "simulated", "users_affected": len(users)}
 
 
 @router.post("/reset")
-def reset_all(db: Session = Depends(get_db)):
+def reset_all(db: Session = Depends(get_db),
+              peer: bool = Query(True)):
     """Reset all alarms, user states, and restore default escalation chain."""
     db.query(Alarm).delete()
 
@@ -95,6 +125,8 @@ def reset_all(db: Session = Depends(get_db)):
             ])
             db.commit()
 
+    if peer:
+        _broadcast("/api/test/reset")
     return {"status": "reset complete"}
 
 
@@ -210,10 +242,15 @@ def get_status(db: Session = Depends(get_db)):
 
 
 @router.post("/advance-clock")
-def advance_clock(seconds: float = 0, minutes: float = 0):
-    """Avance l'horloge du serveur (pour tests d'escalade avec timing réel)."""
+def advance_clock(seconds: float = 0, minutes: float = 0,
+                  peer: bool = Query(True)):
+    """Avance l'horloge du serveur (pour tests d'escalade avec timing réel).
+    Broadcasté au nœud pair pour que la boucle d'escalade — quel que soit le primaire
+    courant — voie le même décalage horaire."""
     total = seconds + minutes * 60
     clock_module.advance(total)
+    if peer:
+        _broadcast("/api/test/advance-clock", {"seconds": seconds, "minutes": minutes})
     return {
         "status": "ok",
         "advanced_seconds": total,
@@ -222,9 +259,11 @@ def advance_clock(seconds: float = 0, minutes: float = 0):
 
 
 @router.post("/reset-clock")
-def reset_clock():
+def reset_clock(peer: bool = Query(True)):
     """Remet l'horloge à l'heure réelle."""
     clock_module.reset()
+    if peer:
+        _broadcast("/api/test/reset-clock")
     return {"status": "ok", "offset_seconds": 0}
 
 

@@ -1,27 +1,94 @@
 # Simule le VPS secondaire (ex: Scaleway).
 #
-# Démarrage :
+# Démarrage (après docker compose up --build -d pour VPS1) :
 #   docker compose -f docker-compose.vps2.yml -p alarm-vps2 up -d
 #
-# Ce compose partage la base PostgreSQL et Mailhog avec le compose principal
-# via le réseau Docker "alarm_shared_net" (créé par docker-compose.yml).
-# Le backend concourt pour le lock advisory PostgreSQL :
-#   - Si VPS1 tourne        → VPS1 = primaire, VPS2 = secondaire (standby)
-#   - Si VPS1 tombe         → VPS2 acquiert le lock en <20s → devient primaire
-#   - Si VPS1 revient       → le premier arrivé garde le lock
+# Architecture :
+#   VPS1 (docker-compose.yml)      : PostgreSQL PRIMARY  + backend primaire
+#   VPS2 (docker-compose.vps2.yml) : PostgreSQL STANDBY  + backend secondaire
+#
+# La réplication streaming est automatique : tout ce qui est écrit sur le primaire
+# est rejoué sur le standby en quelques millisecondes (en local).
+#
+# Failover manuel si VPS1 tombe :
+#   docker exec alarm-vps2-db-standby-1 su-exec postgres pg_ctl promote -D /var/lib/postgresql/data
+#   → le standby devient primaire (accepte les écritures)
+#   → changer DATABASE_URL du backend pour pointer sur db-standby
+#
+# ATTENTION : le backend VPS2 se connecte au primaire (db) en opération normale.
+# Le standby est en lecture seule jusqu'à sa promotion.
+# En production, un HAProxy ou une VIP basculerait automatiquement.
 
 services:
+
+  # ── Init container : clone le primaire via pg_basebackup ──────────────────
+  # Se termine avec exit 0 quand pg_basebackup est terminé.
+  # db-standby attend ce signal (depends_on: service_completed_successfully).
+  db-standby-init:
+    image: postgres:16-alpine
+    environment:
+      PRIMARY_HOST: db
+      PRIMARY_PORT: "5432"
+    volumes:
+      - pgdata_standby:/var/lib/postgresql/data
+      - ./postgres/standby_init.sh:/standby_init.sh:ro
+    entrypoint: ["/bin/sh", "/standby_init.sh"]
+    networks:
+      - alarm_net
+
+  # ── Standby PostgreSQL (hot standby = lecture seule jusqu'à promotion) ────
+  db-standby:
+    image: postgres:16-alpine
+    depends_on:
+      db-standby-init:
+        condition: service_completed_successfully
+    environment:
+      # Ces variables sont ignorées si PGDATA contient déjà PG_VERSION (pg_basebackup).
+      # Elles évitent une erreur de l'entrypoint postgres.
+      POSTGRES_USER: alarm
+      POSTGRES_PASSWORD: alarm_secret
+      POSTGRES_DB: alarm_db
+      PGDATA: /var/lib/postgresql/data
+    command: >
+      postgres
+      -c hot_standby=on
+      -c wal_level=replica
+      -c max_wal_senders=5
+      -c wal_keep_size=64
+    volumes:
+      - pgdata_standby:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    restart: "no"   # Ne pas redémarrer automatiquement après une promotion
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U alarm -d alarm_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      alarm_net:
+        aliases:
+          - db-standby
+
+  # ── Backend VPS2 — concourt pour le lock advisory avec VPS1 ───────────────
+  # En opération normale : se connecte au PRIMAIRE (db) via le réseau partagé.
+  # Failover : changer DATABASE_URL_VPS2 et relancer ce service.
   backend:
     build: ./backend
     ports:
       - "8001:8000"
     environment:
       - SECRET_KEY=alarm-secret-key-change-in-prod
-      - DATABASE_URL=postgresql://alarm:alarm_secret@db:5432/alarm_db
+      # Utilise la variable DATABASE_URL_VPS2 si définie (failover manuel),
+      # sinon se connecte au primaire (db) comme en opération normale.
+      - DATABASE_URL=${DATABASE_URL_VPS2:-postgresql://alarm:alarm_secret@db:5432/alarm_db}
       - SMTP_HOST=mailhog
       - SMTP_PORT=1025
       - SMTP_FROM=alarmes@alarm.local
       - GATEWAY_KEY=${GATEWAY_KEY:-changeme-in-prod}
+    depends_on:
+      db-standby:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -35,3 +102,6 @@ networks:
   alarm_net:
     external: true
     name: alarm_shared_net
+
+volumes:
+  pgdata_standby:

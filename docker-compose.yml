@@ -7,8 +7,20 @@ services:
       POSTGRES_USER: alarm
       POSTGRES_PASSWORD: alarm_secret
       POSTGRES_DB: alarm_db
+    # Activer le WAL streaming pour la réplication vers le standby VPS2
+    command: >
+      postgres
+      -c wal_level=replica
+      -c max_wal_senders=5
+      -c max_replication_slots=5
+      -c hot_standby=on
+      -c wal_keep_size=64
     volumes:
       - pgdata:/var/lib/postgresql/data
+      # Script d'init : crée l'utilisateur replicator + entrée pg_hba.conf
+      # N'est exécuté QU'UNE SEULE FOIS (premier démarrage avec volume vide).
+      # Si la DB existe déjà : docker compose down -v && docker compose up --build -d
+      - ./postgres/primary_init.sh:/docker-entrypoint-initdb.d/01_replication.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U alarm -d alarm_db"]
       interval: 5s
@@ -41,6 +53,10 @@ services:
       - SMTP_PORT=1025
       - SMTP_FROM=alarmes@alarm.local
       - GATEWAY_KEY=${GATEWAY_KEY:-changeme-in-prod}
+      # URL du nœud pair — permet aux endpoints de test de broadcaster
+      # advance-clock/reset-clock/simulate-*/reset vers VPS2 (best-effort).
+      # Utilise le nom de container Docker sur alarm_shared_net.
+      - PEER_TEST_URL=http://alarm-vps2-backend-1:8000
     depends_on:
       db:
         condition: service_healthy

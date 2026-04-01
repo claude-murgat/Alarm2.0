@@ -1832,5 +1832,273 @@ class TestRedundancy:
             f"Guard anti-doublon : 1 SMS attendu, got {len(sms_for_user1)}"
 
 
+# ── Réplication PostgreSQL streaming ────────────────────────────────────────
+#
+# Prérequis (une seule fois si la DB existait avant) :
+#   docker compose down -v          ← efface pgdata (repart de zéro)
+#   docker compose up --build -d    ← crée primaire avec primary_init.sh
+#   docker compose -f docker-compose.vps2.yml -p alarm-vps2 up -d
+#                                   ← init standby via pg_basebackup + démarre
+#
+# Architecture locale représentative :
+#   VPS1 (port 5432) — PostgreSQL PRIMARY  → réplique vers →
+#   VPS2 (port 5433) — PostgreSQL STANDBY  (hot standby = lecture seule)
+
+STANDBY_CONTAINER = os.getenv("STANDBY_CONTAINER", "alarm-vps2-db-standby-1")
+VPS2_PROJECT_DIR = "C:/Users/Charles/Desktop/Projet Claude/Alarm2.0"
+
+
+def _skip_if_standby_unavailable():
+    """Skip si db-standby n'est pas démarré."""
+    result = subprocess.run(
+        [DOCKER, "exec", STANDBY_CONTAINER, "pg_isready", "-U", "alarm", "-q"],
+        capture_output=True, timeout=5
+    )
+    if result.returncode != 0:
+        pytest.skip(
+            "db-standby non disponible — lancer :\n"
+            "  docker compose down -v && docker compose up --build -d\n"
+            "  docker compose -f docker-compose.vps2.yml -p alarm-vps2 up -d"
+        )
+
+
+def _psql_standby(sql: str) -> str:
+    """Exécute une requête SQL sur db-standby via docker exec psql.
+    Retourne le résultat sous forme de chaîne (stripped)."""
+    result = subprocess.run(
+        [DOCKER, "exec", STANDBY_CONTAINER,
+         "psql", "-U", "alarm", "-d", "alarm_db",
+         "-t",   # tuples only (no headers)
+         "-A",   # no column alignment (clean output)
+         "-c", sql],
+        capture_output=True, text=True, timeout=15,
+    )
+    return result.stdout.strip()
+
+
+def _psql_primary(sql: str) -> str:
+    """Exécute une requête SQL sur le primaire (VPS1) via docker exec psql."""
+    result = subprocess.run(
+        [DOCKER, "exec", "alarm20-db-1",
+         "psql", "-U", "alarm", "-d", "alarm_db",
+         "-t", "-A", "-c", sql],
+        capture_output=True, text=True, timeout=15,
+    )
+    return result.stdout.strip()
+
+
+class TestDatabaseReplication:
+    """Vérifie que la réplication streaming PostgreSQL fonctionne entre VPS1 et VPS2.
+
+    Scénarios testés :
+    1. Standby est en mode recovery (hot standby) au démarrage
+    2. Les données écrites sur le primaire sont répliquées sur le standby en <5s
+    3. Les heartbeats et statuts utilisateurs se répliquent
+    4. Le standby refuse les écritures directes (protection split-brain)
+    5. La promotion transforme le standby en primaire acceptant les écritures
+       → inclut le cleanup automatique pour restaurer l'état initial
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        _skip_if_standby_unavailable()
+        requests.post(f"{API}/test/reset")
+        requests.post(f"{API}/alarms/reset")
+        yield
+        requests.post(f"{API}/test/reset")
+        requests.post(f"{API}/alarms/reset")
+
+    # ── État du standby ─────────────────────────────────────────────────────
+
+    def test_standby_is_in_recovery_mode(self):
+        """Le standby doit être en hot_standby (pg_is_in_recovery = true)."""
+        result = _psql_standby("SELECT pg_is_in_recovery()")
+        assert result == "t", \
+            f"db-standby devrait être en mode recovery, got: {result!r}"
+
+    def test_primary_is_not_in_recovery(self):
+        """Le primaire NE doit PAS être en recovery."""
+        result = _psql_primary("SELECT pg_is_in_recovery()")
+        assert result == "f", \
+            f"db (primaire) ne devrait pas être en recovery, got: {result!r}"
+
+    # ── Réplication des données ─────────────────────────────────────────────
+
+    def test_alarm_replicates_to_standby(self):
+        """Une alarme créée via le backend est répliquée sur le standby en <5s."""
+        r = requests.post(f"{API}/alarms/send", json={
+            "title": "Replication Test", "message": "test", "severity": "critical",
+        })
+        alarm_id = r.json()["id"]
+
+        # Attendre la réplication (en local : quasi-instantané, 3s large marge)
+        time.sleep(3)
+
+        count = _psql_standby(f"SELECT COUNT(*) FROM alarms WHERE id = {alarm_id}")
+        assert count == "1", \
+            f"Alarme {alarm_id} devrait être répliquée sur le standby (count={count})"
+
+    def test_alarm_resolution_replicates(self):
+        """La résolution d'une alarme est répliquée sur le standby."""
+        r = requests.post(f"{API}/alarms/send", json={
+            "title": "Resolve Replication", "message": "test", "severity": "critical",
+        })
+        alarm_id = r.json()["id"]
+        requests.post(f"{API}/alarms/{alarm_id}/resolve")
+
+        time.sleep(3)
+
+        status = _psql_standby(f"SELECT status FROM alarms WHERE id = {alarm_id}")
+        assert status == "resolved", \
+            f"Statut résolu devrait être répliqué, got: {status!r}"
+
+    def test_heartbeat_replicates_to_standby(self):
+        """Un heartbeat utilisateur est répliqué sur le standby."""
+        token = requests.post(f"{API}/auth/login", json={
+            "name": USER1_NAME, "password": USER1_PASSWORD
+        }).json()["access_token"]
+        requests.post(f"{API}/devices/heartbeat",
+                      headers={"Authorization": f"Bearer {token}"})
+
+        time.sleep(3)
+
+        result = _psql_standby("SELECT is_online FROM users WHERE name = 'user1'")
+        assert result == "t", \
+            f"is_online de user1 devrait être répliqué sur le standby, got: {result!r}"
+
+    def test_replication_lag_is_negligible(self):
+        """Le lag de réplication est < 5s pour 5 écritures consécutives."""
+        # Créer 5 alarmes rapidement
+        ids = []
+        for i in range(5):
+            r = requests.post(f"{API}/alarms/send", json={
+                "title": f"Lag Test {i}", "message": "test", "severity": "critical",
+            })
+            # Résoudre aussitôt pour éviter la contrainte alarme unique
+            requests.post(f"{API}/alarms/{r.json()['id']}/resolve")
+            ids.append(r.json()["id"])
+
+        time.sleep(5)  # 5s de marge
+
+        count_primary = int(_psql_primary("SELECT COUNT(*) FROM alarms"))
+        count_standby = int(_psql_standby("SELECT COUNT(*) FROM alarms"))
+
+        assert count_standby == count_primary, \
+            f"Standby ({count_standby}) devrait avoir autant d'alarmes que le primaire ({count_primary})"
+
+    # ── Protection write-reject ─────────────────────────────────────────────
+
+    def test_standby_rejects_direct_writes(self):
+        """Le standby refuse les écritures directes — protection contre le split-brain."""
+        result = subprocess.run(
+            [DOCKER, "exec", STANDBY_CONTAINER,
+             "psql", "-U", "alarm", "-d", "alarm_db", "-t", "-A", "-c",
+             "INSERT INTO alarms (title, message, severity, notified_user_ids) "
+             "VALUES ('Direct Write', 'test', 'critical', '')"],
+            capture_output=True, text=True, timeout=10,
+        )
+        error_output = (result.stdout + result.stderr).lower()
+        assert result.returncode != 0, \
+            "L'écriture directe sur le standby devrait échouer (read-only)"
+        assert "read-only" in error_output or "recovery" in error_output, \
+            f"Erreur attendue (read-only/recovery), got: {error_output[:200]}"
+
+    # ── Promotion et failover ───────────────────────────────────────────────
+
+    def test_promotion_promotes_standby_to_primary(self):
+        """Après pg_ctl promote, le standby devient primaire et accepte les écritures.
+        Cleanup automatique : restaure le standby à son état initial après le test."""
+        # 1. Arrêter le primaire
+        subprocess.run(
+            [DOCKER, "compose", "stop", "db"],
+            cwd=VPS2_PROJECT_DIR, capture_output=True, timeout=30,
+        )
+
+        try:
+            # 2. Promouvoir le standby
+            result = subprocess.run(
+                [DOCKER, "exec", STANDBY_CONTAINER,
+                 "su-exec", "postgres",
+                 "pg_ctl", "promote", "-D", "/var/lib/postgresql/data"],
+                capture_output=True, text=True, timeout=15,
+            )
+            assert result.returncode == 0, \
+                f"pg_ctl promote a échoué : {result.stderr}"
+
+            # 3. Attendre que la promotion soit effective
+            time.sleep(3)
+
+            # 4. Vérifier que le standby n'est plus en recovery
+            is_recovery = _psql_standby("SELECT pg_is_in_recovery()")
+            assert is_recovery == "f", \
+                f"Après promotion, pg_is_in_recovery devrait être false, got: {is_recovery!r}"
+
+            # 5. Vérifier qu'on peut écrire sur le standby promu
+            write_result = subprocess.run(
+                [DOCKER, "exec", STANDBY_CONTAINER,
+                 "psql", "-U", "alarm", "-d", "alarm_db", "-t", "-A", "-c",
+                 "INSERT INTO alarms (title, message, severity, notified_user_ids) "
+                 "VALUES ('Post-Promotion Write', 'promoted', 'critical', '') "
+                 "RETURNING id"],
+                capture_output=True, text=True, timeout=10,
+            )
+            assert write_result.returncode == 0, \
+                f"Écriture après promotion devrait réussir, stderr: {write_result.stderr}"
+            # La sortie contient l'id retourné + "INSERT 0 1" — vérifier qu'on a bien un entier
+            first_line = write_result.stdout.strip().splitlines()[0]
+            assert first_line.strip().isdigit(), \
+                f"RETURNING id devrait retourner un entier, got: {write_result.stdout.strip()!r}"
+
+        finally:
+            # ── Cleanup : restaurer le standby à son état initial ──────────
+            # 6. Redémarrer le primaire
+            subprocess.run(
+                [DOCKER, "compose", "start", "db"],
+                cwd=VPS2_PROJECT_DIR, capture_output=True, timeout=30,
+            )
+
+            # 7. Attendre que le primaire soit prêt
+            for _ in range(30):
+                try:
+                    if requests.get(f"{BASE_URL}/health", timeout=2).status_code == 200:
+                        break
+                except Exception:
+                    pass
+                time.sleep(2)
+
+            # 8. Arrêter et supprimer le standby + son volume pour repartir proprement
+            subprocess.run(
+                [DOCKER, "compose", "-f", "docker-compose.vps2.yml", "-p", "alarm-vps2",
+                 "stop", "db-standby"],
+                cwd=VPS2_PROJECT_DIR, capture_output=True, timeout=30,
+            )
+            subprocess.run(
+                [DOCKER, "compose", "-f", "docker-compose.vps2.yml", "-p", "alarm-vps2",
+                 "rm", "-f", "db-standby", "db-standby-init"],
+                cwd=VPS2_PROJECT_DIR, capture_output=True, timeout=15,
+            )
+            subprocess.run(
+                [DOCKER, "volume", "rm", "alarm-vps2_pgdata_standby"],
+                capture_output=True, timeout=10,
+            )
+
+            # 9. Relancer VPS2 — le standby se ré-initialise via pg_basebackup
+            subprocess.run(
+                [DOCKER, "compose", "-f", "docker-compose.vps2.yml", "-p", "alarm-vps2",
+                 "up", "-d"],
+                cwd=VPS2_PROJECT_DIR, capture_output=True, timeout=120,
+            )
+
+            # 10. Attendre que le standby et le backend VPS2 soient prêts
+            for _ in range(40):
+                result = subprocess.run(
+                    [DOCKER, "exec", STANDBY_CONTAINER, "pg_isready", "-U", "alarm", "-q"],
+                    capture_output=True, timeout=5,
+                )
+                if result.returncode == 0:
+                    break
+                time.sleep(3)
+
+
 # Tests Android E2E dans Espresso (android/app/src/androidTest/).
 # Lancer avec : cd android && ./gradlew connectedAndroidTest
