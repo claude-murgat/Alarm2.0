@@ -51,11 +51,17 @@ def simulate_watchdog_failure(db: Session = Depends(get_db)):
 
 @router.post("/simulate-connection-loss")
 def simulate_connection_loss(db: Session = Depends(get_db)):
-    """Simulate connection loss by marking all users offline."""
+    """Simulate connection loss by marking all users offline.
+    Stocke aussi un timestamp Unix pour bloquer les heartbeats des tokens anciens
+    (ex: app Android en arrière-plan) — seuls les fresh logins peuvent rétablir le heartbeat."""
+    import time as _time
+    from . import devices as devices_module
     users = db.query(User).all()
     for user in users:
         user.is_online = False
     db.commit()
+    # Bloquer les tokens émis STRICTEMENT AVANT cette seconde
+    devices_module.connection_loss_time_int = int(_time.time())
     return {"status": "simulated", "users_affected": len(users)}
 
 
@@ -64,9 +70,10 @@ def reset_all(db: Session = Depends(get_db)):
     """Reset all alarms, user states, and restore default escalation chain."""
     db.query(Alarm).delete()
 
-    # Reset heartbeat pause
+    # Reset heartbeat pause et connection loss simulation
     from . import devices as devices_module
     devices_module.heartbeat_paused = False
+    devices_module.connection_loss_time_int = None
 
     users = db.query(User).all()
     for user in users:
