@@ -90,6 +90,21 @@ class TestBackendHealth:
 
 class TestUserLogin:
 
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        # Nettoyer les users de test residuels (testcaseuser, bad name, etc.)
+        users = requests.get(f"{API}/users/").json()
+        default_names = {"admin", "user1", "user2"}
+        for u in users:
+            if u["name"] not in default_names:
+                requests.delete(f"{API}/users/{u['id']}")
+        yield
+        # Cleanup apres aussi
+        users = requests.get(f"{API}/users/").json()
+        for u in users:
+            if u["name"] not in default_names:
+                requests.delete(f"{API}/users/{u['id']}")
+
     def test_admin_login(self):
         r = requests.post(f"{API}/auth/login", json={
             "name": ADMIN_NAME, "password": ADMIN_PASSWORD

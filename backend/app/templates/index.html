@@ -144,13 +144,18 @@
         <!-- Escalade -->
         <div class="panel" id="escalation">
             <div class="card">
-                <h3>Delai d'escalade</h3>
-                <div class="form-row" style="align-items:center">
+                <h3>Configuration</h3>
+                <div class="form-row" style="align-items:center;gap:24px;flex-wrap:wrap">
                     <div class="form-group">
                         <label>Delai entre chaque escalade (min)</label>
                         <input id="escalationDelay" type="number" min="1" max="60" step="1" value="15" style="width:80px">
+                        <button class="btn-primary" onclick="saveDelay()" style="margin-left:8px">Sauvegarder</button>
                     </div>
-                    <button class="btn-primary" onclick="saveDelay()">Sauvegarder le delai</button>
+                    <div class="form-group">
+                        <label>Email d'alerte (direction technique)</label>
+                        <input id="alertEmail" type="email" placeholder="email@exemple.com" style="width:280px">
+                        <button class="btn-primary" onclick="saveAlertEmail()" style="margin-left:8px">Sauvegarder</button>
+                    </div>
                 </div>
             </div>
             <div class="card">
@@ -579,6 +584,23 @@
             } catch(e) { alert(e.message); }
         }
 
+        async function loadAlertEmail() {
+            try {
+                const config = await api('/api/config/system');
+                const email = config.alert_email || '';
+                document.getElementById('alertEmail').value = email;
+            } catch(e) {}
+        }
+
+        async function saveAlertEmail() {
+            const email = document.getElementById('alertEmail').value.trim();
+            if (!email) { alert('Veuillez entrer une adresse email'); return; }
+            try {
+                await api('/api/config/system', { method: 'POST', body: JSON.stringify({ key: 'alert_email', value: email }) });
+                loadAll();
+            } catch(e) { alert(e.message); }
+        }
+
         async function addUser() {
             await api('/api/auth/register', { method: 'POST', body: JSON.stringify({
                 name: document.getElementById('newUserName').value,
@@ -715,6 +737,7 @@
             loadDevices();
             loadEscalation();
             loadCluster();
+            loadAlertEmail();
         }
 
         loadAll();
