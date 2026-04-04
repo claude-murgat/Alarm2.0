@@ -1,0 +1,151 @@
+Test Report - 2026-04-03 08:57:30
+Duration: 136.9s
+======================================================================
+
+PHASES:
+  PHASE 0: PASS
+  PHASE 1: PASS
+  PHASE 2: PASS
+  PHASE 3: PASS
+  PHASE 4: PASS
+  PHASE 5: PASS
+
+======================================================================
+
+DETAILED LOG:
+[    0.0s] === SNAPSHOT: BEFORE PHASE 0: Verification cluster ===
+[    0.0s]   node1: role=secondary db=True loop=True status=ok
+[    0.0s]   node2: role=primary db=True loop=True status=ok
+[    0.0s]   node3: role=secondary db=True loop=True status=ok
+[    0.1s]   Quorum: 3/3 has_quorum=True
+[    0.1s]     node1: role=replica state=streaming lag=0
+[    0.1s]     node2: role=leader state=running lag=-
+[    0.1s]     node3: role=replica state=streaming lag=0
+[    0.1s]   Connected users: 3/3
+[    0.1s]   Alarms: active=0 ack=0
+[    0.2s]   container: node1-backend-1 Up 8 minutes
+[    0.2s]   container: node1-etcd-1 Up 8 minutes (healthy)
+[    0.2s]   container: node1-patroni-1 Up 8 minutes (healthy)
+[    0.2s]   container: node2-backend-1 Up 14 minutes
+[    0.2s]   container: node2-etcd-1 Up 33 minutes (healthy)
+[    0.2s]   container: node2-patroni-1 Up 14 minutes (healthy)
+[    0.2s]   container: node3-backend-1 Up 14 minutes
+[    0.2s]   container: node3-etcd-1 Up 40 minutes (healthy)
+[    0.2s]   container: node3-patroni-1 Up 14 minutes (healthy)
+[    0.2s] 
+[   11.4s] === SNAPSHOT: BEFORE PHASE 1: Alarme + replication ===
+[   11.4s]   node1: role=secondary db=True loop=True status=ok
+[   11.4s]   node2: role=primary db=True loop=True status=ok
+[   11.5s]   node3: role=secondary db=True loop=True status=ok
+[   11.5s]   Quorum: 3/3 has_quorum=True
+[   11.5s]     node1: role=replica state=streaming lag=0
+[   11.5s]     node2: role=leader state=running lag=-
+[   11.5s]     node3: role=replica state=streaming lag=0
+[   11.5s]   Connected users: 3/3
+[   11.5s]   Alarms: active=0 ack=0
+[   11.6s]   container: node1-backend-1 Up 8 minutes
+[   11.6s]   container: node1-etcd-1 Up 9 minutes (healthy)
+[   11.6s]   container: node1-patroni-1 Up 8 minutes (healthy)
+[   11.6s]   container: node2-backend-1 Up 14 minutes
+[   11.6s]   container: node2-etcd-1 Up 34 minutes (healthy)
+[   11.6s]   container: node2-patroni-1 Up 14 minutes (healthy)
+[   11.6s]   container: node3-backend-1 Up 14 minutes
+[   11.6s]   container: node3-etcd-1 Up 40 minutes (healthy)
+[   11.6s]   container: node3-patroni-1 Up 14 minutes (healthy)
+[   11.6s] 
+[   14.7s] === SNAPSHOT: BEFORE PHASE 2: Kill primary ===
+[   14.7s]   node1: role=secondary db=True loop=True status=ok
+[   14.7s]   node2: role=primary db=True loop=True status=ok
+[   14.8s]   node3: role=secondary db=True loop=True status=ok
+[   14.8s]   Quorum: 3/3 has_quorum=True
+[   14.8s]     node1: role=replica state=streaming lag=0
+[   14.8s]     node2: role=leader state=running lag=-
+[   14.8s]     node3: role=replica state=streaming lag=0
+[   14.8s]   Connected users: 3/3
+[   14.8s]   Alarms: active=1 ack=0
+[   14.9s]   container: node1-backend-1 Up 8 minutes
+[   14.9s]   container: node1-etcd-1 Up 9 minutes (healthy)
+[   14.9s]   container: node1-patroni-1 Up 8 minutes (healthy)
+[   14.9s]   container: node2-backend-1 Up 14 minutes
+[   14.9s]   container: node2-etcd-1 Up 34 minutes (healthy)
+[   14.9s]   container: node2-patroni-1 Up 14 minutes (healthy)
+[   14.9s]   container: node3-backend-1 Up 14 minutes
+[   14.9s]   container: node3-etcd-1 Up 40 minutes (healthy)
+[   14.9s]   container: node3-patroni-1 Up 14 minutes (healthy)
+[   14.9s] 
+[   51.4s] === SNAPSHOT: BEFORE PHASE 3: Rejoin ===
+[   51.5s]   node1: role=secondary db=True loop=True status=ok
+[   55.5s]   node2: DOWN (ConnectTimeout)
+[   55.5s]   node3: role=primary db=True loop=True status=ok
+[   55.5s]   Quorum: 2/2 has_quorum=True
+[   55.5s]     node1: role=replica state=streaming lag=0
+[   55.5s]     node3: role=leader state=running lag=-
+[   59.6s]   Connected users: 3/3
+[   59.6s]   Alarms: active=1 ack=0
+[   59.7s]   container: node1-backend-1 Up 9 minutes
+[   59.7s]   container: node1-etcd-1 Up 9 minutes (healthy)
+[   59.7s]   container: node1-patroni-1 Up 9 minutes (healthy)
+[   59.7s]   container: node3-backend-1 Up 15 minutes
+[   59.7s]   container: node3-etcd-1 Up 41 minutes (healthy)
+[   59.7s]   container: node3-patroni-1 Up 15 minutes (healthy)
+[   59.7s] 
+[  118.2s] === SNAPSHOT: BEFORE PHASE 4: Escalade ===
+[  118.2s]   node1: role=secondary db=True loop=True status=ok
+[  118.2s]   node2: role=secondary db=True loop=True status=ok
+[  118.2s]   node3: role=primary db=True loop=True status=ok
+[  118.2s]   Quorum: 3/3 has_quorum=True
+[  118.2s]     node1: role=replica state=streaming lag=0
+[  118.2s]     node2: role=replica state=streaming lag=0
+[  118.2s]     node3: role=leader state=running lag=-
+[  118.3s]   Connected users: 2/3
+[  118.3s]   Alarms: active=1 ack=0
+[  118.4s]   container: node1-backend-1 Up 10 minutes
+[  118.4s]   container: node1-etcd-1 Up 10 minutes (healthy)
+[  118.4s]   container: node1-patroni-1 Up 10 minutes (healthy)
+[  118.4s]   container: node2-backend-1 Up 36 seconds
+[  118.4s]   container: node2-etcd-1 Up 58 seconds (healthy)
+[  118.4s]   container: node2-patroni-1 Up 47 seconds (healthy)
+[  118.4s]   container: node3-backend-1 Up 16 minutes
+[  118.4s]   container: node3-etcd-1 Up 42 minutes (healthy)
+[  118.4s]   container: node3-patroni-1 Up 16 minutes (healthy)
+[  118.4s] 
+[  131.2s] === SNAPSHOT: BEFORE PHASE 5: Coherence ===
+[  131.3s]   node1: role=secondary db=True loop=True status=ok
+[  131.3s]   node2: role=secondary db=True loop=True status=ok
+[  131.3s]   node3: role=primary db=True loop=True status=ok
+[  131.3s]   Quorum: 3/3 has_quorum=True
+[  131.3s]     node1: role=replica state=streaming lag=0
+[  131.3s]     node2: role=replica state=streaming lag=0
+[  131.3s]     node3: role=leader state=running lag=-
+[  131.4s]   Connected users: 3/3
+[  131.4s]   Alarms: active=0 ack=0
+[  131.5s]   container: node1-backend-1 Up 10 minutes
+[  131.5s]   container: node1-etcd-1 Up 11 minutes (healthy)
+[  131.5s]   container: node1-patroni-1 Up 10 minutes (healthy)
+[  131.5s]   container: node2-backend-1 Up 50 seconds
+[  131.5s]   container: node2-etcd-1 Up About a minute (healthy)
+[  131.5s]   container: node2-patroni-1 Up About a minute (healthy)
+[  131.5s]   container: node3-backend-1 Up 16 minutes
+[  131.5s]   container: node3-etcd-1 Up 42 minutes (healthy)
+[  131.5s]   container: node3-patroni-1 Up 16 minutes (healthy)
+[  131.5s] 
+[  136.7s] === SNAPSHOT: FINAL ===
+[  136.7s]   node1: role=secondary db=True loop=True status=ok
+[  136.8s]   node2: role=secondary db=True loop=True status=ok
+[  136.8s]   node3: role=primary db=True loop=True status=ok
+[  136.8s]   Quorum: 3/3 has_quorum=True
+[  136.8s]     node1: role=replica state=streaming lag=0
+[  136.8s]     node2: role=replica state=streaming lag=0
+[  136.8s]     node3: role=leader state=running lag=-
+[  136.9s]   Connected users: 3/3
+[  136.9s]   Alarms: active=0 ack=0
+[  136.9s]   container: node1-backend-1 Up 10 minutes
+[  136.9s]   container: node1-etcd-1 Up 11 minutes (healthy)
+[  136.9s]   container: node1-patroni-1 Up 11 minutes (healthy)
+[  136.9s]   container: node2-backend-1 Up 55 seconds
+[  136.9s]   container: node2-etcd-1 Up About a minute (healthy)
+[  136.9s]   container: node2-patroni-1 Up About a minute (healthy)
+[  136.9s]   container: node3-backend-1 Up 16 minutes
+[  136.9s]   container: node3-etcd-1 Up 43 minutes (healthy)
+[  136.9s]   container: node3-patroni-1 Up 16 minutes (healthy)
+[  136.9s] 

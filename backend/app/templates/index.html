@@ -83,6 +83,7 @@
         <div class="tab" data-tab="alarms">Alarmes</div>
         <div class="tab" data-tab="escalation">Escalade</div>
         <div class="tab" data-tab="tests">Tests</div>
+        <div class="tab" data-tab="cluster">Cluster</div>
     </div>
 
     <div class="content">
@@ -143,18 +144,33 @@
         <!-- Escalade -->
         <div class="panel" id="escalation">
             <div class="card">
-                <h3>Ajouter une règle d'escalade</h3>
-                <div class="form-row">
-                    <div class="form-group"><label>Position</label><input id="escPosition" type="number" min="1" value="1"></div>
-                    <div class="form-group"><label>Utilisateur</label><select id="escUser"></select></div>
-                    <div class="form-group"><label>Délai (min)</label><input id="escDelay" type="number" min="0.1" step="0.1" value="15"></div>
-                    <button class="btn-primary" onclick="addEscalation()">Ajouter</button>
+                <h3>Delai d'escalade</h3>
+                <div class="form-row" style="align-items:center">
+                    <div class="form-group">
+                        <label>Delai entre chaque escalade (min)</label>
+                        <input id="escalationDelay" type="number" min="1" max="60" step="1" value="15" style="width:80px">
+                    </div>
+                    <button class="btn-primary" onclick="saveDelay()">Sauvegarder le delai</button>
                 </div>
             </div>
             <div class="card">
-                <h3>Chaîne d'escalade</h3>
-                <table><thead><tr><th>Position</th><th>Utilisateur</th><th>Délai (min)</th><th>Actions</th></tr></thead>
-                <tbody id="escalationTable"></tbody></table>
+                <h3>Chaine d'escalade</h3>
+                <div style="display:flex;gap:24px;margin-bottom:16px">
+                    <div style="flex:1">
+                        <h4 style="color:#94a3b8;margin-bottom:8px">Utilisateurs disponibles</h4>
+                        <div id="availableUsers" style="min-height:60px;background:#1a1a2e;border:2px dashed #334155;border-radius:8px;padding:8px">
+                        </div>
+                    </div>
+                    <div style="flex:1">
+                        <h4 style="color:#94a3b8;margin-bottom:8px">Chaine d'escalade (ordre)</h4>
+                        <div id="escalationChain" style="min-height:60px;background:#1a1a2e;border:2px solid #22c55e44;border-radius:8px;padding:8px">
+                        </div>
+                    </div>
+                </div>
+                <div style="display:flex;gap:8px">
+                    <button class="btn-primary" id="saveEscalation" onclick="saveEscalationChain()">Sauvegarder</button>
+                    <button class="btn-warning" id="cancelEscalation" onclick="cancelEscalationEdit()">Annuler</button>
+                </div>
             </div>
         </div>
 
@@ -174,12 +190,58 @@
                 <div class="log-area" id="testLog"></div>
             </div>
         </div>
+
+        <!-- Cluster / Quorum -->
+        <div class="panel" id="cluster">
+            <div class="card">
+                <h3>Quorum</h3>
+                <div id="quorumBanner" style="padding:16px;border-radius:8px;font-size:1.2rem;font-weight:bold;text-align:center;margin-bottom:16px;background:#22c55e33;color:#22c55e;">
+                    Chargement...
+                </div>
+                <div style="display:flex;gap:16px;margin-bottom:16px;">
+                    <div class="card stat"><div class="value" id="clusterTotal">-</div><div class="label">Noeuds total</div></div>
+                    <div class="card stat"><div class="value" id="clusterHealthy">-</div><div class="label">Noeuds sains</div></div>
+                    <div class="card stat"><div class="value" id="clusterLocalNode">-</div><div class="label">Ce noeud</div></div>
+                    <div class="card stat"><div class="value" id="clusterLocalRole">-</div><div class="label">Role</div></div>
+                </div>
+            </div>
+            <div class="card">
+                <h3>Membres du cluster</h3>
+                <table>
+                    <thead><tr><th>Nom</th><th>Role</th><th>Etat</th><th>Host</th><th>Port</th><th>Timeline</th><th>Lag</th></tr></thead>
+                    <tbody id="clusterMembers"></tbody>
+                </table>
+            </div>
+        </div>
     </div>
 
     <script>
-        const API = '';
+        let API = '';           // URL de base pour les lectures (ce backend)
+        let PRIMARY_API = '';   // URL de base pour les ecritures (le primary)
         let users = [];
         let heartbeatPaused = false;
+
+        // Detecter le primary au chargement
+        async function detectPrimary() {
+            // D'abord tester ce backend
+            try {
+                const r = await fetch('/health');
+                const h = await r.json();
+                if (h.role === 'primary') { PRIMARY_API = ''; return; }
+            } catch(e) {}
+            // Sinon chercher parmi les backends connus
+            const ports = [8000, 8001, 8002];
+            for (const port of ports) {
+                try {
+                    const url = `${location.protocol}//${location.hostname}:${port}`;
+                    const r = await fetch(`${url}/health`, {signal: AbortSignal.timeout(2000)});
+                    const h = await r.json();
+                    if (h.role === 'primary') { PRIMARY_API = url; return; }
+                } catch(e) {}
+            }
+            PRIMARY_API = '';  // fallback
+        }
+        detectPrimary();
 
         document.querySelectorAll('.tab').forEach(tab => {
             tab.addEventListener('click', () => {
@@ -191,13 +253,25 @@
         });
 
         async function api(path, opts = {}) {
-            const res = await fetch(API + path, {
+            // Les ecritures (POST/PUT/DELETE) vont au primary
+            const isWrite = opts.method && opts.method !== 'GET';
+            const base = isWrite ? PRIMARY_API : API;
+            const res = await fetch(base + path, {
                 headers: { 'Content-Type': 'application/json', ...opts.headers },
                 ...opts,
             });
             if (!res.ok) {
+                // Si c'est une erreur read-only, re-detecter le primary et retenter
+                if (res.status === 500 && isWrite) {
+                    await detectPrimary();
+                    const retry = await fetch(PRIMARY_API + path, {
+                        headers: { 'Content-Type': 'application/json', ...opts.headers },
+                        ...opts,
+                    });
+                    if (retry.ok) return retry.json();
+                }
                 const err = await res.json().catch(() => ({ detail: res.statusText }));
-                throw new Error(err.detail || 'Requête échouée');
+                throw new Error(err.detail || 'Requete echouee');
             }
             return res.json();
         }
@@ -284,12 +358,225 @@
                 <td>${timeAgo(u.last_heartbeat)}</td></tr>`).join('') || '<tr><td colspan="4" style="text-align:center;color:#94a3b8">Aucun utilisateur</td></tr>';
         }
 
+        let editingEscalation = false;  // Flag pour bloquer l'autorefresh pendant l'edition
+        let originalChainIds = [];     // Etat serveur de la chaine (pour detecter les modifs)
+
+        function highlightChanges() {
+            // Compare l'etat actuel du DOM avec originalChainIds
+            const chainEl = document.getElementById('escalationChain');
+
+            // Marquer chaque item de la chaine
+            chainEl.querySelectorAll('.esc-item').forEach((item, i) => {
+                const uid = parseInt(item.dataset.userId);
+                const origIndex = originalChainIds.indexOf(uid);
+                const name = getUserName(uid);
+                const span = item.querySelector('span');
+                item.style.borderLeft = '';
+
+                // Retirer les anciens badges
+                item.querySelector('.esc-badge')?.remove();
+
+                if (origIndex === -1) {
+                    // Nouveau dans la chaine
+                    item.style.borderLeft = '4px solid #22c55e';
+                    if (span) span.innerHTML = `<strong>${i+1}.</strong> ${name} <span class="esc-badge" style="font-size:0.75em;color:#22c55e;margin-left:8px">nouveau</span>`;
+                } else if (origIndex !== i) {
+                    // Position changee — afficher l'ancien numero barre
+                    item.style.borderLeft = '4px solid #f59e0b';
+                    if (span) span.innerHTML = `<strong>${i+1}.</strong> ${name} <span class="esc-badge" style="font-size:0.75em;color:#f59e0b;margin-left:8px"><s>${origIndex+1}</s></span>`;
+                } else {
+                    // Inchange
+                    if (span) span.innerHTML = `<strong>${i+1}.</strong> ${name}`;
+                }
+            });
+
+            // Marquer les items retires (dans availableUsers mais etaient dans la chaine)
+            const availEl = document.getElementById('availableUsers');
+            availEl.querySelectorAll('.esc-item').forEach(item => {
+                const uid = parseInt(item.dataset.userId);
+                item.style.borderLeft = '';
+                item.querySelector('.esc-badge')?.remove();
+                if (originalChainIds.includes(uid)) {
+                    const origPos = originalChainIds.indexOf(uid) + 1;
+                    item.style.borderLeft = '4px solid #ef4444';
+                    item.innerHTML = `${getUserName(uid)} <span class="esc-badge" style="font-size:0.75em;color:#ef4444;margin-left:8px"><s>pos ${origPos}</s></span>`;
+                }
+            });
+        }
+
         async function loadEscalation() {
-            const esc = await api('/api/config/escalation');
-            document.getElementById('escalationTable').innerHTML = esc.map(e => `
-                <tr><td>${e.position}</td><td>${getUserName(e.user_id)}</td>
-                <td>${e.delay_minutes}</td>
-                <td><button class="btn-danger btn-sm" onclick="deleteEscalation(${e.id})">Supprimer</button></td></tr>`).join('') || '<tr><td colspan="4" style="text-align:center;color:#94a3b8">Aucune règle configurée</td></tr>';
+            // Ne pas ecraser si l'utilisateur est en train d'editer
+            if (editingEscalation) return;
+
+            try {
+                // Charger le delai global
+                const delayData = await api('/api/config/escalation-delay');
+                document.getElementById('escalationDelay').value = delayData.minutes;
+            } catch(e) {}
+
+            try {
+                const esc = await api('/api/config/escalation');
+                const chainIds = esc.map(e => e.user_id);
+                originalChainIds = [...chainIds];  // Sauvegarder l'etat serveur
+
+                // Chaine d'escalade
+                const chainEl = document.getElementById('escalationChain');
+                chainEl.innerHTML = esc.map((e, i) => `
+                    <div class="esc-item" draggable="true" data-user-id="${e.user_id}"
+                         style="padding:8px 12px;margin:4px 0;background:#2a2a3e;border-radius:6px;cursor:grab;display:flex;justify-content:space-between;align-items:center;color:#e2e8f0">
+                        <span><strong>${i+1}.</strong> ${getUserName(e.user_id)}</span>
+                        <span class="esc-remove" onclick="removeFromChain(${e.user_id})" style="cursor:pointer;color:#ef4444;font-size:1.2em;padding:0 4px">&times;</span>
+                    </div>
+                `).join('') || '<div style="text-align:center;color:#64748b;padding:16px">Aucun utilisateur</div>';
+
+                // Users disponibles (pas dans la chaine)
+                const availEl = document.getElementById('availableUsers');
+                const available = users.filter(u => !chainIds.includes(u.id));
+                availEl.innerHTML = available.map(u => `
+                    <div class="esc-item" draggable="true" data-user-id="${u.id}"
+                         style="padding:8px 12px;margin:4px 0;background:#334155;border-radius:6px;cursor:grab;color:#94a3b8">
+                        ${u.name}
+                    </div>
+                `).join('') || '<div style="text-align:center;color:#64748b;padding:16px">Tous dans la chaine</div>';
+
+                setupDragDrop();
+            } catch(e) {}
+        }
+
+        function setupDragDrop() {
+            const containers = [document.getElementById('availableUsers'), document.getElementById('escalationChain')];
+            let draggedEl = null;
+
+            document.querySelectorAll('.esc-item').forEach(item => {
+                item.addEventListener('dragstart', (e) => {
+                    draggedEl = item;
+                    editingEscalation = true;
+                    setTimeout(() => item.style.opacity = '0.4', 0);
+                });
+                item.addEventListener('dragend', () => {
+                    item.style.opacity = '1';
+                    draggedEl = null;
+                });
+            });
+
+            containers.forEach(container => {
+                container.addEventListener('dragover', (e) => {
+                    e.preventDefault();
+                    container.style.borderColor = '#22c55e';
+                });
+                container.addEventListener('dragleave', () => {
+                    container.style.borderColor = '';
+                });
+                container.addEventListener('drop', (e) => {
+                    e.preventDefault();
+                    container.style.borderColor = '';
+                    if (!draggedEl) return;
+
+                    // Trouver la position d'insertion (avant quel element)
+                    const afterElement = getDragAfterElement(container, e.clientY);
+                    if (afterElement) {
+                        container.insertBefore(draggedEl, afterElement);
+                    } else {
+                        container.appendChild(draggedEl);
+                    }
+
+                    // Si l'item est depose dans la chaine, reconstruire le contenu
+                    const uid = parseInt(draggedEl.dataset.userId);
+                    if (container.id === 'escalationChain') {
+                        draggedEl.style.background = '#2a2a3e';
+                        draggedEl.style.color = '#e2e8f0';
+                        draggedEl.style.display = 'flex';
+                        draggedEl.style.justifyContent = 'space-between';
+                        draggedEl.style.alignItems = 'center';
+                        // Nettoyer et reconstruire (evite le doublon de nom)
+                        draggedEl.innerHTML = '';
+                        const nameSpan = document.createElement('span');
+                        nameSpan.innerHTML = `<strong>.</strong> ${getUserName(uid)}`;
+                        draggedEl.appendChild(nameSpan);
+                        const cross = document.createElement('span');
+                        cross.className = 'esc-remove';
+                        cross.style.cssText = 'cursor:pointer;color:#ef4444;font-size:1.2em;padding:0 4px';
+                        cross.innerHTML = '&times;';
+                        cross.onclick = () => removeFromChain(uid);
+                        draggedEl.appendChild(cross);
+                    }
+                    // Si depose dans les disponibles, reconstruire simple
+                    if (container.id === 'availableUsers') {
+                        draggedEl.innerHTML = getUserName(uid);
+                        draggedEl.style.background = '#334155';
+                        draggedEl.style.color = '#94a3b8';
+                        draggedEl.style.display = '';
+                    }
+
+                    updateChainNumbers();
+                });
+            });
+        }
+
+        function getDragAfterElement(container, y) {
+            const items = [...container.querySelectorAll('.esc-item:not([style*="opacity: 0.4"])')];
+            return items.reduce((closest, child) => {
+                const box = child.getBoundingClientRect();
+                const offset = y - box.top - box.height / 2;
+                if (offset < 0 && offset > closest.offset) {
+                    return { offset, element: child };
+                }
+                return closest;
+            }, { offset: Number.NEGATIVE_INFINITY }).element;
+        }
+
+        function updateChainNumbers() {
+            const chainEl = document.getElementById('escalationChain');
+            chainEl.querySelectorAll('.esc-item').forEach((item, i) => {
+                const span = item.querySelector('span');
+                if (span) {
+                    const name = getUserName(parseInt(item.dataset.userId));
+                    span.innerHTML = `<strong>${i+1}.</strong> ${name}`;
+                }
+            });
+            highlightChanges();
+        }
+
+        function removeFromChain(userId) {
+            editingEscalation = true;
+            const chainEl = document.getElementById('escalationChain');
+            const availEl = document.getElementById('availableUsers');
+            const item = chainEl.querySelector(`[data-user-id="${userId}"]`);
+            if (!item) return;
+            // Reconstruire comme item disponible (propre, sans doublon)
+            item.innerHTML = getUserName(userId);
+            item.style.background = '#334155';
+            item.style.color = '#94a3b8';
+            item.style.display = '';
+            item.style.borderLeft = '';
+            availEl.appendChild(item);
+            updateChainNumbers();  // Appelle highlightChanges() en interne
+            setupDragDrop();
+        }
+
+        async function saveEscalationChain() {
+            const chainEl = document.getElementById('escalationChain');
+            const userIds = [...chainEl.querySelectorAll('.esc-item')].map(el => parseInt(el.dataset.userId));
+            if (userIds.length === 0) { alert('La chaine ne peut pas etre vide'); return; }
+            try {
+                await api('/api/config/escalation/bulk', { method: 'POST', body: JSON.stringify({ user_ids: userIds }) });
+                editingEscalation = false;
+                loadAll();
+            } catch(e) { alert(e.message); }
+        }
+
+        function cancelEscalationEdit() {
+            editingEscalation = false;
+            loadAll();
+        }
+
+        async function saveDelay() {
+            const minutes = parseFloat(document.getElementById('escalationDelay').value);
+            if (minutes < 1 || minutes > 60) { alert('Le delai doit etre entre 1 et 60 minutes'); return; }
+            try {
+                await api('/api/config/escalation-delay', { method: 'POST', body: JSON.stringify({ minutes }) });
+                loadAll();
+            } catch(e) { alert(e.message); }
         }
 
         async function addUser() {
@@ -320,16 +607,7 @@
 
         async function resolveAlarm(id) { await api(`/api/alarms/${id}/resolve`, { method: 'POST' }); loadAll(); }
 
-        async function addEscalation() {
-            await api('/api/config/escalation', { method: 'POST', body: JSON.stringify({
-                position: parseInt(document.getElementById('escPosition').value),
-                user_id: parseInt(document.getElementById('escUser').value),
-                delay_minutes: parseFloat(document.getElementById('escDelay').value),
-            })});
-            loadAll();
-        }
-
-        async function deleteEscalation(id) { await api(`/api/config/escalation/${id}`, { method: 'DELETE' }); loadAll(); }
+        // addEscalation/deleteEscalation remplaces par saveEscalationChain/removeFromChain
 
         function log(msg, type = 'info') {
             const el = document.getElementById('testLog');
@@ -388,12 +666,55 @@
             } catch (e) { log(`Erreur : ${e.message}`, 'error'); }
         }
 
+        async function loadCluster() {
+            try {
+                const data = await api('/api/cluster');
+                const q = data.quorum || {};
+                const banner = document.getElementById('quorumBanner');
+                if (q.has_quorum) {
+                    banner.textContent = `Quorum OK (${q.healthy}/${q.total})`;
+                    banner.style.background = '#22c55e33';
+                    banner.style.color = '#22c55e';
+                } else {
+                    banner.textContent = `QUORUM PERDU (${q.healthy}/${q.total})`;
+                    banner.style.background = '#ef444433';
+                    banner.style.color = '#ef4444';
+                }
+                document.getElementById('clusterTotal').textContent = q.total || '-';
+                document.getElementById('clusterHealthy').textContent = q.healthy || '-';
+                document.getElementById('clusterLocalNode').textContent = data.local_node || '-';
+                document.getElementById('clusterLocalRole').textContent = data.local_role || '-';
+
+                const tbody = document.getElementById('clusterMembers');
+                tbody.innerHTML = (data.members || []).map(m => {
+                    const isLeader = m.role === 'leader';
+                    const isDown = m.state === 'stopped' || m.state === 'unknown';
+                    const color = isLeader ? '#22c55e' : isDown ? '#ef4444' : '#94a3b8';
+                    const lag = m.lag != null ? m.lag : '-';
+                    return `<tr style="color:${color}">
+                        <td><strong>${m.name || '-'}</strong></td>
+                        <td><span class="badge" style="background:${isLeader ? '#22c55e33' : '#33415533'};color:${color}">${m.role || '-'}</span></td>
+                        <td>${m.state || '-'}</td>
+                        <td>${m.host || '-'}</td>
+                        <td>${m.port || '-'}</td>
+                        <td>${m.timeline || '-'}</td>
+                        <td>${lag}</td>
+                    </tr>`;
+                }).join('');
+            } catch (e) {
+                document.getElementById('quorumBanner').textContent = 'Erreur: ' + e.message;
+                document.getElementById('quorumBanner').style.background = '#ef444433';
+                document.getElementById('quorumBanner').style.color = '#ef4444';
+            }
+        }
+
         function loadAll() {
             loadStatus();
             loadUsers();
             loadAlarms();
             loadDevices();
             loadEscalation();
+            loadCluster();
         }
 
         loadAll();

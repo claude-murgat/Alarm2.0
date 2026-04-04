@@ -7,6 +7,7 @@ from .database import SessionLocal
 from .models import Alarm, EscalationConfig, User, SystemConfig, SmsQueue
 from .clock import now as clock_now
 from .email_service import send_alert_email
+from .events import log_event
 
 logger = logging.getLogger("escalation")
 
@@ -105,11 +106,14 @@ async def escalation_loop():
                         continue
 
                     current_position = -1
-                    current_delay = 15.0
+                    # Lire le delai global depuis SystemConfig
+                    delay_config = db.query(SystemConfig).filter(
+                        SystemConfig.key == "escalation_delay_minutes"
+                    ).first()
+                    current_delay = float(delay_config.value) if delay_config else 15.0
                     for ec in escalation_chain:
                         if ec.user_id == alarm.assigned_user_id:
                             current_position = ec.position
-                            current_delay = ec.delay_minutes
                             break
 
                     elapsed = (now - alarm.created_at).total_seconds() / 60.0
@@ -121,8 +125,9 @@ async def escalation_loop():
                         )
 
                         if next_user and next_user.user_id != alarm.assigned_user_id:
+                            prev_user = alarm.assigned_user_id
                             logger.info(
-                                f"Escalating alarm {alarm.id} from user {alarm.assigned_user_id} "
+                                f"Escalating alarm {alarm.id} from user {prev_user} "
                                 f"to user {next_user.user_id} (position {next_user.position})"
                             )
                             alarm.assigned_user_id = next_user.user_id
@@ -130,6 +135,10 @@ async def escalation_loop():
                             _add_notified_user(alarm, next_user.user_id)
                             alarm.status = "escalated"
                             alarm.escalation_count += 1
+                            notified = [int(x) for x in (alarm.notified_user_ids or "").split(",") if x.strip()]
+                            log_event("alarm_escalated", alarm_id=alarm.id,
+                                      from_user=prev_user, to_user=next_user.user_id,
+                                      notified_user_ids=notified)
 
                         # Toujours notifier via SMS tous les utilisateurs déjà dans la chaîne
                         # quand le seuil est atteint (le guard anti-doublon évite les doublons)

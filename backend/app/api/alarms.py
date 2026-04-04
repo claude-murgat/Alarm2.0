@@ -7,6 +7,7 @@ from ..database import get_db
 from ..models import Alarm, User, EscalationConfig
 from ..schemas import AlarmCreate, AlarmResponse
 from ..auth import get_current_user
+from ..events import log_event
 
 router = APIRouter(prefix="/api/alarms", tags=["alarms"])
 
@@ -77,6 +78,7 @@ def send_alarm(alarm_data: AlarmCreate, db: Session = Depends(get_db)):
     db.add(alarm)
     db.commit()
     db.refresh(alarm)
+    log_event("alarm_created", alarm_id=alarm.id, assigned_to=alarm.assigned_user_id)
     return _alarm_response(alarm, db)
 
 
@@ -133,6 +135,7 @@ def acknowledge_alarm(
     alarm.suspended_until = now + timedelta(minutes=30)
     db.commit()
     db.refresh(alarm)
+    log_event("alarm_acknowledged", alarm_id=alarm.id, by_user=current_user.id)
     return _alarm_response(alarm, db)
 
 
@@ -145,6 +148,7 @@ def resolve_alarm(alarm_id: int, db: Session = Depends(get_db)):
     alarm.status = "resolved"
     db.commit()
     db.refresh(alarm)
+    log_event("alarm_resolved", alarm_id=alarm.id)
     return _alarm_response(alarm, db)
 
 

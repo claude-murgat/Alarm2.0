@@ -8,9 +8,11 @@ import android.widget.EditText
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
+import com.alarm.critical.api.ApiClient
 import com.alarm.critical.api.ApiProvider
 import com.alarm.critical.model.DeviceRegister
 import com.alarm.critical.model.LoginRequest
+import com.alarm.critical.service.AlarmPollingService
 import kotlinx.coroutines.launch
 import java.util.UUID
 
@@ -22,6 +24,10 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         prefs = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
+
+        // Toujours repartir de l'URL 0 au demarrage
+        ApiClient.currentUrlIndex = 0
+        ApiClient.consecutiveFailures = 0
 
         val savedToken = prefs.getString("token", null)
         if (savedToken != null) {
@@ -52,10 +58,23 @@ class MainActivity : AppCompatActivity() {
 
             lifecycleScope.launch {
                 try {
-                    val response = ApiProvider.service.login(LoginRequest(name, password))
-                    if (response.isSuccessful) {
+                    // Trouver un backend qui repond avant de tenter le login
+                    var response = try { ApiProvider.service.login(LoginRequest(name, password)) } catch (e: Exception) { null }
+                    if (response == null || !response.isSuccessful) {
+                        // L'URL courante ne marche pas — essayer les autres
+                        for (i in 0 until 3) {
+                            ApiClient.switchToNextUrl()
+                            response = try { ApiProvider.service.login(LoginRequest(name, password)) } catch (e: Exception) { null }
+                            if (response != null && response.isSuccessful) break
+                        }
+                    }
+                    if (response != null && response.isSuccessful) {
                         val tokenResponse = response.body()!!
                         val token = tokenResponse.access_token
+
+                        // Clear les erreurs d'auth de la session precedente
+                        AlarmPollingService.authErrorAlarm = false
+                        AlarmPollingService.authErrorMessage = null
 
                         prefs.edit()
                             .putString("token", token)
@@ -76,7 +95,7 @@ class MainActivity : AppCompatActivity() {
                         goToDashboard(token)
                     } else {
                         runOnUiThread {
-                            statusText.text = "Échec de connexion : ${response.code()}"
+                            statusText.text = "Échec de connexion : ${response?.code() ?: "aucun serveur disponible"}"
                             loginButton.isEnabled = true
                         }
                     }

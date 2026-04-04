@@ -49,6 +49,16 @@
             android:textColor="#94a3b8"
             android:layout_marginBottom="16dp" />
 
+        <!-- Indicateur sonnerie -->
+        <TextView
+            android:id="@+id/soundStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="\uD83D\uDD07 Sonnerie inactive"
+            android:textSize="14sp"
+            android:textColor="#94a3b8"
+            android:layout_marginBottom="16dp" />
+
         <!-- Alerte connexion perdue (visible après timeout heartbeat) -->
         <TextView
             android:id="@+id/connectionLostAlert"

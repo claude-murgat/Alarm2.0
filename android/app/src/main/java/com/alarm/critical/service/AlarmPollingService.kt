@@ -41,6 +41,10 @@ class AlarmPollingService : Service() {
         // Erreur d'authentification irréversible (refresh échoué)
         var authErrorAlarm = false
         var authErrorMessage: String? = null
+
+        // Flag : le heartbeat a recu 503 (replica), le poll doit switcher
+        @Volatile
+        var needsUrlSwitch = false
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -75,8 +79,23 @@ class AlarmPollingService : Service() {
                 try {
                     val response = ApiProvider.service.getMyAlarms("Bearer $token")
                     if (response.isSuccessful) {
-                        ApiClient.consecutiveFailures = 0  // Réinitialiser le compteur sur succès
+                        // Le heartbeat a signale qu'on est sur un replica → switcher
+                        if (needsUrlSwitch) {
+                            needsUrlSwitch = false
+                            Log.w(TAG, "Poll: heartbeat signale replica, switching URL")
+                            ApiClient.switchToNextUrl()
+                            // Attendre un cycle heartbeat complet pour que le heartbeat
+                            // teste la nouvelle URL avant de re-verifier le flag
+                            delay(4000)
+                            continue
+                        }
+                        ApiClient.consecutiveFailures = 0
                         lastConnectionStatus = "Connected"
+                        // Clear auth error si la connexion remarche
+                        if (authErrorAlarm) {
+                            authErrorAlarm = false
+                            authErrorMessage = null
+                        }
                         val alarms = response.body() ?: emptyList()
                         activeAlarmCount = alarms.size
                         currentAlarm = alarms.firstOrNull()
@@ -112,16 +131,19 @@ class AlarmPollingService : Service() {
                     val response = ApiProvider.service.heartbeat("Bearer $token")
                     if (response.isSuccessful) {
                         lastHeartbeatOk = true
+                        needsUrlSwitch = false  // On est sur le primary, plus besoin de switch
                         // Heartbeat OK → reset du compteur de perte
                         heartbeatLostSince = 0L
                         heartbeatLostAlarm = false
+                    } else if (response.code() == 503) {
+                        // 503 = replica — signaler au poll de switcher
+                        Log.w(TAG, "Heartbeat: backend is replica (503)")
+                        needsUrlSwitch = true
                     } else {
                         onHeartbeatFail()
-                        Log.w(TAG, "Heartbeat failed: ${response.code()}")
                     }
                 } catch (e: Exception) {
                     onHeartbeatFail()
-                    Log.e(TAG, "Heartbeat error: ${e.message}")
                 }
                 delay(3000)
             }

@@ -8,28 +8,37 @@ from ..clock import now as clock_now
 from .. import clock as clock_module
 from ..database import get_db
 from ..models import Alarm, User, EscalationConfig, SmsQueue
+from ..events import log_event
 
 router = APIRouter(prefix="/api/test", tags=["test"])
 
-# URL du nœud pair (ex: VPS2) pour broadcaster les opérations de test sensibles
-# (horloge, simulate-connection-loss, reset).  Vide = pas de pair = mode solo.
-_PEER_TEST_URL = os.getenv("PEER_TEST_URL", "").rstrip("/")
+# URLs des noeuds pairs pour broadcaster les operations de test
+# (horloge, simulate-connection-loss, reset). Comma-separated.
+_PEER_TEST_URLS = [
+    u.strip().rstrip("/") for u in os.getenv("PEER_TEST_URLS", "").split(",") if u.strip()
+]
+# Backward compat : si PEER_TEST_URL (singulier) est set, l'utiliser
+_legacy = os.getenv("PEER_TEST_URL", "").strip().rstrip("/")
+if _legacy and _legacy not in _PEER_TEST_URLS:
+    _PEER_TEST_URLS.append(_legacy)
 
 
 def _broadcast(path: str, params: dict | None = None):
-    """Envoie la même requête POST au nœud pair (best-effort, sans bloquer).
-    Le paramètre peer=false est ajouté pour éviter les boucles infinies."""
-    if not _PEER_TEST_URL:
-        return
-    try:
-        p = dict(params or {})
-        p["peer"] = "false"
-        qs = urllib.parse.urlencode(p)
-        url = f"{_PEER_TEST_URL}{path}?{qs}"
-        req = urllib.request.Request(url, data=b"", method="POST")
-        urllib.request.urlopen(req, timeout=2)
-    except Exception:
-        pass
+    """Envoie la meme requete POST a tous les noeuds pairs (best-effort).
+    Le parametre peer=false est ajoute pour eviter les boucles infinies."""
+    import logging
+    _log = logging.getLogger("broadcast")
+    for peer_url in _PEER_TEST_URLS:
+        try:
+            p = dict(params or {})
+            p["peer"] = "false"
+            qs = urllib.parse.urlencode(p)
+            url = f"{peer_url}{path}?{qs}"
+            req = urllib.request.Request(url, data=b"", method="POST")
+            urllib.request.urlopen(req, timeout=2)
+            _log.info(f"Broadcast OK: {url}")
+        except Exception as e:
+            _log.warning(f"Broadcast FAIL: {peer_url}{path} -> {e}")
 
 
 @router.post("/send-alarm")
@@ -57,6 +66,7 @@ def send_test_alarm(db: Session = Depends(get_db)):
     db.add(alarm)
     db.commit()
     db.refresh(alarm)
+    log_event("alarm_created", alarm_id=alarm.id, assigned_to=user_id, source="test")
     return {"status": "sent", "alarm_id": alarm.id, "assigned_to": user_id}
 
 
@@ -176,6 +186,7 @@ def trigger_escalation(db: Session = Depends(get_db)):
         )
 
         if next_user and next_user.user_id != alarm.assigned_user_id:
+            prev_user = alarm.assigned_user_id
             alarm.assigned_user_id = next_user.user_id
             # Ajouter le nouvel utilisateur à la liste cumulative des notifiés
             raw = alarm.notified_user_ids or ""
@@ -186,6 +197,9 @@ def trigger_escalation(db: Session = Depends(get_db)):
             alarm.status = "escalated"
             alarm.escalation_count += 1
             escalated_count += 1
+            log_event("alarm_escalated", alarm_id=alarm.id,
+                      from_user=prev_user, to_user=next_user.user_id,
+                      notified_user_ids=current_ids)
 
     db.commit()
     return {"status": "ok", "escalated": escalated_count}

@@ -1,79 +1,88 @@
-services:
-  db:
-    image: postgres:16-alpine
-    ports:
-      - "5432:5432"
-    environment:
-      POSTGRES_USER: alarm
-      POSTGRES_PASSWORD: alarm_secret
-      POSTGRES_DB: alarm_db
-    # Activer le WAL streaming pour la réplication vers le standby VPS2
-    command: >
-      postgres
-      -c wal_level=replica
-      -c max_wal_senders=5
-      -c max_replication_slots=5
-      -c hot_standby=on
-      -c wal_keep_size=64
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-      # Script d'init : crée l'utilisateur replicator + entrée pg_hba.conf
-      # N'est exécuté QU'UNE SEULE FOIS (premier démarrage avec volume vide).
-      # Si la DB existe déjà : docker compose down -v && docker compose up --build -d
-      - ./postgres/primary_init.sh:/docker-entrypoint-initdb.d/01_replication.sh:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U alarm -d alarm_db"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    networks:
-      alarm_net:
-        aliases:
-          - db      # alias visible de tous les projets sur alarm_shared_net
+# Docker Compose unifie — instancier avec des .env differents :
+#   docker compose --env-file .env.node1 -p node1 up --build -d
+#   docker compose --env-file .env.node2 -p node2 up --build -d
+#   docker compose --env-file .env.node3 -p node3 up --build -d
 
-  mailhog:
-    image: mailhog/mailhog:latest
+services:
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.17
     ports:
-      - "1025:1025"   # SMTP
-      - "8025:8025"   # Web UI + API
-    restart: unless-stopped
-    networks:
-      alarm_net:
-        aliases:
-          - mailhog  # alias visible de tous les projets sur alarm_shared_net
+      - "${ETCD_CLIENT_PORT}:2379"
+      - "${ETCD_PEER_PORT}:2380"
+    environment:
+      ETCD_NAME: ${NODE_NAME}
+      ETCD_DATA_DIR: /etcd-data
+      ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+      ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
+      ETCD_ADVERTISE_CLIENT_URLS: http://host.docker.internal:${ETCD_CLIENT_PORT}
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://host.docker.internal:${ETCD_PEER_PORT}
+      ETCD_INITIAL_CLUSTER: ${ETCD_INITIAL_CLUSTER}
+      ETCD_INITIAL_CLUSTER_STATE: new
+      ETCD_INITIAL_CLUSTER_TOKEN: alarm-ha-cluster
+    volumes:
+      - etcd_data:/etcd-data
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  patroni:
+    build:
+      context: .
+      dockerfile: Dockerfile.patroni
+    ports:
+      - "${PG_PORT}:5432"
+      - "${PATRONI_PORT}:8008"
+    environment:
+      PATRONI_NAME: ${NODE_NAME}
+      PATRONI_ETCD3_HOSTS: ${ETCD_HOSTS}
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: host.docker.internal:${PG_PORT}
+      PATRONI_RESTAPI_CONNECT_ADDRESS: host.docker.internal:${PATRONI_PORT}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    depends_on:
+      etcd:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8008/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   backend:
     build: ./backend
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT}:8000"
     environment:
-      - SECRET_KEY=alarm-secret-key-change-in-prod
-      - DATABASE_URL=postgresql://alarm:alarm_secret@db:5432/alarm_db
-      - SMTP_HOST=mailhog
+      - DATABASE_URL=postgresql://alarm:alarm_secret@patroni:5432/alarm_db
+      - PATRONI_URL=http://patroni:8008
+      - SECRET_KEY=alarm-secret-key
+      - SMTP_HOST=host.docker.internal
       - SMTP_PORT=1025
       - SMTP_FROM=alarmes@alarm.local
+      - PEER_TEST_URLS=${PEER_TEST_URLS}
+      - NODE_NAME=${NODE_NAME}
       - GATEWAY_KEY=${GATEWAY_KEY:-changeme-in-prod}
-      # URL du nœud pair — permet aux endpoints de test de broadcaster
-      # advance-clock/reset-clock/simulate-*/reset vers VPS2 (best-effort).
-      # Utilise le nom de container Docker sur alarm_shared_net.
-      - PEER_TEST_URL=http://alarm-vps2-backend-1:8000
     depends_on:
-      db:
+      patroni:
         condition: service_healthy
-      mailhog:
-        condition: service_started
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    networks:
-      - alarm_net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
-networks:
-  alarm_net:
-    name: alarm_shared_net
+  # Mailhog : seulement sur le noeud qui a MAILHOG_SMTP_PORT != 0
+  mailhog:
+    image: mailhog/mailhog:latest
+    ports:
+      - "${MAILHOG_SMTP_PORT:-0}:1025"
+      - "${MAILHOG_WEB_PORT:-0}:8025"
+    profiles:
+      - mailhog
 
 volumes:
-  pgdata:
+  etcd_data:
+  pg_data:

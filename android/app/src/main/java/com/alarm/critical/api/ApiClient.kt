@@ -2,6 +2,7 @@ package com.alarm.critical.api
 
 import android.util.Log
 import com.alarm.critical.BuildConfig
+import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
@@ -11,18 +12,21 @@ import java.util.concurrent.TimeUnit
 object ApiClient {
     private val TAG = "ApiClient"
 
-    // Liste des URLs backend : [primaire (VPS1), secondaire (VPS2)]
-    // Configurées au build-time via BuildConfig (voir build.gradle.kts)
+    // Liste des URLs backend : 3 noeuds HA (rotation circulaire sur failover)
+    // Configurees au build-time via BuildConfig (voir build.gradle.kts)
     private val BACKEND_URLS = listOf(
         BuildConfig.PRIMARY_BACKEND_URL,
-        BuildConfig.FALLBACK_BACKEND_URL
+        BuildConfig.FALLBACK_BACKEND_URL,
+        BuildConfig.FALLBACK_BACKEND_URL_2
     )
 
     // Index de l'URL courante (0 = primaire, 1 = secondaire)
     @Volatile
     var currentUrlIndex: Int = 0
 
-    // Compteur d'échecs consécutifs — déclenche un failover à 3
+    // Compteur d'échecs consécutifs — déclenche un failover à 3.
+    // IMPORTANT : seul le polling incrémente ce compteur, pas le heartbeat.
+    // Le heartbeat suit passivement l'URL courante via ApiProvider.service.
     @Volatile
     var consecutiveFailures: Int = 0
 
@@ -30,10 +34,14 @@ object ApiClient {
         level = HttpLoggingInterceptor.Level.BODY
     }
 
+    private val connectionPool = ConnectionPool(5, 5, TimeUnit.SECONDS)
+
     private val httpClient = OkHttpClient.Builder()
         .addInterceptor(loggingInterceptor)
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
+        .connectionPool(connectionPool)
+        .connectTimeout(3, TimeUnit.SECONDS)
+        .readTimeout(5, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
 
     // Cache des instances Retrofit par URL — une seule instance créée par URL
@@ -59,13 +67,15 @@ object ApiClient {
 
     /**
      * Bascule vers l'URL suivante dans la liste (rotation circulaire).
-     * Réinitialise le compteur d'échecs.
+     * Réinitialise le compteur d'échecs et purge les connexions idle
+     * pour éviter les "Connection reset" sur l'ancienne URL.
      */
     @Synchronized
     fun switchToNextUrl() {
         val prev = currentUrlIndex
         currentUrlIndex = (currentUrlIndex + 1) % BACKEND_URLS.size
         consecutiveFailures = 0
-        Log.w(TAG, "Failover: bascule URL[$prev]=${BACKEND_URLS[prev]} → URL[$currentUrlIndex]=${BACKEND_URLS[currentUrlIndex]}")
+        connectionPool.evictAll()
+        Log.w(TAG, "Failover: URL[$prev]=${BACKEND_URLS[prev]} -> URL[$currentUrlIndex]=${BACKEND_URLS[currentUrlIndex]}")
     }
 }

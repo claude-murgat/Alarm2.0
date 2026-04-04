@@ -1,4 +1,7 @@
+import os
 import time as _time
+import urllib.request
+import json as _json
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
@@ -8,8 +11,29 @@ from ..database import get_db
 from ..models import User
 from ..schemas import UserResponse
 from ..auth import get_current_user, security, SECRET_KEY, ALGORITHM
+from ..events import log_event
+from ..leader_election import is_leader
 
 router = APIRouter(prefix="/api/devices", tags=["devices"])
+
+_PEER_URLS = [u.strip() for u in os.getenv("PEER_TEST_URLS", "").split(",") if u.strip()]
+
+
+def _proxy_heartbeat_to_primary(token: str):
+    """Forward le heartbeat vers un peer qui est primary (best-effort)."""
+    import httpx
+    for peer in _PEER_URLS:
+        try:
+            r = httpx.post(
+                f"{peer}/api/devices/heartbeat",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=3.0,
+            )
+            if r.status_code == 200:
+                return r.json()
+        except Exception:
+            continue
+    raise HTTPException(status_code=503, detail="No primary available for heartbeat")
 
 # Global flag for heartbeat pause (toggled via /api/test/toggle-heartbeat-pause)
 heartbeat_paused = False
@@ -60,10 +84,17 @@ def heartbeat(
         except Exception:
             pass  # Erreur de décodage inattendue : laisser passer (ne pas bloquer)
 
+    # Si ce noeud est un replica, indiquer a l'app de switcher
+    if not is_leader.is_set():
+        raise HTTPException(status_code=503, detail="replica")
+
+    was_offline = not current_user.is_online
     now = clock_now()
     current_user.last_heartbeat = now
     current_user.is_online = True
     db.commit()
+    if was_offline:
+        log_event("user_online", user_id=current_user.id, user_name=current_user.name)
     return {"status": "ok", "timestamp": now.isoformat()}
 
 

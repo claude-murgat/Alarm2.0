@@ -1,91 +1,60 @@
 """
-Leader election via PostgreSQL advisory lock.
+Leader election via Patroni REST API.
 
-Un seul nœud peut détenir le lock — c'est le nœud primaire.
-Il exécute la boucle d'escalade et le watchdog.
-Les nœuds secondaires restent en standby et prennent le relais
-automatiquement si le primaire tombe (PostgreSQL libère le lock
-dès que la connexion TCP se ferme, sans intervention manuelle).
+Interroge Patroni toutes les 5 secondes pour savoir si ce noeud est le primary.
+Patroni gere PostgreSQL (replication, promotion, failover) via etcd.
 
-Failover en <20s (prochain cycle d'élection = 10s).
+L'interface publique (is_leader, leader_election_loop) est identique a
+l'ancienne version basee sur advisory lock — les modules qui importent
+is_leader n'ont pas besoin de changer.
 """
 import asyncio
 import logging
-from sqlalchemy import create_engine, text
-from sqlalchemy.pool import NullPool
+import os
+import urllib.request
+
+from .events import log_event
 
 logger = logging.getLogger("leader_election")
 
-# Clé int64 unique pour cette application — évite les collisions avec d'autres
-# processus PostgreSQL qui utiliseraient aussi des advisory locks.
-ADVISORY_LOCK_KEY = 7_481_293_847
+PATRONI_URL = os.getenv("PATRONI_URL", "http://patroni:8008")
 
-# Event asyncio partagé entre toutes les coroutines du même process.
-#   is_leader.is_set()  → ce nœud est PRIMAIRE (lock acquis, escalade active)
-#   not is_leader.is_set() → ce nœud est SECONDAIRE (standby)
+# Event asyncio partage entre toutes les coroutines du meme process.
+#   is_leader.is_set()     -> ce noeud est PRIMAIRE
+#   not is_leader.is_set() -> ce noeud est SECONDAIRE (replica)
 is_leader = asyncio.Event()
 
 
 async def leader_election_loop(database_url: str):
-    """Tente d'acquérir le lock advisory PostgreSQL en boucle.
+    """Interroge Patroni en boucle pour determiner le role de ce noeud.
 
-    Comportement :
-    - Si lock acquis       : set(is_leader), keepalive SELECT 1 toutes les 10s
-    - Si lock non acquis   : clear(is_leader), retente dans 10s
-    - Si connexion perdue  : clear(is_leader), reconnecte au prochain cycle
-    - Si SQLite (dev local): is_leader toujours set, fonction se termine
+    - GET {PATRONI_URL}/primary : 200 = ce noeud est primary
+    - 503 ou erreur = ce noeud est replica/indisponible
+    - Si SQLite (dev local) : toujours primary, pas de Patroni
     """
-    # SQLite ne supporte pas les advisory locks → toujours primaire (dev sans Docker)
     if not database_url.startswith("postgresql"):
-        logger.info("SQLite détecté — advisory lock désactivé, nœud toujours PRIMAIRE")
+        logger.info("SQLite detecte - pas de Patroni, noeud toujours PRIMAIRE")
         is_leader.set()
         return
 
-    lock_conn = None
-
     while True:
         try:
-            # Créer une connexion dédiée (NullPool = vraie connexion PostgreSQL,
-            # pas recyclée par un pool — le lock est attaché à cette session)
-            if lock_conn is None:
-                engine = create_engine(database_url, poolclass=NullPool)
-                lock_conn = engine.connect()
-
-            # pg_try_advisory_lock : non bloquant.
-            # Retourne True si ce nœud obtient le lock, False si un autre le détient.
-            result = lock_conn.execute(
-                text("SELECT pg_try_advisory_lock(:key)"),
-                {"key": ADVISORY_LOCK_KEY},
-            ).scalar()
-            lock_conn.commit()
-
-            if result:
+            req = urllib.request.Request(f"{PATRONI_URL}/primary", method="GET")
+            resp = urllib.request.urlopen(req, timeout=2)
+            if resp.status == 200:
                 if not is_leader.is_set():
-                    logger.info(
-                        "Advisory lock acquis — ce nœud est maintenant PRIMAIRE "
-                        "(escalade + watchdog actifs)"
-                    )
+                    logger.info("Patroni: ce noeud est maintenant PRIMAIRE")
+                    log_event("leader_elected", role="primary")
                 is_leader.set()
-                # Keepalive : maintient la connexion ouverte.
-                # Si cette connexion se ferme, PostgreSQL libère automatiquement
-                # le lock et un autre nœud peut l'acquérir.
-                lock_conn.execute(text("SELECT 1")).scalar()
-                lock_conn.commit()
             else:
                 if is_leader.is_set():
-                    logger.warning(
-                        "Advisory lock non disponible — ce nœud passe en SECONDAIRE (standby)"
-                    )
+                    logger.warning("Patroni: ce noeud passe en SECONDAIRE")
+                    log_event("leader_lost", role="secondary")
                 is_leader.clear()
-
-        except Exception as e:
-            logger.error(f"Leader election error: {e}")
+        except Exception:
+            if is_leader.is_set():
+                logger.warning("Patroni injoignable - ce noeud passe en SECONDAIRE")
+                log_event("leader_lost", role="secondary")
             is_leader.clear()
-            if lock_conn is not None:
-                try:
-                    lock_conn.close()
-                except Exception:
-                    pass
-                lock_conn = None
 
-        await asyncio.sleep(10)
+        await asyncio.sleep(5)

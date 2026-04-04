@@ -25,6 +25,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("alarm_system")
 
 
+class HeartbeatAccessLogFilter(logging.Filter):
+    """Suppress uvicorn access log lines for /api/devices/heartbeat."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "/api/devices/heartbeat" not in record.getMessage()
+
+
 def seed_data():
     """Create default users and escalation config if DB is empty."""
     db = SessionLocal()
@@ -63,12 +69,37 @@ def seed_data():
 async def lifespan(app: FastAPI):
     # Startup
     os.makedirs("data", exist_ok=True)
-    Base.metadata.create_all(bind=engine)
-    run_migrations(engine)
-    seed_data()
 
-    # Démarrer l'élection de leader en premier — les autres coroutines attendent l'event
+    # Filtrer les access logs heartbeat (trop frequents)
+    logging.getLogger("uvicorn.access").addFilter(HeartbeatAccessLogFilter())
+
+    # Demarrer le leader election en premier
     election_task = asyncio.create_task(leader_election_loop(DATABASE_URL))
+
+    # Attendre que Patroni determine le role (max 30s)
+    for _ in range(60):
+        if is_leader.is_set():
+            break
+        await asyncio.sleep(0.5)
+
+    if is_leader.is_set():
+        # Primary : creer les tables et seeder
+        logger.info("Ce noeud est PRIMARY — init DB + seed")
+        Base.metadata.create_all(bind=engine)
+        run_migrations(engine)
+        seed_data()
+    else:
+        # Replica : attendre que la DB soit accessible en lecture
+        logger.info("Ce noeud est REPLICA — attente DB en lecture")
+        for _ in range(60):
+            try:
+                db = SessionLocal()
+                db.execute(text("SELECT 1"))
+                db.close()
+                break
+            except Exception:
+                await asyncio.sleep(1)
+
     escalation_task = asyncio.create_task(escalation_loop())
     watchdog_task = asyncio.create_task(watchdog_loop())
     logger.info("Background tasks started: leader_election + escalation + watchdog")
@@ -138,3 +169,39 @@ async def health():
             content={"status": "degraded", "db": db_ok, "escalation_loop": loop_ok, "role": role}
         )
     return {"status": "ok", "db": True, "escalation_loop": True, "role": role}
+
+
+@app.get("/api/cluster")
+async def cluster_status():
+    """Expose l'etat du cluster Patroni (quorum, membres, roles)."""
+    import urllib.request
+    import json as _json
+
+    patroni_url = os.getenv("PATRONI_URL", "http://patroni:8008")
+    node_name = os.getenv("NODE_NAME", "unknown")
+    local_role = "primary" if is_leader.is_set() else "secondary"
+
+    try:
+        req = urllib.request.Request(f"{patroni_url}/cluster", method="GET")
+        resp = urllib.request.urlopen(req, timeout=3)
+        cluster = _json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        return JSONResponse(
+            status_code=503,
+            content={"error": f"Patroni unreachable: {e}", "local_node": node_name, "local_role": local_role}
+        )
+
+    members = cluster.get("members", [])
+    healthy_count = sum(1 for m in members if m.get("state") in ("running", "streaming"))
+    total_count = len(members)
+
+    return {
+        "local_node": node_name,
+        "local_role": local_role,
+        "quorum": {
+            "total": total_count,
+            "healthy": healthy_count,
+            "has_quorum": healthy_count > total_count / 2,
+        },
+        "members": members,
+    }

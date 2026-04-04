@@ -19,10 +19,11 @@ android {
         versionName = "1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // URLs backend : primaire (VPS1) et secondaire (VPS2)
-        // Pour l'émulateur Android, 10.0.2.2 est l'IP du host local
+        // URLs backend : 3 noeuds HA (Patroni + etcd)
+        // Pour l'emulateur Android, 10.0.2.2 est l'IP du host local
         buildConfigField("String", "PRIMARY_BACKEND_URL", "\"http://10.0.2.2:8000/\"")
-        buildConfigField("String", "FALLBACK_BACKEND_URL", "\"http://10.0.2.2:8000/\"")
+        buildConfigField("String", "FALLBACK_BACKEND_URL", "\"http://10.0.2.2:8001/\"")
+        buildConfigField("String", "FALLBACK_BACKEND_URL_2", "\"http://10.0.2.2:8002/\"")
     }
 
     buildTypes {

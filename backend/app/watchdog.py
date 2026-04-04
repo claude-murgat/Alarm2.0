@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from .database import SessionLocal
 from .models import User
 from .clock import now as clock_now
+from .events import log_event
 
 logger = logging.getLogger("watchdog")
 
@@ -34,6 +35,7 @@ async def watchdog_loop():
                                 f"Last: {user.last_heartbeat}"
                             )
                             user.is_online = False
+                            log_event("user_offline", user_id=user.id, user_name=user.name)
                             db.commit()
                 finally:
                     db.close()

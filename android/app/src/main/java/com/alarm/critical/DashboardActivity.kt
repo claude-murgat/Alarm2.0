@@ -262,6 +262,17 @@ class DashboardActivity : AppCompatActivity() {
                 ackStatus.visibility = View.GONE
                 ackRemaining.visibility = View.GONE
             }
+
+            // Indicateur sonnerie
+            val isSounding = (soundManager?.isPlaying() == true) ||
+                             (connectionLostSoundManager?.isPlaying() == true)
+            findViewById<TextView>(R.id.soundStatus).text =
+                if (isSounding) "\uD83D\uDD14 Sonnerie ACTIVE"   // 🔔
+                else "\uD83D\uDD07 Sonnerie inactive"             // 🔇
+            findViewById<TextView>(R.id.soundStatus).setTextColor(
+                if (isSounding) android.graphics.Color.parseColor("#ef4444")
+                else android.graphics.Color.parseColor("#94a3b8")
+            )
         }
     }
 

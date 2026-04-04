@@ -1,0 +1,49 @@
+scope: alarm-cluster
+
+# name, restapi, etcd3, postgresql connect_address sont overrides
+# par les variables d'env PATRONI_* passees par Docker Compose.
+
+restapi:
+  listen: 0.0.0.0:8008
+
+etcd3:
+  hosts: localhost:2379
+
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576
+    postgresql:
+      use_pg_rewind: true
+      parameters:
+        wal_level: replica
+        hot_standby: "on"
+        max_wal_senders: 5
+        max_replication_slots: 5
+        wal_keep_size: 64MB
+
+  initdb:
+    - encoding: UTF8
+    - data-checksums
+
+  pg_hba:
+    - host replication replicator 0.0.0.0/0 md5
+    - host all all 0.0.0.0/0 md5
+
+  post_bootstrap: /etc/patroni/post_bootstrap.sh
+
+postgresql:
+  listen: 0.0.0.0:5432
+  data_dir: /var/lib/postgresql/data/patroni
+  pgpass: /tmp/pgpass
+  authentication:
+    superuser:
+      username: postgres
+      password: postgres_secret
+    replication:
+      username: replicator
+      password: rep_secret
+  parameters:
+    unix_socket_directories: /tmp
