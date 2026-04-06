@@ -65,15 +65,49 @@
         .test-buttons { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
         .pulsing { animation: pulse 1s infinite; }
+        /* Login overlay */
+        .login-overlay { position: fixed; inset: 0; background: #0f172a; display: flex; align-items: center; justify-content: center; z-index: 1000; }
+        .login-overlay.hidden { display: none; }
+        .login-box { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 40px; width: 360px; }
+        .login-box h2 { color: #ef4444; text-align: center; margin-bottom: 24px; }
+        .login-box .form-group { margin-bottom: 16px; }
+        .login-box input { width: 100%; }
+        .login-box button { width: 100%; padding: 12px; font-size: 1rem; }
+        .login-box .error { color: #ef4444; font-size: 0.85rem; margin-top: 8px; text-align: center; }
+        .header .user-info { display: flex; align-items: center; gap: 12px; }
+        .header .user-info .username { color: #94a3b8; font-size: 0.85rem; }
+        .btn-logout { background: transparent; border: 1px solid #475569; color: #94a3b8; padding: 4px 12px; font-size: 0.8rem; }
+        .btn-logout:hover { border-color: #ef4444; color: #ef4444; }
     </style>
 </head>
 <body>
+    <!-- Login overlay -->
+    <div class="login-overlay" id="loginOverlay">
+        <div class="login-box">
+            <h2>&#x1F6A8; Alarmes Critiques</h2>
+            <div class="form-group">
+                <label>Nom d'utilisateur</label>
+                <input id="loginName" placeholder="admin" autocomplete="username">
+            </div>
+            <div class="form-group">
+                <label>Mot de passe</label>
+                <input id="loginPassword" type="password" placeholder="Mot de passe" autocomplete="current-password">
+            </div>
+            <button class="btn-danger" onclick="doLogin()">Se connecter</button>
+            <div class="error" id="loginError"></div>
+        </div>
+    </div>
+
     <div class="header">
         <h1>&#x1F6A8; Alarmes Critiques</h1>
         <div class="status">
             <span><span class="status-dot online" id="serverStatus"></span> Serveur</span>
             <span id="userCount">Utilisateurs : -</span>
             <span id="alarmCount">Active : -</span>
+            <div class="user-info">
+                <span class="username" id="currentUserName"></span>
+                <button class="btn-logout" onclick="doLogout()">Déconnexion</button>
+            </div>
         </div>
     </div>
 
@@ -225,6 +259,53 @@
         let PRIMARY_API = '';   // URL de base pour les ecritures (le primary)
         let users = [];
         let heartbeatPaused = false;
+        let authToken = null;   // JWT token en memoire
+        let currentUserInfo = null;
+
+        // ── Login / Logout ─────────────────────────────────────────────────
+        async function doLogin() {
+            const name = document.getElementById('loginName').value.trim();
+            const password = document.getElementById('loginPassword').value;
+            const errEl = document.getElementById('loginError');
+            errEl.textContent = '';
+            if (!name || !password) { errEl.textContent = 'Remplissez tous les champs'; return; }
+            try {
+                const res = await fetch((PRIMARY_API || '') + '/api/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, password }),
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    errEl.textContent = err.detail || 'Connexion echouee';
+                    return;
+                }
+                const data = await res.json();
+                authToken = data.access_token;
+                currentUserInfo = data.user;
+                document.getElementById('loginOverlay').classList.add('hidden');
+                document.getElementById('currentUserName').textContent = currentUserInfo.name;
+                loadAll();
+            } catch (e) {
+                errEl.textContent = 'Serveur injoignable';
+            }
+        }
+
+        function doLogout() {
+            authToken = null;
+            currentUserInfo = null;
+            document.getElementById('loginOverlay').classList.remove('hidden');
+            document.getElementById('loginPassword').value = '';
+            document.getElementById('loginError').textContent = '';
+            document.getElementById('currentUserName').textContent = '';
+        }
+
+        // Soumettre le login avec Entree
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !document.getElementById('loginOverlay').classList.contains('hidden')) {
+                doLogin();
+            }
+        });
 
         // Detecter le primary au chargement
         async function detectPrimary() {
@@ -258,20 +339,30 @@
         });
 
         async function api(path, opts = {}) {
+            if (!authToken) { doLogout(); throw new Error('Non authentifie'); }
             // Les ecritures (POST/PUT/DELETE) vont au primary
             const isWrite = opts.method && opts.method !== 'GET';
             const base = isWrite ? PRIMARY_API : API;
+            const authHeaders = {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${authToken}`,
+                ...opts.headers,
+            };
             const res = await fetch(base + path, {
-                headers: { 'Content-Type': 'application/json', ...opts.headers },
                 ...opts,
+                headers: authHeaders,
             });
+            if (res.status === 401 || res.status === 403) {
+                doLogout();
+                throw new Error('Session expiree');
+            }
             if (!res.ok) {
-                // Si c'est une erreur read-only, re-detecter le primary et retenter
+                // Si c'est une erreur write, re-detecter le primary et retenter
                 if (res.status === 500 && isWrite) {
                     await detectPrimary();
                     const retry = await fetch(PRIMARY_API + path, {
-                        headers: { 'Content-Type': 'application/json', ...opts.headers },
                         ...opts,
+                        headers: authHeaders,
                     });
                     if (retry.ok) return retry.json();
                 }
@@ -731,6 +822,7 @@
         }
 
         function loadAll() {
+            if (!authToken) return;  // Pas connecte
             loadStatus();
             loadUsers();
             loadAlarms();
@@ -740,8 +832,8 @@
             loadAlertEmail();
         }
 
-        loadAll();
-        setInterval(loadAll, 5000);
+        // Auto-refresh toutes les 5s (seulement si connecte)
+        setInterval(() => { if (authToken) loadAll(); }, 5000);
     </script>
 </body>
 </html>

@@ -44,12 +44,53 @@ def reset_state(primary_url):
 
 @pytest.fixture
 def dashboard(page: Page, primary_url):
-    """Ouvre la page et attend le chargement complet."""
+    """Ouvre la page, se connecte en admin, et attend le chargement complet."""
     page.goto(primary_url)
     page.wait_for_load_state("networkidle")
+    # Passer l'ecran de login
+    page.locator("#loginName").fill("admin")
+    page.locator("#loginPassword").fill("admin123")
+    page.locator("button:has-text('Se connecter')").click()
     # Attendre que les donnees soient chargees (statsGrid rempli)
     page.wait_for_selector("#statsGrid .stat", timeout=10000)
     return page
+
+
+# ---------------------------------------------------------------------------
+# Login front
+# ---------------------------------------------------------------------------
+
+class TestFrontendLogin:
+
+    def test_login_screen_visible_on_load(self, page: Page, primary_url):
+        """L'ecran de login est visible au chargement."""
+        page.goto(primary_url)
+        page.wait_for_load_state("networkidle")
+        expect(page.locator("#loginOverlay")).to_be_visible()
+
+    def test_login_success_hides_overlay(self, page: Page, primary_url):
+        """Un login valide masque l'overlay et affiche le dashboard."""
+        page.goto(primary_url)
+        page.wait_for_load_state("networkidle")
+        page.locator("#loginName").fill("admin")
+        page.locator("#loginPassword").fill("admin123")
+        page.locator("button:has-text('Se connecter')").click()
+        expect(page.locator("#loginOverlay")).to_be_hidden(timeout=5000)
+        expect(page.locator("#statsGrid")).to_be_visible()
+
+    def test_login_failure_shows_error(self, page: Page, primary_url):
+        """Un login invalide affiche un message d'erreur."""
+        page.goto(primary_url)
+        page.wait_for_load_state("networkidle")
+        page.locator("#loginName").fill("admin")
+        page.locator("#loginPassword").fill("wrongpassword")
+        page.locator("button:has-text('Se connecter')").click()
+        expect(page.locator("#loginError")).not_to_be_empty(timeout=5000)
+
+    def test_logout_shows_login_again(self, dashboard: Page):
+        """Le bouton deconnexion reaffiche l'overlay de login."""
+        dashboard.locator("button.btn-logout").click()
+        expect(dashboard.locator("#loginOverlay")).to_be_visible(timeout=5000)
 
 
 # ---------------------------------------------------------------------------
