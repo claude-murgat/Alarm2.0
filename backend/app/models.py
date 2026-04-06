@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, ForeignKey
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from .database import Base
@@ -38,6 +38,23 @@ class Alarm(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     assigned_user = relationship("User", back_populates="alarms", foreign_keys=[assigned_user_id])
+    notifications = relationship("AlarmNotification", back_populates="alarm",
+                                 cascade="all, delete-orphan", order_by="AlarmNotification.notified_at")
+
+
+class AlarmNotification(Base):
+    """Table de liaison : quels utilisateurs ont été notifiés pour quelle alarme."""
+    __tablename__ = "alarm_notifications"
+    __table_args__ = (
+        UniqueConstraint("alarm_id", "user_id", name="uq_alarm_user"),
+    )
+    id = Column(Integer, primary_key=True, index=True)
+    alarm_id = Column(Integer, ForeignKey("alarms.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    notified_at = Column(DateTime, default=datetime.utcnow)
+
+    alarm = relationship("Alarm", back_populates="notifications")
+    user = relationship("User")
 
 
 class EscalationConfig(Base):

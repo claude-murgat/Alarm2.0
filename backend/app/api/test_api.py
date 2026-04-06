@@ -1,16 +1,24 @@
 import os
 import urllib.parse
 import urllib.request
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 from datetime import timedelta, datetime
 from ..clock import now as clock_now
 from .. import clock as clock_module
 from ..database import get_db
-from ..models import Alarm, User, EscalationConfig, SmsQueue
+from ..models import Alarm, AlarmNotification, User, EscalationConfig, SmsQueue
 from ..events import log_event
 
+ENABLE_TEST_ENDPOINTS = os.getenv("ENABLE_TEST_ENDPOINTS", "false").lower() in ("true", "1", "yes")
+
 router = APIRouter(prefix="/api/test", tags=["test"])
+
+
+def _require_test_endpoints():
+    """Guard: raise 404 if test endpoints are disabled."""
+    if not ENABLE_TEST_ENDPOINTS:
+        raise HTTPException(status_code=404, detail="Test endpoints are disabled")
 
 # URLs des noeuds pairs pour broadcaster les operations de test
 # (horloge, simulate-connection-loss, reset). Comma-separated.
@@ -44,6 +52,7 @@ def _broadcast(path: str, params: dict | None = None):
 @router.post("/send-alarm")
 def send_test_alarm(db: Session = Depends(get_db)):
     """Send a test alarm. Resolves any existing active alarm first (single alarm mode)."""
+    _require_test_endpoints()
     existing = db.query(Alarm).filter(Alarm.status.in_(["active", "escalated"])).first()
     if existing:
         existing.status = "resolved"
@@ -61,9 +70,11 @@ def send_test_alarm(db: Session = Depends(get_db)):
         message="This is a test alarm triggered from the admin panel.",
         severity="critical",
         assigned_user_id=user_id,
-        notified_user_ids=str(user_id) if user_id else "",
     )
     db.add(alarm)
+    db.flush()
+    if user_id:
+        db.add(AlarmNotification(alarm_id=alarm.id, user_id=user_id))
     db.commit()
     db.refresh(alarm)
     log_event("alarm_created", alarm_id=alarm.id, assigned_to=user_id, source="test")
@@ -74,6 +85,7 @@ def send_test_alarm(db: Session = Depends(get_db)):
 def simulate_watchdog_failure(db: Session = Depends(get_db),
                               peer: bool = Query(True)):
     """Simulate watchdog failure by setting all user heartbeats to old."""
+    _require_test_endpoints()
     users = db.query(User).all()
     old_time = clock_now() - timedelta(minutes=5)
     for user in users:
@@ -91,6 +103,7 @@ def simulate_connection_loss(db: Session = Depends(get_db),
     """Simulate connection loss by marking all users offline.
     Stocke aussi un timestamp Unix pour bloquer les heartbeats des tokens anciens
     (ex: app Android en arrière-plan) — seuls les fresh logins peuvent rétablir le heartbeat."""
+    _require_test_endpoints()
     import time as _time
     from . import devices as devices_module
     users = db.query(User).all()
@@ -108,6 +121,8 @@ def simulate_connection_loss(db: Session = Depends(get_db),
 def reset_all(db: Session = Depends(get_db),
               peer: bool = Query(True)):
     """Reset all alarms, user states, and restore default escalation chain."""
+    _require_test_endpoints()
+    db.query(AlarmNotification).delete()
     db.query(Alarm).delete()
 
     # Reset heartbeat pause et connection loss simulation
@@ -144,6 +159,7 @@ def reset_all(db: Session = Depends(get_db),
 def toggle_heartbeat_pause():
     """Toggle the heartbeat pause flag. When paused, heartbeat endpoint returns success
     but does NOT update the last_heartbeat timestamp."""
+    _require_test_endpoints()
     from . import devices as devices_module
     devices_module.heartbeat_paused = not devices_module.heartbeat_paused
     return {"status": "ok", "paused": devices_module.heartbeat_paused}
@@ -154,6 +170,7 @@ def trigger_escalation(db: Session = Depends(get_db)):
     """Exécute un cycle d'escalade forcé (pour tests déterministes).
     Escalade toutes les alarmes actives vers l'utilisateur suivant dans la chaîne,
     indépendamment du délai configuré. Saute les utilisateurs offline."""
+    _require_test_endpoints()
     from ..models import EscalationConfig
 
     active_alarms = (
@@ -188,18 +205,25 @@ def trigger_escalation(db: Session = Depends(get_db)):
         if next_user and next_user.user_id != alarm.assigned_user_id:
             prev_user = alarm.assigned_user_id
             alarm.assigned_user_id = next_user.user_id
-            # Ajouter le nouvel utilisateur à la liste cumulative des notifiés
-            raw = alarm.notified_user_ids or ""
-            current_ids = [int(x) for x in raw.split(",") if x.strip()]
-            if next_user.user_id not in current_ids:
-                current_ids.append(next_user.user_id)
-            alarm.notified_user_ids = ",".join(str(x) for x in current_ids)
+            # Ajouter le nouvel utilisateur à la table des notifiés
+            existing_notif = (
+                db.query(AlarmNotification)
+                .filter(AlarmNotification.alarm_id == alarm.id,
+                        AlarmNotification.user_id == next_user.user_id)
+                .first()
+            )
+            if not existing_notif:
+                db.add(AlarmNotification(alarm_id=alarm.id, user_id=next_user.user_id))
             alarm.status = "escalated"
             alarm.escalation_count += 1
             escalated_count += 1
+            notified_ids = [
+                n[0] for n in db.query(AlarmNotification.user_id)
+                .filter(AlarmNotification.alarm_id == alarm.id).all()
+            ]
             log_event("alarm_escalated", alarm_id=alarm.id,
                       from_user=prev_user, to_user=next_user.user_id,
-                      notified_user_ids=current_ids)
+                      notified_user_ids=notified_ids)
 
     db.commit()
     return {"status": "ok", "escalated": escalated_count}
@@ -235,6 +259,7 @@ def _find_next_online_user(db, escalation_chain, current_position, current_user_
 @router.get("/last-email-sent")
 def get_last_email_sent():
     """Return the last email sent by the system (for testing)."""
+    _require_test_endpoints()
     from ..email_service import get_last_email
     return get_last_email()
 
@@ -242,6 +267,7 @@ def get_last_email_sent():
 @router.get("/status")
 def get_status(db: Session = Depends(get_db)):
     """Get overall system status."""
+    _require_test_endpoints()
     total_users = db.query(User).count()
     online_users = db.query(User).filter(User.is_online == True).count()
     active_alarms = db.query(Alarm).filter(Alarm.status.in_(["active", "escalated"])).count()
@@ -261,6 +287,7 @@ def advance_clock(seconds: float = 0, minutes: float = 0,
     """Avance l'horloge du serveur (pour tests d'escalade avec timing réel).
     Broadcasté au nœud pair pour que la boucle d'escalade — quel que soit le primaire
     courant — voie le même décalage horaire."""
+    _require_test_endpoints()
     total = seconds + minutes * 60
     clock_module.advance(total)
     if peer:
@@ -275,6 +302,7 @@ def advance_clock(seconds: float = 0, minutes: float = 0,
 @router.post("/reset-clock")
 def reset_clock(peer: bool = Query(True)):
     """Remet l'horloge à l'heure réelle."""
+    _require_test_endpoints()
     clock_module.reset()
     if peer:
         _broadcast("/api/test/reset-clock")
@@ -284,6 +312,7 @@ def reset_clock(peer: bool = Query(True)):
 @router.post("/reset-sms-queue")
 def reset_sms_queue(db: Session = Depends(get_db)):
     """Vide la table sms_queue (pour les tests)."""
+    _require_test_endpoints()
     db.query(SmsQueue).delete()
     db.commit()
     return {"status": "ok"}
@@ -292,6 +321,7 @@ def reset_sms_queue(db: Session = Depends(get_db)):
 @router.post("/insert-sms")
 def insert_sms(payload: dict, db: Session = Depends(get_db)):
     """Insère un SMS directement dans sms_queue (pour les tests)."""
+    _require_test_endpoints()
     row = SmsQueue(
         to_number=payload["to_number"],
         body=payload["body"],
@@ -305,6 +335,7 @@ def insert_sms(payload: dict, db: Session = Depends(get_db)):
 @router.post("/simulate-loop-stall")
 def simulate_loop_stall():
     """Simule une boucle d'escalade bloquée en mettant last_tick_at à une date passée."""
+    _require_test_endpoints()
     from .. import escalation as esc_module
     esc_module.last_tick_at = datetime(2020, 1, 1)
     return {"status": "ok", "last_tick_at": "2020-01-01T00:00:00"}

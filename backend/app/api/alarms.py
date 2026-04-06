@@ -4,21 +4,23 @@ from typing import List
 from datetime import timedelta
 from ..clock import now as clock_now
 from ..database import get_db
-from ..models import Alarm, User, EscalationConfig
+from ..models import Alarm, AlarmNotification, User, EscalationConfig
 from ..schemas import AlarmCreate, AlarmResponse
-from ..auth import get_current_user
+from ..auth import get_current_user, get_current_admin
 from ..events import log_event
 
 router = APIRouter(prefix="/api/alarms", tags=["alarms"])
 
 
-def _add_notified_user(alarm, user_id: int):
-    """Ajoute un user_id à la liste notified_user_ids s'il n'y est pas déjà."""
-    raw = alarm.notified_user_ids or ""
-    current_ids = [int(x) for x in raw.split(",") if x.strip()]
-    if user_id not in current_ids:
-        current_ids.append(user_id)
-    alarm.notified_user_ids = ",".join(str(x) for x in current_ids)
+def _add_notified_user(db, alarm, user_id: int):
+    """Ajoute un user_id à la table alarm_notifications s'il n'y est pas déjà."""
+    existing = (
+        db.query(AlarmNotification)
+        .filter(AlarmNotification.alarm_id == alarm.id, AlarmNotification.user_id == user_id)
+        .first()
+    )
+    if not existing:
+        db.add(AlarmNotification(alarm_id=alarm.id, user_id=user_id))
 
 
 def _alarm_response(alarm, db):
@@ -27,7 +29,11 @@ def _alarm_response(alarm, db):
 
 
 @router.post("/send", response_model=AlarmResponse)
-def send_alarm(alarm_data: AlarmCreate, db: Session = Depends(get_db)):
+def send_alarm(
+    alarm_data: AlarmCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Send a new alarm. Only one active alarm at a time."""
     existing = db.query(Alarm).filter(Alarm.status.in_(["active", "escalated"])).first()
     if existing:
@@ -71,11 +77,13 @@ def send_alarm(alarm_data: AlarmCreate, db: Session = Depends(get_db)):
         severity=alarm_data.severity,
         assigned_user_id=assigned_user_id,
     )
-    # Ajouter le premier utilisateur assigné à la liste des notifiés
-    if assigned_user_id:
-        _add_notified_user(alarm, assigned_user_id)
-
     db.add(alarm)
+    db.flush()  # Obtenir l'ID avant d'ajouter la notification
+
+    # Ajouter le premier utilisateur assigné à la table des notifiés
+    if assigned_user_id:
+        _add_notified_user(db, alarm, assigned_user_id)
+
     db.commit()
     db.refresh(alarm)
     log_event("alarm_created", alarm_id=alarm.id, assigned_to=alarm.assigned_user_id)
@@ -83,13 +91,19 @@ def send_alarm(alarm_data: AlarmCreate, db: Session = Depends(get_db)):
 
 
 @router.get("/", response_model=List[AlarmResponse])
-def list_alarms(db: Session = Depends(get_db)):
+def list_alarms(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     alarms = db.query(Alarm).order_by(Alarm.created_at.desc()).all()
     return [_alarm_response(a, db) for a in alarms]
 
 
 @router.get("/active", response_model=List[AlarmResponse])
-def active_alarms(db: Session = Depends(get_db)):
+def active_alarms(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     alarms = (
         db.query(Alarm)
         .filter(Alarm.status.in_(["active", "escalated"]))
@@ -105,16 +119,14 @@ def my_alarms(current_user: User = Depends(get_current_user), db: Session = Depe
     Includes acknowledged alarms so clients can display ack status and countdown."""
     alarms = (
         db.query(Alarm)
-        .filter(Alarm.status.in_(["active", "escalated", "acknowledged"]))
+        .join(AlarmNotification, AlarmNotification.alarm_id == Alarm.id)
+        .filter(
+            Alarm.status.in_(["active", "escalated", "acknowledged"]),
+            AlarmNotification.user_id == current_user.id,
+        )
         .all()
     )
-    result = []
-    for a in alarms:
-        raw = a.notified_user_ids or ""
-        notified = [int(x) for x in raw.split(",") if x.strip()]
-        if current_user.id in notified:
-            result.append(_alarm_response(a, db))
-    return result
+    return [_alarm_response(a, db) for a in alarms]
 
 
 @router.post("/{alarm_id}/ack", response_model=AlarmResponse)
@@ -140,7 +152,11 @@ def acknowledge_alarm(
 
 
 @router.post("/{alarm_id}/resolve", response_model=AlarmResponse)
-def resolve_alarm(alarm_id: int, db: Session = Depends(get_db)):
+def resolve_alarm(
+    alarm_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     alarm = db.query(Alarm).filter(Alarm.id == alarm_id).first()
     if not alarm:
         raise HTTPException(status_code=404, detail="Alarm not found")
@@ -153,10 +169,14 @@ def resolve_alarm(alarm_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/reset")
-def reset_alarms(db: Session = Depends(get_db)):
+def reset_alarms(
+    current_user: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
     """Reset all alarms - for testing."""
     from ..models import SystemConfig
     from ..email_service import reset_last_email
+    db.query(AlarmNotification).delete()
     db.query(Alarm).delete()
     alert_config = db.query(SystemConfig).filter(SystemConfig.key == "alert_email").first()
     if alert_config:

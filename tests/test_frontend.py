@@ -198,7 +198,7 @@ class TestEscalationDelay:
 
         # Intercepter la requete
         with dashboard.expect_request("**/api/config/escalation-delay") as req_info:
-            dashboard.locator("button:text('Sauvegarder le delai')").click()
+            dashboard.locator("#escalationDelay + button").click()
 
         request = req_info.value
         body = request.post_data_json
@@ -230,8 +230,8 @@ class TestAlarms:
         dashboard.locator(".btn-danger:text-is('Envoyer')").click()
         dashboard.wait_for_timeout(2000)
 
-        # L'alarme doit apparaitre dans la table
-        expect(dashboard.locator("#allAlarmsTable")).to_contain_text("Test Playwright")
+        # L'alarme doit apparaitre dans la table (attendre un cycle autorefresh 5s + marge)
+        expect(dashboard.locator("#allAlarmsTable")).to_contain_text("Test Playwright", timeout=10000)
 
     def test_resolve_alarm(self, dashboard: Page, primary_url):
         """Resoudre une alarme la retire des actives."""

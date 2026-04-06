@@ -4,7 +4,7 @@ from datetime import timedelta
 from typing import Optional
 from sqlalchemy.orm import Session
 from .database import SessionLocal
-from .models import Alarm, EscalationConfig, User, SystemConfig, SmsQueue
+from .models import Alarm, AlarmNotification, EscalationConfig, User, SystemConfig, SmsQueue
 from .clock import now as clock_now
 from .email_service import send_alert_email
 from .events import log_event
@@ -17,13 +17,25 @@ ONCALL_OFFLINE_DELAY_MINUTES = 15.0
 last_tick_at: Optional[object] = None
 
 
-def _add_notified_user(alarm, user_id: int):
-    """Ajoute un user_id à notified_user_ids."""
-    raw = alarm.notified_user_ids or ""
-    current_ids = [int(x) for x in raw.split(",") if x.strip()]
-    if user_id not in current_ids:
-        current_ids.append(user_id)
-    alarm.notified_user_ids = ",".join(str(x) for x in current_ids)
+def _add_notified_user(db: Session, alarm, user_id: int):
+    """Ajoute un user_id à la table alarm_notifications s'il n'y est pas déjà."""
+    existing = (
+        db.query(AlarmNotification)
+        .filter(AlarmNotification.alarm_id == alarm.id, AlarmNotification.user_id == user_id)
+        .first()
+    )
+    if not existing:
+        db.add(AlarmNotification(alarm_id=alarm.id, user_id=user_id))
+
+
+def _get_notified_user_ids(db: Session, alarm_id: int) -> list[int]:
+    """Retourne la liste des user_ids notifiés pour une alarme."""
+    notifs = (
+        db.query(AlarmNotification.user_id)
+        .filter(AlarmNotification.alarm_id == alarm_id)
+        .all()
+    )
+    return [n[0] for n in notifs]
 
 
 def _enqueue_sms_for_user(db: Session, user: User, alarm: Alarm):
@@ -131,20 +143,18 @@ async def escalation_loop():
                                 f"to user {next_user.user_id} (position {next_user.position})"
                             )
                             alarm.assigned_user_id = next_user.user_id
-                            # Ajouter le nouvel utilisateur à la liste cumulative des notifiés
-                            _add_notified_user(alarm, next_user.user_id)
+                            # Ajouter le nouvel utilisateur à la table des notifiés
+                            _add_notified_user(db, alarm, next_user.user_id)
                             alarm.status = "escalated"
                             alarm.escalation_count += 1
-                            notified = [int(x) for x in (alarm.notified_user_ids or "").split(",") if x.strip()]
+                            notified = _get_notified_user_ids(db, alarm.id)
                             log_event("alarm_escalated", alarm_id=alarm.id,
                                       from_user=prev_user, to_user=next_user.user_id,
                                       notified_user_ids=notified)
 
                         # Toujours notifier via SMS tous les utilisateurs déjà dans la chaîne
                         # quand le seuil est atteint (le guard anti-doublon évite les doublons)
-                        notified_ids = [
-                            int(x) for x in (alarm.notified_user_ids or "").split(",") if x.strip()
-                        ]
+                        notified_ids = _get_notified_user_ids(db, alarm.id)
                         for uid in notified_ids:
                             u = db.query(User).filter(User.id == uid).first()
                             if u:
@@ -251,8 +261,9 @@ def _check_oncall_heartbeat(db: Session, now, escalation_chain):
         assigned_user_id=assigned_user_id,
         is_oncall_alarm=True,
     )
-    _add_notified_user(alarm, assigned_user_id)
     db.add(alarm)
+    db.flush()  # Obtenir l'ID avant d'ajouter la notification
+    _add_notified_user(db, alarm, assigned_user_id)
     db.commit()
     logger.warning(
         f"On-call alarm created: {oncall_user.name} offline for {offline_duration:.0f}min, "

@@ -114,9 +114,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Critical Alarm System", version="1.0.0", lifespan=lifespan)
 
+# CORS : origines autorisées depuis la variable d'env ALLOWED_ORIGINS (comma-separated).
+# En dev, "*" est toléré mais déconseillé en production.
+_raw_origins = os.getenv("ALLOWED_ORIGINS", "").strip()
+_allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()] if _raw_origins else []
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -143,6 +148,8 @@ async def root():
 async def health():
     from .escalation import last_tick_at
     from .clock import now as clock_now
+    from .auth import SECRET_KEY
+    from .api.test_api import ENABLE_TEST_ENDPOINTS
 
     # Vérifier que la DB est accessible
     db_ok = False
@@ -163,12 +170,22 @@ async def health():
     # Le rôle dépend du lock advisory — peut changer dynamiquement
     role = "primary" if is_leader.is_set() else "secondary"
 
+    # Flags de sécurité
+    secret_key_default = (SECRET_KEY == "alarm-secret-key-change-in-prod")
+
+    base = {
+        "status": "ok",
+        "db": db_ok,
+        "escalation_loop": loop_ok,
+        "role": role,
+        "test_endpoints_enabled": ENABLE_TEST_ENDPOINTS,
+        "secret_key_default": secret_key_default,
+    }
+
     if not db_ok or not loop_ok:
-        return JSONResponse(
-            status_code=503,
-            content={"status": "degraded", "db": db_ok, "escalation_loop": loop_ok, "role": role}
-        )
-    return {"status": "ok", "db": True, "escalation_loop": True, "role": role}
+        base["status"] = "degraded"
+        return JSONResponse(status_code=503, content=base)
+    return base
 
 
 @app.get("/api/cluster")

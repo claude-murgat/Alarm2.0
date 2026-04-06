@@ -2,9 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
 from ..database import get_db
-from ..models import EscalationConfig, SystemConfig
+from ..models import EscalationConfig, SystemConfig, User
 from ..schemas import EscalationConfigCreate, EscalationConfigResponse, SystemConfigUpdate
-from ..models import User
+from ..auth import get_current_user, get_current_admin
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 
@@ -15,7 +15,11 @@ def get_escalation_config(db: Session = Depends(get_db)):
 
 
 @router.post("/escalation", response_model=EscalationConfigResponse)
-def add_escalation_config(config: EscalationConfigCreate, db: Session = Depends(get_db)):
+def add_escalation_config(
+    config: EscalationConfigCreate,
+    current_user: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
     existing = db.query(EscalationConfig).filter(EscalationConfig.position == config.position).first()
     if existing:
         existing.user_id = config.user_id
@@ -36,7 +40,11 @@ def add_escalation_config(config: EscalationConfigCreate, db: Session = Depends(
 
 
 @router.delete("/escalation/{config_id}")
-def delete_escalation_config(config_id: int, db: Session = Depends(get_db)):
+def delete_escalation_config(
+    config_id: int,
+    current_user: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
     ec = db.query(EscalationConfig).filter(EscalationConfig.id == config_id).first()
     if not ec:
         raise HTTPException(status_code=404, detail="Config not found")
@@ -54,7 +62,11 @@ def get_escalation_delay(db: Session = Depends(get_db)):
 
 
 @router.post("/escalation-delay")
-def set_escalation_delay(payload: dict, db: Session = Depends(get_db)):
+def set_escalation_delay(
+    payload: dict,
+    current_user: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
     """Met a jour le delai global d'escalade (1-60 minutes)."""
     minutes = payload.get("minutes")
     if minutes is None or not isinstance(minutes, (int, float)):
@@ -72,7 +84,11 @@ def set_escalation_delay(payload: dict, db: Session = Depends(get_db)):
 
 
 @router.post("/escalation/bulk")
-def save_escalation_chain_bulk(payload: dict, db: Session = Depends(get_db)):
+def save_escalation_chain_bulk(
+    payload: dict,
+    current_user: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
     """Remplace toute la chaine d'escalade. Body: {"user_ids": [2, 3, 1]}"""
     user_ids = payload.get("user_ids", [])
     if not user_ids:
@@ -103,7 +119,11 @@ def get_system_config(db: Session = Depends(get_db)):
 
 
 @router.post("/system")
-def set_system_config(config: SystemConfigUpdate, db: Session = Depends(get_db)):
+def set_system_config(
+    config: SystemConfigUpdate,
+    current_user: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
     existing = db.query(SystemConfig).filter(SystemConfig.key == config.key).first()
     if existing:
         existing.value = config.value

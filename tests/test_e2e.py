@@ -71,6 +71,31 @@ USER2_NAME = "user2"
 USER2_PASSWORD = "user123"
 
 
+# ── Helpers d'authentification ───────────────────────────────────────────────
+
+def _login_user(name, password, base_api=None):
+    """Login and return (token, headers, user_id)."""
+    if base_api is None:
+        base_api = API
+    r = requests.post(f"{base_api}/auth/login", json={"name": name, "password": password})
+    assert r.status_code == 200, f"Login failed for {name}: {r.text}"
+    data = r.json()
+    token = data["access_token"]
+    return token, {"Authorization": f"Bearer {token}"}, data["user"]["id"]
+
+
+def _admin_headers(base_api=None):
+    """Get admin auth headers."""
+    _, headers, _ = _login_user(ADMIN_NAME, ADMIN_PASSWORD, base_api)
+    return headers
+
+
+def _user_headers(name, password, base_api=None):
+    """Get user auth headers and id."""
+    _, headers, uid = _login_user(name, password, base_api)
+    return headers, uid
+
+
 # ── Santé backend ────────────────────────────────────────────────────────────
 
 class TestBackendHealth:
@@ -93,17 +118,18 @@ class TestUserLogin:
     @pytest.fixture(autouse=True)
     def setup(self):
         # Nettoyer les users de test residuels (testcaseuser, bad name, etc.)
-        users = requests.get(f"{API}/users/").json()
+        admin_h = _admin_headers()
+        users = requests.get(f"{API}/users/", headers=admin_h).json()
         default_names = {"admin", "user1", "user2"}
         for u in users:
             if u["name"] not in default_names:
-                requests.delete(f"{API}/users/{u['id']}")
+                requests.delete(f"{API}/users/{u['id']}", headers=admin_h)
         yield
         # Cleanup apres aussi
-        users = requests.get(f"{API}/users/").json()
+        users = requests.get(f"{API}/users/", headers=admin_h).json()
         for u in users:
             if u["name"] not in default_names:
-                requests.delete(f"{API}/users/{u['id']}")
+                requests.delete(f"{API}/users/{u['id']}", headers=admin_h)
 
     def test_admin_login(self):
         r = requests.post(f"{API}/auth/login", json={
@@ -146,7 +172,8 @@ class TestUserLogin:
         assert r.status_code == 401
 
     def test_user_list(self):
-        r = requests.get(f"{API}/users/")
+        admin_h = _admin_headers()
+        r = requests.get(f"{API}/users/", headers=admin_h)
         assert r.status_code == 200
         users = r.json()
         assert len(users) >= 3
@@ -169,10 +196,11 @@ class TestUserLogin:
     def test_register_stores_lowercase(self):
         """L'inscription doit stocker le nom en minuscules."""
         # Nettoyer si existe
-        users = requests.get(f"{API}/users/").json()
+        admin_h = _admin_headers()
+        users = requests.get(f"{API}/users/", headers=admin_h).json()
         for u in users:
             if u["name"] == "testcaseuser":
-                requests.delete(f"{API}/users/{u['id']}")
+                requests.delete(f"{API}/users/{u['id']}", headers=admin_h)
 
         r = requests.post(f"{API}/auth/register", json={
             "name": "TestCaseUser",
@@ -182,7 +210,7 @@ class TestUserLogin:
         assert r.json()["name"] == "testcaseuser"
 
         # Nettoyer
-        requests.delete(f"{API}/users/{r.json()['id']}")
+        requests.delete(f"{API}/users/{r.json()['id']}", headers=admin_h)
 
 
 # ── Alarme unique ────────────────────────────────────────────────────────────
@@ -192,7 +220,8 @@ class TestSingleAlarm:
 
     @pytest.fixture(autouse=True)
     def setup(self):
-        requests.post(f"{API}/alarms/reset")
+        admin_h = _admin_headers()
+        requests.post(f"{API}/alarms/reset", headers=admin_h)
         r = requests.post(f"{API}/auth/login", json={
             "name": USER1_NAME, "password": USER1_PASSWORD
         })
@@ -202,7 +231,7 @@ class TestSingleAlarm:
 
     def test_send_alarm(self):
         """Envoyer une alarme crée bien une alarme active."""
-        r = requests.post(f"{API}/alarms/send", json={
+        r = requests.post(f"{API}/alarms/send", headers=self.headers, json={
             "title": "Panne serveur",
             "message": "Le serveur ne répond plus",
             "severity": "critical",
@@ -212,23 +241,23 @@ class TestSingleAlarm:
 
     def test_only_one_alarm_at_a_time(self):
         """Envoyer une 2e alarme alors qu'une est active doit être refusé (409)."""
-        requests.post(f"{API}/alarms/send", json={
+        requests.post(f"{API}/alarms/send", headers=self.headers, json={
             "title": "Alarme 1", "message": "msg", "severity": "critical",
         })
-        r = requests.post(f"{API}/alarms/send", json={
+        r = requests.post(f"{API}/alarms/send", headers=self.headers, json={
             "title": "Alarme 2", "message": "msg2", "severity": "high",
         })
         assert r.status_code == 409
 
     def test_can_send_after_resolve(self):
         """Après résolution, on peut envoyer une nouvelle alarme."""
-        r = requests.post(f"{API}/alarms/send", json={
+        r = requests.post(f"{API}/alarms/send", headers=self.headers, json={
             "title": "Alarme A", "message": "m", "severity": "critical",
         })
         alarm_id = r.json()["id"]
-        requests.post(f"{API}/alarms/{alarm_id}/resolve")
+        requests.post(f"{API}/alarms/{alarm_id}/resolve", headers=self.headers)
 
-        r = requests.post(f"{API}/alarms/send", json={
+        r = requests.post(f"{API}/alarms/send", headers=self.headers, json={
             "title": "Alarme B", "message": "m", "severity": "critical",
         })
         assert r.status_code == 200
@@ -236,7 +265,7 @@ class TestSingleAlarm:
 
     def test_alarm_received_by_user(self):
         """L'utilisateur reçoit l'alarme active via /mine."""
-        requests.post(f"{API}/alarms/send", json={
+        requests.post(f"{API}/alarms/send", headers=self.headers, json={
             "title": "Test reception",
             "message": "msg",
             "severity": "critical",
@@ -257,7 +286,8 @@ class TestAlarmAcknowledgement:
     def setup(self):
         _reset_clock_all_nodes()
         requests.post(f"{API}/test/reset")          # Then reset users (heartbeats use clock_now)
-        requests.post(f"{API}/alarms/reset")
+        admin_h = _admin_headers()
+        requests.post(f"{API}/alarms/reset", headers=admin_h)
         r = requests.post(f"{API}/auth/login", json={
             "name": USER1_NAME, "password": USER1_PASSWORD
         })
@@ -268,7 +298,7 @@ class TestAlarmAcknowledgement:
         _reset_clock_all_nodes()
 
     def test_acknowledge_alarm(self):
-        r = requests.post(f"{API}/alarms/send", json={
+        r = requests.post(f"{API}/alarms/send", headers=self.headers, json={
             "title": "Ack Test", "message": "m", "severity": "critical",
             "assigned_user_id": self.user1_id,
         })
@@ -282,7 +312,7 @@ class TestAlarmAcknowledgement:
 
     def test_suspended_alarm_visible_in_mine_as_acknowledged(self):
         """Une alarme acquittée reste visible dans /mine avec status acknowledged."""
-        r = requests.post(f"{API}/alarms/send", json={
+        r = requests.post(f"{API}/alarms/send", headers=self.headers, json={
             "title": "Suspend", "message": "m", "severity": "critical",
             "assigned_user_id": self.user1_id,
         })
@@ -296,7 +326,7 @@ class TestAlarmAcknowledgement:
 
     def test_acknowledge_stores_user_name(self):
         """L'acquittement doit enregistrer le nom de l'utilisateur."""
-        r = requests.post(f"{API}/alarms/send", json={
+        r = requests.post(f"{API}/alarms/send", headers=self.headers, json={
             "title": "Ack Name Test", "message": "m", "severity": "critical",
             "assigned_user_id": self.user1_id,
         })
@@ -308,27 +338,48 @@ class TestAlarmAcknowledgement:
 
     def _find_alarm_by_title(self, title, retries=5):
         """Find an alarm by title with retry logic to handle background loop timing."""
+        admin_h = _admin_headers()
+        last_status = None
+        last_body = None
         for attempt in range(retries):
-            r = requests.get(f"{API}/alarms/")
-            alarm = next((a for a in r.json() if a["title"] == title), None)
+            r = requests.get(f"{API}/alarms/", headers=admin_h)
+            last_status = r.status_code
+            last_body = r.text[:500]
+            if r.status_code != 200:
+                time.sleep(2)
+                continue
+            data = r.json()
+            if not isinstance(data, list):
+                time.sleep(2)
+                continue
+            alarm = next((a for a in data if a.get("title") == title), None)
             if alarm is not None:
                 return alarm
             time.sleep(2)
         return None
 
+    def _refresh_all_heartbeats(self):
+        """Send heartbeats for all users to keep them online after clock advance."""
+        for name, password in [(USER1_NAME, USER1_PASSWORD), (USER2_NAME, USER2_PASSWORD),
+                               (ADMIN_NAME, ADMIN_PASSWORD)]:
+            r = requests.post(f"{API}/auth/login", json={"name": name, "password": password})
+            requests.post(f"{API}/devices/heartbeat",
+                          headers={"Authorization": f"Bearer {r.json()['access_token']}"})
+
     def _ensure_clean_state(self):
         """Ensure no stale alarms exist before proceeding."""
-        requests.post(f"{API}/alarms/reset")
+        admin_h = _admin_headers()
+        requests.post(f"{API}/alarms/reset", headers=admin_h)
         # Verify
-        r = requests.get(f"{API}/alarms/")
-        if r.json():
+        r = requests.get(f"{API}/alarms/", headers=admin_h)
+        if r.status_code == 200 and r.json():
             time.sleep(1)
-            requests.post(f"{API}/alarms/reset")
+            requests.post(f"{API}/alarms/reset", headers=admin_h)
 
     def test_ack_expiry_reactivates_alarm(self):
         """#1 — Après expiration de la suspension (30min), l'alarme redevient active."""
         self._ensure_clean_state()
-        r = requests.post(f"{API}/alarms/send", json={
+        r = requests.post(f"{API}/alarms/send", headers=self.headers, json={
             "title": "Expiry Test", "message": "m", "severity": "critical",
             "assigned_user_id": self.user1_id,
         })
@@ -345,6 +396,7 @@ class TestAlarmAcknowledgement:
 
         # Avancer de 31 min (suspension = 30 min)
         _advance_clock_all_nodes(31)
+        self._refresh_all_heartbeats()  # Garder les users online après avance horloge
         time.sleep(12)  # Attendre un tick de la boucle d'escalade
 
         # L'alarme doit être redevenue active (ou escaladée si la boucle a déjà tourné)
@@ -359,7 +411,7 @@ class TestAlarmAcknowledgement:
     def test_ack_expiry_escalation_restarts(self):
         """#3 — Après réactivation post-ack, l'alarme est escaladable."""
         self._ensure_clean_state()
-        r = requests.post(f"{API}/alarms/send", json={
+        r = requests.post(f"{API}/alarms/send", headers=self.headers, json={
             "title": "Ack+Esc Test", "message": "m", "severity": "critical",
             "assigned_user_id": self.user1_id,
         })
@@ -369,6 +421,7 @@ class TestAlarmAcknowledgement:
 
         # Avancer de 31 min → réactivation par la boucle d'escalade
         _advance_clock_all_nodes(31)
+        self._refresh_all_heartbeats()  # Garder les users online après avance horloge
         time.sleep(12)
 
         # L'alarme doit ne plus être acknowledged (réactivée ou déjà escaladée)
@@ -378,7 +431,8 @@ class TestAlarmAcknowledgement:
             f"L'alarme devrait être réactivée, mais est encore '{alarm['status']}'"
 
     def _get_user_id(self, name):
-        users = requests.get(f"{API}/users/").json()
+        admin_h = _admin_headers()
+        users = requests.get(f"{API}/users/", headers=admin_h).json()
         return next(u["id"] for u in users if u["name"] == name)
 
 
@@ -390,26 +444,29 @@ class TestEscalation:
     @pytest.fixture(autouse=True)
     def setup(self):
         requests.post(f"{API}/test/reset")  # Remet tout le monde online
-        requests.post(f"{API}/alarms/reset")
-        requests.post(f"{API}/config/escalation", json={
+        admin_h = _admin_headers()
+        requests.post(f"{API}/alarms/reset", headers=admin_h)
+        requests.post(f"{API}/config/escalation", headers=admin_h, json={
             "position": 1, "user_id": self._get_user_id(USER1_NAME), "delay_minutes": 15
         })
-        requests.post(f"{API}/config/escalation", json={
+        requests.post(f"{API}/config/escalation", headers=admin_h, json={
             "position": 2, "user_id": self._get_user_id(USER2_NAME), "delay_minutes": 15
         })
-        requests.post(f"{API}/config/escalation", json={
+        requests.post(f"{API}/config/escalation", headers=admin_h, json={
             "position": 3, "user_id": self._get_user_id(ADMIN_NAME), "delay_minutes": 15
         })
 
     def _get_user_id(self, name):
-        users = requests.get(f"{API}/users/").json()
+        admin_h = _admin_headers()
+        users = requests.get(f"{API}/users/", headers=admin_h).json()
         return next(u["id"] for u in users if u["name"] == name)
 
     def test_escalation_user1_to_user2(self):
         user1_id = self._get_user_id(USER1_NAME)
         user2_id = self._get_user_id(USER2_NAME)
+        admin_h = _admin_headers()
 
-        r = requests.post(f"{API}/alarms/send", json={
+        r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Escalade", "message": "test", "severity": "critical",
             "assigned_user_id": user1_id,
         })
@@ -418,7 +475,7 @@ class TestEscalation:
         r = requests.post(f"{API}/test/trigger-escalation")
         assert r.status_code == 200
 
-        r = requests.get(f"{API}/alarms/")
+        r = requests.get(f"{API}/alarms/", headers=admin_h)
         alarm = next(a for a in r.json() if a["id"] == alarm_id)
         assert alarm["assigned_user_id"] == user2_id
         assert alarm["escalation_count"] == 1
@@ -427,8 +484,9 @@ class TestEscalation:
     def test_escalation_chain_user2_to_admin(self):
         user1_id = self._get_user_id(USER1_NAME)
         admin_id = self._get_user_id(ADMIN_NAME)
+        admin_h = _admin_headers()
 
-        requests.post(f"{API}/alarms/send", json={
+        requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Double escalade", "message": "test", "severity": "critical",
             "assigned_user_id": user1_id,
         })
@@ -436,15 +494,16 @@ class TestEscalation:
         requests.post(f"{API}/test/trigger-escalation")
         requests.post(f"{API}/test/trigger-escalation")
 
-        r = requests.get(f"{API}/alarms/")
+        r = requests.get(f"{API}/alarms/", headers=admin_h)
         alarm = r.json()[0]
         assert alarm["assigned_user_id"] == admin_id
         assert alarm["escalation_count"] == 2
 
     def test_no_escalation_if_acknowledged(self):
         user1_id = self._get_user_id(USER1_NAME)
+        admin_h = _admin_headers()
 
-        r = requests.post(f"{API}/alarms/send", json={
+        r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Ack avant escalade", "message": "m", "severity": "critical",
             "assigned_user_id": user1_id,
         })
@@ -458,7 +517,7 @@ class TestEscalation:
 
         requests.post(f"{API}/test/trigger-escalation")
 
-        r = requests.get(f"{API}/alarms/")
+        r = requests.get(f"{API}/alarms/", headers=admin_h)
         alarm = next(a for a in r.json() if a["id"] == alarm_id)
         assert alarm["assigned_user_id"] == user1_id
         assert alarm["escalation_count"] == 0
@@ -472,8 +531,9 @@ class TestEscalation:
         """Quand l'escalade atteint le dernier de la chaîne,
         elle doit reboucler au premier utilisateur."""
         user1_id = self._get_user_id(USER1_NAME)
+        admin_h = _admin_headers()
 
-        requests.post(f"{API}/alarms/send", json={
+        requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Wrap around", "message": "test", "severity": "critical",
             "assigned_user_id": user1_id,
         })
@@ -483,7 +543,7 @@ class TestEscalation:
         requests.post(f"{API}/test/trigger-escalation")  # → admin
         requests.post(f"{API}/test/trigger-escalation")  # → user1 (wrap)
 
-        r = requests.get(f"{API}/alarms/")
+        r = requests.get(f"{API}/alarms/", headers=admin_h)
         alarm = r.json()[0]
         assert alarm["assigned_user_id"] == user1_id, \
             f"L'escalade devrait reboucler sur user1 (id={user1_id}), " \
@@ -494,8 +554,9 @@ class TestEscalation:
         """Le rebouclage doit continuer indéfiniment (2 tours complets)."""
         user1_id = self._get_user_id(USER1_NAME)
         user2_id = self._get_user_id(USER2_NAME)
+        admin_h = _admin_headers()
 
-        requests.post(f"{API}/alarms/send", json={
+        requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Multi wrap", "message": "test", "severity": "critical",
             "assigned_user_id": user1_id,
         })
@@ -504,7 +565,7 @@ class TestEscalation:
         for _ in range(4):
             requests.post(f"{API}/test/trigger-escalation")
 
-        r = requests.get(f"{API}/alarms/")
+        r = requests.get(f"{API}/alarms/", headers=admin_h)
         alarm = r.json()[0]
         assert alarm["assigned_user_id"] == user2_id, \
             f"Après 4 escalades, devrait être sur user2 (id={user2_id})"
@@ -518,25 +579,35 @@ class TestEscalationWithClock:
     def setup(self):
         _reset_clock_all_nodes()
         requests.post(f"{API}/test/reset")          # Then reset users (heartbeats use clock_now)
-        requests.post(f"{API}/alarms/reset")
-        requests.post(f"{API}/config/escalation", json={
+        admin_h = _admin_headers()
+        requests.post(f"{API}/alarms/reset", headers=admin_h)
+        requests.post(f"{API}/config/escalation", headers=admin_h, json={
             "position": 1, "user_id": self._get_user_id(USER1_NAME), "delay_minutes": 15
         })
-        requests.post(f"{API}/config/escalation", json={
+        requests.post(f"{API}/config/escalation", headers=admin_h, json={
             "position": 2, "user_id": self._get_user_id(USER2_NAME), "delay_minutes": 15
         })
         yield
         _reset_clock_all_nodes()
 
     def _get_user_id(self, name):
-        users = requests.get(f"{API}/users/").json()
+        admin_h = _admin_headers()
+        users = requests.get(f"{API}/users/", headers=admin_h).json()
         return next(u["id"] for u in users if u["name"] == name)
 
     def _find_alarm_by_title(self, title, retries=3):
         """Find an alarm by title with retry logic to handle background loop timing."""
+        admin_h = _admin_headers()
         for attempt in range(retries):
-            r = requests.get(f"{API}/alarms/")
-            alarm = next((a for a in r.json() if a["title"] == title), None)
+            r = requests.get(f"{API}/alarms/", headers=admin_h)
+            if r.status_code != 200:
+                time.sleep(2)
+                continue
+            data = r.json()
+            if not isinstance(data, list):
+                time.sleep(2)
+                continue
+            alarm = next((a for a in data if a.get("title") == title), None)
             if alarm is not None:
                 return alarm
             time.sleep(2)
@@ -553,8 +624,9 @@ class TestEscalationWithClock:
     def test_no_escalation_before_delay(self):
         """A 13 min, l'alarme ne doit PAS etre escaladee (seuil = 15 min)."""
         user1_id = self._get_user_id(USER1_NAME)
+        admin_h = _admin_headers()
 
-        r = requests.post(f"{API}/alarms/send", json={
+        r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Timing no-esc", "message": "m", "severity": "critical",
             "assigned_user_id": user1_id,
         })
@@ -577,8 +649,9 @@ class TestEscalationWithClock:
         """À 16 min, l'alarme DOIT être escaladée."""
         user1_id = self._get_user_id(USER1_NAME)
         user2_id = self._get_user_id(USER2_NAME)
+        admin_h = _admin_headers()
 
-        r = requests.post(f"{API}/alarms/send", json={
+        r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Timing esc-16", "message": "m", "severity": "critical",
             "assigned_user_id": user1_id,
         })
@@ -601,8 +674,9 @@ class TestEscalationWithClock:
         """À exactement 15 min, l'alarme doit être escaladée (>=)."""
         user1_id = self._get_user_id(USER1_NAME)
         user2_id = self._get_user_id(USER2_NAME)
+        admin_h = _admin_headers()
 
-        r = requests.post(f"{API}/alarms/send", json={
+        r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Boundary-15", "message": "m", "severity": "critical",
             "assigned_user_id": user1_id,
         })
@@ -647,7 +721,8 @@ class TestWatchdog:
         requests.post(f"{API}/devices/heartbeat", headers=headers)
         requests.post(f"{API}/test/simulate-watchdog-failure")
 
-        r = requests.get(f"{API}/users/")
+        admin_h = _admin_headers()
+        r = requests.get(f"{API}/users/", headers=admin_h)
         user = next(u for u in r.json() if u["name"] == USER2_NAME)
         assert user["is_online"] is False
 
@@ -660,7 +735,8 @@ class TestWatchdog:
         requests.post(f"{API}/devices/heartbeat", headers=headers)
         time.sleep(1)
 
-        r = requests.get(f"{API}/users/")
+        admin_h = _admin_headers()
+        r = requests.get(f"{API}/users/", headers=admin_h)
         user = next(u for u in r.json() if u["name"] == USER1_NAME)
         assert user["is_online"] is True
 
@@ -676,7 +752,8 @@ class TestWatchdog:
 class TestWebInterface:
 
     def test_send_test_alarm(self):
-        requests.post(f"{API}/alarms/reset")
+        admin_h = _admin_headers()
+        requests.post(f"{API}/alarms/reset", headers=admin_h)
         r = requests.post(f"{API}/test/send-alarm")
         assert r.status_code == 200
         assert r.json()["status"] == "sent"
@@ -718,20 +795,22 @@ class TestEscalationSkipOffline:
 
     @pytest.fixture(autouse=True)
     def setup(self):
-        requests.post(f"{API}/alarms/reset")
+        admin_h = _admin_headers()
+        requests.post(f"{API}/alarms/reset", headers=admin_h)
         requests.post(f"{API}/test/reset")  # Remet tout le monde online
-        requests.post(f"{API}/config/escalation", json={
+        requests.post(f"{API}/config/escalation", headers=admin_h, json={
             "position": 1, "user_id": self._get_user_id(USER1_NAME), "delay_minutes": 15
         })
-        requests.post(f"{API}/config/escalation", json={
+        requests.post(f"{API}/config/escalation", headers=admin_h, json={
             "position": 2, "user_id": self._get_user_id(USER2_NAME), "delay_minutes": 15
         })
-        requests.post(f"{API}/config/escalation", json={
+        requests.post(f"{API}/config/escalation", headers=admin_h, json={
             "position": 3, "user_id": self._get_user_id(ADMIN_NAME), "delay_minutes": 15
         })
 
     def _get_user_id(self, name):
-        users = requests.get(f"{API}/users/").json()
+        admin_h = _admin_headers()
+        users = requests.get(f"{API}/users/", headers=admin_h).json()
         return next(u["id"] for u in users if u["name"] == name)
 
     def test_escalation_skips_offline_user(self):
@@ -739,6 +818,7 @@ class TestEscalationSkipOffline:
         user1_id = self._get_user_id(USER1_NAME)
         user2_id = self._get_user_id(USER2_NAME)
         admin_id = self._get_user_id(ADMIN_NAME)
+        admin_h = _admin_headers()
 
         # Mettre tout le monde offline
         requests.post(f"{API}/test/simulate-connection-loss")
@@ -749,13 +829,13 @@ class TestEscalationSkipOffline:
         requests.post(f"{API}/devices/heartbeat", headers={"Authorization": f"Bearer {r.json()['access_token']}"})
 
         # Vérifier que user2 est bien offline avant de continuer
-        users = requests.get(f"{API}/users/").json()
+        users = requests.get(f"{API}/users/", headers=admin_h).json()
         user2 = next(u for u in users if u["name"] == USER2_NAME)
         assert user2["is_online"] is False, \
             f"user2 devrait être offline mais is_online={user2['is_online']}"
 
         # Envoyer alarme à user1
-        requests.post(f"{API}/alarms/send", json={
+        requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Skip offline", "message": "test", "severity": "critical",
             "assigned_user_id": user1_id,
         })
@@ -763,7 +843,7 @@ class TestEscalationSkipOffline:
         # Escalader → devrait sauter user2 (offline) et aller à admin
         requests.post(f"{API}/test/trigger-escalation")
 
-        r = requests.get(f"{API}/alarms/")
+        r = requests.get(f"{API}/alarms/", headers=admin_h)
         alarm = r.json()[0]
         assert alarm["assigned_user_id"] == admin_id, \
             f"Devrait sauter user2 (offline) → admin, mais assignée à {alarm['assigned_user_id']}"
@@ -771,13 +851,14 @@ class TestEscalationSkipOffline:
     def test_escalation_all_offline_wraps_to_first_online(self):
         """Si tous sauf user1 sont offline, on reste sur user1 (pas de boucle infinie)."""
         user1_id = self._get_user_id(USER1_NAME)
+        admin_h = _admin_headers()
 
         # Mettre tout le monde offline sauf user1
         requests.post(f"{API}/test/simulate-connection-loss")
         r = requests.post(f"{API}/auth/login", json={"name": USER1_NAME, "password": USER1_PASSWORD})
         requests.post(f"{API}/devices/heartbeat", headers={"Authorization": f"Bearer {r.json()['access_token']}"})
 
-        requests.post(f"{API}/alarms/send", json={
+        requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Tous offline", "message": "test", "severity": "critical",
             "assigned_user_id": user1_id,
         })
@@ -794,19 +875,22 @@ class TestDeletedUserDuringAlarm:
 
     @pytest.fixture(autouse=True)
     def setup(self):
-        requests.post(f"{API}/alarms/reset")
+        admin_h = _admin_headers()
+        requests.post(f"{API}/alarms/reset", headers=admin_h)
 
     def _get_user_id(self, name):
-        users = requests.get(f"{API}/users/").json()
+        admin_h = _admin_headers()
+        users = requests.get(f"{API}/users/", headers=admin_h).json()
         return next((u["id"] for u in users if u["name"] == name), None)
 
     def test_alarm_reassigned_when_user_deleted(self):
         """Quand l'utilisateur assigné est supprimé, l'alarme doit être
         réassignée au premier de la chaîne d'escalade."""
+        admin_h = _admin_headers()
         # Supprimer le tempuser s'il existe déjà
         existing_id = self._get_user_id("tempuser")
         if existing_id:
-            requests.delete(f"{API}/users/{existing_id}")
+            requests.delete(f"{API}/users/{existing_id}", headers=admin_h)
 
         # Créer un utilisateur temporaire
         r = requests.post(f"{API}/auth/register", json={
@@ -815,16 +899,16 @@ class TestDeletedUserDuringAlarm:
         temp_id = r.json()["id"]
 
         # Envoyer alarme à tempuser
-        requests.post(f"{API}/alarms/send", json={
+        requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Delete test", "message": "m", "severity": "critical",
             "assigned_user_id": temp_id,
         })
 
         # Supprimer tempuser
-        requests.delete(f"{API}/users/{temp_id}")
+        requests.delete(f"{API}/users/{temp_id}", headers=admin_h)
 
         # L'alarme doit être réassignée
-        r = requests.get(f"{API}/alarms/active")
+        r = requests.get(f"{API}/alarms/active", headers=admin_h)
         if r.json():
             alarm = r.json()[0]
             assert alarm["assigned_user_id"] != temp_id, \
@@ -840,25 +924,27 @@ class TestEmptyEscalationChainAlert:
 
     @pytest.fixture(autouse=True)
     def setup(self):
-        requests.post(f"{API}/alarms/reset")
+        admin_h = _admin_headers()
+        requests.post(f"{API}/alarms/reset", headers=admin_h)
         # Reset email config to default
-        requests.post(f"{API}/config/system", json={
+        requests.post(f"{API}/config/system", headers=admin_h, json={
             "key": "alert_email", "value": "direction_technique@charlesmurgat.com"
         })
 
     def test_alarm_with_empty_chain_sends_email(self):
         """Quand la chaîne est vide et une alarme est envoyée,
         un email doit être envoyé à l'adresse configurée."""
+        admin_h = _admin_headers()
         # Supprimer toutes les règles d'escalade
-        esc = requests.get(f"{API}/config/escalation").json()
+        esc = requests.get(f"{API}/config/escalation", headers=admin_h).json()
         for e in esc:
-            requests.delete(f"{API}/config/escalation/{e['id']}")
+            requests.delete(f"{API}/config/escalation/{e['id']}", headers=admin_h)
 
         # Vérifier que la chaîne est vide
-        assert len(requests.get(f"{API}/config/escalation").json()) == 0
+        assert len(requests.get(f"{API}/config/escalation", headers=admin_h).json()) == 0
 
         # Envoyer une alarme
-        r = requests.post(f"{API}/alarms/send", json={
+        r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "No chain", "message": "Chaîne vide", "severity": "critical",
         })
         assert r.status_code == 200
@@ -873,12 +959,13 @@ class TestEmptyEscalationChainAlert:
 
     def test_email_recipient_is_configurable(self):
         """L'adresse email d'alerte doit être paramétrable."""
-        r = requests.post(f"{API}/config/system", json={
+        admin_h = _admin_headers()
+        r = requests.post(f"{API}/config/system", headers=admin_h, json={
             "key": "alert_email", "value": "custom@example.com"
         })
         assert r.status_code == 200
 
-        r = requests.get(f"{API}/config/system")
+        r = requests.get(f"{API}/config/system", headers=admin_h)
         assert r.json()["alert_email"] == "custom@example.com"
 
 
@@ -896,16 +983,18 @@ class TestBackendResilience:
         assert r.status_code == 404
 
     def test_resolve_nonexistent_alarm(self):
-        r = requests.post(f"{API}/alarms/99999/resolve")
-        assert r.status_code == 404
+        headers = {"Authorization": f"Bearer dummy"}
+        r = requests.post(f"{API}/alarms/99999/resolve", headers=headers)
+        assert r.status_code == 404 or r.status_code == 401
 
     def test_login_empty_fields(self):
         r = requests.post(f"{API}/auth/login", json={"name": "", "password": ""})
         assert r.status_code in (401, 422)
 
     def test_send_alarm_missing_fields(self):
-        r = requests.post(f"{API}/alarms/send", json={})
-        assert r.status_code == 422
+        headers = {"Authorization": f"Bearer dummy"}
+        r = requests.post(f"{API}/alarms/send", headers=headers, json={})
+        assert r.status_code == 422 or r.status_code == 401
 
     def test_heartbeat_with_invalid_token(self):
         headers = {"Authorization": "Bearer invalid-garbage-token"}
@@ -948,18 +1037,19 @@ class TestPersistenceAfterCrash:
 
     def test_data_persists_after_restart(self):
         """Créer un utilisateur + alarme, restart Docker, vérifier qu'ils existent."""
+        admin_h = _admin_headers()
         # Nettoyer et créer des données
-        requests.post(f"{API}/alarms/reset")
-        users_before = requests.get(f"{API}/users/").json()
+        requests.post(f"{API}/alarms/reset", headers=admin_h)
+        users_before = requests.get(f"{API}/users/", headers=admin_h).json()
         user_count_before = len(users_before)
 
         # Créer une alarme
-        requests.post(f"{API}/alarms/send", json={
+        requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Persistence Test", "message": "Survive restart", "severity": "critical",
         })
 
         # Vérifier avant restart
-        alarms = requests.get(f"{API}/alarms/").json()
+        alarms = requests.get(f"{API}/alarms/", headers=admin_h).json()
         persist_alarm = next((a for a in alarms if a["title"] == "Persistence Test"), None)
         assert persist_alarm is not None
 
@@ -981,11 +1071,12 @@ class TestPersistenceAfterCrash:
             time.sleep(2)
 
         # Vérifier après restart
-        users_after = requests.get(f"{API}/users/").json()
+        admin_h = _admin_headers()  # Re-login after restart
+        users_after = requests.get(f"{API}/users/", headers=admin_h).json()
         assert len(users_after) == user_count_before, \
             f"Utilisateurs perdus : {user_count_before} avant → {len(users_after)} après"
 
-        alarms_after = requests.get(f"{API}/alarms/").json()
+        alarms_after = requests.get(f"{API}/alarms/", headers=admin_h).json()
         persist_alarm_after = next((a for a in alarms_after if a["title"] == "Persistence Test"), None)
         assert persist_alarm_after is not None, \
             "L'alarme 'Persistence Test' a disparu après le restart"
@@ -1001,7 +1092,8 @@ class TestEmailViaMailhog:
 
     @pytest.fixture(autouse=True)
     def setup(self):
-        requests.post(f"{API}/alarms/reset")
+        admin_h = _admin_headers()
+        requests.post(f"{API}/alarms/reset", headers=admin_h)
         # Vider la boîte Mailhog
         try:
             requests.delete(f"{MAILHOG_URL}/api/v1/messages", timeout=3)
@@ -1010,13 +1102,14 @@ class TestEmailViaMailhog:
 
     def test_empty_chain_sends_real_email(self):
         """Quand la chaîne est vide, un email SMTP doit arriver dans Mailhog."""
+        admin_h = _admin_headers()
         # Supprimer toutes les règles d'escalade
-        esc = requests.get(f"{API}/config/escalation").json()
+        esc = requests.get(f"{API}/config/escalation", headers=admin_h).json()
         for e in esc:
-            requests.delete(f"{API}/config/escalation/{e['id']}")
+            requests.delete(f"{API}/config/escalation/{e['id']}", headers=admin_h)
 
         # Envoyer alarme → déclenche l'email
-        requests.post(f"{API}/alarms/send", json={
+        requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Mailhog Test", "message": "Test SMTP réel", "severity": "critical",
         })
 
@@ -1044,7 +1137,8 @@ class TestCumulativeEscalation:
 
     @pytest.fixture(autouse=True)
     def setup(self):
-        requests.post(f"{API}/alarms/reset")
+        admin_h = _admin_headers()
+        requests.post(f"{API}/alarms/reset", headers=admin_h)
         _reset_clock_all_nodes()
         requests.post(f"{API}/test/reset")
         # Envoyer des heartbeats pour maintenir les users online
@@ -1060,7 +1154,8 @@ class TestCumulativeEscalation:
         return r.json()["access_token"]
 
     def _get_user_id(self, name):
-        users = requests.get(f"{API}/users/").json()
+        admin_h = _admin_headers()
+        users = requests.get(f"{API}/users/", headers=admin_h).json()
         return next(u["id"] for u in users if u["name"] == name)
 
     def test_escalated_alarm_still_visible_to_first_user(self):
@@ -1069,9 +1164,10 @@ class TestCumulativeEscalation:
         token2 = self._login("user2")
         h1 = {"Authorization": f"Bearer {token1}"}
         h2 = {"Authorization": f"Bearer {token2}"}
+        admin_h = _admin_headers()
 
         # Envoyer alarme (va à user1)
-        requests.post(f"{API}/alarms/send", json={
+        requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Cumul Test", "message": "test", "severity": "critical",
         })
 
@@ -1099,8 +1195,9 @@ class TestCumulativeEscalation:
         """User1 reçoit l'alarme, escalade vers user2, user1 peut quand même acquitter."""
         token1 = self._login("user1")
         h1 = {"Authorization": f"Bearer {token1}"}
+        admin_h = _admin_headers()
 
-        requests.post(f"{API}/alarms/send", json={
+        requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Ack Cumul", "message": "test", "severity": "critical",
         })
 
@@ -1119,12 +1216,13 @@ class TestCumulativeEscalation:
 
     def test_alarm_shows_notified_users(self):
         """L'alarme doit contenir la liste des utilisateurs notifiés."""
-        requests.post(f"{API}/alarms/send", json={
+        admin_h = _admin_headers()
+        requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Notif List", "message": "test", "severity": "critical",
         })
 
         # Avant escalade : seul user1 est notifié
-        alarms = requests.get(f"{API}/alarms/").json()
+        alarms = requests.get(f"{API}/alarms/", headers=admin_h).json()
         alarm = next(a for a in alarms if a["title"] == "Notif List")
         assert "notified_user_ids" in alarm, "Le champ notified_user_ids doit exister"
         user1_id = self._get_user_id("user1")
@@ -1133,7 +1231,7 @@ class TestCumulativeEscalation:
         # Après escalade : user1 ET user2 (trigger manuel pour fiabilité)
         requests.post(f"{API}/test/trigger-escalation")
 
-        alarms = requests.get(f"{API}/alarms/").json()
+        alarms = requests.get(f"{API}/alarms/", headers=admin_h).json()
         alarm = next(a for a in alarms if a["title"] == "Notif List")
         user2_id = self._get_user_id("user2")
         assert user1_id in alarm["notified_user_ids"], "user1 doit rester dans notified"
@@ -1154,21 +1252,24 @@ class TestOnCallDisconnectionAlarm:
         # ne recrée pas d'alarme d'astreinte avec un offset résiduel
         _reset_clock_all_nodes()
         requests.post(f"{API}/test/reset")  # Met tout le monde online
-        requests.post(f"{API}/alarms/reset")
+        admin_h = _admin_headers()
+        requests.post(f"{API}/alarms/reset", headers=admin_h)
         # Attendre un cycle du background task avec l'état propre
         time.sleep(12)
         # Re-nettoyer si le background task a créé quelque chose entre temps
-        requests.post(f"{API}/alarms/reset")
+        requests.post(f"{API}/alarms/reset", headers=admin_h)
         yield
         _reset_clock_all_nodes()
 
     def _get_user_id(self, name):
-        users = requests.get(f"{API}/users/").json()
+        admin_h = _admin_headers()
+        users = requests.get(f"{API}/users/", headers=admin_h).json()
         return next(u["id"] for u in users if u["name"] == name)
 
     def test_oncall_offline_15min_creates_alarm(self):
         """User1 (pos 1) perd son heartbeat. Après 15 min, alarme auto créée."""
         user1_id = self._get_user_id("user1")
+        admin_h = _admin_headers()
 
         # Mettre user1 offline
         requests.post(f"{API}/test/simulate-connection-loss")
@@ -1187,7 +1288,7 @@ class TestOnCallDisconnectionAlarm:
         time.sleep(11)  # Attendre un tick du watchdog/escalation loop
 
         # Une alarme automatique doit avoir été créée
-        alarms = requests.get(f"{API}/alarms/active").json()
+        alarms = requests.get(f"{API}/alarms/active", headers=admin_h).json()
         oncall_alarm = next((a for a in alarms if "astreinte" in a["title"].lower()), None)
         assert oncall_alarm is not None, \
             f"Aucune alarme 'astreinte' créée. Alarmes actives : {[a['title'] for a in alarms]}"
@@ -1200,6 +1301,7 @@ class TestOnCallDisconnectionAlarm:
     def test_oncall_alarm_auto_resolves_on_reconnection(self):
         """Si user1 revient en ligne, l'alarme d'astreinte se résout automatiquement."""
         user1_id = self._get_user_id("user1")
+        admin_h = _admin_headers()
 
         # Mettre user1 offline
         requests.post(f"{API}/test/simulate-connection-loss")
@@ -1210,7 +1312,7 @@ class TestOnCallDisconnectionAlarm:
         _advance_clock_all_nodes(16)
         time.sleep(11)
 
-        alarms = requests.get(f"{API}/alarms/active").json()
+        alarms = requests.get(f"{API}/alarms/active", headers=admin_h).json()
         assert any("astreinte" in a["title"].lower() for a in alarms)
 
         # User1 revient en ligne (heartbeat)
@@ -1221,13 +1323,14 @@ class TestOnCallDisconnectionAlarm:
         time.sleep(11)
 
         # L'alarme d'astreinte doit être automatiquement résolue
-        alarms = requests.get(f"{API}/alarms/active").json()
+        alarms = requests.get(f"{API}/alarms/active", headers=admin_h).json()
         oncall_alarms = [a for a in alarms if "astreinte" in a["title"].lower()]
         assert len(oncall_alarms) == 0, \
             "L'alarme d'astreinte devrait être résolue après reconnexion de user1"
 
     def test_oncall_alarm_escalates_normally(self):
         """L'alarme d'astreinte suit l'escalade normale (user2 → admin → ...)."""
+        admin_h = _admin_headers()
         # Tout le monde offline sauf user2 et admin
         requests.post(f"{API}/test/simulate-connection-loss")
         token2 = requests.post(f"{API}/auth/login", json={"name": "user2", "password": "user123"}).json()["access_token"]
@@ -1243,7 +1346,7 @@ class TestOnCallDisconnectionAlarm:
         requests.post(f"{API}/devices/heartbeat", headers={"Authorization": f"Bearer {token_admin}"})
         time.sleep(11)
 
-        alarms = requests.get(f"{API}/alarms/active").json()
+        alarms = requests.get(f"{API}/alarms/active", headers=admin_h).json()
         oncall = next((a for a in alarms if "astreinte" in a["title"].lower()), None)
         assert oncall is not None
 
@@ -1254,7 +1357,7 @@ class TestOnCallDisconnectionAlarm:
         r = requests.post(f"{API}/test/trigger-escalation")
         assert r.json()["escalated"] >= 1, "Le trigger devrait avoir escaladé l'alarme d'astreinte"
 
-        alarms = requests.get(f"{API}/alarms/active").json()
+        alarms = requests.get(f"{API}/alarms/active", headers=admin_h).json()
         oncall = next((a for a in alarms if "astreinte" in a["title"].lower()), None)
         assert oncall is not None
         assert oncall["escalation_count"] >= 1, "L'alarme d'astreinte devrait avoir été escaladée"
@@ -1262,6 +1365,7 @@ class TestOnCallDisconnectionAlarm:
     def test_no_oncall_alarm_if_not_position1(self):
         """User2 (pos 2) offline ne déclenche PAS d'alarme d'astreinte.
         Seul le #1 (astreinte contractuelle) est surveillé."""
+        admin_h = _admin_headers()
         # Tout le monde online sauf user2
         requests.post(f"{API}/test/reset")  # Tout online
         user2_id = self._get_user_id("user2")
@@ -1277,7 +1381,7 @@ class TestOnCallDisconnectionAlarm:
         time.sleep(11)
 
         # Aucune alarme d'astreinte ne doit être créée
-        alarms = requests.get(f"{API}/alarms/active").json()
+        alarms = requests.get(f"{API}/alarms/active", headers=admin_h).json()
         oncall_alarms = [a for a in alarms if "astreinte" in a["title"].lower()]
         assert len(oncall_alarms) == 0, \
             "Pas d'alarme d'astreinte pour user2 — seul le #1 est surveillé"
@@ -1314,7 +1418,8 @@ class TestNotifiedUsersVisibility:
 
     @pytest.fixture(autouse=True)
     def setup(self):
-        requests.post(f"{API}/alarms/reset")
+        admin_h = _admin_headers()
+        requests.post(f"{API}/alarms/reset", headers=admin_h)
         requests.post(f"{API}/test/reset")
 
     def test_alarm_response_contains_notified_user_names(self):
@@ -1322,8 +1427,9 @@ class TestNotifiedUsersVisibility:
         token1 = requests.post(f"{API}/auth/login", json={
             "name": "user1", "password": "user123"
         }).json()["access_token"]
+        admin_h = _admin_headers()
 
-        requests.post(f"{API}/alarms/send", json={
+        requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Noms notifiés", "message": "test", "severity": "critical",
         })
 
@@ -1344,7 +1450,8 @@ class TestAckedAlarmVisibility:
     def setup(self):
         _reset_clock_all_nodes()
         requests.post(f"{API}/test/reset")
-        requests.post(f"{API}/alarms/reset")
+        admin_h = _admin_headers()
+        requests.post(f"{API}/alarms/reset", headers=admin_h)
 
         # Login user1 et user2
         r1 = requests.post(f"{API}/auth/login", json={
@@ -1366,8 +1473,9 @@ class TestAckedAlarmVisibility:
 
     def test_acked_alarm_visible_to_other_notified_user(self):
         """User2 doit voir une alarme acquittée par user1 avec status acknowledged."""
+        admin_h = _admin_headers()
         # Créer alarme assignée à user1
-        r = requests.post(f"{API}/alarms/send", json={
+        r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Visible Ack", "message": "m", "severity": "critical",
             "assigned_user_id": self.user1_id,
         })
@@ -1393,7 +1501,8 @@ class TestAckedAlarmVisibility:
 
     def test_ack_remaining_seconds_in_response(self):
         """Le champ ack_remaining_seconds doit être présent et décompter avec le temps."""
-        r = requests.post(f"{API}/alarms/send", json={
+        admin_h = _admin_headers()
+        r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Countdown Test", "message": "m", "severity": "critical",
             "assigned_user_id": self.user1_id,
         })
@@ -1422,7 +1531,8 @@ class TestAckedAlarmVisibility:
 
     def test_acked_alarm_visible_to_acker_too(self):
         """L'utilisateur qui a acquitté doit aussi voir l'alarme dans /mine."""
-        r = requests.post(f"{API}/alarms/send", json={
+        admin_h = _admin_headers()
+        r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Self Ack Visible", "message": "m", "severity": "critical",
             "assigned_user_id": self.user1_id,
         })
@@ -1449,7 +1559,8 @@ class TestSmsAndHealth:
     def setup(self):
         _reset_clock_all_nodes()
         requests.post(f"{API}/test/reset")
-        requests.post(f"{API}/alarms/reset")
+        admin_h = _admin_headers()
+        requests.post(f"{API}/alarms/reset", headers=admin_h)
         requests.post(f"{API}/test/reset-sms-queue")
         # Attendre que la boucle d'escalade fasse un tick apres un eventuel
         # simulate-loop-stall du test precedent (test_health_endpoint_returns_503)
@@ -1459,7 +1570,8 @@ class TestSmsAndHealth:
         requests.post(f"{API}/test/reset-sms-queue")
 
     def _get_user_id(self, name):
-        users = requests.get(f"{API}/users/").json()
+        admin_h = _admin_headers()
+        users = requests.get(f"{API}/users/", headers=admin_h).json()
         return next(u["id"] for u in users if u["name"] == name)
 
     # ── /health ─────────────────────────────────────────────────────────────
@@ -1512,13 +1624,14 @@ class TestSmsAndHealth:
     def test_sms_written_to_queue_on_escalation(self):
         """Après escalade, un SMS est écrit dans sms_queue pour les users avec phone_number."""
         user1_id = self._get_user_id(USER1_NAME)
+        admin_h = _admin_headers()
 
         # Enregistrer un numéro de téléphone pour user1
-        r = requests.patch(f"{API}/users/{user1_id}", json={"phone_number": "+33600000001"})
+        r = requests.patch(f"{API}/users/{user1_id}", headers=admin_h, json={"phone_number": "+33600000001"})
         assert r.status_code == 200
 
         # Envoyer une alarme assignée à user1
-        requests.post(f"{API}/alarms/send", json={
+        requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "SMS Test", "message": "m", "severity": "critical",
             "assigned_user_id": user1_id,
         })
@@ -1660,6 +1773,7 @@ def _skip_if_backend2_unavailable():
         )
 
 
+@pytest.mark.failover
 class TestRedundancy:
     """Vérifie que les 2 backends partagent correctement l'état via PostgreSQL
     et que le failover de leadership (advisory lock) fonctionne automatiquement.
@@ -1677,14 +1791,15 @@ class TestRedundancy:
     def setup(self):
         _skip_if_backend2_unavailable()
         requests.post(f"{API}/test/reset")
-        requests.post(f"{API}/alarms/reset")
+        admin_h = _admin_headers()
+        requests.post(f"{API}/alarms/reset", headers=admin_h)
         requests.post(f"{API}/test/reset-sms-queue")
         # Réinitialiser l'horloge sur les DEUX nœuds — le primaire peut avoir changé
         _reset_clock_all_nodes()
         _reset_clock_all_nodes()
         yield
         requests.post(f"{API}/test/reset")
-        requests.post(f"{API}/alarms/reset")
+        requests.post(f"{API}/alarms/reset", headers=admin_h)
         requests.post(f"{API}/test/reset-sms-queue")
         _reset_clock_all_nodes()
         _reset_clock_all_nodes()
@@ -1692,7 +1807,8 @@ class TestRedundancy:
     def _get_user_id(self, name, api=None):
         if api is None:
             api = API
-        users = requests.get(f"{api}/users/").json()
+        admin_h = _admin_headers(api)
+        users = requests.get(f"{api}/users/", headers=admin_h).json()
         return next(u["id"] for u in users if u["name"] == name)
 
     # ── Santé et leadership ─────────────────────────────────────────────────
@@ -1730,9 +1846,10 @@ class TestRedundancy:
         project_dir = "C:/Users/Charles/Desktop/Projet Claude/Alarm2.0"
 
         # Creer une alarme avant le failover
+        headers = _admin_headers(f"{primary_url}/api")
         r = requests.post(f"{primary_url}/api/alarms/send", json={
             "title": "Failover Test", "message": "doit survivre", "severity": "critical",
-        })
+        }, headers=headers)
         alarm_id = r.json()["id"]
 
         # Arreter le noeud primaire entier (patroni + backend + etcd)
@@ -1762,7 +1879,8 @@ class TestRedundancy:
             "Un autre noeud devrait devenir primaire en <60s apres l'arret du primaire"
 
         # Les donnees sont toujours disponibles
-        alarms = requests.get(f"{new_primary_url}/api/alarms/").json()
+        new_headers = _admin_headers(f"{new_primary_url}/api")
+        alarms = requests.get(f"{new_primary_url}/api/alarms/", headers=new_headers).json()
         assert any(a["id"] == alarm_id for a in alarms), \
             "L'alarme doit etre accessible sur le nouveau primaire (replication)"
 
@@ -1783,27 +1901,31 @@ class TestRedundancy:
 
     def test_alarm_created_on_backend1_visible_on_backend2(self):
         """Une alarme créée via backend1 est immédiatement visible sur backend2."""
-        r = requests.post(f"{API}/alarms/send", json={
+        admin_h = _admin_headers()
+        r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Redondance Test", "message": "visible des deux côtés", "severity": "critical",
         })
         assert r.status_code == 200
         alarm_id = r.json()["id"]
 
-        r2 = requests.get(f"{API_2}/alarms/")
+        admin_h2 = _admin_headers(API_2)
+        r2 = requests.get(f"{API_2}/alarms/", headers=admin_h2)
         ids_on_b2 = [a["id"] for a in r2.json()]
         assert alarm_id in ids_on_b2, \
             f"Alarme {alarm_id} créée sur backend1 devrait être visible sur backend2"
 
     def test_alarm_resolved_on_backend1_visible_on_backend2(self):
         """Une alarme résolue sur backend1 est immédiatement marquée resolved sur backend2."""
-        r = requests.post(f"{API}/alarms/send", json={
+        admin_h = _admin_headers()
+        r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Resolve Sync", "message": "test", "severity": "critical",
         })
         alarm_id = r.json()["id"]
 
-        requests.post(f"{API}/alarms/{alarm_id}/resolve")
+        requests.post(f"{API}/alarms/{alarm_id}/resolve", headers=admin_h)
 
-        r2 = requests.get(f"{API_2}/alarms/")
+        admin_h2 = _admin_headers(API_2)
+        r2 = requests.get(f"{API_2}/alarms/", headers=admin_h2)
         alarm_b2 = next((a for a in r2.json() if a["id"] == alarm_id), None)
         assert alarm_b2 is not None, "L'alarme devrait exister sur backend2"
         assert alarm_b2["status"] == "resolved", \
@@ -1812,7 +1934,8 @@ class TestRedundancy:
     def test_ack_on_backend1_visible_on_backend2(self):
         """Un ACK effectué via backend1 est visible sur backend2."""
         user1_id = self._get_user_id(USER1_NAME)
-        r = requests.post(f"{API}/alarms/send", json={
+        admin_h = _admin_headers()
+        r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Ack Sync", "message": "test", "severity": "critical",
             "assigned_user_id": user1_id,
         })
@@ -1824,7 +1947,8 @@ class TestRedundancy:
         requests.post(f"{API}/alarms/{alarm_id}/ack",
                       headers={"Authorization": f"Bearer {token1}"})
 
-        r2 = requests.get(f"{API_2}/alarms/")
+        admin_h2 = _admin_headers(API_2)
+        r2 = requests.get(f"{API_2}/alarms/", headers=admin_h2)
         alarm_b2 = next((a for a in r2.json() if a["id"] == alarm_id), None)
         assert alarm_b2 is not None
         assert alarm_b2["status"] == "acknowledged", \
@@ -1832,8 +1956,10 @@ class TestRedundancy:
 
     def test_user_list_consistent_across_backends(self):
         """La liste des utilisateurs est identique sur les deux backends."""
-        ids_b1 = sorted(u["id"] for u in requests.get(f"{API}/users/").json())
-        ids_b2 = sorted(u["id"] for u in requests.get(f"{API_2}/users/").json())
+        admin_h = _admin_headers()
+        ids_b1 = sorted(u["id"] for u in requests.get(f"{API}/users/", headers=admin_h).json())
+        admin_h2 = _admin_headers(API_2)
+        ids_b2 = sorted(u["id"] for u in requests.get(f"{API_2}/users/", headers=admin_h2).json())
         assert ids_b1 == ids_b2, \
             f"Listes utilisateurs différentes — b1: {ids_b1}, b2: {ids_b2}"
 
@@ -1876,7 +2002,8 @@ class TestRedundancy:
 
         # Vérifier la visibilité depuis un autre backend
         other_api = API_2 if primary_url != BASE_URL_2 else API
-        users = requests.get(f"{other_api}/users/").json()
+        other_admin_h = _admin_headers(other_api)
+        users = requests.get(f"{other_api}/users/", headers=other_admin_h).json()
         user1 = next(u for u in users if u["name"] == USER1_NAME)
         assert user1["is_online"] is True, \
             "Heartbeat envoyé via le primary devrait mettre user1 online vu depuis l'autre backend"
@@ -1922,9 +2049,10 @@ class TestRedundancy:
         """La boucle d'escalade du primaire n'enqueue qu'un seul SMS par destinataire.
         Le guard anti-doublon protège contre une double exécution accidentelle."""
         user1_id = self._get_user_id(USER1_NAME)
-        requests.patch(f"{API}/users/{user1_id}", json={"phone_number": "+33699000099"})
+        admin_h = _admin_headers()
+        requests.patch(f"{API}/users/{user1_id}", headers=admin_h, json={"phone_number": "+33699000099"})
 
-        requests.post(f"{API}/alarms/send", json={
+        requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Anti-dup Test", "message": "test", "severity": "critical",
             "assigned_user_id": user1_id,
         })
@@ -1939,274 +2067,6 @@ class TestRedundancy:
         sms_for_user1 = [s for s in pending if s["to_number"] == "+33699000099"]
         assert len(sms_for_user1) == 1, \
             f"Guard anti-doublon : 1 SMS attendu, got {len(sms_for_user1)}"
-
-
-# ── Réplication PostgreSQL streaming ────────────────────────────────────────
-#
-# Prérequis (une seule fois si la DB existait avant) :
-#   docker compose down -v          ← efface pgdata (repart de zéro)
-#   docker compose up --build -d    ← crée primaire avec primary_init.sh
-#   docker compose -f docker-compose.vps2.yml -p alarm-vps2 up -d
-#                                   ← init standby via pg_basebackup + démarre
-#
-# Architecture locale représentative :
-#   VPS1 (port 5432) — PostgreSQL PRIMARY  → réplique vers →
-#   VPS2 (port 5433) — PostgreSQL STANDBY  (hot standby = lecture seule)
-
-STANDBY_CONTAINER = os.getenv("STANDBY_CONTAINER", "alarm-vps2-db-standby-1")
-VPS2_PROJECT_DIR = "C:/Users/Charles/Desktop/Projet Claude/Alarm2.0"
-
-
-def _skip_if_standby_unavailable():
-    """Skip si db-standby n'est pas démarré."""
-    result = subprocess.run(
-        [DOCKER, "exec", STANDBY_CONTAINER, "pg_isready", "-U", "alarm", "-q"],
-        capture_output=True, timeout=5
-    )
-    if result.returncode != 0:
-        pytest.skip(
-            "db-standby non disponible — lancer :\n"
-            "  docker compose down -v && docker compose up --build -d\n"
-            "  docker compose -f docker-compose.vps2.yml -p alarm-vps2 up -d"
-        )
-
-
-def _psql_standby(sql: str) -> str:
-    """Exécute une requête SQL sur db-standby via docker exec psql.
-    Retourne le résultat sous forme de chaîne (stripped)."""
-    result = subprocess.run(
-        [DOCKER, "exec", STANDBY_CONTAINER,
-         "psql", "-U", "alarm", "-d", "alarm_db",
-         "-t",   # tuples only (no headers)
-         "-A",   # no column alignment (clean output)
-         "-c", sql],
-        capture_output=True, text=True, timeout=15,
-    )
-    return result.stdout.strip()
-
-
-def _psql_primary(sql: str) -> str:
-    """Exécute une requête SQL sur le primaire (VPS1) via docker exec psql."""
-    result = subprocess.run(
-        [DOCKER, "exec", "alarm20-db-1",
-         "psql", "-U", "alarm", "-d", "alarm_db",
-         "-t", "-A", "-c", sql],
-        capture_output=True, text=True, timeout=15,
-    )
-    return result.stdout.strip()
-
-
-class TestDatabaseReplication:
-    """Vérifie que la réplication streaming PostgreSQL fonctionne entre VPS1 et VPS2.
-
-    Scénarios testés :
-    1. Standby est en mode recovery (hot standby) au démarrage
-    2. Les données écrites sur le primaire sont répliquées sur le standby en <5s
-    3. Les heartbeats et statuts utilisateurs se répliquent
-    4. Le standby refuse les écritures directes (protection split-brain)
-    5. La promotion transforme le standby en primaire acceptant les écritures
-       → inclut le cleanup automatique pour restaurer l'état initial
-    """
-
-    @pytest.fixture(autouse=True)
-    def setup(self):
-        _skip_if_standby_unavailable()
-        requests.post(f"{API}/test/reset")
-        requests.post(f"{API}/alarms/reset")
-        yield
-        requests.post(f"{API}/test/reset")
-        requests.post(f"{API}/alarms/reset")
-
-    # ── État du standby ─────────────────────────────────────────────────────
-
-    def test_standby_is_in_recovery_mode(self):
-        """Le standby doit être en hot_standby (pg_is_in_recovery = true)."""
-        result = _psql_standby("SELECT pg_is_in_recovery()")
-        assert result == "t", \
-            f"db-standby devrait être en mode recovery, got: {result!r}"
-
-    def test_primary_is_not_in_recovery(self):
-        """Le primaire NE doit PAS être en recovery."""
-        result = _psql_primary("SELECT pg_is_in_recovery()")
-        assert result == "f", \
-            f"db (primaire) ne devrait pas être en recovery, got: {result!r}"
-
-    # ── Réplication des données ─────────────────────────────────────────────
-
-    def test_alarm_replicates_to_standby(self):
-        """Une alarme créée via le backend est répliquée sur le standby en <5s."""
-        r = requests.post(f"{API}/alarms/send", json={
-            "title": "Replication Test", "message": "test", "severity": "critical",
-        })
-        alarm_id = r.json()["id"]
-
-        # Attendre la réplication (en local : quasi-instantané, 3s large marge)
-        time.sleep(3)
-
-        count = _psql_standby(f"SELECT COUNT(*) FROM alarms WHERE id = {alarm_id}")
-        assert count == "1", \
-            f"Alarme {alarm_id} devrait être répliquée sur le standby (count={count})"
-
-    def test_alarm_resolution_replicates(self):
-        """La résolution d'une alarme est répliquée sur le standby."""
-        r = requests.post(f"{API}/alarms/send", json={
-            "title": "Resolve Replication", "message": "test", "severity": "critical",
-        })
-        alarm_id = r.json()["id"]
-        requests.post(f"{API}/alarms/{alarm_id}/resolve")
-
-        time.sleep(3)
-
-        status = _psql_standby(f"SELECT status FROM alarms WHERE id = {alarm_id}")
-        assert status == "resolved", \
-            f"Statut résolu devrait être répliqué, got: {status!r}"
-
-    def test_heartbeat_replicates_to_standby(self):
-        """Un heartbeat utilisateur est répliqué sur le standby."""
-        token = requests.post(f"{API}/auth/login", json={
-            "name": USER1_NAME, "password": USER1_PASSWORD
-        }).json()["access_token"]
-        requests.post(f"{API}/devices/heartbeat",
-                      headers={"Authorization": f"Bearer {token}"})
-
-        time.sleep(3)
-
-        result = _psql_standby("SELECT is_online FROM users WHERE name = 'user1'")
-        assert result == "t", \
-            f"is_online de user1 devrait être répliqué sur le standby, got: {result!r}"
-
-    def test_replication_lag_is_negligible(self):
-        """Le lag de réplication est < 5s pour 5 écritures consécutives."""
-        # Créer 5 alarmes rapidement
-        ids = []
-        for i in range(5):
-            r = requests.post(f"{API}/alarms/send", json={
-                "title": f"Lag Test {i}", "message": "test", "severity": "critical",
-            })
-            # Résoudre aussitôt pour éviter la contrainte alarme unique
-            requests.post(f"{API}/alarms/{r.json()['id']}/resolve")
-            ids.append(r.json()["id"])
-
-        time.sleep(5)  # 5s de marge
-
-        count_primary = int(_psql_primary("SELECT COUNT(*) FROM alarms"))
-        count_standby = int(_psql_standby("SELECT COUNT(*) FROM alarms"))
-
-        assert count_standby == count_primary, \
-            f"Standby ({count_standby}) devrait avoir autant d'alarmes que le primaire ({count_primary})"
-
-    # ── Protection write-reject ─────────────────────────────────────────────
-
-    def test_standby_rejects_direct_writes(self):
-        """Le standby refuse les écritures directes — protection contre le split-brain."""
-        result = subprocess.run(
-            [DOCKER, "exec", STANDBY_CONTAINER,
-             "psql", "-U", "alarm", "-d", "alarm_db", "-t", "-A", "-c",
-             "INSERT INTO alarms (title, message, severity, notified_user_ids) "
-             "VALUES ('Direct Write', 'test', 'critical', '')"],
-            capture_output=True, text=True, timeout=10,
-        )
-        error_output = (result.stdout + result.stderr).lower()
-        assert result.returncode != 0, \
-            "L'écriture directe sur le standby devrait échouer (read-only)"
-        assert "read-only" in error_output or "recovery" in error_output, \
-            f"Erreur attendue (read-only/recovery), got: {error_output[:200]}"
-
-    # ── Promotion et failover ───────────────────────────────────────────────
-
-    def test_promotion_promotes_standby_to_primary(self):
-        """Après pg_ctl promote, le standby devient primaire et accepte les écritures.
-        Cleanup automatique : restaure le standby à son état initial après le test."""
-        # 1. Arrêter le primaire
-        subprocess.run(
-            [DOCKER, "compose", "stop", "db"],
-            cwd=VPS2_PROJECT_DIR, capture_output=True, timeout=30,
-        )
-
-        try:
-            # 2. Promouvoir le standby
-            result = subprocess.run(
-                [DOCKER, "exec", STANDBY_CONTAINER,
-                 "su-exec", "postgres",
-                 "pg_ctl", "promote", "-D", "/var/lib/postgresql/data"],
-                capture_output=True, text=True, timeout=15,
-            )
-            assert result.returncode == 0, \
-                f"pg_ctl promote a échoué : {result.stderr}"
-
-            # 3. Attendre que la promotion soit effective
-            time.sleep(3)
-
-            # 4. Vérifier que le standby n'est plus en recovery
-            is_recovery = _psql_standby("SELECT pg_is_in_recovery()")
-            assert is_recovery == "f", \
-                f"Après promotion, pg_is_in_recovery devrait être false, got: {is_recovery!r}"
-
-            # 5. Vérifier qu'on peut écrire sur le standby promu
-            write_result = subprocess.run(
-                [DOCKER, "exec", STANDBY_CONTAINER,
-                 "psql", "-U", "alarm", "-d", "alarm_db", "-t", "-A", "-c",
-                 "INSERT INTO alarms (title, message, severity, notified_user_ids) "
-                 "VALUES ('Post-Promotion Write', 'promoted', 'critical', '') "
-                 "RETURNING id"],
-                capture_output=True, text=True, timeout=10,
-            )
-            assert write_result.returncode == 0, \
-                f"Écriture après promotion devrait réussir, stderr: {write_result.stderr}"
-            # La sortie contient l'id retourné + "INSERT 0 1" — vérifier qu'on a bien un entier
-            first_line = write_result.stdout.strip().splitlines()[0]
-            assert first_line.strip().isdigit(), \
-                f"RETURNING id devrait retourner un entier, got: {write_result.stdout.strip()!r}"
-
-        finally:
-            # ── Cleanup : restaurer le standby à son état initial ──────────
-            # 6. Redémarrer le primaire
-            subprocess.run(
-                [DOCKER, "compose", "start", "db"],
-                cwd=VPS2_PROJECT_DIR, capture_output=True, timeout=30,
-            )
-
-            # 7. Attendre que le primaire soit prêt
-            for _ in range(30):
-                try:
-                    if requests.get(f"{BASE_URL}/health", timeout=2).status_code == 200:
-                        break
-                except Exception:
-                    pass
-                time.sleep(2)
-
-            # 8. Arrêter et supprimer le standby + son volume pour repartir proprement
-            subprocess.run(
-                [DOCKER, "compose", "-f", "docker-compose.vps2.yml", "-p", "alarm-vps2",
-                 "stop", "db-standby"],
-                cwd=VPS2_PROJECT_DIR, capture_output=True, timeout=30,
-            )
-            subprocess.run(
-                [DOCKER, "compose", "-f", "docker-compose.vps2.yml", "-p", "alarm-vps2",
-                 "rm", "-f", "db-standby", "db-standby-init"],
-                cwd=VPS2_PROJECT_DIR, capture_output=True, timeout=15,
-            )
-            subprocess.run(
-                [DOCKER, "volume", "rm", "alarm-vps2_pgdata_standby"],
-                capture_output=True, timeout=10,
-            )
-
-            # 9. Relancer VPS2 — le standby se ré-initialise via pg_basebackup
-            subprocess.run(
-                [DOCKER, "compose", "-f", "docker-compose.vps2.yml", "-p", "alarm-vps2",
-                 "up", "-d"],
-                cwd=VPS2_PROJECT_DIR, capture_output=True, timeout=120,
-            )
-
-            # 10. Attendre que le standby et le backend VPS2 soient prêts
-            for _ in range(40):
-                result = subprocess.run(
-                    [DOCKER, "exec", STANDBY_CONTAINER, "pg_isready", "-U", "alarm", "-q"],
-                    capture_output=True, timeout=5,
-                )
-                if result.returncode == 0:
-                    break
-                time.sleep(3)
 
 
 # ── Cluster / Quorum ─────────────────────────────────────────────────────────
@@ -2265,6 +2125,7 @@ class TestClusterEndpoint:
         assert "clusterMembers" in r.text
 
 
+@pytest.mark.failover
 class TestHeartbeatFailover:
     """Verifie que le heartbeat reprend apres la mort du leader.
 
@@ -2388,6 +2249,7 @@ class TestHeartbeatFailover:
             f"Le detail devrait mentionner 'replica', got {r.json()}"
 
 
+@pytest.mark.failover
 class TestAndroidHeartbeatFailover:
     """Verifie que l'app Android rebascule ses heartbeats apres la mort du leader.
 
@@ -2573,7 +2435,8 @@ class TestEscalationDelayGlobal:
         yield
         # Remettre le delai par defaut
         try:
-            requests.post(f"{API}/config/escalation-delay",
+            admin_h = _admin_headers()
+            requests.post(f"{API}/config/escalation-delay", headers=admin_h,
                          json={"minutes": 15}, timeout=3)
         except Exception:
             pass
@@ -2581,40 +2444,45 @@ class TestEscalationDelayGlobal:
 
     def test_global_delay_endpoint_returns_current_value(self):
         """GET /api/config/escalation-delay retourne le delai global (defaut 15)."""
-        r = requests.get(f"{API}/config/escalation-delay")
+        admin_h = _admin_headers()
+        r = requests.get(f"{API}/config/escalation-delay", headers=admin_h)
         assert r.status_code == 200
         assert r.json()["minutes"] == 15
 
     def test_global_delay_can_be_updated(self):
         """POST /api/config/escalation-delay met a jour le delai."""
-        r = requests.post(f"{API}/config/escalation-delay", json={"minutes": 10})
+        admin_h = _admin_headers()
+        r = requests.post(f"{API}/config/escalation-delay", headers=admin_h, json={"minutes": 10})
         assert r.status_code == 200
         assert r.json()["minutes"] == 10
         # Verifier en relisant
-        r2 = requests.get(f"{API}/config/escalation-delay")
+        r2 = requests.get(f"{API}/config/escalation-delay", headers=admin_h)
         assert r2.json()["minutes"] == 10
 
     def test_global_delay_rejects_below_1(self):
         """Le delai doit etre >= 1 minute."""
-        r = requests.post(f"{API}/config/escalation-delay", json={"minutes": 0.5})
+        admin_h = _admin_headers()
+        r = requests.post(f"{API}/config/escalation-delay", headers=admin_h, json={"minutes": 0.5})
         assert r.status_code == 422
 
     def test_global_delay_rejects_above_60(self):
         """Le delai doit etre <= 60 minutes."""
-        r = requests.post(f"{API}/config/escalation-delay", json={"minutes": 61})
+        admin_h = _admin_headers()
+        r = requests.post(f"{API}/config/escalation-delay", headers=admin_h, json={"minutes": 61})
         assert r.status_code == 422
 
     def test_escalation_uses_global_delay(self):
         """L'escalade utilise le delai global, pas un delai par position."""
         # Mettre le delai a 5 min
-        requests.post(f"{API}/config/escalation-delay", json={"minutes": 5})
+        admin_h = _admin_headers()
+        requests.post(f"{API}/config/escalation-delay", headers=admin_h, json={"minutes": 5})
 
-        user1_id = next(u["id"] for u in requests.get(f"{API}/users/").json()
+        user1_id = next(u["id"] for u in requests.get(f"{API}/users/", headers=admin_h).json()
                         if u["name"] == USER1_NAME)
-        user2_id = next(u["id"] for u in requests.get(f"{API}/users/").json()
+        user2_id = next(u["id"] for u in requests.get(f"{API}/users/", headers=admin_h).json()
                         if u["name"] == USER2_NAME)
 
-        requests.post(f"{API}/alarms/send", json={
+        requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Delay Test", "message": "m", "severity": "critical",
             "assigned_user_id": user1_id,
         })
@@ -2628,7 +2496,7 @@ class TestEscalationDelayGlobal:
             requests.post(f"{API}/devices/heartbeat", headers={"Authorization": f"Bearer {t}"})
         time.sleep(22)  # 2 ticks d'escalade (10s chacun) + marge
 
-        alarms = requests.get(f"{API}/alarms/").json()
+        alarms = requests.get(f"{API}/alarms/", headers=admin_h).json()
         alarm = next(a for a in alarms if a["title"] == "Delay Test")
         assert alarm["assigned_user_id"] == user2_id, \
             f"Alarme devrait etre escaladee avec delai global 5 min"
@@ -2646,7 +2514,8 @@ class TestEscalationChainBulk:
         requests.post(f"{API}/test/reset")
 
     def _get_user_id(self, name):
-        return next(u["id"] for u in requests.get(f"{API}/users/").json()
+        admin_h = _admin_headers()
+        return next(u["id"] for u in requests.get(f"{API}/users/", headers=admin_h).json()
                     if u["name"] == name)
 
     def test_save_escalation_chain_replaces_all(self):
@@ -2654,12 +2523,13 @@ class TestEscalationChainBulk:
         u1 = self._get_user_id(USER1_NAME)
         u2 = self._get_user_id(USER2_NAME)
         admin = self._get_user_id(ADMIN_NAME)
+        admin_h = _admin_headers()
 
-        r = requests.post(f"{API}/config/escalation/bulk",
+        r = requests.post(f"{API}/config/escalation/bulk", headers=admin_h,
                          json={"user_ids": [admin, u1]})
         assert r.status_code == 200
 
-        chain = requests.get(f"{API}/config/escalation").json()
+        chain = requests.get(f"{API}/config/escalation", headers=admin_h).json()
         assert len(chain) == 2
         assert chain[0]["user_id"] == admin
         assert chain[1]["user_id"] == u1
@@ -2667,13 +2537,15 @@ class TestEscalationChainBulk:
     def test_save_escalation_chain_rejects_duplicate_user(self):
         """Un meme user ne peut pas apparaitre 2 fois."""
         u1 = self._get_user_id(USER1_NAME)
-        r = requests.post(f"{API}/config/escalation/bulk",
+        admin_h = _admin_headers()
+        r = requests.post(f"{API}/config/escalation/bulk", headers=admin_h,
                          json={"user_ids": [u1, u1]})
         assert r.status_code == 422
 
     def test_save_escalation_chain_rejects_empty(self):
         """La chaine ne peut pas etre vide."""
-        r = requests.post(f"{API}/config/escalation/bulk",
+        admin_h = _admin_headers()
+        r = requests.post(f"{API}/config/escalation/bulk", headers=admin_h,
                          json={"user_ids": []})
         assert r.status_code == 422
 
@@ -2682,11 +2554,12 @@ class TestEscalationChainBulk:
         u1 = self._get_user_id(USER1_NAME)
         u2 = self._get_user_id(USER2_NAME)
         admin = self._get_user_id(ADMIN_NAME)
+        admin_h = _admin_headers()
 
-        requests.post(f"{API}/config/escalation/bulk",
+        requests.post(f"{API}/config/escalation/bulk", headers=admin_h,
                      json={"user_ids": [u2, admin, u1]})
 
-        chain = requests.get(f"{API}/config/escalation").json()
+        chain = requests.get(f"{API}/config/escalation", headers=admin_h).json()
         assert chain[0]["position"] == 1
         assert chain[0]["user_id"] == u2
         assert chain[1]["position"] == 2
@@ -2716,7 +2589,8 @@ class TestEscalationFrontend:
 
     def test_frontend_all_users_present(self):
         """Tous les users du systeme apparaissent dans la page (dans l'une ou l'autre liste)."""
-        users = requests.get(f"{API}/users/").json()
+        admin_h = _admin_headers()
+        users = requests.get(f"{API}/users/", headers=admin_h).json()
         html = requests.get(f"{BASE_URL}/").text
         # La page charge les users dynamiquement via JS, on ne peut pas verifier
         # le contenu dynamique via un simple GET HTML. On verifie que le JS

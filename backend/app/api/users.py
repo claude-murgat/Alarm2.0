@@ -1,3 +1,5 @@
+import time
+from collections import defaultdict
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -5,9 +7,33 @@ from typing import List
 from ..database import get_db
 from ..models import User, Alarm, EscalationConfig
 from ..schemas import UserCreate, UserResponse, LoginRequest, TokenResponse
-from ..auth import hash_password, verify_password, create_access_token, get_current_user
+from ..auth import hash_password, verify_password, create_access_token, get_current_user, get_current_admin
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+# ── Rate limiting par username ────────────────────────────────────────────────
+# Stocke les timestamps des tentatives échouées par nom (en mémoire).
+_login_failures: dict[str, list[float]] = defaultdict(list)
+RATE_LIMIT_WINDOW = 60  # secondes
+RATE_LIMIT_MAX_FAILURES = 10  # max tentatives échouées par fenêtre
+
+
+def _check_rate_limit(username: str):
+    """Vérifie si le username est rate-limited. Raise 429 si oui."""
+    now = time.time()
+    key = username.lower()
+    # Purger les tentatives hors fenêtre
+    _login_failures[key] = [t for t in _login_failures[key] if now - t < RATE_LIMIT_WINDOW]
+    if len(_login_failures[key]) >= RATE_LIMIT_MAX_FAILURES:
+        raise HTTPException(
+            status_code=429,
+            detail="Trop de tentatives de connexion. Réessayez dans une minute.",
+        )
+
+
+def _record_failure(username: str):
+    """Enregistre une tentative échouée."""
+    _login_failures[username.lower()].append(time.time())
 
 
 @router.post("/register", response_model=UserResponse)
@@ -30,11 +56,17 @@ def register(user_data: UserCreate, db: Session = Depends(get_db)):
 
 @router.post("/login", response_model=TokenResponse)
 def login(login_data: LoginRequest, db: Session = Depends(get_db)):
+    # Rate limiting par username
+    _check_rate_limit(login_data.name)
+
     # Case-insensitive login
     user = db.query(User).filter(func.lower(User.name) == login_data.name.lower()).first()
     if not user or not verify_password(login_data.password, user.hashed_password):
+        _record_failure(login_data.name)
         raise HTTPException(status_code=401, detail="Identifiants invalides")
 
+    # Login réussi : effacer l'historique de tentatives
+    _login_failures.pop(login_data.name.lower(), None)
     token = create_access_token(user.id)
     return TokenResponse(
         access_token=token,
@@ -51,12 +83,19 @@ users_router = APIRouter(prefix="/api/users", tags=["users"])
 
 
 @users_router.get("/", response_model=List[UserResponse])
-def list_users(db: Session = Depends(get_db)):
+def list_users(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     return db.query(User).all()
 
 
 @users_router.delete("/{user_id}")
-def delete_user(user_id: int, db: Session = Depends(get_db)):
+def delete_user(
+    user_id: int,
+    current_user: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
@@ -105,8 +144,19 @@ def refresh_token(current_user: User = Depends(get_current_user)):
 
 
 @users_router.patch("/{user_id}", response_model=UserResponse)
-def update_user(user_id: int, payload: dict, db: Session = Depends(get_db)):
-    """Met à jour les champs d'un utilisateur (ex: phone_number)."""
+def update_user(
+    user_id: int,
+    payload: dict,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Met à jour les champs d'un utilisateur (ex: phone_number).
+    Un utilisateur peut modifier son propre profil. Modifier un autre profil requiert admin."""
+    if user_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Seul un admin peut modifier un autre utilisateur",
+        )
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Utilisateur non trouvé")

@@ -1,6 +1,6 @@
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 import re
 
 
@@ -43,9 +43,9 @@ class TokenResponse(BaseModel):
 
 
 class AlarmCreate(BaseModel):
-    title: str
-    message: str
-    severity: str = "critical"
+    title: str = Field(..., max_length=200)
+    message: str = Field(..., max_length=2000)
+    severity: Literal["low", "medium", "high", "critical"] = "critical"
     assigned_user_id: Optional[int] = None
 
 
@@ -73,16 +73,26 @@ class AlarmResponse(BaseModel):
 
     @classmethod
     def from_alarm(cls, alarm, db=None):
-        """Build AlarmResponse with parsed notified_user_ids and resolved names."""
+        """Build AlarmResponse with notified_user_ids/names from alarm_notifications table."""
         from .clock import now as clock_now
-        raw_ids = alarm.notified_user_ids or ""
-        parsed_ids = [int(x) for x in raw_ids.split(",") if x.strip()]
+
+        # Lire les IDs notifiés depuis la table de liaison
+        parsed_ids = []
         names = []
-        if db and parsed_ids:
-            from .models import User
-            users = db.query(User).filter(User.id.in_(parsed_ids)).all()
-            id_to_name = {u.id: u.name for u in users}
-            names = [id_to_name.get(uid, "?") for uid in parsed_ids]
+        if db:
+            from .models import AlarmNotification, User
+            notifs = (
+                db.query(AlarmNotification)
+                .filter(AlarmNotification.alarm_id == alarm.id)
+                .order_by(AlarmNotification.notified_at)
+                .all()
+            )
+            parsed_ids = [n.user_id for n in notifs]
+            if parsed_ids:
+                users = db.query(User).filter(User.id.in_(parsed_ids)).all()
+                id_to_name = {u.id: u.name for u in users}
+                names = [id_to_name.get(uid, "?") for uid in parsed_ids]
+
         ack_remaining = None
         if alarm.suspended_until and alarm.status == "acknowledged":
             remaining = (alarm.suspended_until - clock_now()).total_seconds()

@@ -64,6 +64,8 @@ services:
       - PEER_TEST_URLS=${PEER_TEST_URLS}
       - NODE_NAME=${NODE_NAME}
       - GATEWAY_KEY=${GATEWAY_KEY:-changeme-in-prod}
+      - ENABLE_TEST_ENDPOINTS=${ENABLE_TEST_ENDPOINTS:-true}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:8000,http://localhost:8001,http://localhost:8002}
     depends_on:
       patroni:
         condition: service_healthy

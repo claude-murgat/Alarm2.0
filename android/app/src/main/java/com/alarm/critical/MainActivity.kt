@@ -40,9 +40,11 @@ class MainActivity : AppCompatActivity() {
         val loginButton = findViewById<Button>(R.id.loginButton)
         val statusText = findViewById<TextView>(R.id.statusText)
 
-        // Pré-rempli pour les tests
-        nameInput.setText("user1")
-        passwordInput.setText("user123")
+        // Pré-rempli uniquement en mode debug (jamais en production)
+        if (BuildConfig.DEBUG) {
+            nameInput.setText("user1")
+            passwordInput.setText("user123")
+        }
 
         loginButton.setOnClickListener {
             val name = nameInput.text.toString().trim()

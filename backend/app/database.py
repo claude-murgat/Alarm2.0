@@ -17,7 +17,7 @@ Base = declarative_base()
 
 
 def run_migrations(engine):
-    """Ajoute les colonnes manquantes sur les tables existantes (idempotent)."""
+    """Ajoute les colonnes/tables manquantes sur les tables existantes (idempotent)."""
     is_sqlite = engine.dialect.name == "sqlite"
     with engine.connect() as conn:
         if is_sqlite:
@@ -32,6 +32,54 @@ def run_migrations(engine):
             conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_number VARCHAR"))
             conn.commit()
             logger.info("Migration: users.phone_number vérifiée/ajoutée")
+
+        # ── Migration : table alarm_notifications ──────────────────────────
+        _migrate_alarm_notifications(conn, is_sqlite)
+
+
+def _migrate_alarm_notifications(conn, is_sqlite: bool):
+    """Crée la table alarm_notifications et migre les données CSV si nécessaire."""
+    # Vérifier si la table existe déjà
+    if is_sqlite:
+        exists = conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name='alarm_notifications'")
+        ).fetchone()
+    else:
+        exists = conn.execute(
+            text("SELECT to_regclass('public.alarm_notifications')")
+        ).fetchone()
+        exists = exists[0] if exists else None
+
+    if not exists:
+        conn.execute(text("""
+            CREATE TABLE alarm_notifications (
+                id SERIAL PRIMARY KEY,
+                alarm_id INTEGER NOT NULL REFERENCES alarms(id) ON DELETE CASCADE,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                notified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (alarm_id, user_id)
+            )
+        """))
+        conn.commit()
+        logger.info("Migration: table alarm_notifications créée")
+
+        # Migrer les données CSV existantes vers la nouvelle table
+        rows = conn.execute(text("SELECT id, notified_user_ids FROM alarms WHERE notified_user_ids IS NOT NULL AND notified_user_ids != ''")).fetchall()
+        for row in rows:
+            alarm_id = row[0]
+            csv_ids = row[1]
+            for uid_str in csv_ids.split(","):
+                uid_str = uid_str.strip()
+                if uid_str:
+                    try:
+                        uid = int(uid_str)
+                        conn.execute(text(
+                            "INSERT INTO alarm_notifications (alarm_id, user_id) VALUES (:aid, :uid) ON CONFLICT DO NOTHING"
+                        ), {"aid": alarm_id, "uid": uid})
+                    except (ValueError, Exception):
+                        pass
+        conn.commit()
+        logger.info(f"Migration: {len(rows)} alarmes migrées vers alarm_notifications")
 
 
 def get_db():

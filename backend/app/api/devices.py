@@ -99,6 +99,9 @@ def heartbeat(
 
 
 @router.get("/", response_model=List[UserResponse])
-def list_devices(db: Session = Depends(get_db)):
+def list_devices(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Return list of users with their online status (replaces device list)."""
     return db.query(User).all()
