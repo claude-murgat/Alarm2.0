@@ -74,6 +74,22 @@ class SystemConfig(Base):
     value = Column(String, nullable=False)
 
 
+class DeviceToken(Base):
+    """Tokens FCM enregistres par les apps Android."""
+    __tablename__ = "device_tokens"
+    __table_args__ = (
+        UniqueConstraint("user_id", "device_id", name="uq_user_device"),
+    )
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    fcm_token = Column(String, nullable=False)
+    device_id = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User")
+
+
 class SmsQueue(Base):
     __tablename__ = "sms_queue"
     id = Column(Integer, primary_key=True, index=True)

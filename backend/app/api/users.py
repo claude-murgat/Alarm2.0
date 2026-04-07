@@ -68,9 +68,16 @@ def login(login_data: LoginRequest, db: Session = Depends(get_db)):
     # Login réussi : effacer l'historique de tentatives
     _login_failures.pop(login_data.name.lower(), None)
     token = create_access_token(user.id)
+
+    # Calculer is_oncall : user est-il en position 1 de la chaine d'escalade ?
+    from ..models import EscalationConfig
+    first_pos = db.query(EscalationConfig).order_by(EscalationConfig.position).first()
+    is_oncall = first_pos is not None and first_pos.user_id == user.id
+
     return TokenResponse(
         access_token=token,
         user=UserResponse.model_validate(user),
+        is_oncall=is_oncall,
     )
 
 

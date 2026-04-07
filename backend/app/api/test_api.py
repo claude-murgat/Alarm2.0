@@ -130,6 +130,10 @@ def reset_all(db: Session = Depends(get_db),
     devices_module.heartbeat_paused = False
     devices_module.connection_loss_time_int = None
 
+    # Reset FCM test list
+    from ..fcm_service import reset_last_fcm
+    reset_last_fcm()
+
     users = db.query(User).all()
     for user in users:
         user.is_online = True
@@ -197,8 +201,8 @@ def trigger_escalation(db: Session = Depends(get_db)):
                 current_position = ec.position
                 break
 
-        # Trouver l'utilisateur suivant ONLINE (avec rebouclage)
-        next_user = _find_next_online_user(
+        # Trouver l'utilisateur suivant (sans filtre online — FCM reveille)
+        next_user = _find_next_user(
             db, escalation_chain, current_position, alarm.assigned_user_id
         )
 
@@ -214,6 +218,7 @@ def trigger_escalation(db: Session = Depends(get_db)):
             )
             if not existing_notif:
                 db.add(AlarmNotification(alarm_id=alarm.id, user_id=next_user.user_id))
+                db.flush()  # Flush pour que la query notified_ids voie le nouvel ajout
             alarm.status = "escalated"
             alarm.escalation_count += 1
             escalated_count += 1
@@ -225,15 +230,22 @@ def trigger_escalation(db: Session = Depends(get_db)):
                       from_user=prev_user, to_user=next_user.user_id,
                       notified_user_ids=notified_ids)
 
+            # FCM a tous les notifies (cumulative)
+            from ..fcm_service import send_fcm_to_user
+            for uid in notified_ids:
+                try:
+                    send_fcm_to_user(db, uid, alarm.title, alarm.message,
+                                     {"alarm_id": str(alarm.id), "severity": alarm.severity})
+                except Exception:
+                    pass
+
     db.commit()
     return {"status": "ok", "escalated": escalated_count}
 
 
-def _find_next_online_user(db, escalation_chain, current_position, current_user_id):
-    """Find the next online user in the escalation chain after current_position.
-    Wraps around if needed. Skips users who are known offline (have a last_heartbeat
-    but is_online=False). Users who never had a heartbeat are not skipped.
-    Returns None if no eligible user found (other than current)."""
+def _find_next_user(db, escalation_chain, current_position, current_user_id):
+    """Find the next user in the escalation chain after current_position.
+    Wraps around if needed. Ne filtre PAS sur is_online — FCM reveille les users."""
     candidates = []
     for ec in escalation_chain:
         if ec.position > current_position:
@@ -248,9 +260,6 @@ def _find_next_online_user(db, escalation_chain, current_position, current_user_
         user = db.query(User).filter(User.id == ec.user_id).first()
         if not user:
             continue
-        # Skip user only if they have been seen before (last_heartbeat not null) and are offline
-        if user.last_heartbeat is not None and not user.is_online:
-            continue
         return ec
 
     return None
@@ -262,6 +271,23 @@ def get_last_email_sent():
     _require_test_endpoints()
     from ..email_service import get_last_email
     return get_last_email()
+
+
+@router.get("/last-fcm")
+def get_last_fcm():
+    """Return all FCM notifications sent (for testing)."""
+    _require_test_endpoints()
+    from ..fcm_service import get_last_fcm_list
+    return get_last_fcm_list()
+
+
+@router.post("/reset-fcm")
+def reset_fcm():
+    """Reset FCM notification list (for testing)."""
+    _require_test_endpoints()
+    from ..fcm_service import reset_last_fcm
+    reset_last_fcm()
+    return {"status": "ok"}
 
 
 @router.get("/status")

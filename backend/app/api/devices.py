@@ -8,8 +8,8 @@ from sqlalchemy.orm import Session
 from typing import List
 from ..clock import now as clock_now
 from ..database import get_db
-from ..models import User
-from ..schemas import UserResponse
+from ..models import User, DeviceToken
+from ..schemas import UserResponse, FcmTokenRequest, FcmTokenDeleteRequest
 from ..auth import get_current_user, security, SECRET_KEY, ALGORITHM
 from ..events import log_event
 from ..leader_election import is_leader
@@ -96,6 +96,47 @@ def heartbeat(
     if was_offline:
         log_event("user_online", user_id=current_user.id, user_name=current_user.name)
     return {"status": "ok", "timestamp": now.isoformat()}
+
+
+@router.post("/fcm-token")
+def register_fcm_token(
+    data: FcmTokenRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Enregistre ou met a jour un token FCM pour le device de l'utilisateur."""
+    existing = (
+        db.query(DeviceToken)
+        .filter(DeviceToken.user_id == current_user.id, DeviceToken.device_id == data.device_id)
+        .first()
+    )
+    if existing:
+        existing.fcm_token = data.token
+        existing.updated_at = clock_now()
+    else:
+        db.add(DeviceToken(
+            user_id=current_user.id,
+            fcm_token=data.token,
+            device_id=data.device_id,
+        ))
+    db.commit()
+    return {"status": "ok"}
+
+
+@router.delete("/fcm-token")
+def delete_fcm_token(
+    data: FcmTokenDeleteRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Supprime un token FCM (au logout)."""
+    deleted = (
+        db.query(DeviceToken)
+        .filter(DeviceToken.user_id == current_user.id, DeviceToken.device_id == data.device_id)
+        .delete()
+    )
+    db.commit()
+    return {"status": "ok", "deleted": deleted}
 
 
 @router.get("/", response_model=List[UserResponse])

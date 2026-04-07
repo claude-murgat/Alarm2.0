@@ -7,6 +7,7 @@ from .database import SessionLocal
 from .models import Alarm, AlarmNotification, EscalationConfig, User, SystemConfig, SmsQueue
 from .clock import now as clock_now
 from .email_service import send_alert_email
+from .fcm_service import send_fcm_to_user
 from .events import log_event
 
 logger = logging.getLogger("escalation")
@@ -118,21 +119,32 @@ async def escalation_loop():
                         continue
 
                     current_position = -1
-                    # Lire le delai global depuis SystemConfig
-                    delay_config = db.query(SystemConfig).filter(
-                        SystemConfig.key == "escalation_delay_minutes"
-                    ).first()
-                    current_delay = float(delay_config.value) if delay_config else 15.0
+                    assigned_position = -1
                     for ec in escalation_chain:
                         if ec.user_id == alarm.assigned_user_id:
                             current_position = ec.position
+                            assigned_position = ec.position
                             break
+
+                    # Delai 2 paliers : astreinte (pos 1) = delai normal, veille (pos 2+) = delai accelere
+                    delay_config = db.query(SystemConfig).filter(
+                        SystemConfig.key == "escalation_delay_minutes"
+                    ).first()
+                    if assigned_position == 1:
+                        # Position 1 = astreinte → delai normal
+                        current_delay = float(delay_config.value) if delay_config else 15.0
+                    else:
+                        # Positions 2+ = veille → delai accelere FCM
+                        fcm_delay = db.query(SystemConfig).filter(
+                            SystemConfig.key == "fcm_escalation_delay_minutes"
+                        ).first()
+                        current_delay = float(fcm_delay.value) if fcm_delay else 2.0
 
                     elapsed = (now - alarm.created_at).total_seconds() / 60.0
                     escalation_threshold = current_delay * (alarm.escalation_count + 1)
 
                     if elapsed >= escalation_threshold:
-                        next_user = _find_next_online_user(
+                        next_user = _find_next_user(
                             db, escalation_chain, current_position, alarm.assigned_user_id
                         )
 
@@ -152,13 +164,17 @@ async def escalation_loop():
                                       from_user=prev_user, to_user=next_user.user_id,
                                       notified_user_ids=notified)
 
-                        # Toujours notifier via SMS tous les utilisateurs déjà dans la chaîne
-                        # quand le seuil est atteint (le guard anti-doublon évite les doublons)
+                        # FCM + SMS a tous les utilisateurs notifies (cumulative)
                         notified_ids = _get_notified_user_ids(db, alarm.id)
                         for uid in notified_ids:
                             u = db.query(User).filter(User.id == uid).first()
                             if u:
                                 _enqueue_sms_for_user(db, u, alarm)
+                                try:
+                                    send_fcm_to_user(db, uid, alarm.title, alarm.message,
+                                                     {"alarm_id": str(alarm.id), "severity": alarm.severity})
+                                except Exception:
+                                    pass  # FCM est best-effort
                         db.commit()
 
                 # --- 3. On-call monitoring: user #1 heartbeat ---
@@ -271,9 +287,9 @@ def _check_oncall_heartbeat(db: Session, now, escalation_chain):
     )
 
 
-def _find_next_online_user(db, escalation_chain, current_position, current_user_id):
-    """Find the next online user in the escalation chain after current_position.
-    Wraps around if needed. Skips users who are known offline."""
+def _find_next_user(db, escalation_chain, current_position, current_user_id):
+    """Find the next user in the escalation chain after current_position.
+    Wraps around if needed. Ne filtre PAS sur is_online — le FCM se charge du reveil."""
     candidates = []
     for ec in escalation_chain:
         if ec.position > current_position:
@@ -288,8 +304,7 @@ def _find_next_online_user(db, escalation_chain, current_position, current_user_
         user = db.query(User).filter(User.id == ec.user_id).first()
         if not user:
             continue
-        if user.last_heartbeat is not None and not user.is_online:
-            continue
+        # Plus de filtre is_online — l'escalade suit l'ordre de la chaine
         return ec
 
     return None

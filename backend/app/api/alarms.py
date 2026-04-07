@@ -87,6 +87,16 @@ def send_alarm(
     db.commit()
     db.refresh(alarm)
     log_event("alarm_created", alarm_id=alarm.id, assigned_to=alarm.assigned_user_id)
+
+    # Envoyer FCM a l'utilisateur assigne (fire-and-forget)
+    if assigned_user_id:
+        try:
+            from ..fcm_service import send_fcm_to_user
+            send_fcm_to_user(db, assigned_user_id, alarm.title, alarm.message,
+                             {"alarm_id": str(alarm.id), "severity": alarm.severity})
+        except Exception:
+            pass  # FCM est best-effort
+
     return _alarm_response(alarm, db)
 
 

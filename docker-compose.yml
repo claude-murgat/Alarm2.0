@@ -66,6 +66,9 @@ services:
       - GATEWAY_KEY=${GATEWAY_KEY:-changeme-in-prod}
       - ENABLE_TEST_ENDPOINTS=${ENABLE_TEST_ENDPOINTS:-true}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:8000,http://localhost:8001,http://localhost:8002}
+      - FCM_PROJECT_ID=${FCM_PROJECT_ID:-}
+      - FCM_SERVICE_ACCOUNT_JSON=${FCM_SERVICE_ACCOUNT_JSON:-}
+      - FCM_ESCALATION_DELAY_MINUTES=${FCM_ESCALATION_DELAY_MINUTES:-2}
     depends_on:
       patroni:
         condition: service_healthy

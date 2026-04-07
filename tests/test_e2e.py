@@ -790,67 +790,58 @@ class TestWebInterface:
 
 # ── #2 Escalade skip offline ──────────────────────────────────────────────────
 
-class TestEscalationSkipOffline:
-    """#2 — L'escalade doit sauter les utilisateurs offline."""
+class TestEscalationReachesOffline:
+    """#2 — L'escalade atteint les utilisateurs offline (FCM les reveille)."""
 
     @pytest.fixture(autouse=True)
     def setup(self):
         admin_h = _admin_headers()
         requests.post(f"{API}/alarms/reset", headers=admin_h)
         requests.post(f"{API}/test/reset")  # Remet tout le monde online
-        requests.post(f"{API}/config/escalation", headers=admin_h, json={
-            "position": 1, "user_id": self._get_user_id(USER1_NAME), "delay_minutes": 15
-        })
-        requests.post(f"{API}/config/escalation", headers=admin_h, json={
-            "position": 2, "user_id": self._get_user_id(USER2_NAME), "delay_minutes": 15
-        })
-        requests.post(f"{API}/config/escalation", headers=admin_h, json={
-            "position": 3, "user_id": self._get_user_id(ADMIN_NAME), "delay_minutes": 15
-        })
+        # Restaurer la chaine standard
+        users = requests.get(f"{API}/users/", headers=admin_h).json()
+        uid1 = next(u["id"] for u in users if u["name"] == USER1_NAME)
+        uid2 = next(u["id"] for u in users if u["name"] == USER2_NAME)
+        uid_admin = next(u["id"] for u in users if u["name"] == ADMIN_NAME)
+        requests.post(f"{API}/config/escalation/bulk", json={
+            "user_ids": [uid1, uid2, uid_admin],
+        }, headers=admin_h)
 
     def _get_user_id(self, name):
         admin_h = _admin_headers()
         users = requests.get(f"{API}/users/", headers=admin_h).json()
         return next(u["id"] for u in users if u["name"] == name)
 
-    def test_escalation_skips_offline_user(self):
-        """Si user2 est offline, l'escalade passe directement à admin."""
+    def test_escalation_reaches_offline_user(self):
+        """Meme si user2 est offline, l'escalade va a user2 (FCM le reveille)."""
         user1_id = self._get_user_id(USER1_NAME)
         user2_id = self._get_user_id(USER2_NAME)
-        admin_id = self._get_user_id(ADMIN_NAME)
         admin_h = _admin_headers()
 
         # Mettre tout le monde offline
         requests.post(f"{API}/test/simulate-connection-loss")
-        # Remettre user1 et admin online (user2 reste offline)
+        # Remettre user1 online
         r = requests.post(f"{API}/auth/login", json={"name": USER1_NAME, "password": USER1_PASSWORD})
         requests.post(f"{API}/devices/heartbeat", headers={"Authorization": f"Bearer {r.json()['access_token']}"})
-        r = requests.post(f"{API}/auth/login", json={"name": ADMIN_NAME, "password": ADMIN_PASSWORD})
-        requests.post(f"{API}/devices/heartbeat", headers={"Authorization": f"Bearer {r.json()['access_token']}"})
 
-        # Vérifier que user2 est bien offline avant de continuer
-        users = requests.get(f"{API}/users/", headers=admin_h).json()
-        user2 = next(u for u in users if u["name"] == USER2_NAME)
-        assert user2["is_online"] is False, \
-            f"user2 devrait être offline mais is_online={user2['is_online']}"
-
-        # Envoyer alarme à user1
+        # Envoyer alarme a user1
         requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Skip offline", "message": "test", "severity": "critical",
+            "title": "Reach offline", "message": "test", "severity": "critical",
             "assigned_user_id": user1_id,
         })
 
-        # Escalader → devrait sauter user2 (offline) et aller à admin
+        # Escalader → va a user2 meme s'il est offline
         requests.post(f"{API}/test/trigger-escalation")
 
         r = requests.get(f"{API}/alarms/", headers=admin_h)
         alarm = r.json()[0]
-        assert alarm["assigned_user_id"] == admin_id, \
-            f"Devrait sauter user2 (offline) → admin, mais assignée à {alarm['assigned_user_id']}"
+        assert alarm["assigned_user_id"] == user2_id, \
+            f"Devrait aller a user2 (offline, FCM le reveille), mais assignee a {alarm['assigned_user_id']}"
 
-    def test_escalation_all_offline_wraps_to_first_online(self):
-        """Si tous sauf user1 sont offline, on reste sur user1 (pas de boucle infinie)."""
+    def test_escalation_wraps_even_all_offline(self):
+        """Meme si tous sont offline, l'escalade suit l'ordre de la chaine."""
         user1_id = self._get_user_id(USER1_NAME)
+        user2_id = self._get_user_id(USER2_NAME)
         admin_h = _admin_headers()
 
         # Mettre tout le monde offline sauf user1
@@ -859,13 +850,13 @@ class TestEscalationSkipOffline:
         requests.post(f"{API}/devices/heartbeat", headers={"Authorization": f"Bearer {r.json()['access_token']}"})
 
         requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Tous offline", "message": "test", "severity": "critical",
+            "title": "All offline", "message": "test", "severity": "critical",
             "assigned_user_id": user1_id,
         })
 
-        # Escalader → personne d'autre n'est online, pas d'escalade
+        # Escalader → user2 meme offline
         r = requests.post(f"{API}/test/trigger-escalation")
-        assert r.json()["escalated"] == 0
+        assert r.json()["escalated"] == 1
 
 
 # ── #5 Utilisateur supprimé pendant alarme ───────────────────────────────────
@@ -2426,12 +2417,21 @@ class TestAndroidHeartbeatFailover:
 # ── Delai escalade global ────────────────────────────────────────────────────
 
 class TestEscalationDelayGlobal:
-    """Verifie le delai d'escalade unique (1-60 min) pour toute la chaine."""
+    """Verifie le delai d'escalade pour le user d'astreinte (pos 1)."""
 
     @pytest.fixture(autouse=True)
     def setup(self):
         requests.post(f"{API}/test/reset")
         _reset_clock_all_nodes()
+        # Restaurer la chaine standard
+        admin_h = _admin_headers()
+        users = requests.get(f"{API}/users/", headers=admin_h).json()
+        uid1 = next(u["id"] for u in users if u["name"] == USER1_NAME)
+        uid2 = next(u["id"] for u in users if u["name"] == USER2_NAME)
+        uid_admin = next(u["id"] for u in users if u["name"] == ADMIN_NAME)
+        requests.post(f"{API}/config/escalation/bulk", json={
+            "user_ids": [uid1, uid2, uid_admin],
+        }, headers=admin_h)
         yield
         # Remettre le delai par defaut
         try:
@@ -2471,25 +2471,25 @@ class TestEscalationDelayGlobal:
         r = requests.post(f"{API}/config/escalation-delay", headers=admin_h, json={"minutes": 61})
         assert r.status_code == 422
 
-    def test_escalation_uses_global_delay(self):
-        """L'escalade utilise le delai global, pas un delai par position."""
-        # Mettre le delai a 5 min
+    def test_escalation_uses_global_delay_for_oncall(self):
+        """L'escalade du user d'astreinte (pos 1) utilise le delai global configurable.
+        Avec le delai a 5 min et une avance de 6 min, l'alarme doit etre escaladee
+        au moins une fois (user1 → user2). Avec le delai veille de 2 min, une deuxieme
+        escalade peut suivre si le temps ecoule depasse aussi le seuil veille."""
         admin_h = _admin_headers()
+        # Mettre le delai astreinte a 5 min
         requests.post(f"{API}/config/escalation-delay", headers=admin_h, json={"minutes": 5})
 
         user1_id = next(u["id"] for u in requests.get(f"{API}/users/", headers=admin_h).json()
                         if u["name"] == USER1_NAME)
-        user2_id = next(u["id"] for u in requests.get(f"{API}/users/", headers=admin_h).json()
-                        if u["name"] == USER2_NAME)
 
         requests.post(f"{API}/alarms/send", headers=admin_h, json={
             "title": "Delay Test", "message": "m", "severity": "critical",
             "assigned_user_id": user1_id,
         })
 
-        # Avancer de 6 min (> 5 min = delai global)
+        # Avancer de 6 min (> 5 min = delai astreinte configure)
         _advance_clock_all_nodes(6)
-        # Heartbeats pour garder les users online
         for name, pwd in [(USER1_NAME, USER1_PASSWORD), (USER2_NAME, USER2_PASSWORD),
                           (ADMIN_NAME, ADMIN_PASSWORD)]:
             t = requests.post(f"{API}/auth/login", json={"name": name, "password": pwd}).json()["access_token"]
@@ -2498,8 +2498,11 @@ class TestEscalationDelayGlobal:
 
         alarms = requests.get(f"{API}/alarms/", headers=admin_h).json()
         alarm = next(a for a in alarms if a["title"] == "Delay Test")
-        assert alarm["assigned_user_id"] == user2_id, \
-            f"Alarme devrait etre escaladee avec delai global 5 min"
+        # L'alarme doit avoir ete escaladee au moins une fois (pas sur user1)
+        assert alarm["assigned_user_id"] != user1_id, \
+            f"Alarme devrait etre escaladee apres 6 min (delai astreinte 5 min)"
+        assert alarm["escalation_count"] >= 1, \
+            f"Au moins 1 escalade attendue, got {alarm['escalation_count']}"
 
 
 # ── Chaine escalade bulk ────────────────────────────────────────────────────

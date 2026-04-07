@@ -5,20 +5,21 @@ Système d'astreinte avec notification mobile, sonnerie continue, acquittement t
 ## Architecture
 
 ```
-┌─────────────────────┐         ┌──────────────────────────────────┐
-│  App Android (Kotlin)│◄──────►│  FastAPI Backend (Docker)        │
-│  ├─ Login par nom   │  HTTP   │  ├─ API REST                    │
-│  ├─ Polling /mine   │ polling │  ├─ Interface web admin (/)      │
-│  ├─ Heartbeat 3s    │  3s     │  ├─ Moteur d'escalade (asyncio) │
-│  ├─ Sonnerie alarme │         │  ├─ Watchdog (30s)              │
-│  ├─ Acquittement    │         │  ├─ Horloge injectable (tests)  │
-│  └─ Refresh token   │         │  └─ Email SMTP (Mailhog)        │
-└─────────────────────┘         └────────────┬─────────────────────┘
-                                             │
-                                ┌────────────┼──────────────┐
-                                │            │              │
-                           PostgreSQL    Mailhog       Docker
-                             :5432        :8025        Compose
+┌─────────────────────────┐         ┌──────────────────────────────────┐
+│  App Android (Kotlin)    │◄──────►│  FastAPI Backend (Docker)        │
+│  ├─ Login par nom        │  HTTP   │  ├─ API REST                    │
+│  ├─ Mode astreinte :     │ polling │  ├─ Interface web admin (/)      │
+│  │  ├─ Polling /mine 3s  │  3s     │  ├─ Moteur d'escalade (asyncio) │
+│  │  ├─ Heartbeat 3s      │         │  ├─ Watchdog (30s)              │
+│  │  └─ Sonnerie alarme   │         │  ├─ Horloge injectable (tests)  │
+│  ├─ Mode veille :        │         │  ├─ Email SMTP (Mailhog)        │
+│  │  ├─ FCM uniquement    │  push   │  └─ FCM (Firebase Cloud Msg)    │
+│  │  └─ Reveil par push   │         └────────────┬─────────────────────┘
+│  ├─ Acquittement         │                      │
+│  └─ Refresh token        │         ┌────────────┼──────────────┐
+└──────────────────────────┘         │            │              │
+                                PostgreSQL    Mailhog       Docker
+                                  :5432        :8025        Compose
 ```
 
 ## Mécanismes d'alarme — Vue complète
@@ -55,41 +56,68 @@ Système d'astreinte avec notification mobile, sonnerie continue, acquittement t
 - **Nouvelle alarme = nouvelle sonnerie** : si une alarme est résolue puis qu'une nouvelle
   arrive, elle sonne même si l'utilisateur avait acquitté la précédente (reset par ID)
 
-### 2. Escalade cumulative
+### 2. Modes astreinte / veille
+
+Le systeme distingue deux profils avec des impacts batterie differents :
 
 ```
-  Alarme envoyée
+  ┌──────────────────────────────────────────────────────────┐
+  │  MODE ASTREINTE (position 1 — telephone pro sur secteur) │
+  │  ├─ Foreground service permanent                         │
+  │  ├─ Heartbeat POST toutes les 3s                         │
+  │  ├─ Polling GET /alarms/mine toutes les 3s               │
+  │  ├─ Sonnerie immediate si alarme                         │
+  │  └─ Delai escalade : 15 min (configurable)               │
+  └──────────────────────────────────────────────────────────┘
+
+  ┌──────────────────────────────────────────────────────────┐
+  │  MODE VEILLE (positions 2+ — telephones perso)           │
+  │  ├─ AUCUN foreground service au repos                    │
+  │  ├─ AUCUN heartbeat, AUCUN polling                       │
+  │  ├─ Seul FCM actif (cout batterie ~0, via Play Services) │
+  │  ├─ Reveil par push FCM quand l'escalade arrive          │
+  │  ├─ Delai escalade : 2 min (si pas d'ack apres FCM)     │
+  │  └─ Service s'arrete automatiquement apres resolution    │
+  └──────────────────────────────────────────────────────────┘
+```
+
+Le champ `is_oncall` dans la reponse de login indique le mode (position 1 = true).
+
+### 3. Escalade cumulative
+
+```
+  Alarme envoyee
        │
        ▼
-  ┌─────────┐  15 min sans ack  ┌─────────┐  15 min  ┌─────────┐
+  ┌─────────┐  15 min sans ack  ┌─────────┐  2 min   ┌─────────┐
   │  user1   │─────────────────►│  user2   │────────►│  admin   │
-  │ (pos. 1) │  🔊 SONNE        │ (pos. 2) │  🔊      │ (pos. 3) │
-  │ 🔊 SONNE │  TOUJOURS        │ 🔊 SONNE │  AUSSI   │ 🔊 SONNE │
+  │ (pos. 1) │  🔊 SONNE        │ (pos. 2) │  🔊+FCM  │ (pos. 3) │
+  │ ASTREINTE│  TOUJOURS        │ VEILLE   │  AUSSI   │ VEILLE   │
+  │ 🔊 SONNE │                  │ 🔊 SONNE │          │ 🔊 SONNE │
   └─────────┘                   └─────────┘          └────┬─────┘
-                                                          │ 15 min (si toujours pas ack)
+                                                          │ 2 min
                                                           ▼
-                                                   Rebouclage vers
-                                                   le prochain online
-                                                   (effet limité : tout
-                                                   le monde sonne déjà)
+                                                   Rebouclage
 
-  ★ CUMULATIVE : chaque utilisateur appelé CONTINUE de sonner.
+  ★ CUMULATIVE : chaque utilisateur appele CONTINUE de sonner.
     N'importe lequel peut acquitter l'alarme.
+  ★ FCM : les users en veille sont reveilles par push notification.
+  ★ 2 PALIERS : astreinte (pos 1) = 15 min, veille (pos 2+) = 2 min.
 ```
 
-**Règles :**
-- Délai configurable par position (défaut 15 min)
-- **Escalade cumulative** : les utilisateurs précédents continuent de voir/entendre l'alarme
-- **N'importe qui** parmi les notifiés peut acquitter (pas seulement le dernier)
-- **Liste des notifiés** visible (`notified_user_ids` + `notified_user_names`)
-- **Skip des utilisateurs offline** (heartbeat connu + is_online=false)
-- **Rebouclage** après le dernier → continue à tourner (effet limité si tout le monde sonne déjà)
-- **Pas d'escalade** si alarme acquittée
+**Regles :**
+- **Delai 2 paliers** : astreinte (position 1) = 15 min, veille (positions 2+) = 2 min
+- **Plus de filtre online** : l'escalade suit l'ordre de la chaine, le FCM reveille les users en veille
+- **Escalade cumulative** : les utilisateurs precedents continuent de voir/entendre l'alarme
+- **N'importe qui** parmi les notifies peut acquitter (pas seulement le dernier)
+- **Liste des notifies** visible (`notified_user_ids` + `notified_user_names`)
+- **Rebouclage** apres le dernier
+- **Pas d'escalade** si alarme acquittee
 - **Reprise d'escalade** si ack expire et alarme redevient active
-- **Chaîne vide** → email à `direction_technique@charlesmurgat.com` (configurable)
-- **Timing testé** via horloge injectable (pas de sleep dans les tests)
+- **Chaine vide** → email a `direction_technique@charlesmurgat.com` (configurable)
+- **Timing teste** via horloge injectable (pas de sleep dans les tests)
 
-### 2b. Utilisateur d'astreinte hors connexion
+### 3b. Utilisateur d'astreinte hors connexion
 
 ```
   User #1 (astreinte contractuelle, position 1)
@@ -117,7 +145,7 @@ Système d'astreinte avec notification mobile, sonnerie continue, acquittement t
 - **Auto-résolution** si user #1 revient en ligne (heartbeat)
 - Si **personne** n'est connecté → email à la direction technique
 
-### 3. Watchdog / Heartbeat
+### 4. Watchdog / Heartbeat (mode astreinte uniquement)
 
 ```
   App Android                        Backend
@@ -147,7 +175,7 @@ Système d'astreinte avec notification mobile, sonnerie continue, acquittement t
 - Quand en pause : endpoint retourne 503 → l'app détecte la perte
 - Quand repris : heartbeat normal reprend
 
-### 4. Authentification et Token
+### 5. Authentification et Token
 
 ```
   Login (nom + mdp)
@@ -166,7 +194,7 @@ Système d'astreinte avec notification mobile, sonnerie continue, acquittement t
            "Votre session a expiré..."
 ```
 
-### 5. Suppression d'utilisateur
+### 6. Suppression d'utilisateur
 
 ```
   Utilisateur supprimé pendant alarme active
@@ -176,7 +204,7 @@ Système d'astreinte avec notification mobile, sonnerie continue, acquittement t
   (ou au premier autre utilisateur si chaîne vide)
 ```
 
-### 6. Persistence
+### 7. Persistence
 
 ```
   PostgreSQL (Docker volume pgdata)
@@ -295,6 +323,7 @@ cd android && ./gradlew connectedAndroidTest
 | Tests mobile | Espresso + FakeApiService (isolé, sans backend) |
 | DI mobile | Manuel (ApiProvider singleton) |
 | Email | SMTP via Mailhog (dev) / configurable (prod) |
+| Push | FCM (Firebase Cloud Messaging) pour reveil mode veille |
 
 ## Troubleshooting
 
@@ -305,7 +334,6 @@ cd android && ./gradlew connectedAndroidTest
 
 ## Limitations actuelles
 
-- Communication par HTTP polling (pas de push/FCM)
-- Pas de HTTPS/TLS (développement uniquement)
-- Backend hébergé sur site = point de défaillance unique (voir analyse redondance)
+- Pas de HTTPS/TLS (developpement uniquement)
 - L'alarme d'astreinte ne peut pas coexister avec une alarme manuelle (contrainte alarme unique)
+- Phase B prevue : SSE (Server-Sent Events) pour push temps reel sans polling

@@ -40,6 +40,16 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserResponse
+    is_oncall: bool = False
+
+
+class FcmTokenRequest(BaseModel):
+    token: str
+    device_id: str
+
+
+class FcmTokenDeleteRequest(BaseModel):
+    device_id: str
 
 
 class AlarmCreate(BaseModel):
