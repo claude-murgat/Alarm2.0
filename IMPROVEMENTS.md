@@ -2,10 +2,11 @@
 
 ## Statut global
 - Date d'analyse : 2026-04-06
-- Derniere mise a jour : 2026-04-06
+- Derniere mise a jour : 2026-04-08
 - Total : 19 points identifies (11 logiciel + 8 fonctionnel)
-- Termines : 9/19 (points 1-9)
-- Restants : 10/19 (points 10-19)
+- Termines : 11/19
+- Rejetes : 3/19
+- Restants : 5/19
 
 ---
 
@@ -53,10 +54,12 @@ Endpoint login vulnerable au brute-force.
 - slowapi ou middleware custom
 - Limiter /api/auth/login a N tentatives/minute par IP
 
-### 10. [TODO] Passer au WebSocket/SSE au lieu du polling 3s
-Consommation batterie/bande passante excessive.
-- WebSocket pour notifications temps reel
-- Polling en fallback uniquement
+### 10. [PHASE B] Passer au SSE au lieu du polling 3s (mode astreinte)
+Le polling 3s fonctionne mais ajoute de la latence.
+- SSE pour push temps reel des evenements (alarmes, escalades, resolutions)
+- Polling en fallback si SSE deconnecte > 5s
+- Le heartbeat POST 3s reste inchange (source de verite watchdog)
+- Prevu en Phase B apres stabilisation FCM
 
 ### 11. [TODO] Logging structure (JSON)
 Pour un systeme critique, logging basique insuffisant.
@@ -67,14 +70,13 @@ Pour un systeme critique, logging basique insuffisant.
 
 ## FONCTIONNEL
 
-### 12. [TODO] Escalade differenciee selon la severite
+### 12. [REJETE] Escalade differenciee selon la severite
 Toutes les alarmes suivent la meme chaine/delai.
-- Chaines d'escalade par severite ou categorie
-- Delais raccourcis pour alarmes critiques
+- **Motif** : sur ce site, si c'est pas grave on n'appelle pas. Il n'y a pas de severites differentes en pratique — toutes les alarmes qui arrivent sont critiques.
 
-### 13. [TODO] Duree d'acquittement configurable
+### 13. [REJETE] Duree d'acquittement configurable
 30 minutes fixes = trop rigide.
-- Choix au moment de l'ack : 15min, 30min, 1h, 2h
+- **Motif** : c'est configurable dans la supervision en amont. Le systeme d'alarme ne fait que relayer, la duree d'ack est un parametre operationnel gere par la supervision.
 
 ### 14. [TODO] Audit trail (historique des actions)
 Pas de trace de qui a fait quoi.
@@ -85,14 +87,19 @@ Pas de trace de qui a fait quoi.
 Detection on-call limitee a position 1.
 - Calendrier de garde, rotation automatique, echanges
 
-### 16. [TODO] Groupes/categories d'alarmes
+### 16. [REJETE] Groupes/categories d'alarmes
 Pas de tagging ni routage par zone/equipement.
-- Tags : "chaudiere", "securite", "informatique"
-- Routage vers chaines d'escalade dediees
+- **Motif** : meme raison que le point 12 — si c'est pas grave on n'appelle pas. Le routage par zone/equipement est gere par la supervision, pas par le systeme d'alarme.
 
-### 17. [TODO] Notifications push (FCM)
+### 17. [DONE] Notifications push (FCM)
 Si Android tue le foreground service, aucune notification.
 - Firebase Cloud Messaging en complement du polling
+- Mode astreinte (pos 1) : foreground service permanent + heartbeat 3s
+- Mode veille (pos 2+) : FCM uniquement, cout batterie ~0
+- Escalade 2 paliers : astreinte 15 min, veille 2 min
+- Envoi reel via FCM API v1 + OAuth2 (google-auth)
+- AlarmFirebaseService + AlarmWakeUpHandler cote Android
+- 14 tests backend (test_fcm.py) + 3 tests modes (test_user_modes.py)
 
 ### 18. [TODO] Circuit SMS complet
 SmsQueue existe mais envoi pas clairement branche.

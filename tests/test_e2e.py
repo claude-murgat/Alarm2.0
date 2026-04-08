@@ -581,6 +581,8 @@ class TestEscalationWithClock:
         requests.post(f"{API}/test/reset")          # Then reset users (heartbeats use clock_now)
         admin_h = _admin_headers()
         requests.post(f"{API}/alarms/reset", headers=admin_h)
+        # Restaurer delai global a 15 min (peut etre pollue par d'autres tests)
+        requests.post(f"{API}/config/escalation-delay", headers=admin_h, json={"minutes": 15})
         requests.post(f"{API}/config/escalation", headers=admin_h, json={
             "position": 1, "user_id": self._get_user_id(USER1_NAME), "delay_minutes": 15
         })
@@ -2432,6 +2434,9 @@ class TestEscalationDelayGlobal:
         requests.post(f"{API}/config/escalation/bulk", json={
             "user_ids": [uid1, uid2, uid_admin],
         }, headers=admin_h)
+        # Remettre le delai par defaut AVANT chaque test
+        requests.post(f"{API}/config/escalation-delay", headers=admin_h,
+                     json={"minutes": 15}, timeout=3)
         yield
         # Remettre le delai par defaut
         try:
