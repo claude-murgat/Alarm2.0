@@ -8,12 +8,16 @@ import android.widget.EditText
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
+import android.util.Log
 import com.alarm.critical.api.ApiClient
 import com.alarm.critical.api.ApiProvider
 import com.alarm.critical.model.DeviceRegister
+import com.alarm.critical.model.FcmTokenRequest
 import com.alarm.critical.model.LoginRequest
 import com.alarm.critical.service.AlarmPollingService
+import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 import java.util.UUID
 
 class MainActivity : AppCompatActivity() {
@@ -73,6 +77,7 @@ class MainActivity : AppCompatActivity() {
                     if (response != null && response.isSuccessful) {
                         val tokenResponse = response.body()!!
                         val token = tokenResponse.access_token
+                        val isOncall = tokenResponse.is_oncall
 
                         // Clear les erreurs d'auth de la session precedente
                         AlarmPollingService.authErrorAlarm = false
@@ -82,19 +87,39 @@ class MainActivity : AppCompatActivity() {
                             .putString("token", token)
                             .putString("user_name", tokenResponse.user.name)
                             .putInt("user_id", tokenResponse.user.id)
+                            .putBoolean("is_oncall", isOncall)
+                            .putBoolean("started_by_fcm", false)
                             .apply()
 
-                        // Register (no-op côté serveur, gardé pour compat)
-                        val deviceToken = prefs.getString("device_token", null)
+                        // Register device (no-op cote serveur, garde pour compat)
+                        val deviceId = prefs.getString("device_token", null)
                             ?: UUID.randomUUID().toString().also {
                                 prefs.edit().putString("device_token", it).apply()
                             }
                         ApiProvider.service.registerDevice(
                             "Bearer $token",
-                            DeviceRegister(deviceToken)
+                            DeviceRegister(deviceId)
                         )
 
-                        goToDashboard(token)
+                        // Enregistrer le token FCM sur le backend
+                        try {
+                            val fcmToken = FirebaseMessaging.getInstance().token.await()
+                            ApiProvider.service.registerFcmToken(
+                                "Bearer $token",
+                                FcmTokenRequest(token = fcmToken, device_id = deviceId)
+                            )
+                            Log.d("MainActivity", "FCM token registered: ${fcmToken.take(20)}...")
+                        } catch (e: Exception) {
+                            Log.e("MainActivity", "FCM token registration failed: ${e.message}")
+                        }
+
+                        if (isOncall) {
+                            // Mode astreinte : demarrer le foreground service
+                            goToDashboard(token)
+                        } else {
+                            // Mode veille : pas de foreground service, juste le dashboard
+                            goToDashboard(token)
+                        }
                     } else {
                         runOnUiThread {
                             statusText.text = "Échec de connexion : ${response?.code() ?: "aucun serveur disponible"}"

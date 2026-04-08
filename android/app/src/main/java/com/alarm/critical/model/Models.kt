@@ -5,7 +5,8 @@ data class LoginRequest(val name: String, val password: String)
 data class TokenResponse(
     val access_token: String,
     val token_type: String,
-    val user: UserResponse
+    val user: UserResponse,
+    val is_oncall: Boolean = false
 )
 
 data class UserResponse(
@@ -32,5 +33,9 @@ data class AlarmResponse(
 )
 
 data class DeviceRegister(val device_token: String)
+
+data class FcmTokenRequest(val token: String, val device_id: String)
+
+data class FcmTokenDeleteRequest(val device_id: String)
 
 data class HeartbeatResponse(val status: String, val timestamp: String)

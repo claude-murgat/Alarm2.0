@@ -45,6 +45,9 @@ class AlarmPollingService : Service() {
         // Flag : le heartbeat a recu 503 (replica), le poll doit switcher
         @Volatile
         var needsUrlSwitch = false
+
+        // Flag : service demarre par un push FCM (mode veille)
+        var startedByFcm = false
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -59,6 +62,11 @@ class AlarmPollingService : Service() {
         if (token == null) {
             stopSelf()
             return START_NOT_STICKY
+        }
+
+        // Detecter si demarre par FCM (mode veille)
+        if (intent?.getBooleanExtra("started_by_fcm", false) == true) {
+            startedByFcm = true
         }
 
         val notification = buildNotification("Surveillance des alarmes...")
@@ -105,6 +113,18 @@ class AlarmPollingService : Service() {
                         }
 
                         updateNotification("Surveillance - ${alarms.size} alarme(s) active(s)")
+
+                        // Mode veille : arreter le service quand plus d'alarme active
+                        if (alarms.isEmpty() && startedByFcm) {
+                            val prefs = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
+                            val isOncall = prefs.getBoolean("is_oncall", true)
+                            if (!isOncall) {
+                                Log.w(TAG, "Alarm resolved + mode veille → stopping service")
+                                prefs.edit().putBoolean("started_by_fcm", false).apply()
+                                stopSelf()
+                                return@launch
+                            }
+                        }
                     } else if (response.code() == 401) {
                         Log.w(TAG, "Token expiré (401) — tentative de refresh")
                         if (!tryRefreshToken()) {

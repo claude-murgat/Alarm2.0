@@ -14,10 +14,14 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import android.util.Log
 import com.alarm.critical.api.ApiProvider
 import com.alarm.critical.model.AlarmResponse
+import com.alarm.critical.model.FcmTokenRequest
 import com.alarm.critical.service.AlarmPollingService
 import com.alarm.critical.service.AlarmSoundManager
+import com.google.firebase.messaging.FirebaseMessaging
+import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.*
 import java.text.SimpleDateFormat
 import java.util.*
@@ -56,8 +60,27 @@ class DashboardActivity : AppCompatActivity() {
         // Afficher uniquement le nom (pas de bienvenue, pas d'email)
         findViewById<TextView>(R.id.userNameText).text = userName
 
-        // Démarrer le service de polling
-        startPollingService()
+        // Enregistrer le token FCM au demarrage (couvre le cas SharedPrefs injectees)
+        lifecycleScope.launch {
+            try {
+                val fcmToken = FirebaseMessaging.getInstance().token.await()
+                val deviceId = prefs.getString("device_token", "unknown") ?: "unknown"
+                ApiProvider.service.registerFcmToken(
+                    "Bearer $token",
+                    FcmTokenRequest(token = fcmToken, device_id = deviceId)
+                )
+                Log.d("Dashboard", "FCM token registered: ${fcmToken.take(20)}...")
+            } catch (e: Exception) {
+                Log.e("Dashboard", "FCM token registration failed: ${e.message}")
+            }
+        }
+
+        // Demarrer le service de polling UNIQUEMENT si on-call ou reveille par FCM
+        val isOncall = prefs.getBoolean("is_oncall", true)
+        val startedByFcm = prefs.getBoolean("started_by_fcm", false)
+        if (isOncall || startedByFcm) {
+            startPollingService()
+        }
 
         // Bouton déconnexion
         findViewById<Button>(R.id.logoutButton).setOnClickListener {

@@ -82,6 +82,20 @@ class FakeApiService : ApiService {
         return refreshTokenResponse ?: loginResponse
     }
 
+    // FCM token management
+    var fcmTokenRegistered: FcmTokenRequest? = null
+    var fcmTokenDeleted: FcmTokenDeleteRequest? = null
+
+    override suspend fun registerFcmToken(auth: String, request: FcmTokenRequest): Response<Map<String, String>> {
+        fcmTokenRegistered = request
+        return Response.success(mapOf("status" to "ok"))
+    }
+
+    override suspend fun deleteFcmToken(auth: String, request: FcmTokenDeleteRequest): Response<Map<String, String>> {
+        fcmTokenDeleted = request
+        return Response.success(mapOf("status" to "ok"))
+    }
+
     /** Reset le compteur d'appels pour réutiliser avec un nouvel IdlingResource */
     fun resetCallCount() {
         myAlarmsCallCount = 0

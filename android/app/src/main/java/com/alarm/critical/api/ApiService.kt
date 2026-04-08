@@ -31,4 +31,16 @@ interface ApiService {
 
     @POST("api/auth/refresh")
     suspend fun refreshToken(@Header("Authorization") auth: String): Response<TokenResponse>
+
+    @POST("api/devices/fcm-token")
+    suspend fun registerFcmToken(
+        @Header("Authorization") auth: String,
+        @Body request: FcmTokenRequest
+    ): Response<Map<String, String>>
+
+    @HTTP(method = "DELETE", path = "api/devices/fcm-token", hasBody = true)
+    suspend fun deleteFcmToken(
+        @Header("Authorization") auth: String,
+        @Body request: FcmTokenDeleteRequest
+    ): Response<Map<String, String>>
 }
