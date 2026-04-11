@@ -53,7 +53,7 @@ services:
   backend:
     build: ./backend
     ports:
-      - "${BACKEND_PORT}:8000"
+      - "0.0.0.0:${BACKEND_PORT}:8000"
     environment:
       - DATABASE_URL=postgresql://alarm:alarm_secret@patroni:5432/alarm_db
       - PATRONI_URL=http://patroni:8008

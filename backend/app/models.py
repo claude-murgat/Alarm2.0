@@ -99,3 +99,15 @@ class SmsQueue(Base):
     sent_at = Column(DateTime, nullable=True)
     error = Column(String, nullable=True)
     retries = Column(Integer, default=0)
+
+
+class AuditEvent(Base):
+    """Audit trail : trace de toutes les actions importantes du système."""
+    __tablename__ = "audit_events"
+    id = Column(Integer, primary_key=True, index=True)
+    alarm_id = Column(Integer, ForeignKey("alarms.id", ondelete="SET NULL"), nullable=True)
+    event_type = Column(String, nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    timestamp = Column(DateTime, nullable=False, default=datetime.utcnow)
+    details = Column(String, nullable=True)  # JSON string
+    correlation_id = Column(String, nullable=True)

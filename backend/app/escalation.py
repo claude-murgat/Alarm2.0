@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import uuid
 from datetime import timedelta
 from typing import Optional
 from sqlalchemy.orm import Session
@@ -9,6 +10,7 @@ from .clock import now as clock_now
 from .email_service import send_alert_email
 from .fcm_service import send_fcm_to_user
 from .events import log_event
+from .logging_config import correlation_id_var
 
 logger = logging.getLogger("escalation")
 
@@ -73,6 +75,7 @@ async def escalation_loop():
     from .leader_election import is_leader
     while True:
         try:
+            correlation_id_var.set(str(uuid.uuid4()))
             now = clock_now()
             last_tick_at = now  # Toujours mis à jour — permet à /health de détecter un blocage
 
@@ -99,6 +102,7 @@ async def escalation_loop():
                     alarm.status = "active"
                     alarm.suspended_until = None
                     alarm.created_at = now
+                    log_event("escalation_timeout", db=db, alarm_id=alarm.id)
                     db.commit()
 
                 # --- 2. Escalation of active/escalated alarms ---
@@ -160,7 +164,7 @@ async def escalation_loop():
                             alarm.status = "escalated"
                             alarm.escalation_count += 1
                             notified = _get_notified_user_ids(db, alarm.id)
-                            log_event("alarm_escalated", alarm_id=alarm.id,
+                            log_event("alarm_escalated", db=db, alarm_id=alarm.id,
                                       from_user=prev_user, to_user=next_user.user_id,
                                       notified_user_ids=notified)
 

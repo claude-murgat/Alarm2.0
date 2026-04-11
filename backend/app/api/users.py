@@ -8,6 +8,7 @@ from ..database import get_db
 from ..models import User, Alarm, EscalationConfig
 from ..schemas import UserCreate, UserResponse, LoginRequest, TokenResponse
 from ..auth import hash_password, verify_password, create_access_token, get_current_user, get_current_admin
+from ..events import log_event
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -51,6 +52,7 @@ def register(user_data: UserCreate, db: Session = Depends(get_db)):
     db.add(user)
     db.commit()
     db.refresh(user)
+    log_event("user_created", db=db, user_id=user.id, name=user.name)
     return user
 
 
@@ -63,6 +65,7 @@ def login(login_data: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(func.lower(User.name) == login_data.name.lower()).first()
     if not user or not verify_password(login_data.password, user.hashed_password):
         _record_failure(login_data.name)
+        log_event("user_login_failed", db=db, name=login_data.name)
         raise HTTPException(status_code=401, detail="Identifiants invalides")
 
     # Login réussi : effacer l'historique de tentatives
@@ -74,6 +77,7 @@ def login(login_data: LoginRequest, db: Session = Depends(get_db)):
     first_pos = db.query(EscalationConfig).order_by(EscalationConfig.position).first()
     is_oncall = first_pos is not None and first_pos.user_id == user.id
 
+    log_event("user_login", db=db, user_id=user.id, name=user.name)
     return TokenResponse(
         access_token=token,
         user=UserResponse.model_validate(user),
@@ -135,8 +139,11 @@ def delete_user(
                 alarm.assigned_user_id = new_user_id
             db.commit()  # Commit reassignment BEFORE delete to avoid FK SET NULL
 
+    deleted_name = user.name
+    deleted_id = user.id
     db.delete(user)
     db.commit()
+    log_event("user_deleted", db=db, user_id=deleted_id, name=deleted_name)
     return {"status": "deleted"}
 
 

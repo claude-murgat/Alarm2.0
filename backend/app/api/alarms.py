@@ -86,7 +86,7 @@ def send_alarm(
 
     db.commit()
     db.refresh(alarm)
-    log_event("alarm_created", alarm_id=alarm.id, assigned_to=alarm.assigned_user_id)
+    log_event("alarm_created", db=db, alarm_id=alarm.id, user_id=current_user.id, assigned_to=alarm.assigned_user_id)
 
     # Envoyer FCM a l'utilisateur assigne (fire-and-forget)
     if assigned_user_id:
@@ -157,7 +157,7 @@ def acknowledge_alarm(
     alarm.suspended_until = now + timedelta(minutes=30)
     db.commit()
     db.refresh(alarm)
-    log_event("alarm_acknowledged", alarm_id=alarm.id, by_user=current_user.id)
+    log_event("alarm_acknowledged", db=db, alarm_id=alarm.id, by_user=current_user.id)
     return _alarm_response(alarm, db)
 
 
@@ -174,7 +174,7 @@ def resolve_alarm(
     alarm.status = "resolved"
     db.commit()
     db.refresh(alarm)
-    log_event("alarm_resolved", alarm_id=alarm.id)
+    log_event("alarm_resolved", db=db, alarm_id=alarm.id, user_id=current_user.id)
     return _alarm_response(alarm, db)
 
 

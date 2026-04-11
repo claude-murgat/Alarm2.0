@@ -894,6 +894,10 @@ class AlarmE2ETest {
         waitForPolls(4)
         val scenario = launchDashboard()
 
+        // Attendre que les 4 polls soient passés via Espresso IdlingResource
+        onView(withId(R.id.currentAlarmLine))
+            .check(matches(isDisplayed()))
+
         // Après 3 échecs, l'URL doit avoir basculé vers l'index 1
         assertEquals(
             "currentUrlIndex devrait être 1 après 3 échecs",

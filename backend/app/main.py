@@ -1,27 +1,31 @@
 import asyncio
 import logging
 import os
+import uuid
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy import text
 from .database import engine, Base, SessionLocal, run_migrations
 from .models import User, EscalationConfig, SystemConfig
 from .auth import hash_password
+from .logging_config import setup_logging, correlation_id_var
 from .api.users import router as auth_router, users_router
 from .api.alarms import router as alarms_router
 from .api.devices import router as devices_router
 from .api.config import router as config_router
 from .api.test_api import router as test_router
 from .api.sms import router as sms_router
+from .api.audit import router as audit_router
 from .escalation import escalation_loop
 from .watchdog import watchdog_loop
 from .leader_election import leader_election_loop, is_leader
 from .database import DATABASE_URL
 
-logging.basicConfig(level=logging.INFO)
+setup_logging()
 logger = logging.getLogger("alarm_system")
 
 
@@ -127,6 +131,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+class CorrelationIdMiddleware(BaseHTTPMiddleware):
+    """Injects a correlation ID into every request for log tracing."""
+    async def dispatch(self, request: Request, call_next):
+        corr_id = request.headers.get("X-Correlation-ID") or str(uuid.uuid4())
+        correlation_id_var.set(corr_id)
+        response = await call_next(request)
+        response.headers["X-Correlation-ID"] = corr_id
+        return response
+
+
+app.add_middleware(CorrelationIdMiddleware)
+
 # Register API routers
 app.include_router(auth_router)
 app.include_router(users_router)
@@ -135,6 +152,7 @@ app.include_router(devices_router)
 app.include_router(config_router)
 app.include_router(test_router)
 app.include_router(sms_router)
+app.include_router(audit_router)
 
 
 @app.get("/", response_class=HTMLResponse)

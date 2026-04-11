@@ -28,10 +28,17 @@
 - Ne pas lancer 2 émulateurs pendant les tests (interférences heartbeat)
 
 ### Structure des tests
-- `tests/test_e2e.py` : 50 tests backend (pytest)
-- `android/app/src/androidTest/java/com/alarm/critical/AlarmE2ETest.kt` : 18 tests Espresso
+- `tests/test_e2e.py` : 119 tests backend (pytest) — principal
+- `tests/test_fcm.py` : 11 tests FCM
+- `tests/test_improvements.py` : 28 tests améliorations
+- `tests/test_user_modes.py` : 3 tests modes astreinte/veille
+- `tests/test_frontend.py` : 17 tests interface web
+- `tests/test_failback.py` : tests failback (cluster)
+- **Total backend : 178 tests**
+- `android/app/src/androidTest/java/com/alarm/critical/AlarmE2ETest.kt` : 22 tests Espresso
 - `android/app/src/androidTest/java/com/alarm/critical/FakeApiService.kt` : Fake API
 - `android/app/src/androidTest/java/com/alarm/critical/PollingIdlingResource.kt` : IdlingResource
+- **Total : 200 tests (178 backend + 22 Android)**
 
 ## Architecture DI (Dependency Injection)
 - `ApiProvider` : singleton holder, `override(mock)` / `reset()`

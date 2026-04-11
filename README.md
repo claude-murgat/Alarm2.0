@@ -5,21 +5,24 @@ Système d'astreinte avec notification mobile, sonnerie continue, acquittement t
 ## Architecture
 
 ```
-┌─────────────────────────┐         ┌──────────────────────────────────┐
-│  App Android (Kotlin)    │◄──────►│  FastAPI Backend (Docker)        │
-│  ├─ Login par nom        │  HTTP   │  ├─ API REST                    │
-│  ├─ Mode astreinte :     │ polling │  ├─ Interface web admin (/)      │
-│  │  ├─ Polling /mine 3s  │  3s     │  ├─ Moteur d'escalade (asyncio) │
-│  │  ├─ Heartbeat 3s      │         │  ├─ Watchdog (30s)              │
-│  │  └─ Sonnerie alarme   │         │  ├─ Horloge injectable (tests)  │
-│  ├─ Mode veille :        │         │  ├─ Email SMTP (Mailhog)        │
-│  │  ├─ FCM uniquement    │  push   │  └─ FCM (Firebase Cloud Msg)    │
-│  │  └─ Reveil par push   │         └────────────┬─────────────────────┘
-│  ├─ Acquittement         │                      │
-│  └─ Refresh token        │         ┌────────────┼──────────────┐
-└──────────────────────────┘         │            │              │
-                                PostgreSQL    Mailhog       Docker
-                                  :5432        :8025        Compose
+┌──────────────────────────┐         ┌───────────────────────────────────────────┐
+│  App Android (Kotlin)     │◄───────►│  Cluster Patroni 3 nœuds                 │
+│  ├─ Login par nom         │  HTTP    │  ├─ NODE1 (on-site) : FastAPI + PG       │
+│  ├─ Mode astreinte :      │ polling  │  ├─ NODE2 (VPS cloud) : FastAPI + PG     │
+│  │  ├─ Polling /mine 3s   │  3s      │  ├─ NODE3 (VPS cloud) : FastAPI + PG     │
+│  │  ├─ Heartbeat 3s       │          │  ├─ API REST + Moteur d'escalade         │
+│  │  └─ Sonnerie alarme    │          │  ├─ Watchdog + Horloge injectable        │
+│  ├─ Mode veille :         │          │  ├─ FCM (Firebase Cloud Messaging)       │
+│  │  ├─ FCM uniquement     │  push    │  └─ Email SMTP (Mailhog en dev)          │
+│  │  └─ Reveil par push    │          └──────────────────┬──────────────────────┘
+│  ├─ Acquittement          │                             │
+│  └─ Refresh token         │          ┌──────────────────┴──────────────────────┐
+└───────────────────────────┘          │  NODE1 uniquement :                     │
+                                       │  Waveshare SIM7600E-H (USB)            │
+                                       │  ├─ SMS (AT commands)                  │
+                                       │  ├─ Appels vocaux + TTS + DTMF         │
+                                       │  └─ Failover 4G (backup internet)      │
+                                       └────────────────────────────────────────┘
 ```
 
 ## Mécanismes d'alarme — Vue complète
@@ -251,10 +254,10 @@ Ou en un clic : **double-cliquer sur `launch.bat`** à la racine du projet.
 
 ## Tests E2E
 
-### Backend (62 tests — nécessite Docker Compose up)
+### Backend (178 tests — nécessite Docker Compose up)
 
 ```bash
-python -m pytest tests/test_e2e.py -v
+python -m pytest tests/ -v
 ```
 
 | Suite | Tests | Couverture |
@@ -279,7 +282,31 @@ python -m pytest tests/test_e2e.py -v
 | Visibilité notifiés | 1 | notified_user_names dans la réponse API |
 | Visibilité alarme acquittée | 3 | Alarme ack visible par autres notifiés, countdown ack_remaining_seconds, visible par l'acker aussi |
 
-### Android Espresso (21 tests — aucun backend nécessaire)
+**Fichier: tests/test_fcm.py (11 tests)**
+
+| Suite | Tests | Couverture |
+|-------|-------|-----------|
+| FCM tokens & push | 11 | Enregistrement/suppression tokens, push sur alarme/escalade, multi-devices, pas de crash sans token |
+
+**Fichier: tests/test_improvements.py (28 tests)**
+
+| Suite | Tests | Couverture |
+|-------|-------|-----------|
+| Améliorations | 28 | Auth, CORS, rate limiting, validation, audit trail, logging structuré |
+
+**Fichier: tests/test_user_modes.py (3 tests)**
+
+| Suite | Tests | Couverture |
+|-------|-------|-----------|
+| Modes astreinte/veille | 3 | is_oncall dans login response, changement de mode |
+
+**Fichier: tests/test_frontend.py (17 tests)**
+
+| Suite | Tests | Couverture |
+|-------|-------|-----------|
+| Interface web | 17 | Dashboard, contrôles admin, affichage alarmes |
+
+### Android Espresso (22 tests — aucun backend nécessaire)
 
 ```bash
 cd android && ./gradlew connectedAndroidTest
@@ -309,7 +336,7 @@ cd android && ./gradlew connectedAndroidTest
 | 20 | Countdown mis à jour à chaque poll | "30 min" → "29 min" |
 | 21 | Nouvelle alarme après résolution sonne | 🔴 + bouton ack reset même si ack précédent |
 
-**Total : 83 tests E2E (62 backend + 21 mobile)**
+**Total : 200 tests E2E (178 backend + 22 mobile)**
 
 ## Stack technique
 
@@ -324,6 +351,8 @@ cd android && ./gradlew connectedAndroidTest
 | DI mobile | Manuel (ApiProvider singleton) |
 | Email | SMTP via Mailhog (dev) / configurable (prod) |
 | Push | FCM (Firebase Cloud Messaging) pour reveil mode veille |
+| SMS & Voix | Waveshare SIM7600E-H 4G (AT commands via pyserial) — NODE1 on-site uniquement |
+| HA | Patroni 3 nœuds (1 on-site + 2 VPS cloud) + PostgreSQL streaming replication |
 
 ## Troubleshooting
 

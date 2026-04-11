@@ -73,11 +73,43 @@ class AlarmPollingService : Service() {
         startForeground(NOTIFICATION_ID, notification)
         isRunning = true
 
-        startPolling()
-        startHeartbeat()
-        startTokenRefresh()
+        // Trouver le primary avant de demarrer le polling
+        scope.launch {
+            findPrimaryUrl()
+            startPolling()
+            startHeartbeat()
+            startTokenRefresh()
+        }
 
         return START_STICKY
+    }
+
+    /**
+     * Probe chaque URL backend pour trouver le primary (heartbeat 200).
+     * Si l'URL courante est un replica (503), bascule immédiatement.
+     */
+    private suspend fun findPrimaryUrl() {
+        try {
+            val response = ApiProvider.service.heartbeat("Bearer $token")
+            if (response.isSuccessful) {
+                Log.i(TAG, "URL courante est le primary")
+                return
+            }
+        } catch (_: Exception) {}
+
+        // L'URL courante ne marche pas — essayer les autres
+        Log.w(TAG, "URL courante n'est pas le primary, recherche...")
+        for (i in 0 until 3) {
+            ApiClient.switchToNextUrl()
+            try {
+                val response = ApiProvider.service.heartbeat("Bearer $token")
+                if (response.isSuccessful) {
+                    Log.i(TAG, "Primary trouvé sur URL index ${ApiClient.currentUrlIndex}")
+                    return
+                }
+            } catch (_: Exception) {}
+        }
+        Log.e(TAG, "Aucun primary trouvé, on demarre avec l'URL courante")
     }
 
     private fun startPolling() {

@@ -2608,5 +2608,196 @@ class TestEscalationFrontend:
         assert "escalationChain" in html or "escalation-chain" in html
 
 
+# ── Audit Trail ─────────────────────────────────────────────────────────────
+
+class TestAuditTrail:
+    """Tests pour l'audit trail (IMPROVEMENTS #14) et le logging structuré (#11)."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        admin_h = _admin_headers()
+        requests.post(f"{API}/test/reset", headers=admin_h)
+        _reset_clock_all_nodes()
+        yield
+        _reset_clock_all_nodes()
+
+    def test_alarm_created_generates_audit_event(self):
+        """L'envoi d'une alarme doit créer un événement audit alarm_created."""
+        admin_h = _admin_headers()
+        r = requests.post(f"{API}/alarms/send", json={
+            "title": "Audit test", "message": "msg", "severity": "critical"
+        }, headers=admin_h)
+        assert r.status_code == 200
+        alarm_id = r.json()["id"]
+
+        audit = requests.get(f"{API}/audit/", params={"alarm_id": alarm_id}, headers=admin_h)
+        assert audit.status_code == 200
+        events = audit.json()
+        types = [e["event_type"] for e in events]
+        assert "alarm_created" in types
+
+    def test_alarm_lifecycle_audit_events(self):
+        """Cycle complet create → ack → resolve doit produire 3 événements."""
+        admin_h = _admin_headers()
+        r = requests.post(f"{API}/alarms/send", json={
+            "title": "Lifecycle", "message": "msg", "severity": "critical"
+        }, headers=admin_h)
+        alarm_id = r.json()["id"]
+
+        requests.post(f"{API}/alarms/{alarm_id}/ack", headers=admin_h)
+        requests.post(f"{API}/alarms/{alarm_id}/resolve", headers=admin_h)
+
+        audit = requests.get(f"{API}/audit/", params={"alarm_id": alarm_id}, headers=admin_h)
+        events = audit.json()
+        types = [e["event_type"] for e in events]
+        assert "alarm_created" in types
+        assert "alarm_acknowledged" in types
+        assert "alarm_resolved" in types
+
+    def test_escalation_generates_audit_event(self):
+        """L'escalade d'une alarme doit créer un événement alarm_escalated."""
+        admin_h = _admin_headers()
+        r = requests.post(f"{API}/alarms/send", json={
+            "title": "Escalade audit", "message": "msg", "severity": "critical"
+        }, headers=admin_h)
+        alarm_id = r.json()["id"]
+
+        # Avancer le temps au-delà du délai d'escalade
+        _advance_clock_all_nodes(16)
+        requests.post(f"{API}/test/trigger-escalation", headers=admin_h)
+
+        audit = requests.get(f"{API}/audit/", params={"alarm_id": alarm_id}, headers=admin_h)
+        events = audit.json()
+        types = [e["event_type"] for e in events]
+        assert "alarm_escalated" in types
+
+    def test_login_generates_audit_event(self):
+        """Un login réussi doit créer un événement user_login."""
+        admin_h = _admin_headers()
+        # Le login admin ci-dessus a déjà généré un événement
+        audit = requests.get(f"{API}/audit/", params={"event_type": "user_login"}, headers=admin_h)
+        assert audit.status_code == 200
+        events = audit.json()
+        assert len(events) > 0
+        assert all(e["event_type"] == "user_login" for e in events)
+
+    def test_login_failed_generates_audit_event(self):
+        """Un login échoué doit créer un événement user_login_failed."""
+        requests.post(f"{API}/auth/login", json={"name": "admin", "password": "wrong"})
+        admin_h = _admin_headers()
+
+        audit = requests.get(f"{API}/audit/", params={"event_type": "user_login_failed"}, headers=admin_h)
+        assert audit.status_code == 200
+        events = audit.json()
+        assert len(events) > 0
+        assert events[0]["event_type"] == "user_login_failed"
+
+    def test_config_change_generates_audit_event(self):
+        """Modifier la config escalade doit créer un événement config_changed."""
+        admin_h = _admin_headers()
+        requests.post(f"{API}/config/escalation-delay", json={"minutes": 20}, headers=admin_h)
+
+        audit = requests.get(f"{API}/audit/", params={"event_type": "config_changed"}, headers=admin_h)
+        assert audit.status_code == 200
+        events = audit.json()
+        assert len(events) > 0
+        # Remettre la config par défaut
+        requests.post(f"{API}/config/escalation-delay", json={"minutes": 15}, headers=admin_h)
+
+    def test_audit_filter_by_event_type(self):
+        """Le filtrage par event_type ne retourne que les événements de ce type."""
+        admin_h = _admin_headers()
+        requests.post(f"{API}/alarms/send", json={
+            "title": "Filter test", "message": "msg", "severity": "critical"
+        }, headers=admin_h)
+
+        audit = requests.get(f"{API}/audit/", params={"event_type": "alarm_created"}, headers=admin_h)
+        events = audit.json()
+        assert len(events) > 0
+        assert all(e["event_type"] == "alarm_created" for e in events)
+
+    def test_audit_filter_by_date_range(self):
+        """Le filtrage par date retourne les événements dans la plage."""
+        admin_h = _admin_headers()
+        requests.post(f"{API}/alarms/send", json={
+            "title": "Date test", "message": "msg", "severity": "critical"
+        }, headers=admin_h)
+
+        # Plage large pour capturer tout
+        audit = requests.get(f"{API}/audit/", params={
+            "start_date": "2020-01-01T00:00:00",
+            "end_date": "2030-01-01T00:00:00"
+        }, headers=admin_h)
+        events = audit.json()
+        assert len(events) > 0
+
+        # Plage dans le passé lointain = aucun résultat
+        audit2 = requests.get(f"{API}/audit/", params={
+            "start_date": "2010-01-01T00:00:00",
+            "end_date": "2010-12-31T00:00:00"
+        }, headers=admin_h)
+        assert len(audit2.json()) == 0
+
+    def test_audit_requires_admin(self):
+        """Un utilisateur non-admin doit recevoir 403 sur GET /api/audit."""
+        user_h, _ = _user_headers(USER1_NAME, USER1_PASSWORD)
+        r = requests.get(f"{API}/audit/", headers=user_h)
+        assert r.status_code == 403
+
+    def test_audit_pagination(self):
+        """Les paramètres page/page_size fonctionnent."""
+        admin_h = _admin_headers()
+        # Créer plusieurs événements
+        for i in range(3):
+            requests.post(f"{API}/alarms/send", json={
+                "title": f"Page test {i}", "message": "msg", "severity": "critical"
+            }, headers=admin_h)
+            # Résoudre pour pouvoir créer la suivante
+            active = requests.get(f"{API}/alarms/active", headers=admin_h).json()
+            if active:
+                requests.post(f"{API}/alarms/{active[0]['id']}/resolve", headers=admin_h)
+
+        # Page 1, taille 2
+        audit = requests.get(f"{API}/audit/", params={"page": 1, "page_size": 2}, headers=admin_h)
+        events = audit.json()
+        assert len(events) <= 2
+
+        # Vérifier qu'il y a un header X-Total-Count
+        assert "X-Total-Count" in audit.headers
+
+    def test_correlation_id_in_audit_events(self):
+        """Les événements audit doivent avoir un correlation_id non-null."""
+        admin_h = _admin_headers()
+        r = requests.post(f"{API}/alarms/send", json={
+            "title": "Corr test", "message": "msg", "severity": "critical"
+        }, headers=admin_h)
+        alarm_id = r.json()["id"]
+
+        audit = requests.get(f"{API}/audit/", params={"alarm_id": alarm_id}, headers=admin_h)
+        events = audit.json()
+        assert len(events) > 0
+        assert events[0]["correlation_id"] is not None
+        assert len(events[0]["correlation_id"]) > 0
+
+    def test_reset_clears_audit_events(self):
+        """POST /test/reset doit aussi effacer les audit events."""
+        admin_h = _admin_headers()
+        requests.post(f"{API}/alarms/send", json={
+            "title": "Reset test", "message": "msg", "severity": "critical"
+        }, headers=admin_h)
+
+        # Vérifier qu'il y a des events
+        audit = requests.get(f"{API}/audit/", headers=admin_h)
+        assert len(audit.json()) > 0
+
+        # Reset
+        requests.post(f"{API}/test/reset", headers=admin_h)
+
+        # Les events doivent être effacés — login génère un user_login,
+        # mais les alarm_created doivent avoir disparu
+        audit2 = requests.get(f"{API}/audit/", params={"event_type": "alarm_created"}, headers=admin_h)
+        assert len(audit2.json()) == 0
+
+
 # Tests Android E2E dans Espresso (android/app/src/androidTest/).
 # Lancer avec : cd android && ./gradlew connectedAndroidTest

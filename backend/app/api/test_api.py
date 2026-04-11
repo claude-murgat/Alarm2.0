@@ -77,7 +77,7 @@ def send_test_alarm(db: Session = Depends(get_db)):
         db.add(AlarmNotification(alarm_id=alarm.id, user_id=user_id))
     db.commit()
     db.refresh(alarm)
-    log_event("alarm_created", alarm_id=alarm.id, assigned_to=user_id, source="test")
+    log_event("alarm_created", db=db, alarm_id=alarm.id, assigned_to=user_id, source="test")
     return {"status": "sent", "alarm_id": alarm.id, "assigned_to": user_id}
 
 
@@ -122,6 +122,8 @@ def reset_all(db: Session = Depends(get_db),
               peer: bool = Query(True)):
     """Reset all alarms, user states, and restore default escalation chain."""
     _require_test_endpoints()
+    from ..models import AuditEvent
+    db.query(AuditEvent).delete()
     db.query(AlarmNotification).delete()
     db.query(Alarm).delete()
 
@@ -226,7 +228,7 @@ def trigger_escalation(db: Session = Depends(get_db)):
                 n[0] for n in db.query(AlarmNotification.user_id)
                 .filter(AlarmNotification.alarm_id == alarm.id).all()
             ]
-            log_event("alarm_escalated", alarm_id=alarm.id,
+            log_event("alarm_escalated", db=db, alarm_id=alarm.id,
                       from_user=prev_user, to_user=next_user.user_id,
                       notified_user_ids=notified_ids)
 

@@ -39,6 +39,9 @@ def run_migrations(engine):
         # ── Migration : table device_tokens ───────────────────────────────
         _migrate_device_tokens(conn, is_sqlite)
 
+        # ── Migration : table audit_events ────────────────────────────────
+        _migrate_audit_events(conn, is_sqlite)
+
 
 def _migrate_alarm_notifications(conn, is_sqlite: bool):
     """Crée la table alarm_notifications et migre les données CSV si nécessaire."""
@@ -124,6 +127,49 @@ def _migrate_device_tokens(conn, is_sqlite: bool):
             """))
         conn.commit()
         logger.info("Migration: table device_tokens creee")
+
+
+def _migrate_audit_events(conn, is_sqlite: bool):
+    """Cree la table audit_events si elle n'existe pas (idempotent)."""
+    if is_sqlite:
+        exists = conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name='audit_events'")
+        ).fetchone()
+    else:
+        exists = conn.execute(
+            text("SELECT to_regclass('public.audit_events')")
+        ).fetchone()
+        exists = exists[0] if exists else None
+
+    if not exists:
+        if is_sqlite:
+            conn.execute(text("""
+                CREATE TABLE audit_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    alarm_id INTEGER REFERENCES alarms(id) ON DELETE SET NULL,
+                    event_type VARCHAR NOT NULL,
+                    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    details VARCHAR,
+                    correlation_id VARCHAR
+                )
+            """))
+        else:
+            conn.execute(text("""
+                CREATE TABLE audit_events (
+                    id SERIAL PRIMARY KEY,
+                    alarm_id INTEGER REFERENCES alarms(id) ON DELETE SET NULL,
+                    event_type VARCHAR NOT NULL,
+                    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    details VARCHAR,
+                    correlation_id VARCHAR
+                )
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_event_type ON audit_events (event_type)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_timestamp ON audit_events (timestamp)"))
+        conn.commit()
+        logger.info("Migration: table audit_events creee")
 
 
 def get_db():

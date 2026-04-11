@@ -94,7 +94,7 @@ def heartbeat(
     current_user.is_online = True
     db.commit()
     if was_offline:
-        log_event("user_online", user_id=current_user.id, user_name=current_user.name)
+        log_event("user_online", db=db, user_id=current_user.id, user_name=current_user.name)
     return {"status": "ok", "timestamp": now.isoformat()}
 
 

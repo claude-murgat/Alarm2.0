@@ -11,9 +11,11 @@ is_leader n'ont pas besoin de changer.
 import asyncio
 import logging
 import os
+import uuid
 import urllib.request
 
 from .events import log_event
+from .logging_config import correlation_id_var
 
 logger = logging.getLogger("leader_election")
 
@@ -38,6 +40,7 @@ async def leader_election_loop(database_url: str):
         return
 
     while True:
+        correlation_id_var.set(str(uuid.uuid4()))
         try:
             req = urllib.request.Request(f"{PATRONI_URL}/primary", method="GET")
             resp = urllib.request.urlopen(req, timeout=2)

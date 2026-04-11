@@ -1,4 +1,6 @@
-# Option A — Deux backends autonomes SQLite + sync applicative
+# ~~Option A — Deux backends autonomes SQLite + sync applicative~~
+
+> **ABANDONNÉE** — L'option B (Patroni 3 nœuds) a été retenue. Ce document est conservé pour référence historique uniquement.
 
 ## Contexte
 

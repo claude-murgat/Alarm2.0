@@ -117,6 +117,7 @@
         <div class="tab" data-tab="alarms">Alarmes</div>
         <div class="tab" data-tab="escalation">Escalade</div>
         <div class="tab" data-tab="tests">Tests</div>
+        <div class="tab" data-tab="audit">Audit</div>
         <div class="tab" data-tab="cluster">Cluster</div>
     </div>
 
@@ -232,6 +233,65 @@
         </div>
 
         <!-- Cluster / Quorum -->
+        <div class="panel" id="audit">
+            <div class="card">
+                <h3>Filtres</h3>
+                <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:end;">
+                    <div>
+                        <label style="font-size:0.8rem;color:#94a3b8;">Type</label><br>
+                        <select id="auditFilterType" style="background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:6px 10px;">
+                            <option value="">Tous</option>
+                            <option value="alarm_created">alarm_created</option>
+                            <option value="alarm_acknowledged">alarm_acknowledged</option>
+                            <option value="alarm_resolved">alarm_resolved</option>
+                            <option value="alarm_escalated">alarm_escalated</option>
+                            <option value="user_login">user_login</option>
+                            <option value="user_login_failed">user_login_failed</option>
+                            <option value="config_changed">config_changed</option>
+                            <option value="user_created">user_created</option>
+                            <option value="user_deleted">user_deleted</option>
+                            <option value="escalation_timeout">escalation_timeout</option>
+                            <option value="watchdog_offline">watchdog_offline</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label style="font-size:0.8rem;color:#94a3b8;">Alarm ID</label><br>
+                        <input id="auditFilterAlarmId" type="number" placeholder="—" style="width:80px;background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:6px 10px;">
+                    </div>
+                    <div>
+                        <label style="font-size:0.8rem;color:#94a3b8;">Depuis</label><br>
+                        <input id="auditFilterStart" type="date" style="background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:6px 10px;">
+                    </div>
+                    <div>
+                        <label style="font-size:0.8rem;color:#94a3b8;">Jusqu'a</label><br>
+                        <input id="auditFilterEnd" type="date" style="background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:6px 10px;">
+                    </div>
+                    <button onclick="loadAuditEvents(1)" style="background:#3b82f6;color:white;border:none;border-radius:6px;padding:8px 16px;cursor:pointer;">Filtrer</button>
+                </div>
+            </div>
+            <div class="card">
+                <h3>Evenements (<span id="auditTotal">0</span>)</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Date</th>
+                            <th>Type</th>
+                            <th>Utilisateur</th>
+                            <th>Alarme</th>
+                            <th>Details</th>
+                            <th>Correlation ID</th>
+                        </tr>
+                    </thead>
+                    <tbody id="auditTableBody"></tbody>
+                </table>
+                <div style="display:flex;justify-content:center;gap:12px;margin-top:12px;">
+                    <button id="auditPrev" onclick="loadAuditEvents(auditPage-1)" style="background:#334155;color:#e2e8f0;border:none;border-radius:6px;padding:6px 14px;cursor:pointer;" disabled>&laquo; Prec</button>
+                    <span id="auditPageInfo" style="color:#94a3b8;line-height:32px;">Page 1</span>
+                    <button id="auditNext" onclick="loadAuditEvents(auditPage+1)" style="background:#334155;color:#e2e8f0;border:none;border-radius:6px;padding:6px 14px;cursor:pointer;">Suiv &raquo;</button>
+                </div>
+            </div>
+        </div>
+
         <div class="panel" id="cluster">
             <div class="card">
                 <h3>Quorum</h3>
@@ -260,8 +320,8 @@
         let PRIMARY_API = '';   // URL de base pour les ecritures (le primary)
         let users = [];
         let heartbeatPaused = false;
-        let authToken = null;   // JWT token en memoire
-        let currentUserInfo = null;
+        let authToken = sessionStorage.getItem('authToken');
+        let currentUserInfo = JSON.parse(sessionStorage.getItem('currentUserInfo') || 'null');
 
         // ── Login / Logout ─────────────────────────────────────────────────
         async function doLogin() {
@@ -284,6 +344,8 @@
                 const data = await res.json();
                 authToken = data.access_token;
                 currentUserInfo = data.user;
+                sessionStorage.setItem('authToken', authToken);
+                sessionStorage.setItem('currentUserInfo', JSON.stringify(currentUserInfo));
                 document.getElementById('loginOverlay').classList.add('hidden');
                 document.getElementById('currentUserName').textContent = currentUserInfo.name;
                 loadAll();
@@ -295,6 +357,8 @@
         function doLogout() {
             authToken = null;
             currentUserInfo = null;
+            sessionStorage.removeItem('authToken');
+            sessionStorage.removeItem('currentUserInfo');
             document.getElementById('loginOverlay').classList.remove('hidden');
             document.getElementById('loginPassword').value = '';
             document.getElementById('loginError').textContent = '';
@@ -330,12 +394,20 @@
         }
         detectPrimary();
 
+        // Restaurer la session apres un refresh
+        if (authToken && currentUserInfo) {
+            document.getElementById('loginOverlay').classList.add('hidden');
+            document.getElementById('currentUserName').textContent = currentUserInfo.name;
+            loadAll();
+        }
+
         document.querySelectorAll('.tab').forEach(tab => {
             tab.addEventListener('click', () => {
                 document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
                 document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
                 tab.classList.add('active');
                 document.getElementById(tab.dataset.tab).classList.add('active');
+                if (tab.dataset.tab === 'audit') loadAuditEvents(1);
             });
         });
 
@@ -829,6 +901,56 @@
                 document.getElementById('quorumBanner').style.background = '#ef444433';
                 document.getElementById('quorumBanner').style.color = '#ef4444';
             }
+        }
+
+        // ── Audit Trail ──────────────────────────────────────────────────
+        let auditPage = 1;
+        const AUDIT_PAGE_SIZE = 30;
+        const auditTypeColors = {
+            alarm_created: '#3b82f6', alarm_acknowledged: '#f59e0b', alarm_resolved: '#22c55e',
+            alarm_escalated: '#a855f7', user_login: '#94a3b8', user_login_failed: '#ef4444',
+            config_changed: '#f59e0b', user_created: '#22c55e', user_deleted: '#ef4444',
+            escalation_timeout: '#f97316', watchdog_offline: '#ef4444',
+        };
+
+        async function loadAuditEvents(page) {
+            if (!authToken) return;
+            if (page < 1) page = 1;
+            auditPage = page;
+            const params = new URLSearchParams({page, page_size: AUDIT_PAGE_SIZE});
+            const t = document.getElementById('auditFilterType').value;
+            const a = document.getElementById('auditFilterAlarmId').value;
+            const s = document.getElementById('auditFilterStart').value;
+            const e = document.getElementById('auditFilterEnd').value;
+            if (t) params.set('event_type', t);
+            if (a) params.set('alarm_id', a);
+            if (s) params.set('start_date', s + 'T00:00:00');
+            if (e) params.set('end_date', e + 'T23:59:59');
+            try {
+                const resp = await fetch(`${API}/api/audit/?${params}`, {headers: {'Authorization': 'Bearer ' + authToken}});
+                const total = parseInt(resp.headers.get('X-Total-Count') || '0');
+                const events = await resp.json();
+                document.getElementById('auditTotal').textContent = total;
+                const maxPage = Math.max(1, Math.ceil(total / AUDIT_PAGE_SIZE));
+                document.getElementById('auditPageInfo').textContent = `Page ${page} / ${maxPage}`;
+                document.getElementById('auditPrev').disabled = page <= 1;
+                document.getElementById('auditNext').disabled = page >= maxPage;
+                const tbody = document.getElementById('auditTableBody');
+                tbody.innerHTML = events.map(ev => {
+                    const color = auditTypeColors[ev.event_type] || '#94a3b8';
+                    const ts = ev.timestamp ? new Date(ev.timestamp).toLocaleString() : '-';
+                    const det = ev.details ? JSON.stringify(ev.details) : '';
+                    const corrShort = ev.correlation_id ? ev.correlation_id.substring(0, 8) + '...' : '-';
+                    return `<tr>
+                        <td style="white-space:nowrap">${ts}</td>
+                        <td><span class="badge" style="background:${color}33;color:${color}">${ev.event_type}</span></td>
+                        <td>${ev.user_id || '-'}</td>
+                        <td>${ev.alarm_id || '-'}</td>
+                        <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${det.replace(/"/g,'&quot;')}">${det || '-'}</td>
+                        <td title="${ev.correlation_id || ''}">${corrShort}</td>
+                    </tr>`;
+                }).join('');
+            } catch (err) { console.error('Audit load error', err); }
         }
 
         function loadAll() {

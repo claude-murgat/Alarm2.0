@@ -2,11 +2,11 @@
 
 ## Statut global
 - Date d'analyse : 2026-04-06
-- Derniere mise a jour : 2026-04-08
+- Derniere mise a jour : 2026-04-11
 - Total : 19 points identifies (11 logiciel + 8 fonctionnel)
-- Termines : 11/19
+- Termines : 13/19
 - Rejetes : 3/19
-- Restants : 5/19
+- Restants : 3/19
 
 ---
 
@@ -61,10 +61,12 @@ Le polling 3s fonctionne mais ajoute de la latence.
 - Le heartbeat POST 3s reste inchange (source de verite watchdog)
 - Prevu en Phase B apres stabilisation FCM
 
-### 11. [TODO] Logging structure (JSON)
+### 11. [DONE] Logging structure (JSON)
 Pour un systeme critique, logging basique insuffisant.
-- Format JSON, niveaux, correlation IDs
-- Centralisation (ELK, Loki)
+- Format JSON via JsonLogFormatter custom (logging_config.py)
+- Correlation ID par requete (middleware + contextvars) + background tasks
+- Tous les loggers (app, uvicorn) en sortie JSON structuree
+- Compatible Docker json-file driver, pret pour ELK/Loki
 
 ---
 
@@ -78,10 +80,14 @@ Toutes les alarmes suivent la meme chaine/delai.
 30 minutes fixes = trop rigide.
 - **Motif** : c'est configurable dans la supervision en amont. Le systeme d'alarme ne fait que relayer, la duree d'ack est un parametre operationnel gere par la supervision.
 
-### 14. [TODO] Audit trail (historique des actions)
-Pas de trace de qui a fait quoi.
-- Table alarm_events(alarm_id, event_type, user_id, timestamp, details)
-- Dashboard de performance
+### 14. [DONE] Audit trail (historique des actions)
+Tracabilite complete de toutes les actions du systeme.
+- Table audit_events (alarm_id, event_type, user_id, timestamp, details JSON, correlation_id)
+- 11 types d'evenements : alarm_created/ack/resolved/escalated, user_login/login_failed/created/deleted, config_changed, escalation_timeout, watchdog_offline
+- API GET /api/audit/ (admin only, pagine, filtrable par alarm_id, event_type, user_id, dates)
+- Onglet Audit dans le dashboard frontend avec filtres et pagination
+- Best-effort sur replicas (pas de crash si DB read-only)
+- 12 tests E2E (TestAuditTrail)
 
 ### 15. [TODO] Planning on-call (rotation, calendrier)
 Detection on-call limitee a position 1.
@@ -101,10 +107,12 @@ Si Android tue le foreground service, aucune notification.
 - AlarmFirebaseService + AlarmWakeUpHandler cote Android
 - 14 tests backend (test_fcm.py) + 3 tests modes (test_user_modes.py)
 
-### 18. [TODO] Circuit SMS complet
+### 18. [TODO] Circuit SMS + Appels vocaux complet
 SmsQueue existe mais envoi pas clairement branche.
-- Integration Twilio/OVH SMS
-- Retry avec backoff exponentiel
+- **Décision** : Waveshare SIM7600E-H 4G HAT en USB sur le serveur on-site + Free 2€/mois
+- Pas de Twilio/OVH (tout on-site, zéro dépendance cloud)
+- SMS via AT commands (pyserial), appels vocaux + TTS + acquittement DTMF (Goertzel logiciel)
+- Voir `ARCHITECTURE_SMS_VOIX.md` pour le détail complet
 
 ### 19. [TODO] Mode maintenance
 Pas de mecanisme pour prevenir les fausses escalades pendant une MAJ.

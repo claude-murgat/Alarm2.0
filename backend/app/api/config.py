@@ -5,6 +5,7 @@ from ..database import get_db
 from ..models import EscalationConfig, SystemConfig, User
 from ..schemas import EscalationConfigCreate, EscalationConfigResponse, SystemConfigUpdate
 from ..auth import get_current_user, get_current_admin
+from ..events import log_event
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 
@@ -80,6 +81,7 @@ def set_escalation_delay(
     else:
         db.add(SystemConfig(key="escalation_delay_minutes", value=str(minutes)))
     db.commit()
+    log_event("config_changed", db=db, user_id=current_user.id, key="escalation_delay_minutes", value=str(minutes))
     return {"minutes": minutes}
 
 
@@ -108,6 +110,7 @@ def save_escalation_chain_bulk(
     for i, uid in enumerate(user_ids):
         db.add(EscalationConfig(position=i + 1, user_id=uid, delay_minutes=15.0))
     db.commit()
+    log_event("config_changed", db=db, user_id=current_user.id, key="escalation_chain", value=str(user_ids))
 
     return db.query(EscalationConfig).order_by(EscalationConfig.position).all()
 
@@ -131,4 +134,5 @@ def set_system_config(
         existing = SystemConfig(key=config.key, value=config.value)
         db.add(existing)
     db.commit()
+    log_event("config_changed", db=db, user_id=current_user.id, key=config.key, value=config.value)
     return {"status": "ok"}

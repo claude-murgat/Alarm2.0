@@ -85,28 +85,34 @@
 - **Starlink** : câbler en parallèle (pas en série derrière le modem principal) → le modem n'est plus un SPOF
 - **Coût** : ~8 €/mois (VPS1 ~3,50€ + VPS2 ~3,60€ — pas de DB externe payante)
 
-### P2+P3 — Machine on-site (clé USB GSM) : gateway SMS + health monitor
-- **Hardware** : PC ou Raspberry Pi sur onduleur + clé USB GSM (ex: Huawei E3372, ~20€) + SIM forfait SMS illimité (~5€/mois)
-- **Double rôle — aucune dépendance externe** :
+### P2+P3 — Machine on-site : gateway SMS + appels vocaux + health monitor
+- **Hardware retenu** : Mini PC business (Lenovo/HP/Dell) + Waveshare SIM7600E-H 4G HAT (~70€) + SIM Free 2€/mois
+- **Détail complet** : voir `ARCHITECTURE_SMS_VOIX.md`
+- **Ancienne proposition** : clé USB GSM Huawei E3372 → abandonnée (2G/3G obsolète, pas de voix/TTS)
+- **Triple rôle sur le nœud on-site (NODE1 du cluster Patroni)** :
 
-  **Rôle 1 — Gateway SMS (alarmes)**
-  - Modèle pull : poll `GET /internal/sms/pending` sur les VPS toutes les 30s
-  - Envoie les SMS via la clé GSM (gammu-smsd ou python-gammu)
+  **Rôle 1 — Gateway SMS + appels vocaux (alarmes)**
+  - Poll `GET /internal/sms/pending` + `GET /internal/calls/pending` sur le backend local (ou VPS cloud en fallback)
+  - Envoie les SMS et passe les appels vocaux via le Waveshare SIM7600E-H (pyserial + AT commands)
+  - Appels avec TTS (AT+CTTS) + acquittement DTMF (décodage Goertzel logiciel sur le port audio USB)
   - Aucun port entrant à ouvrir sur le réseau site
-  - Si internet site tombe : la clé GSM peut aussi fournir les données mobiles pour continuer à poller
 
-  **Rôle 2 — Health monitor (remplace Healthchecks.io)**
-  - Poll `GET /health` sur VPS1 ET VPS2 toutes les 5 min
-  - Si les DEUX ne répondent plus → envoie SMS d'alerte directement via la clé GSM
-  - Aucun service externe nécessaire (Healthchecks.io supprimé)
-  - L'endpoint `/health` est enrichi côté backend : vérifie DB joignable + boucle d'escalade active (retourne 503 si boucle bloquée → détecte bugs internes, pas seulement crashes)
+  **Rôle 2 — Health monitor**
+  - Poll `GET /health` sur les 3 nœuds (NODE1, NODE2, NODE3) toutes les 5 min
+  - Si les TROIS ne répondent plus → envoie SMS d'alerte directement via le SIM7600
+  - L'endpoint `/health` vérifie DB joignable + boucle d'escalade active
 
-- **Implémentation backend** : table `sms_queue` dans PostgreSQL (répliquée VPS1↔VPS2)
-  - La boucle d'escalade écrit dans `sms_queue`
-  - Endpoints : `GET /internal/sms/pending` + `POST /internal/sms/{id}/sent`
-- **Coût** : ~20€ une fois (clé USB) + ~5€/mois (SIM) — zéro dépendance externe, zéro coût variable
-- **SPOF résiduel** : la machine on-site elle-même — si elle tombe, on perd le SMS et le monitoring
-  - Acceptable : le système principal (app Android + VPS) continue de fonctionner normalement
+  **Rôle 3 — Failover internet 4G**
+  - Le SIM7600 sert aussi de connexion internet de secours (mode ECM, métrique 300)
+  - Si fibre + Starlink tombent → le nœud on-site reste connecté au cluster via 4G
+  - Les push FCM et la réplication PostgreSQL transitent par la 4G
+
+- **Implémentation backend** : tables `sms_queue` + `call_queue` dans PostgreSQL (répliquées sur les 3 nœuds Patroni)
+  - La boucle d'escalade écrit dans `sms_queue` / `call_queue`
+  - Endpoints : `GET /internal/sms/pending`, `GET /internal/calls/pending`, `POST /internal/calls/{id}/result`
+- **Coût** : ~70€ une fois (Waveshare SIM7600E-H) + ~2€/mois (SIM Free) — zéro dépendance cloud pour les notifications
+- **SPOF résiduel** : le nœud on-site tombe → plus de SMS/appels vocaux
+  - Acceptable : les push FCM continuent via les VPS cloud, le cluster Patroni reste fonctionnel (2/3 nœuds)
   - La sirène câblée PLC reste active indépendamment
 
 ### P4 — UPS dédié Starlink (si pas déjà fait)
