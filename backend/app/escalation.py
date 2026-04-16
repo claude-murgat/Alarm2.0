@@ -5,7 +5,7 @@ from datetime import timedelta
 from typing import Optional
 from sqlalchemy.orm import Session
 from .database import SessionLocal
-from .models import Alarm, AlarmNotification, EscalationConfig, User, SystemConfig, SmsQueue
+from .models import Alarm, AlarmNotification, EscalationConfig, User, SystemConfig, SmsQueue, CallQueue
 from .clock import now as clock_now
 from .email_service import send_alert_email
 from .fcm_service import send_fcm_to_user
@@ -28,7 +28,7 @@ def _add_notified_user(db: Session, alarm, user_id: int):
         .first()
     )
     if not existing:
-        db.add(AlarmNotification(alarm_id=alarm.id, user_id=user_id))
+        db.add(AlarmNotification(alarm_id=alarm.id, user_id=user_id, notified_at=clock_now()))
 
 
 def _get_notified_user_ids(db: Session, alarm_id: int) -> list[int]:
@@ -62,6 +62,34 @@ def _enqueue_sms_for_user(db: Session, user: User, alarm: Alarm):
     sms = SmsQueue(to_number=user.phone_number, body=body)
     db.add(sms)
     logger.info(f"SMS enqueued for {user.name} ({user.phone_number}) — alarm {alarm.id}")
+
+
+def _enqueue_call_for_user(db: Session, user: User, alarm: Alarm):
+    """Enqueue un appel vocal pour un utilisateur qui a un numero de telephone.
+    Guard anti-doublon : ne cree pas de call si un identique non-traite existe deja."""
+    if not user.phone_number:
+        return
+    tts_message = f"Alarme critique: {alarm.title}. Appuyez 1 pour acquitter, 2 pour escalader."
+    existing = (
+        db.query(CallQueue)
+        .filter(
+            CallQueue.to_number == user.phone_number,
+            CallQueue.alarm_id == alarm.id,
+            CallQueue.called_at == None,
+            CallQueue.retries < 3,
+        )
+        .first()
+    )
+    if existing:
+        return  # Call deja en attente pour cet utilisateur/alarme
+    call = CallQueue(
+        to_number=user.phone_number,
+        alarm_id=alarm.id,
+        user_id=user.id,
+        tts_message=tts_message,
+    )
+    db.add(call)
+    logger.info(f"Call enqueued for {user.name} ({user.phone_number}) — alarm {alarm.id}")
 
 
 async def escalation_loop():
@@ -102,6 +130,16 @@ async def escalation_loop():
                     alarm.status = "active"
                     alarm.suspended_until = None
                     alarm.created_at = now
+                    # Reset SMS/Call flags pour permettre un nouveau cycle
+                    notifs = (
+                        db.query(AlarmNotification)
+                        .filter(AlarmNotification.alarm_id == alarm.id)
+                        .all()
+                    )
+                    for notif in notifs:
+                        notif.sms_sent = False
+                        notif.call_sent = False
+                        notif.notified_at = now
                     log_event("escalation_timeout", db=db, alarm_id=alarm.id)
                     db.commit()
 
@@ -145,9 +183,8 @@ async def escalation_loop():
                         current_delay = float(fcm_delay.value) if fcm_delay else 2.0
 
                     elapsed = (now - alarm.created_at).total_seconds() / 60.0
-                    escalation_threshold = current_delay * (alarm.escalation_count + 1)
 
-                    if elapsed >= escalation_threshold:
+                    if elapsed >= current_delay:
                         next_user = _find_next_user(
                             db, escalation_chain, current_position, alarm.assigned_user_id
                         )
@@ -163,25 +200,54 @@ async def escalation_loop():
                             _add_notified_user(db, alarm, next_user.user_id)
                             alarm.status = "escalated"
                             alarm.escalation_count += 1
+                            # Reset timer pour que le prochain palier ait son propre délai
+                            alarm.created_at = now
                             notified = _get_notified_user_ids(db, alarm.id)
                             log_event("alarm_escalated", db=db, alarm_id=alarm.id,
                                       from_user=prev_user, to_user=next_user.user_id,
                                       notified_user_ids=notified)
 
-                        # FCM + SMS a tous les utilisateurs notifies (cumulative)
+                        # FCM a tous les utilisateurs notifies (cumulative)
                         notified_ids = _get_notified_user_ids(db, alarm.id)
                         for uid in notified_ids:
-                            u = db.query(User).filter(User.id == uid).first()
-                            if u:
-                                _enqueue_sms_for_user(db, u, alarm)
-                                try:
-                                    send_fcm_to_user(db, uid, alarm.title, alarm.message,
-                                                     {"alarm_id": str(alarm.id), "severity": alarm.severity})
-                                except Exception:
-                                    pass  # FCM est best-effort
+                            try:
+                                send_fcm_to_user(db, uid, alarm.title, alarm.message,
+                                                 {"alarm_id": str(alarm.id), "severity": alarm.severity})
+                            except Exception:
+                                pass  # FCM est best-effort
                         db.commit()
 
-                # --- 3. On-call monitoring: user #1 heartbeat ---
+                # --- 3. Timer-based SMS/Call enqueue ---
+                sms_call_delay_cfg = db.query(SystemConfig).filter(
+                    SystemConfig.key == "sms_call_delay_minutes"
+                ).first()
+                sms_call_delay = float(sms_call_delay_cfg.value) if sms_call_delay_cfg else 2.0
+
+                for alarm in active_alarms:
+                    # Ne pas envoyer SMS/call pour les alarmes acquittees (suspended)
+                    if alarm.status == "acknowledged":
+                        continue
+                    notifs = (
+                        db.query(AlarmNotification)
+                        .filter(AlarmNotification.alarm_id == alarm.id)
+                        .all()
+                    )
+                    for notif in notifs:
+                        if not notif.notified_at:
+                            continue
+                        elapsed = (now - notif.notified_at).total_seconds() / 60.0
+                        if elapsed >= sms_call_delay:
+                            user = db.query(User).filter(User.id == notif.user_id).first()
+                            if user:
+                                if not notif.sms_sent:
+                                    _enqueue_sms_for_user(db, user, alarm)
+                                    notif.sms_sent = True
+                                if not notif.call_sent:
+                                    _enqueue_call_for_user(db, user, alarm)
+                                    notif.call_sent = True
+                    db.commit()
+
+                # --- 4. On-call monitoring: user #1 heartbeat ---
                 _check_oncall_heartbeat(db, now, escalation_chain)
 
             finally:

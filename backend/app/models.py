@@ -1,4 +1,5 @@
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, ForeignKey, UniqueConstraint
+from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from .database import Base
@@ -52,6 +53,8 @@ class AlarmNotification(Base):
     alarm_id = Column(Integer, ForeignKey("alarms.id", ondelete="CASCADE"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     notified_at = Column(DateTime, default=datetime.utcnow)
+    sms_sent = Column(Boolean, default=False)
+    call_sent = Column(Boolean, default=False)
 
     alarm = relationship("Alarm", back_populates="notifications")
     user = relationship("User")
@@ -99,6 +102,22 @@ class SmsQueue(Base):
     sent_at = Column(DateTime, nullable=True)
     error = Column(String, nullable=True)
     retries = Column(Integer, default=0)
+
+
+class CallQueue(Base):
+    __tablename__ = "call_queue"
+    id = Column(Integer, primary_key=True, index=True)
+    to_number = Column(String, nullable=False)
+    alarm_id = Column(Integer, ForeignKey("alarms.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    tts_message = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    called_at = Column(DateTime, nullable=True)
+    result = Column(String, nullable=True)  # ack_dtmf|ack_sms|no_answer|busy|error|escalate
+    retries = Column(Integer, default=0)
+
+    alarm = relationship("Alarm")
+    user = relationship("User")
 
 
 class AuditEvent(Base):

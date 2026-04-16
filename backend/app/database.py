@@ -42,6 +42,12 @@ def run_migrations(engine):
         # ── Migration : table audit_events ────────────────────────────────
         _migrate_audit_events(conn, is_sqlite)
 
+        # ── Migration : table call_queue ──────────────────────────────────
+        _migrate_call_queue(conn, is_sqlite)
+
+        # ── Migration : colonnes sms_sent/call_sent sur alarm_notifications
+        _migrate_alarm_notifications_sms_call(conn, is_sqlite)
+
 
 def _migrate_alarm_notifications(conn, is_sqlite: bool):
     """Crée la table alarm_notifications et migre les données CSV si nécessaire."""
@@ -170,6 +176,70 @@ def _migrate_audit_events(conn, is_sqlite: bool):
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_timestamp ON audit_events (timestamp)"))
         conn.commit()
         logger.info("Migration: table audit_events creee")
+
+
+def _migrate_call_queue(conn, is_sqlite: bool):
+    """Cree la table call_queue si elle n'existe pas (idempotent)."""
+    if is_sqlite:
+        exists = conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name='call_queue'")
+        ).fetchone()
+    else:
+        exists = conn.execute(
+            text("SELECT to_regclass('public.call_queue')")
+        ).fetchone()
+        exists = exists[0] if exists else None
+
+    if not exists:
+        if is_sqlite:
+            conn.execute(text("""
+                CREATE TABLE call_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    to_number VARCHAR NOT NULL,
+                    alarm_id INTEGER NOT NULL REFERENCES alarms(id),
+                    user_id INTEGER NOT NULL REFERENCES users(id),
+                    tts_message VARCHAR NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    called_at TIMESTAMP,
+                    result VARCHAR,
+                    retries INTEGER DEFAULT 0
+                )
+            """))
+        else:
+            conn.execute(text("""
+                CREATE TABLE call_queue (
+                    id SERIAL PRIMARY KEY,
+                    to_number VARCHAR NOT NULL,
+                    alarm_id INTEGER NOT NULL REFERENCES alarms(id),
+                    user_id INTEGER NOT NULL REFERENCES users(id),
+                    tts_message VARCHAR NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    called_at TIMESTAMP,
+                    result VARCHAR,
+                    retries INTEGER DEFAULT 0
+                )
+            """))
+        conn.commit()
+        logger.info("Migration: table call_queue creee")
+
+
+def _migrate_alarm_notifications_sms_call(conn, is_sqlite: bool):
+    """Ajoute les colonnes sms_sent et call_sent a alarm_notifications (idempotent)."""
+    if is_sqlite:
+        cols = [row[1] for row in conn.execute(text("PRAGMA table_info(alarm_notifications)")).fetchall()]
+        if "sms_sent" not in cols:
+            conn.execute(text("ALTER TABLE alarm_notifications ADD COLUMN sms_sent BOOLEAN DEFAULT FALSE"))
+            conn.commit()
+            logger.info("Migration: alarm_notifications.sms_sent ajoutee")
+        if "call_sent" not in cols:
+            conn.execute(text("ALTER TABLE alarm_notifications ADD COLUMN call_sent BOOLEAN DEFAULT FALSE"))
+            conn.commit()
+            logger.info("Migration: alarm_notifications.call_sent ajoutee")
+    else:
+        conn.execute(text("ALTER TABLE alarm_notifications ADD COLUMN IF NOT EXISTS sms_sent BOOLEAN DEFAULT FALSE"))
+        conn.execute(text("ALTER TABLE alarm_notifications ADD COLUMN IF NOT EXISTS call_sent BOOLEAN DEFAULT FALSE"))
+        conn.commit()
+        logger.info("Migration: alarm_notifications.sms_sent/call_sent verifiees/ajoutees")
 
 
 def get_db():

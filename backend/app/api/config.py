@@ -6,6 +6,7 @@ from ..models import EscalationConfig, SystemConfig, User
 from ..schemas import EscalationConfigCreate, EscalationConfigResponse, SystemConfigUpdate
 from ..auth import get_current_user, get_current_admin
 from ..events import log_event
+from ..fcm_service import send_fcm_to_user
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 
@@ -85,6 +86,37 @@ def set_escalation_delay(
     return {"minutes": minutes}
 
 
+@router.get("/sms-call-delay")
+def get_sms_call_delay(db: Session = Depends(get_db)):
+    """Retourne le delai SMS/appel apres notification en minutes."""
+    config = db.query(SystemConfig).filter(SystemConfig.key == "sms_call_delay_minutes").first()
+    minutes = float(config.value) if config else 2.0
+    return {"delay_minutes": minutes}
+
+
+@router.post("/sms-call-delay")
+def set_sms_call_delay(
+    payload: dict,
+    current_user: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """Met a jour le delai SMS/appel (1-30 minutes)."""
+    minutes = payload.get("delay_minutes")
+    if minutes is None or not isinstance(minutes, (int, float)):
+        raise HTTPException(status_code=422, detail="delay_minutes requis (nombre)")
+    if minutes < 1 or minutes > 30:
+        raise HTTPException(status_code=422, detail="Le delai doit etre entre 1 et 30 minutes")
+
+    config = db.query(SystemConfig).filter(SystemConfig.key == "sms_call_delay_minutes").first()
+    if config:
+        config.value = str(int(minutes))
+    else:
+        db.add(SystemConfig(key="sms_call_delay_minutes", value=str(int(minutes))))
+    db.commit()
+    log_event("config_changed", db=db, user_id=current_user.id, key="sms_call_delay_minutes", value=str(int(minutes)))
+    return {"delay_minutes": int(minutes)}
+
+
 @router.post("/escalation/bulk")
 def save_escalation_chain_bulk(
     payload: dict,
@@ -112,6 +144,9 @@ def save_escalation_chain_bulk(
     db.commit()
     log_event("config_changed", db=db, user_id=current_user.id, key="escalation_chain", value=str(user_ids))
 
+    # Notifier tous les utilisateurs de la chaine par push FCM
+    _notify_escalation_change(db, user_ids)
+
     return db.query(EscalationConfig).order_by(EscalationConfig.position).all()
 
 
@@ -136,3 +171,36 @@ def set_system_config(
     db.commit()
     log_event("config_changed", db=db, user_id=current_user.id, key=config.key, value=config.value)
     return {"status": "ok"}
+
+
+def _notify_escalation_change(db: Session, user_ids: list[int]):
+    """Envoie un push FCM a chaque utilisateur de la chaine pour l'informer
+    de sa nouvelle position. Type 'escalation_update' pour traitement cote app."""
+    import logging
+    logger = logging.getLogger("config")
+
+    for i, uid in enumerate(user_ids):
+        position = i + 1
+        is_oncall = position == 1
+        user = db.query(User).filter(User.id == uid).first()
+        name = user.name if user else "?"
+
+        if is_oncall:
+            title = "Vous etes de garde"
+            body = f"Position #{position} dans la chaine d'escalade"
+        else:
+            title = "Chaine d'escalade modifiee"
+            body = f"Vous etes en position #{position}"
+
+        try:
+            send_fcm_to_user(
+                db, uid, title, body,
+                data={
+                    "type": "escalation_update",
+                    "escalation_position": str(position),
+                    "is_oncall": str(is_oncall).lower(),
+                }
+            )
+            logger.info(f"Escalation push sent to {name} (position {position})")
+        except Exception as e:
+            logger.error(f"Escalation push failed for {name}: {e}")

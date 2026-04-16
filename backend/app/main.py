@@ -63,6 +63,7 @@ def seed_data():
             db.add(SystemConfig(key="escalation_delay_minutes", value="15"))
             db.add(SystemConfig(key="watchdog_timeout_seconds", value="60"))
             db.add(SystemConfig(key="ack_suspension_minutes", value="30"))
+            db.add(SystemConfig(key="sms_call_delay_minutes", value="2"))
             db.commit()
             logger.info("Seed data created: 3 users, escalation chain configured")
     finally:
@@ -116,7 +117,7 @@ async def lifespan(app: FastAPI):
     watchdog_task.cancel()
 
 
-app = FastAPI(title="Critical Alarm System", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Alarme Murgat", version="1.0.0", lifespan=lifespan)
 
 # CORS : origines autorisées depuis la variable d'env ALLOWED_ORIGINS (comma-separated).
 # En dev, "*" est toléré mais déconseillé en production.
@@ -152,7 +153,12 @@ app.include_router(devices_router)
 app.include_router(config_router)
 app.include_router(test_router)
 app.include_router(sms_router)
+from .api.calls import router as calls_router
+app.include_router(calls_router)
 app.include_router(audit_router)
+
+from .api.stats import router as stats_router
+app.include_router(stats_router)
 
 
 @app.get("/", response_class=HTMLResponse)

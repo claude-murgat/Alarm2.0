@@ -7,7 +7,7 @@ from datetime import timedelta, datetime
 from ..clock import now as clock_now
 from .. import clock as clock_module
 from ..database import get_db
-from ..models import Alarm, AlarmNotification, User, EscalationConfig, SmsQueue
+from ..models import Alarm, AlarmNotification, User, EscalationConfig, SmsQueue, CallQueue
 from ..events import log_event
 
 ENABLE_TEST_ENDPOINTS = os.getenv("ENABLE_TEST_ENDPOINTS", "false").lower() in ("true", "1", "yes")
@@ -124,6 +124,8 @@ def reset_all(db: Session = Depends(get_db),
     _require_test_endpoints()
     from ..models import AuditEvent
     db.query(AuditEvent).delete()
+    db.query(CallQueue).delete()
+    db.query(SmsQueue).delete()
     db.query(AlarmNotification).delete()
     db.query(Alarm).delete()
 
@@ -155,6 +157,12 @@ def reset_all(db: Session = Depends(get_db),
                 EscalationConfig(position=3, user_id=admin.id, delay_minutes=15.0),
             ])
             db.commit()
+
+    # Ensure sms_call_delay_minutes config exists
+    from ..models import SystemConfig
+    if not db.query(SystemConfig).filter(SystemConfig.key == "sms_call_delay_minutes").first():
+        db.add(SystemConfig(key="sms_call_delay_minutes", value="2"))
+        db.commit()
 
     if peer:
         _broadcast("/api/test/reset")
@@ -353,6 +361,31 @@ def insert_sms(payload: dict, db: Session = Depends(get_db)):
     row = SmsQueue(
         to_number=payload["to_number"],
         body=payload["body"],
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"id": row.id}
+
+
+@router.post("/reset-call-queue")
+def reset_call_queue(db: Session = Depends(get_db)):
+    """Vide la table call_queue (pour les tests)."""
+    _require_test_endpoints()
+    db.query(CallQueue).delete()
+    db.commit()
+    return {"status": "ok"}
+
+
+@router.post("/insert-call")
+def insert_call(payload: dict, db: Session = Depends(get_db)):
+    """Insere un appel directement dans call_queue (pour les tests)."""
+    _require_test_endpoints()
+    row = CallQueue(
+        to_number=payload["to_number"],
+        alarm_id=payload["alarm_id"],
+        user_id=payload["user_id"],
+        tts_message=payload["tts_message"],
     )
     db.add(row)
     db.commit()
