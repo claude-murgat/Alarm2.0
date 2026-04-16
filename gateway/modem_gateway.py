@@ -26,6 +26,7 @@ from config import (
     ALERT_COOLDOWN_SECONDS, HTTP_TIMEOUT_SECONDS, ALERT_RECIPIENTS,
 )
 from modem_detect import detect_modem_port, send_at_command
+from dtmf_decoder import DtmfDecoder
 
 logging.basicConfig(
     level=logging.INFO,
@@ -179,9 +180,10 @@ class SmsSenderThread(threading.Thread):
 class CallSenderThread(threading.Thread):
     """Poll /internal/calls/pending et passe les appels via ATD + TTS."""
 
-    def __init__(self, ser: serial.Serial):
+    def __init__(self, ser: serial.Serial, audio_port: str | None = None):
         super().__init__(daemon=True, name="CallSender")
         self.ser = ser
+        self.audio_port = audio_port
         self.running = True
 
     def run(self):
@@ -258,16 +260,49 @@ class CallSenderThread(threading.Thread):
             return "error"
 
     def _wait_for_dtmf(self, timeout: float = 30) -> str | None:
-        """Attend une notification DTMF (+DTMF: X) sur le port serie.
+        """Attend une touche DTMF pendant un appel.
+        Strategie 1 : ecoute le port audio USB (Goertzel sur PCM 8kHz)
+        Strategie 2 (fallback) : ecoute les URC +DTMF sur le port AT
+
         Retourne le digit ou None si timeout."""
+        import numpy as np
+
+        # Tenter la detection via le port audio (Goertzel)
+        if self.audio_port:
+            try:
+                audio_ser = serial.Serial(
+                    port=self.audio_port,
+                    baudrate=115200,
+                    timeout=0.1,
+                )
+                decoder = DtmfDecoder(sample_rate=8000)
+                block_bytes = 410  # 205 samples * 2 bytes (16-bit)
+                deadline = time.time() + timeout
+
+                while time.time() < deadline:
+                    raw = audio_ser.read(block_bytes)
+                    if len(raw) >= block_bytes:
+                        samples = np.frombuffer(raw[:block_bytes], dtype=np.int16)
+                        key = decoder.detect(samples)
+                        if key:
+                            logger.info(f"DTMF Goertzel : {key}")
+                            audio_ser.close()
+                            return key
+                    time.sleep(0.01)
+
+                audio_ser.close()
+                return None
+            except Exception as e:
+                logger.warning(f"Audio port erreur ({self.audio_port}): {e}, fallback URC")
+
+        # Fallback : ecoute les notifications URC +DTMF sur le port AT
         deadline = time.time() + timeout
         while time.time() < deadline:
             if self.ser.in_waiting > 0:
                 line = self.ser.readline().decode(errors="replace").strip()
                 if "+DTMF:" in line:
-                    # Format: +DTMF: 1
                     digit = line.split(":")[1].strip()
-                    logger.info(f"DTMF recu : {digit}")
+                    logger.info(f"DTMF URC : {digit}")
                     return digit
             time.sleep(0.1)
         return None
@@ -443,6 +478,18 @@ def main():
         send_at_command(ser, "AT+CMGF=1", timeout=3)      # Mode texte SMS
         send_at_command(ser, "AT+CNMI=2,1,0,0,0", timeout=3)  # Notifications SMS
 
+    # Detecter le port audio (pour DTMF Goertzel)
+    audio_port = None
+    from serial.tools import list_ports as lp
+    for p in lp.comports():
+        if p.vid and p.vid in (0x1E0E, 0x2C7C) and "audio" in (p.description or "").lower():
+            audio_port = p.device
+            break
+    if audio_port:
+        logger.info(f"Port audio detecte : {audio_port} (DTMF Goertzel)")
+    else:
+        logger.warning("Port audio non detecte — DTMF via URC fallback uniquement")
+
     # Verifier la connectivite backend
     primary = _find_primary_url()
     if primary:
@@ -453,7 +500,7 @@ def main():
     # Demarrer les threads
     threads = [
         SmsSenderThread(ser),
-        CallSenderThread(ser),
+        CallSenderThread(ser, audio_port=audio_port),
         SmsReceiverThread(ser),
         HealthMonitorThread(ser),
     ]
