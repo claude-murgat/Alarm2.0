@@ -88,6 +88,11 @@ def _list_candidate_ports(manual_port: str | None = None) -> list[str]:
         if any(kw in desc_lower or kw in manufacturer_lower for kw in KNOWN_KEYWORDS):
             candidates.append(p.device)
 
+    # Prioriser les ports avec "AT PORT" dans le nom (port AT commands)
+    candidates.sort(key=lambda p: 0 if "AT PORT" in (
+        next((x.description for x in list_ports.comports() if x.device == p), "") or ""
+    ).upper() else 1)
+
     if candidates:
         logger.info(f"{len(candidates)} port(s) SIM7600 candidat(s) : {candidates}")
     else:
