@@ -26,6 +26,11 @@ def pytest_addoption(parser):
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "failover: tests that manipulate Docker containers")
+    # Niveaux CI (voir docs/AI_STRATEGY.md) — declares pour eviter PytestUnknownMarkWarning
+    config.addinivalue_line("markers", "unit: tier 1 — logique pure, pas de DB/HTTP")
+    config.addinivalue_line("markers", "integration: tier 2 — FastAPI TestClient + SQLite temp")
+    config.addinivalue_line("markers", "e2e: tier 3 — end-to-end contre cluster live")
+    config.addinivalue_line("markers", "chaos: tier 4 — scenarios de panne (nightly, non-blocking)")
 
 
 def pytest_collection_modifyitems(config, items):

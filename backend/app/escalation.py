@@ -19,6 +19,11 @@ ONCALL_OFFLINE_DELAY_MINUTES = 15.0
 # Mis à jour à chaque tick — utilisé par /health pour détecter une boucle bloquée
 last_tick_at: Optional[object] = None
 
+# Flag de test : quand True, la boucle NE met PAS à jour last_tick_at.
+# Permet au endpoint /test/simulate-loop-stall de figer l'état stall de manière déterministe.
+# Remis à False par /test/clear-loop-stall.
+_simulate_stall: bool = False
+
 
 def _add_notified_user(db: Session, alarm, user_id: int):
     """Ajoute un user_id à la table alarm_notifications s'il n'y est pas déjà."""
@@ -105,7 +110,8 @@ async def escalation_loop():
         try:
             correlation_id_var.set(str(uuid.uuid4()))
             now = clock_now()
-            last_tick_at = now  # Toujours mis à jour — permet à /health de détecter un blocage
+            if not _simulate_stall:
+                last_tick_at = now  # Toujours mis à jour — permet à /health de détecter un blocage
 
             if not is_leader.is_set():
                 # Nœud secondaire : standby, pas d'escalade

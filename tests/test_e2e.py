@@ -1579,16 +1579,21 @@ class TestSmsAndHealth:
         assert data["escalation_loop"] is True
 
     def test_health_endpoint_returns_503_if_loop_stalled(self):
-        """GET /health retourne 503 si la boucle d'escalade est bloquée."""
-        # Helper de test qui met last_tick_at à une date passée
+        """GET /health retourne 503 si la boucle d'escalade est bloquée.
+        Deterministe : simulate-loop-stall active un flag qui bloque la mise a jour
+        de last_tick_at par la boucle, donc pas de race avec un tick concurrent."""
         r = requests.post(f"{API}/test/simulate-loop-stall")
         assert r.status_code == 200
 
-        r = requests.get(f"{BASE_URL}/health")
-        assert r.status_code == 503
-        data = r.json()
-        assert data["status"] == "degraded"
-        assert data["escalation_loop"] is False
+        try:
+            r = requests.get(f"{BASE_URL}/health")
+            assert r.status_code == 503
+            data = r.json()
+            assert data["status"] == "degraded"
+            assert data["escalation_loop"] is False
+        finally:
+            # Toujours clear pour ne pas polluer les tests suivants
+            requests.post(f"{API}/test/clear-loop-stall")
 
     # ── /internal/sms/* ──────────────────────────────────────────────────────
 

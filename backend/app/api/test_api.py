@@ -134,6 +134,10 @@ def reset_all(db: Session = Depends(get_db),
     devices_module.heartbeat_paused = False
     devices_module.connection_loss_time_int = None
 
+    # Reset flag de simulation de stall de la boucle d'escalade
+    from .. import escalation as esc_module
+    esc_module._simulate_stall = False
+
     # Reset FCM test list
     from ..fcm_service import reset_last_fcm
     reset_last_fcm()
@@ -144,25 +148,37 @@ def reset_all(db: Session = Depends(get_db),
         user.last_heartbeat = clock_now()
     db.commit()
 
-    # Restore default escalation chain if empty
-    existing_esc = db.query(EscalationConfig).count()
-    if existing_esc == 0:
-        user1 = db.query(User).filter(User.name == "user1").first()
-        user2 = db.query(User).filter(User.name == "user2").first()
-        admin = db.query(User).filter(User.name == "admin").first()
-        if user1 and user2 and admin:
-            db.add_all([
-                EscalationConfig(position=1, user_id=user1.id, delay_minutes=15.0),
-                EscalationConfig(position=2, user_id=user2.id, delay_minutes=15.0),
-                EscalationConfig(position=3, user_id=admin.id, delay_minutes=15.0),
-            ])
-            db.commit()
-
-    # Ensure sms_call_delay_minutes config exists
-    from ..models import SystemConfig
-    if not db.query(SystemConfig).filter(SystemConfig.key == "sms_call_delay_minutes").first():
-        db.add(SystemConfig(key="sms_call_delay_minutes", value="2"))
+    # Restore default escalation chain — TOUJOURS (pas seulement si vide).
+    # Un test precedent peut avoir reduit ou reordonne la chaine ; le reset doit
+    # garantir un etat deterministe pour tous les tests suivants.
+    user1 = db.query(User).filter(User.name == "user1").first()
+    user2 = db.query(User).filter(User.name == "user2").first()
+    admin = db.query(User).filter(User.name == "admin").first()
+    if user1 and user2 and admin:
+        db.query(EscalationConfig).delete()
         db.commit()
+        db.add_all([
+            EscalationConfig(position=1, user_id=user1.id, delay_minutes=15.0),
+            EscalationConfig(position=2, user_id=user2.id, delay_minutes=15.0),
+            EscalationConfig(position=3, user_id=admin.id, delay_minutes=15.0),
+        ])
+        db.commit()
+
+    # Ensure system config keys exist AND are at their default values
+    # (un test precedent peut avoir modifie escalation_delay_minutes — on restaure).
+    from ..models import SystemConfig
+    defaults = {
+        "escalation_delay_minutes": "15",
+        "sms_call_delay_minutes": "2",
+        "watchdog_timeout_seconds": "60",
+    }
+    for key, default_value in defaults.items():
+        cfg = db.query(SystemConfig).filter(SystemConfig.key == key).first()
+        if cfg:
+            cfg.value = default_value
+        else:
+            db.add(SystemConfig(key=key, value=default_value))
+    db.commit()
 
     if peer:
         _broadcast("/api/test/reset")
@@ -395,8 +411,21 @@ def insert_call(payload: dict, db: Session = Depends(get_db)):
 
 @router.post("/simulate-loop-stall")
 def simulate_loop_stall():
-    """Simule une boucle d'escalade bloquée en mettant last_tick_at à une date passée."""
+    """Simule une boucle d'escalade bloquée en mettant last_tick_at à une date passée.
+    Active le flag _simulate_stall pour que la boucle ne réécrive pas la valeur au prochain tick.
+    Toujours appeler /test/clear-loop-stall après pour restaurer le fonctionnement normal."""
     _require_test_endpoints()
     from .. import escalation as esc_module
+    esc_module._simulate_stall = True
     esc_module.last_tick_at = datetime(2020, 1, 1)
     return {"status": "ok", "last_tick_at": "2020-01-01T00:00:00"}
+
+
+@router.post("/clear-loop-stall")
+def clear_loop_stall():
+    """Relève le flag de simulation de stall — la boucle recommence à mettre à jour last_tick_at."""
+    _require_test_endpoints()
+    from .. import escalation as esc_module
+    esc_module._simulate_stall = False
+    # Laisse last_tick_at tel quel : le prochain tick (dans <10s) le remettra à now.
+    return {"status": "ok"}
