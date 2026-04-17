@@ -11,6 +11,8 @@ from .email_service import send_alert_email
 from .fcm_service import send_fcm_to_user
 from .events import log_event
 from .logging_config import correlation_id_var
+from .logic.ack_expiry import evaluate_ack_expiry
+from .logic.models import AlarmSnapshot
 
 logger = logging.getLogger("escalation")
 
@@ -44,6 +46,20 @@ def _get_notified_user_ids(db: Session, alarm_id: int) -> list[int]:
         .all()
     )
     return [n[0] for n in notifs]
+
+
+def _alarm_to_snapshot(alarm: Alarm) -> AlarmSnapshot:
+    """Convertit un objet ORM Alarm en AlarmSnapshot pour les fonctions pures.
+    L'appelant est responsable d'appliquer les Actions retournees sur l'Alarm ORM."""
+    return AlarmSnapshot(
+        id=alarm.id,
+        status=alarm.status,
+        created_at=alarm.created_at,
+        suspended_until=alarm.suspended_until,
+        assigned_user_id=alarm.assigned_user_id,
+        escalation_count=alarm.escalation_count,
+        is_oncall_alarm=alarm.is_oncall_alarm,
+    )
 
 
 def _enqueue_sms_for_user(db: Session, user: User, alarm: Alarm):
@@ -122,16 +138,14 @@ async def escalation_loop():
             try:
 
                 # --- 1. Ack expiry: reactivate acknowledged alarms ---
-                ack_alarms = (
-                    db.query(Alarm)
-                    .filter(
-                        Alarm.status == "acknowledged",
-                        Alarm.suspended_until != None,
-                        Alarm.suspended_until < now,
-                    )
-                    .all()
-                )
-                for alarm in ack_alarms:
+                # Logique de decision extraite dans logic/ack_expiry.py (testee unit).
+                # Ici on ne fait que charger l'etat + appliquer les Actions retournees.
+                all_ack = db.query(Alarm).filter(Alarm.status == "acknowledged").all()
+                snapshots = [_alarm_to_snapshot(a) for a in all_ack]
+                reactivations = evaluate_ack_expiry(snapshots, now)
+                ack_by_id = {a.id: a for a in all_ack}
+                for reactivation in reactivations:
+                    alarm = ack_by_id[reactivation.alarm_id]
                     logger.info(f"Ack expired for alarm {alarm.id}, reactivating")
                     alarm.status = "active"
                     alarm.suspended_until = None
