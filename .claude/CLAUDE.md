@@ -1,5 +1,23 @@
 # Contexte projet — Alarme Murgat
 
+## ⚠️ LECTURE OBLIGATOIRE EN DÉBUT DE SESSION
+
+Avant toute modification du code ou écriture de tests, **consulter systématiquement** :
+
+- **[tests/INVARIANTS.md](../tests/INVARIANTS.md)** — Catalogue des invariants métier (source de vérité).
+  Chaque règle business est listée avec ID stable (INV-XXX), criticité, statut (✅/⚠️/❌/🐛).
+  C'est le document qui dicte ce que les tests doivent vérifier et ce que le code doit garantir.
+  Ne PAS lire le code source pour déduire le comportement attendu — lire le catalogue.
+  Si un invariant manque ou est ambigu, demander au propriétaire AVANT d'implémenter/tester.
+
+- **[tests/audit_v2.json](../tests/audit_v2.json)** — Audit critique indépendant de la suite de tests
+  (bugs réels trouvés, blind spots, architecture recommandée).
+
+- **[android/INVARIANTS.md](../android/INVARIANTS.md)** — Invariants côté app Android (à créer).
+
+Règle d'or : **les tests viennent de la spec (catalogue), pas du code**. Un bug dans le code
+ne doit jamais être figé par un test — le catalogue tranche.
+
 ## Process TDD établi avec l'utilisateur
 
 ### Convention RED → GREEN

@@ -60,9 +60,10 @@ def seed_data():
             db.add_all(escalation)
 
             # Default system config
+            # Note: la durée d'ack (30 min) est hardcodée dans alarms.py — décision produit
+            # IMPROVEMENTS #13 REJETE : gérée par la supervision en amont, pas paramétrable.
             db.add(SystemConfig(key="escalation_delay_minutes", value="15"))
             db.add(SystemConfig(key="watchdog_timeout_seconds", value="60"))
-            db.add(SystemConfig(key="ack_suspension_minutes", value="30"))
             db.add(SystemConfig(key="sms_call_delay_minutes", value="2"))
             db.commit()
             logger.info("Seed data created: 3 users, escalation chain configured")

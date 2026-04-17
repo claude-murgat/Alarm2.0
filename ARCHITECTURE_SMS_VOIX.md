@@ -207,8 +207,7 @@ En parallèle de l'envoi SMS/appels, le gateway tourne un **thread d'écoute SMS
 | Paramètre | Clé SystemConfig | Défaut | Description |
 |-----------|-----------------|--------|-------------|
 | Délai SMS/appel | `sms_call_delay_minutes` | 2 | Minutes après notification push avant d'envoyer SMS + appel |
-| Délai escalade astreinte | `escalation_delay_minutes` | 15 | Minutes avant d'escalader au palier suivant (position 1) |
-| Délai escalade veille | `fcm_escalation_delay_minutes` | 2 | Minutes avant d'escalader (positions 2+) |
+| Délai escalade | `escalation_delay_minutes` | 15 | Minutes avant d'escalader au palier suivant (uniforme pour tous les users) |
 
 ### Séquence pour chaque utilisateur notifié
 
@@ -224,7 +223,7 @@ Utilisateur ajouté aux notifiés (notified_at = now)
                                (et ce nouvel utilisateur a ses propres timers)
 ```
 
-### Timeline concrète (défauts : sms_call=2min, escalade astreinte=15min, escalade veille=2min)
+### Timeline concrète (défauts : sms_call=2min, escalade uniforme=15min)
 
 ```
 ALARME CRÉÉE
@@ -233,19 +232,20 @@ ALARME CRÉÉE
 ├─ t+2min   user1 reçoit SMS + Appel vocal (si pas d'ack)
 │
 ├─ t+15min  ESCALADE → user2 ajouté (user1 continue de sonner)
+│           Si user1 offline : FCM wake-up high-priority tenté sur user1 au même tick
 │           user2 reçoit Push FCM
 │           user1 reçoit Push FCM (rappel cumulative)
 ├─ t+17min  user2 reçoit SMS + Appel (si pas d'ack)
 │
-├─ t+17min  ESCALADE → admin ajouté (délai veille = 2min pour user2)
+├─ t+30min  ESCALADE → admin ajouté (15 min après user2)
 │           admin reçoit Push FCM
 │           user1 + user2 reçoivent Push FCM (rappel)
-├─ t+19min  admin reçoit SMS + Appel (si pas d'ack)
+├─ t+32min  admin reçoit SMS + Appel (si pas d'ack)
 │
-├─ t+19min  REBOUCLAGE → retour user1
+├─ t+45min  REBOUCLAGE → retour user1
 │           ...
 │
-└─ Acquittement par N'IMPORTE QUI (app, DTMF, réponse SMS) → TOUT s'arrête
+└─ Acquittement par UN DES NOTIFIÉS (app, DTMF, réponse SMS) → TOUT s'arrête
 ```
 
 ### Implémentation dans escalation.py

@@ -102,7 +102,8 @@ Si Android tue le foreground service, aucune notification.
 - Firebase Cloud Messaging en complement du polling
 - Mode astreinte (pos 1) : foreground service permanent + heartbeat 3s
 - Mode veille (pos 2+) : FCM uniquement, cout batterie ~0
-- Escalade 2 paliers : astreinte 15 min, veille 2 min
+- Escalade uniforme : 15 min par palier (configurable via `escalation_delay_minutes`)
+- FCM wake-up avant escalade si user courant offline (tenter de le reveiller)
 - Envoi reel via FCM API v1 + OAuth2 (google-auth)
 - AlarmFirebaseService + AlarmWakeUpHandler cote Android
 - 14 tests backend (test_fcm.py) + 3 tests modes (test_user_modes.py)

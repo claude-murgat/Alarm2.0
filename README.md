@@ -79,7 +79,7 @@ Le systeme distingue deux profils avec des impacts batterie differents :
   │  ├─ AUCUN heartbeat, AUCUN polling                       │
   │  ├─ Seul FCM actif (cout batterie ~0, via Play Services) │
   │  ├─ Reveil par push FCM quand l'escalade arrive          │
-  │  ├─ Delai escalade : 2 min (si pas d'ack apres FCM)     │
+  │  ├─ Delai escalade : 15 min (identique a l'astreinte)    │
   │  └─ Service s'arrete automatiquement apres resolution    │
   └──────────────────────────────────────────────────────────┘
 ```
@@ -92,27 +92,28 @@ Le champ `is_oncall` dans la reponse de login indique le mode (position 1 = true
   Alarme envoyee
        │
        ▼
-  ┌─────────┐  15 min sans ack  ┌─────────┐  2 min   ┌─────────┐
+  ┌─────────┐  15 min sans ack  ┌─────────┐  15 min  ┌─────────┐
   │  user1   │─────────────────►│  user2   │────────►│  admin   │
   │ (pos. 1) │  🔊 SONNE        │ (pos. 2) │  🔊+FCM  │ (pos. 3) │
   │ ASTREINTE│  TOUJOURS        │ VEILLE   │  AUSSI   │ VEILLE   │
   │ 🔊 SONNE │                  │ 🔊 SONNE │          │ 🔊 SONNE │
   └─────────┘                   └─────────┘          └────┬─────┘
-                                                          │ 2 min
+                                                          │ 15 min
                                                           ▼
                                                    Rebouclage
 
   ★ CUMULATIVE : chaque utilisateur appele CONTINUE de sonner.
-    N'importe lequel peut acquitter l'alarme.
+    N'importe lequel des notifies peut acquitter l'alarme.
   ★ FCM : les users en veille sont reveilles par push notification.
-  ★ 2 PALIERS : astreinte (pos 1) = 15 min, veille (pos 2+) = 2 min.
+  ★ DELAI UNIFORME : 15 min par palier (configurable via escalation_delay_minutes).
 ```
 
 **Regles :**
-- **Delai 2 paliers** : astreinte (position 1) = 15 min, veille (positions 2+) = 2 min
+- **Delai uniforme** : 15 min par palier pour TOUS les users (configurable via `escalation_delay_minutes`)
 - **Plus de filtre online** : l'escalade suit l'ordre de la chaine, le FCM reveille les users en veille
+- **FCM wake-up** : si le user courant est offline au moment de l'escalade, un FCM high-priority lui est envoye avant de passer au suivant
 - **Escalade cumulative** : les utilisateurs precedents continuent de voir/entendre l'alarme
-- **N'importe qui** parmi les notifies peut acquitter (pas seulement le dernier)
+- **Seuls les notifies** peuvent acquitter (pas un user tiers qui n'a jamais ete appele)
 - **Liste des notifies** visible (`notified_user_ids` + `notified_user_names`)
 - **Rebouclage** apres le dernier
 - **Pas d'escalade** si alarme acquittee
