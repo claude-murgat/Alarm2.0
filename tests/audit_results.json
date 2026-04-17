@@ -1,0 +1,256 @@
+{
+  "method": "manual_audit_with_durations",
+  "run_date": "2026-04-16",
+  "total_seconds": 3963.57,
+  "total_seconds_human": "66min 03s",
+  "total_tests": 187,
+  "passed": 155,
+  "failed": 1,
+  "errors": 15,
+  "skipped": 16,
+  "exit_code": 1,
+
+  "by_file": [
+    {
+      "file": "tests/test_e2e.py",
+      "test_count": 119,
+      "passed": 102,
+      "failed": 1,
+      "skipped": 16,
+      "errors": 0,
+      "notes": "16 skipped = failover tests (--skip-failover). 1 failed = test_health_endpoint_returns_503_if_loop_stalled"
+    },
+    {
+      "file": "tests/test_improvements.py",
+      "test_count": 28,
+      "passed": 28,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "notes": "All 28 pass (les 2 echecs en run isolee etaient dus a une alarme active residuelle, resolus apres reset)"
+    },
+    {
+      "file": "tests/test_fcm.py",
+      "test_count": 11,
+      "passed": 11,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0
+    },
+    {
+      "file": "tests/test_user_modes.py",
+      "test_count": 5,
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0
+    },
+    {
+      "file": "tests/test_frontend.py",
+      "test_count": 18,
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 15,
+      "notes": "15 errors = Playwright timeout dans le setup (login fixture). Seuls les 3 tests TestFrontendLogin passent. Probable: session/cookie de login expiree ou page.goto timeout"
+    },
+    {
+      "file": "tests/test_dtmf_decoder.py",
+      "test_count": 6,
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 0,
+      "notes": "Tests purement algorithmiques, < 0.1s total"
+    }
+  ],
+
+  "top20_slowest_calls": [
+    {"name": "test_e2e::TestEscalation::test_escalation_user1_to_user2", "duration_s": 29.85, "phase": "call"},
+    {"name": "test_e2e::TestPersistenceAfterCrash::test_data_persists_after_restart", "duration_s": 27.02, "phase": "call"},
+    {"name": "test_e2e::TestEscalation::test_escalation_chain_user2_to_admin", "duration_s": 24.57, "phase": "call"},
+    {"name": "test_e2e::TestOnCallDisconnectionAlarm::test_oncall_offline_15min_creates_alarm", "duration_s": 22.96, "phase": "call"},
+    {"name": "test_e2e::TestOnCallDisconnectionAlarm::test_oncall_alarm_escalates_normally", "duration_s": 22.58, "phase": "call"},
+    {"name": "test_e2e::TestOnCallDisconnectionAlarm::test_oncall_alarm_auto_resolves_on_reconnection", "duration_s": 22.12, "phase": "call"},
+    {"name": "test_e2e::TestOnCallDisconnectionAlarm::test_nobody_connected_sends_email", "duration_s": 21.23, "phase": "call"},
+    {"name": "test_e2e::TestDeletedUserDuringAlarm::test_alarm_reassigned_when_user_deleted", "duration_s": 20.84, "phase": "call"},
+    {"name": "test_e2e::TestEscalation::test_escalation_wraps_around_after_last_user", "duration_s": 20.40, "phase": "call"},
+    {"name": "test_e2e::TestEscalation::test_escalation_wrap_continues_cycling", "duration_s": 20.30, "phase": "call"},
+    {"name": "test_e2e::TestCumulativeEscalation::test_escalated_alarm_still_visible_to_first_user", "duration_s": 19.87, "phase": "call"},
+    {"name": "test_e2e::TestCumulativeEscalation::test_any_notified_user_can_acknowledge", "duration_s": 19.47, "phase": "call"},
+    {"name": "test_e2e::TestCumulativeEscalation::test_alarm_shows_notified_users", "duration_s": 19.25, "phase": "call"},
+    {"name": "test_e2e::TestEscalation::test_no_escalation_if_acknowledged", "duration_s": 18.76, "phase": "call"},
+    {"name": "test_e2e::TestAlarmAcknowledgement::test_ack_expiry_reactivates_alarm", "duration_s": 18.09, "phase": "call"},
+    {"name": "test_e2e::TestAlarmAcknowledgement::test_ack_expiry_escalation_restarts", "duration_s": 17.91, "phase": "call"},
+    {"name": "test_e2e::TestEscalationDelayGlobal::test_escalation_uses_global_delay_for_oncall", "duration_s": 15.47, "phase": "call"},
+    {"name": "test_frontend::TestEscalationDragDrop::test_save_escalation_sends_correct_request", "duration_s": 15.31, "phase": "setup"},
+    {"name": "test_e2e::TestEscalationReachesOffline::test_escalation_reaches_offline_user", "duration_s": 14.83, "phase": "call"},
+    {"name": "test_e2e::TestEscalationReachesOffline::test_escalation_wraps_even_all_offline", "duration_s": 14.42, "phase": "call"}
+  ],
+
+  "setup_teardown_overhead": {
+    "description": "Beaucoup de temps est passe dans setup/teardown, pas seulement dans les tests eux-memes",
+    "examples": [
+      {"pattern": "test_frontend setup ~13s chacun", "cause": "Playwright browser launch + login fixture", "count": 18},
+      {"pattern": "test_e2e escalation setup ~12-13s", "cause": "reset-clock + test/reset + alarms/reset + login + alarm setup + time.sleep(12) pour tick", "count": 15},
+      {"pattern": "test_e2e teardown ~6-12s", "cause": "reset-clock sur tous les noeuds + alarms/reset", "count": "~30"}
+    ]
+  },
+
+  "analysis": {
+    "sleep_inventory": [
+      {"file": "tests/test_e2e.py", "line": 349, "duration_s": 2, "test": "_find_alarm_by_title (helper)", "reason": "Retry polling pour trouver une alarme"},
+      {"file": "tests/test_e2e.py", "line": 353, "duration_s": 2, "test": "_find_alarm_by_title (helper)", "reason": "Retry polling"},
+      {"file": "tests/test_e2e.py", "line": 358, "duration_s": 2, "test": "_find_alarm_by_title (helper)", "reason": "Retry polling"},
+      {"file": "tests/test_e2e.py", "line": 376, "duration_s": 1, "test": "setup TestEscalation", "reason": "Pause apres envoi alarme dans setup"},
+      {"file": "tests/test_e2e.py", "line": 400, "duration_s": 12, "test": "test_escalation_user1_to_user2", "reason": "Attendre un tick de la boucle d'escalade"},
+      {"file": "tests/test_e2e.py", "line": 425, "duration_s": 12, "test": "test_escalation_chain_user2_to_admin", "reason": "Attendre un tick escalade"},
+      {"file": "tests/test_e2e.py", "line": 606, "duration_s": 2, "test": "_find_alarm_by_title v2 (helper)", "reason": "Retry polling"},
+      {"file": "tests/test_e2e.py", "line": 610, "duration_s": 2, "test": "_find_alarm_by_title v2 (helper)", "reason": "Retry polling"},
+      {"file": "tests/test_e2e.py", "line": 615, "duration_s": 2, "test": "_find_alarm_by_title v2 (helper)", "reason": "Retry polling"},
+      {"file": "tests/test_e2e.py", "line": 641, "duration_s": 11, "test": "test_escalation_after_delay", "reason": "Attendre tick escalation loop (10s)"},
+      {"file": "tests/test_e2e.py", "line": 666, "duration_s": 11, "test": "test_escalation_exactly_at_boundary", "reason": "Attendre tick escalation loop"},
+      {"file": "tests/test_e2e.py", "line": 690, "duration_s": 11, "test": "test_watchdog_detects_offline", "reason": "Attendre tick watchdog"},
+      {"file": "tests/test_e2e.py", "line": 738, "duration_s": 1, "test": "test_heartbeat_recent_shows_seconds", "reason": "Attendre 1s pour verifier secondes"},
+      {"file": "tests/test_e2e.py", "line": 1064, "duration_s": 2, "test": "test_empty_chain_sends_real_email", "reason": "Attendre SMTP delivery"},
+      {"file": "tests/test_e2e.py", "line": 1109, "duration_s": 2, "test": "test_empty_chain_sends_real_email (mailhog)", "reason": "Laisser le temps au SMTP"},
+      {"file": "tests/test_e2e.py", "line": 1177, "duration_s": 11, "test": "test_escalated_alarm_still_visible_to_first_user", "reason": "Attendre tick escalade"},
+      {"file": "tests/test_e2e.py", "line": 1199, "duration_s": 11, "test": "test_any_notified_user_can_acknowledge", "reason": "Attendre tick escalade"},
+      {"file": "tests/test_e2e.py", "line": 1251, "duration_s": 12, "test": "test_oncall_offline_15min_creates_alarm", "reason": "Attendre tick watchdog/escalation"},
+      {"file": "tests/test_e2e.py", "line": 1281, "duration_s": 11, "test": "test_oncall_alarm_auto_resolves_on_reconnection", "reason": "Attendre tick watchdog/escalation loop"},
+      {"file": "tests/test_e2e.py", "line": 1306, "duration_s": 11, "test": "test_oncall_alarm_escalates_normally", "reason": "Attendre tick"},
+      {"file": "tests/test_e2e.py", "line": 1316, "duration_s": 11, "test": "test_oncall_alarm_escalates_normally", "reason": "Attendre 2e tick"},
+      {"file": "tests/test_e2e.py", "line": 1340, "duration_s": 11, "test": "test_no_oncall_alarm_if_not_position1", "reason": "Attendre tick"},
+      {"file": "tests/test_e2e.py", "line": 1374, "duration_s": 11, "test": "test_nobody_connected_sends_email", "reason": "Attendre tick"},
+      {"file": "tests/test_e2e.py", "line": 1394, "duration_s": 11, "test": "test_nobody_connected_sends_email", "reason": "Attendre 2e tick"},
+      {"file": "tests/test_e2e.py", "line": 1560, "duration_s": 12, "test": "test_sms_written_to_queue_on_escalation", "reason": "Attendre tick escalade"},
+      {"file": "tests/test_e2e.py", "line": 1644, "duration_s": 22, "test": "test_sms_excluded_after_max_retries", "reason": "Attendre 2 ticks escalade (10s chacun) + marge"},
+      {"file": "tests/test_e2e.py", "line": 1857, "duration_s": 1, "test": "test_data_persists_after_restart (polling)", "reason": "Attendre que le backend redemarre"},
+      {"file": "tests/test_e2e.py", "line": 1891, "duration_s": 2, "test": "test_data_persists_after_restart (polling)", "reason": "Attendre escalation loop restart"},
+      {"file": "tests/test_e2e.py", "line": 2056, "duration_s": 12, "test": "test_escalation_uses_global_delay_for_oncall", "reason": "Attendre tick escalade"},
+      {"file": "tests/test_e2e.py", "line": 2151, "duration_s": 1, "test": "test_alarm_lifecycle_audit_events (polling)", "reason": "Retry loop pour alarme"},
+      {"file": "tests/test_e2e.py", "line": 2179, "duration_s": 1, "test": "test_escalation_generates_audit_event", "reason": "Retry loop"},
+      {"file": "tests/test_e2e.py", "line": 2215, "duration_s": 2, "test": "test_escalation_generates_audit_event", "reason": "Attendre tick avant assertion"},
+      {"file": "tests/test_e2e.py", "line": 2291, "duration_s": 1, "test": "test_config_change_generates_audit_event", "reason": "Attendre propagation"},
+      {"file": "tests/test_e2e.py", "line": 2311, "duration_s": 1, "test": "test_audit_filter_by_event_type", "reason": "Attendre propagation"},
+      {"file": "tests/test_e2e.py", "line": 2326, "duration_s": 3, "test": "test_audit_filter_by_date_range", "reason": "Attendre propagation"},
+      {"file": "tests/test_e2e.py", "line": 2354, "duration_s": 1, "test": "test_audit_pagination", "reason": "Attendre propagation"},
+      {"file": "tests/test_e2e.py", "line": 2364, "duration_s": 1, "test": "test_correlation_id_in_audit_events", "reason": "Attendre propagation"},
+      {"file": "tests/test_e2e.py", "line": 2389, "duration_s": 2, "test": "test_reset_clears_audit_events", "reason": "Attendre propagation"},
+      {"file": "tests/test_e2e.py", "line": 2397, "duration_s": 5, "test": "test_reset_clears_audit_events", "reason": "Attendre replication cluster"},
+      {"file": "tests/test_e2e.py", "line": 2416, "duration_s": 2, "test": "test_reset_clears_audit_events", "reason": "Attendre apres insertion"},
+      {"file": "tests/test_e2e.py", "line": 2502, "duration_s": 22, "test": "test_sms_excluded_after_max_retries (v2)", "reason": "2 ticks d'escalade (10s chacun) + marge"},
+      {"file": "tests/test_fcm.py", "line": 346, "duration_s": 12, "test": "test_escalation_fast_for_veille_user", "reason": "Attendre tick escalade"},
+      {"file": "tests/test_fcm.py", "line": 369, "duration_s": 12, "test": "test_escalation_slow_for_oncall_user", "reason": "Attendre tick escalade"},
+      {"file": "tests/test_sms_voice.py", "line": 46, "duration_s": 22, "test": "TICK_WAIT constant", "reason": "2 ticks escalation loop (10s) + marge, utilise 21 fois"},
+      {"file": "tests/test_sms_voice.py", "line": 145, "duration_s": 12, "test": "TestSmsCallTimer.setup()", "reason": "Attendre tick escalation loop"},
+      {"file": "tests/test_sms_voice.py", "line": 313, "duration_s": 12, "test": "TestCallQueueEndpoints.setup()", "reason": "Attendre tick escalation loop"},
+      {"file": "tests/test_sms_voice.py", "line": 455, "duration_s": 12, "test": "TestAckByPhone.setup()", "reason": "Attendre tick escalation loop"},
+      {"file": "tests/test_sms_voice.py", "line": 537, "duration_s": 12, "test": "TestSmsCallIntegration.setup()", "reason": "Attendre tick escalation loop"}
+    ],
+
+    "sleep_summary": {
+      "total_calls": 96,
+      "total_static_sleep_seconds": 846,
+      "total_static_sleep_human": "14min 06s",
+      "by_category": {
+        "escalation_tick_wait_11_12s": {"count": 20, "total_s": 232, "reason": "Attendre un tick de la boucle d'escalade (10s loop)"},
+        "double_tick_wait_22s": {"count": 3, "total_s": 66, "reason": "Attendre 2 ticks d'escalade + marge"},
+        "TICK_WAIT_constant_22s": {"count": 21, "total_s": 462, "reason": "test_sms_voice.py: 2 ticks escalation + marge"},
+        "retry_polling_1_2s": {"count": 25, "total_s": 40, "reason": "Polling de retry pour trouver alarme/attendre propagation"},
+        "smtp_wait_2s": {"count": 2, "total_s": 4, "reason": "Attendre delivery SMTP vers Mailhog"},
+        "replication_wait_3_5s": {"count": 5, "total_s": 18, "reason": "Attendre replication cluster/audit"},
+        "misc_1_8s": {"count": 20, "total_s": 24, "reason": "Divers: restart polling, heartbeat, propagation"}
+      }
+    },
+
+    "escalation_tick": {
+      "value_seconds": 10,
+      "configurable": false,
+      "hardcoded": true,
+      "source_file": "backend/app/escalation.py",
+      "source_lines": [112, 258],
+      "description": "asyncio.sleep(10) dans la boucle d'escalade — identique pour le noeud primaire et le standby",
+      "related_configurable_delays": {
+        "escalation_delay_minutes": {"default": 15, "configurable_via": "DB SystemConfig + API /api/config/escalation-delay", "range": "1-60 min"},
+        "fcm_escalation_delay_minutes": {"default": 2, "description": "Delai pour positions 2+ (veille)"},
+        "sms_call_delay_minutes": {"default": 2, "configurable_via": "DB SystemConfig + API /api/config/sms-call-delay", "range": "1-30 min"}
+      },
+      "recommendation": "Rendre le tick configurable via env var (ex: ESCALATION_TICK_SECONDS=10) pour pouvoir le reduire a 2-3s en test sans impacter la prod"
+    },
+
+    "improvements_status": {
+      "total": 28,
+      "passed": 28,
+      "failed": 0,
+      "status": "ALL PASS",
+      "notes": "Les 2 echecs observes en run isolee (test_resolve_alarm_requires_auth, test_send_alarm_works_with_auth) etaient dus a une alarme active residuelle d'un run precedent. Apres alarms/reset, tout passe. Cela confirme un probleme de shared state entre runs successifs."
+    },
+
+    "failed_tests": [
+      {
+        "test": "tests/test_e2e.py::TestSmsAndHealth::test_health_endpoint_returns_503_if_loop_stalled",
+        "reason": "Le test attend que le health check retourne 503 quand la boucle d'escalade est en stall, mais le timing est fragile",
+        "category": "timing_sensitive"
+      }
+    ],
+
+    "errored_tests": {
+      "count": 15,
+      "all_in": "tests/test_frontend.py",
+      "working": ["test_login_screen_visible_on_load", "test_login_success_hides_overlay", "test_login_failure_shows_error"],
+      "failing": "Tous les autres (15 tests) — Playwright timeout dans le setup fixture (login)",
+      "root_cause": "La fixture de login Playwright timeout probablement car le backend est lent a repondre apres les tests E2E intensifs, ou session/cookie expiration"
+    },
+
+    "bottlenecks": [
+      {
+        "rank": 1,
+        "description": "test_sms_voice.py: TICK_WAIT=22s * 21 appels = 462s de sleep pur",
+        "impact_seconds": 462,
+        "recommendation": "Rendre le tick d'escalade configurable (env var ESCALATION_TICK_SECONDS). En test, utiliser 2s au lieu de 10s. TICK_WAIT passerait de 22s a ~6s, gain: ~336s (5min 36s)"
+      },
+      {
+        "rank": 2,
+        "description": "test_e2e.py: ~20 sleep(11-12) pour attendre un tick d'escalade = ~232s",
+        "impact_seconds": 232,
+        "recommendation": "Meme solution: tick configurable. Gain si tick=2s: ~180s (3min). Alternative: POST /test/force-escalation-tick pour forcer un tick immediatement"
+      },
+      {
+        "rank": 3,
+        "description": "test_frontend.py: 15 erreurs Playwright avec ~13s de setup chacun = ~195s perdus en setup/teardown + 15 tests non valides",
+        "impact_seconds": 195,
+        "recommendation": "Diagnostiquer le timeout de la fixture login. Probable: ajouter un retry ou augmenter le timeout Playwright. Verifier que le backend repond rapidement apres les tests E2E."
+      }
+    ],
+
+    "parallelization_assessment": {
+      "verdict": "PARALLELISATION INTER-FICHIERS POSSIBLE AVEC ISOLATION, INTRA-FICHIER NON",
+      "shared_state": {
+        "database": "PostgreSQL partage — tous les tests utilisent les memes comptes (admin, user1, user2) et la meme instance",
+        "escalation_loop": "Boucle d'escalade backend unique — un test qui avance l'horloge affecte tous les autres",
+        "injectable_clock": "Horloge partagee — reset-clock doit etre appele entre chaque test class",
+        "alarm_singleton": "Une seule alarme active a la fois — tests doivent reset avant chaque test"
+      },
+      "isolation_mechanisms": {
+        "per_class_setup": "Chaque TestClass a un setup fixture avec alarms/reset + test/reset + reset-clock",
+        "autouse_fixture": "pytest.fixture(autouse=True, scope='function') detecte le primary avant chaque test",
+        "clock_reset": "_reset_clock_all_nodes() appele dans chaque setup qui touche au temps"
+      },
+      "feasibility": {
+        "inter_file_parallel": "POSSIBLE si chaque worker a son propre backend/DB (Docker Compose -p worker1, -p worker2). pytest-xdist par fichier.",
+        "intra_file_parallel": "NON — les tests dans un fichier partagent etat DB et horloge, le setup de chaque class depend du teardown du precedent",
+        "quick_win": "Les tests sans time.sleep (TestBackendResilience, TestClusterEndpoint, TestInputValidation, etc.) pourraient tourner en parallele sur le meme backend car ils ne touchent pas a l'horloge ni aux alarmes"
+      },
+      "test_independence_score": "6/10 — bonne isolation par class, mais dependance forte au backend partagé"
+    },
+
+    "overall_recommendations": [
+      "1. TICK CONFIGURABLE: Exposer ESCALATION_TICK_SECONDS en env var (defaut 10, test: 2-3). Gain potentiel: ~8-10 min sur 66 min total (-15%)",
+      "2. ENDPOINT /test/force-tick: Creer un endpoint qui force un tick immediat de la boucle d'escalade, eliminant le besoin de sleep(11-12)",
+      "3. FIX test_frontend.py: Diagnostiquer les 15 erreurs Playwright — probablement un timeout dans la fixture login",
+      "4. FIX test_health_endpoint_returns_503_if_loop_stalled: Seul test qui echoue de maniere reproductible",
+      "5. PYTEST-XDIST PAR FICHIER: Avec un backend par worker (Docker Compose), paralleliser test_e2e + test_improvements + test_fcm + test_user_modes. Gain theorique: ~50% du temps total"
+    ]
+  }
+}

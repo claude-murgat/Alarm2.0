@@ -6,7 +6,8 @@ data class TokenResponse(
     val access_token: String,
     val token_type: String,
     val user: UserResponse,
-    val is_oncall: Boolean = false
+    val is_oncall: Boolean = false,
+    val escalation_position: Int? = null
 )
 
 data class UserResponse(

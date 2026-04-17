@@ -40,3 +40,7 @@ docker-data/
 
 # Temp
 /tmp/
+*.pid
+
+# Local Claude settings
+.claude/settings.local.json

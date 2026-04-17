@@ -72,16 +72,21 @@ def login(login_data: LoginRequest, db: Session = Depends(get_db)):
     _login_failures.pop(login_data.name.lower(), None)
     token = create_access_token(user.id)
 
-    # Calculer is_oncall : user est-il en position 1 de la chaine d'escalade ?
+    # Calculer is_oncall + escalation_position
     from ..models import EscalationConfig
     first_pos = db.query(EscalationConfig).order_by(EscalationConfig.position).first()
     is_oncall = first_pos is not None and first_pos.user_id == user.id
+
+    # Position de l'utilisateur dans la chaine d'escalade (None si absent)
+    user_esc = db.query(EscalationConfig).filter(EscalationConfig.user_id == user.id).first()
+    escalation_position = user_esc.position if user_esc else None
 
     log_event("user_login", db=db, user_id=user.id, name=user.name)
     return TokenResponse(
         access_token=token,
         user=UserResponse.model_validate(user),
         is_oncall=is_oncall,
+        escalation_position=escalation_position,
     )
 
 

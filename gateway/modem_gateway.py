@@ -232,12 +232,11 @@ class CallSenderThread(threading.Thread):
                     send_at_command(self.ser, "ATH", timeout=3)
                     return "no_answer"
 
-                # Jouer le TTS
-                time.sleep(1)  # Petit delai pour stabiliser l'appel
+                # Jouer le TTS (local au module — ne passe pas toujours sur la ligne)
+                time.sleep(2)  # Stabiliser l'appel
                 send_at_command(self.ser, f'AT+CTTS=2,"{tts_message}"', timeout=10)
 
-                # Attendre DTMF (via +DTMF unsolicited, ou ecoute audio)
-                # Pour l'instant : attendre 30s une reponse DTMF via URC
+                # Attendre DTMF via URC (+RXDTMF: X ou +DTMF: X)
                 dtmf_key = self._wait_for_dtmf(timeout=30)
 
                 # Raccrocher
@@ -300,8 +299,9 @@ class CallSenderThread(threading.Thread):
         while time.time() < deadline:
             if self.ser.in_waiting > 0:
                 line = self.ser.readline().decode(errors="replace").strip()
-                if "+DTMF:" in line:
-                    digit = line.split(":")[1].strip()
+                if "+DTMF:" in line or "+RXDTMF:" in line:
+                    # Format: +DTMF: 1 ou +RXDTMF: 1
+                    digit = line.split(":")[-1].strip()
                     logger.info(f"DTMF URC : {digit}")
                     return digit
             time.sleep(0.1)

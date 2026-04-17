@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.CriticalAlarm" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+    <style name="Theme.AlarmeMurgat" parent="Theme.MaterialComponents.DayNight.NoActionBar">
         <item name="colorPrimary">#D32F2F</item>
         <item name="colorPrimaryVariant">#B71C1C</item>
         <item name="colorOnPrimary">#FFFFFF</item>

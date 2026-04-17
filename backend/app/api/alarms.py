@@ -102,10 +102,21 @@ def send_alarm(
 
 @router.get("/", response_model=List[AlarmResponse])
 def list_alarms(
+    days: int = 10,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    alarms = db.query(Alarm).order_by(Alarm.created_at.desc()).all()
+    """Liste les alarmes des N derniers jours (defaut 10, max 90)."""
+    from ..clock import now as clock_now
+    from datetime import timedelta
+    days = max(1, min(days, 90))
+    since = clock_now() - timedelta(days=days)
+    alarms = (
+        db.query(Alarm)
+        .filter(Alarm.created_at >= since)
+        .order_by(Alarm.created_at.desc())
+        .all()
+    )
     return [_alarm_response(a, db) for a in alarms]
 
 

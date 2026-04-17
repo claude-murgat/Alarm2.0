@@ -3,7 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Système d'alarmes critiques - Admin</title>
+    <title>Alarme Murgat - Admin</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; }
@@ -99,11 +100,9 @@
     </div>
 
     <div class="header">
-        <h1>&#x1F6A8; Alarmes Critiques</h1>
+        <h1>Alarme Murgat</h1>
         <div class="status">
-            <span><span class="status-dot online" id="serverStatus"></span> Serveur</span>
-            <span id="userCount">Utilisateurs : -</span>
-            <span id="alarmCount">Active : -</span>
+            <span id="alarmCount" style="font-weight:bold">-</span>
             <div class="user-info">
                 <span class="username" id="currentUserName"></span>
                 <button class="btn-logout" onclick="doLogout()">Déconnexion</button>
@@ -113,11 +112,12 @@
 
     <div class="tabs">
         <div class="tab active" data-tab="dashboard">Tableau de bord</div>
+        <div class="tab" data-tab="escalation">Escalade</div>
+        <div class="tab" data-tab="stats">Statistiques</div>
         <div class="tab" data-tab="users">Utilisateurs</div>
         <div class="tab" data-tab="alarms">Alarmes</div>
-        <div class="tab" data-tab="escalation">Escalade</div>
         <div class="tab" data-tab="tests">Tests</div>
-        <div class="tab" data-tab="audit">Audit</div>
+        <div class="tab" data-tab="audit">Log</div>
         <div class="tab" data-tab="cluster">Cluster</div>
     </div>
 
@@ -127,12 +127,12 @@
             <div class="grid" id="statsGrid"></div>
             <div class="card">
                 <h3>Alarme en cours</h3>
-                <table><thead><tr><th>ID</th><th>Titre</th><th>Gravité</th><th>Statut</th><th>Assignée à</th><th>Acquittée par</th><th>Créée</th><th>Actions</th></tr></thead>
+                <table><thead><tr><th>ID</th><th>Titre</th><th>Statut</th><th>Assignée à</th><th>Acquittée par</th><th>Créée</th><th>Actions</th></tr></thead>
                 <tbody id="activeAlarmsTable"></tbody></table>
             </div>
             <div class="card">
                 <h3>Utilisateurs connectés</h3>
-                <table><thead><tr><th>ID</th><th>Nom</th><th>Statut</th><th>Dernier heartbeat</th></tr></thead>
+                <table><thead><tr><th>Nom</th><th>Statut</th><th>Dernier heartbeat</th></tr></thead>
                 <tbody id="devicesTable"></tbody></table>
             </div>
         </div>
@@ -162,16 +162,13 @@
                 <div class="form-row">
                     <div class="form-group"><label>Titre</label><input id="alarmTitle" placeholder="Titre de l'alarme"></div>
                     <div class="form-group"><label>Message</label><input id="alarmMessage" placeholder="Description" style="width:300px"></div>
-                    <div class="form-group"><label>Gravité</label>
-                        <select id="alarmSeverity"><option value="critical">Critique</option><option value="high">Haute</option><option value="medium">Moyenne</option><option value="low">Basse</option></select>
-                    </div>
-                    <div class="form-group"><label>Assigner à</label><select id="alarmUser"></select></div>
+
                     <button class="btn-danger" onclick="sendAlarm()">Envoyer</button>
                 </div>
             </div>
             <div class="card">
                 <h3>Toutes les alarmes</h3>
-                <table><thead><tr><th>ID</th><th>Titre</th><th>Message</th><th>Gravité</th><th>Statut</th><th>Assignée</th><th>Acquittée par</th><th>Créée</th><th>Actions</th></tr></thead>
+                <table><thead><tr><th>ID</th><th>Titre</th><th>Message</th><th>Statut</th><th>Assignée</th><th>Acquittée par</th><th>Créée</th><th>Actions</th></tr></thead>
                 <tbody id="allAlarmsTable"></tbody></table>
             </div>
         </div>
@@ -210,6 +207,45 @@
                 <div style="display:flex;gap:8px">
                     <button class="btn-primary" id="saveEscalation" onclick="saveEscalationChain()">Sauvegarder</button>
                     <button class="btn-warning" id="cancelEscalation" onclick="cancelEscalationEdit()">Annuler</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Statistiques -->
+        <div class="panel" id="stats">
+            <div class="card">
+                <h3>KPIs Astreinte</h3>
+                <div style="display:flex;gap:16px;align-items:center;margin-bottom:16px;flex-wrap:wrap">
+                    <div>
+                        <label style="color:#94a3b8;font-size:0.85rem">Periode</label><br>
+                        <select id="statsWeeks" onchange="loadStats()" style="background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:6px 10px;">
+                            <option value="4">4 semaines</option>
+                            <option value="8" selected>8 semaines</option>
+                            <option value="12">12 semaines</option>
+                            <option value="26">6 mois</option>
+                            <option value="52">1 an</option>
+                        </select>
+                    </div>
+                    <label style="color:#94a3b8;font-size:0.85rem;display:flex;align-items:center;gap:6px;margin-top:16px">
+                        <input type="checkbox" id="statsHorsHeures" checked onchange="loadStats()">
+                        Hors heures ouvrees uniquement
+                    </label>
+                </div>
+                <div class="grid" id="kpiCards" style="margin-bottom:24px"></div>
+            </div>
+            <div class="card">
+                <h3 id="weeklyChartTitle">Alarmes par semaine</h3>
+                <div style="height:300px"><canvas id="weeklyChart"></canvas></div>
+            </div>
+            <div style="display:flex;gap:16px;flex-wrap:wrap">
+                <div class="card" style="flex:1;min-width:300px">
+                    <h3>Repartition escalade</h3>
+                    <div style="height:250px;display:flex;justify-content:center"><canvas id="escalationChart"></canvas></div>
+                </div>
+                <div class="card" style="flex:1;min-width:300px">
+                    <h3>Top alarmes recurrentes</h3>
+                    <table><thead><tr><th>Titre</th><th>Occurrences</th></tr></thead>
+                    <tbody id="recurringTable"></tbody></table>
                 </div>
             </div>
         </div>
@@ -471,25 +507,48 @@
         async function loadStatus() {
             try {
                 const s = await api('/api/test/status');
-                document.getElementById('userCount').textContent = `Utilisateurs : ${s.connected_users}/${s.users}`;
-                document.getElementById('alarmCount').textContent = `Active : ${s.alarms.active}`;
+                const hasAlarm = s.alarms.active > 0 || s.alarms.acknowledged > 0;
+                const isAcked = s.alarms.acknowledged > 0 && s.alarms.active === 0;
+                const bannerStatus = hasAlarm
+                    ? (isAcked ? 'Acquittee' : 'Alarme active')
+                    : 'Aucune alarme';
+                const bannerEl = document.getElementById('alarmCount');
+                bannerEl.textContent = bannerStatus;
+                bannerEl.style.color = hasAlarm
+                    ? (isAcked ? '#22c55e' : '#ef4444')
+                    : '#94a3b8';
+                const alarmStatus = bannerStatus;
+                const alarmClass = hasAlarm && !isAcked ? 'pulsing' : '';
+                const alarmColor = hasAlarm
+                    ? (isAcked ? 'color:#22c55e' : 'color:#ef4444')
+                    : 'color:#94a3b8';
+                // Trouver le garde (position 1 de la chaine d'escalade)
+                let guardInfo = 'Aucun garde';
+                let guardColor = '#94a3b8';
+                try {
+                    const chain = await api('/api/config/escalation');
+                    if (chain.length > 0) {
+                        const guardUserId = chain[0].user_id;
+                        const guardUser = users.find(u => u.id === guardUserId);
+                        if (guardUser) {
+                            const online = guardUser.is_online;
+                            guardInfo = `${guardUser.name} ${online ? '(en ligne)' : '(hors ligne)'}`;
+                            guardColor = online ? '#22c55e' : '#ef4444';
+                        }
+                    }
+                } catch (_) {}
                 document.getElementById('statsGrid').innerHTML = `
-                    <div class="card stat"><div class="value">${s.users}</div><div class="label">Utilisateurs</div></div>
-                    <div class="card stat"><div class="value">${s.connected_users}/${s.users}</div><div class="label">Utilisateurs connectés</div></div>
-                    <div class="card stat"><div class="value ${s.alarms.active > 0 ? 'pulsing' : ''}">${s.alarms.active}</div><div class="label">Alarme active</div></div>
-                    <div class="card stat"><div class="value">${s.alarms.acknowledged}</div><div class="label">Acquittées</div></div>
-                    <div class="card stat"><div class="value">${s.alarms.resolved}</div><div class="label">Résolues</div></div>`;
+                    <div class="card"><h3>Actuellement de garde</h3><div style="color:${guardColor};font-size:1.2rem;font-weight:bold;margin-top:8px">${guardInfo}</div></div>
+                    <div class="card"><h3>État alarme</h3><div style="font-size:1.2rem;font-weight:bold;margin-top:8px;${alarmColor}" class="${alarmClass}">${alarmStatus}</div></div>`;
             } catch (e) {
-                document.getElementById('serverStatus').classList.replace('online', 'offline');
+                document.getElementById('alarmCount').textContent = 'Serveur injoignable';
+                document.getElementById('alarmCount').style.color = '#ef4444';
             }
         }
 
         async function loadUsers() {
             users = await api('/api/users/');
-            const sel1 = document.getElementById('alarmUser');
-            const sel2 = document.getElementById('escUser');
-            sel1.innerHTML = '<option value="">Auto (chaîne d\'escalade)</option>' + users.map(u => `<option value="${u.id}">${u.name}</option>`).join('');
-            sel2.innerHTML = users.map(u => `<option value="${u.id}">${u.name}</option>`).join('');
+            // Assignation alarme supprimee (toujours auto-escalade)
             document.getElementById('usersTable').innerHTML = users.map(u => `
                 <tr><td>${u.id}</td><td>${u.name}</td>
                 <td>${u.is_admin ? 'Oui' : 'Non'}</td>
@@ -502,29 +561,27 @@
             const active = alarms.filter(a => ['active', 'escalated'].includes(a.status));
             document.getElementById('activeAlarmsTable').innerHTML = active.map(a => `
                 <tr><td>${a.id}</td><td>${a.title}</td>
-                <td><span class="badge ${a.severity}">${severityLabels[a.severity] || a.severity}</span></td>
                 <td><span class="badge ${a.status}">${statusLabels[a.status] || a.status}</span></td>
                 <td>${getUserName(a.assigned_user_id)}</td>
                 <td>${a.acknowledged_by_name || '-'}</td>
                 <td>${timeAgo(a.created_at)}</td>
-                <td><button class="btn-success btn-sm" onclick="resolveAlarm(${a.id})">Résoudre</button></td></tr>`).join('') || '<tr><td colspan="8" style="text-align:center;color:#94a3b8">Aucune alarme active</td></tr>';
+                <td><button class="btn-success btn-sm" onclick="resolveAlarm(${a.id})">Résoudre</button></td></tr>`).join('') || '<tr><td colspan="7" style="text-align:center;color:#94a3b8">Aucune alarme active</td></tr>';
 
             document.getElementById('allAlarmsTable').innerHTML = alarms.map(a => `
                 <tr><td>${a.id}</td><td>${a.title}</td><td>${a.message}</td>
-                <td><span class="badge ${a.severity}">${severityLabels[a.severity] || a.severity}</span></td>
                 <td><span class="badge ${a.status}">${statusLabels[a.status] || a.status}</span></td>
                 <td>${getUserName(a.assigned_user_id)}</td>
                 <td>${a.acknowledged_by_name || '-'}</td>
                 <td>${timeAgo(a.created_at)}</td>
-                <td>${a.status !== 'resolved' ? `<button class="btn-success btn-sm" onclick="resolveAlarm(${a.id})">Résoudre</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="9" style="text-align:center;color:#94a3b8">Aucune alarme</td></tr>';
+                <td>${a.status !== 'resolved' ? `<button class="btn-success btn-sm" onclick="resolveAlarm(${a.id})">Résoudre</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="8" style="text-align:center;color:#94a3b8">Aucune alarme</td></tr>';
         }
 
         async function loadDevices() {
             const usersList = await api('/api/users/');
             document.getElementById('devicesTable').innerHTML = usersList.map(u => `
-                <tr><td>${u.id}</td><td>${u.name}</td>
+                <tr><td>${u.name}</td>
                 <td><span class="badge ${u.is_online ? 'online' : 'offline'}">${u.is_online ? 'En ligne' : 'Hors ligne'}</span></td>
-                <td>${timeAgo(u.last_heartbeat)}</td></tr>`).join('') || '<tr><td colspan="4" style="text-align:center;color:#94a3b8">Aucun utilisateur</td></tr>';
+                <td>${timeAgo(u.last_heartbeat)}</td></tr>`).join('') || '<tr><td colspan="3" style="text-align:center;color:#94a3b8">Aucun utilisateur</td></tr>';
         }
 
         let editingEscalation = false;  // Flag pour bloquer l'autorefresh pendant l'edition
@@ -777,13 +834,12 @@
         async function deleteUser(id) { await api(`/api/users/${id}`, { method: 'DELETE' }); loadAll(); }
 
         async function sendAlarm() {
-            const userId = document.getElementById('alarmUser').value;
             try {
                 await api('/api/alarms/send', { method: 'POST', body: JSON.stringify({
                     title: document.getElementById('alarmTitle').value,
                     message: document.getElementById('alarmMessage').value,
-                    severity: document.getElementById('alarmSeverity').value,
-                    assigned_user_id: userId ? parseInt(userId) : null,
+                    severity: 'critical',
+                    assigned_user_id: null,
                 })});
             } catch (e) {
                 alert(e.message);
@@ -953,6 +1009,85 @@
             } catch (err) { console.error('Audit load error', err); }
         }
 
+        // ── Statistiques / KPIs ──────────────────────────────────────
+        let weeklyChartInstance = null;
+        let escalationChartInstance = null;
+
+        async function loadStats() {
+            const horsHeures = document.getElementById('statsHorsHeures')?.checked ?? true;
+            const weeks = document.getElementById('statsWeeks')?.value || 8;
+            try {
+                const data = await api(`/api/stats/kpi?weeks=${weeks}&hors_heures_only=${horsHeures}`);
+                document.getElementById('weeklyChartTitle').textContent = `Alarmes par semaine (${weeks} sem.)`;
+
+                // KPI cards
+                document.getElementById('kpiCards').innerHTML = `
+                    <div class="card stat"><div class="value">${data.total_alarms}</div><div class="label">Alarmes (${data.period_weeks} sem.)</div></div>
+                    <div class="card stat"><div class="value">${data.escalation_rate}%</div><div class="label">Taux d'escalade</div></div>
+                    <div class="card stat"><div class="value">${data.mttr_minutes} min</div><div class="label">MTTR moyen</div></div>`;
+
+                // Weekly chart
+                const ctx1 = document.getElementById('weeklyChart');
+                if (weeklyChartInstance) weeklyChartInstance.destroy();
+                weeklyChartInstance = new Chart(ctx1, {
+                    type: 'bar',
+                    data: {
+                        labels: data.weeks.map(w => w.week_start),
+                        datasets: [
+                            {
+                                label: 'Alarmes',
+                                data: data.weeks.map(w => w.total),
+                                backgroundColor: '#3b82f6',
+                                borderRadius: 4,
+                            },
+                            {
+                                label: 'Avec escalade',
+                                data: data.weeks.map(w => w.with_escalation),
+                                backgroundColor: '#ef4444',
+                                borderRadius: 4,
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true, maintainAspectRatio: false,
+                        plugins: { legend: { labels: { color: '#94a3b8' } } },
+                        scales: {
+                            x: { ticks: { color: '#94a3b8' }, grid: { color: '#1e293b' } },
+                            y: { beginAtZero: true, ticks: { color: '#94a3b8', stepSize: 1 }, grid: { color: '#1e293b' } }
+                        }
+                    }
+                });
+
+                // Escalation pie chart
+                const ctx2 = document.getElementById('escalationChart');
+                if (escalationChartInstance) escalationChartInstance.destroy();
+                const esc = data.escalation_distribution;
+                escalationChartInstance = new Chart(ctx2, {
+                    type: 'doughnut',
+                    data: {
+                        labels: ['Garde seul', 'Escalade n\u00b02', 'Escalade n\u00b03+'],
+                        datasets: [{
+                            data: [esc.position_1, esc.position_2, esc.position_3_plus],
+                            backgroundColor: ['#22c55e', '#f59e0b', '#ef4444'],
+                            borderWidth: 0,
+                        }]
+                    },
+                    options: {
+                        responsive: true, maintainAspectRatio: false,
+                        plugins: { legend: { labels: { color: '#94a3b8' } } }
+                    }
+                });
+
+                // Recurring table
+                document.getElementById('recurringTable').innerHTML = data.top_recurring.map(r =>
+                    `<tr><td>${r.title}</td><td style="text-align:center;font-weight:bold">${r.count}</td></tr>`
+                ).join('') || '<tr><td colspan="2" style="text-align:center;color:#94a3b8">Aucune alarme</td></tr>';
+
+            } catch (e) {
+                console.error('Stats load error:', e);
+            }
+        }
+
         function loadAll() {
             if (!authToken) return;  // Pas connecte
             loadStatus();
@@ -962,6 +1097,7 @@
             loadEscalation();
             loadCluster();
             loadAlertEmail();
+            loadStats();
         }
 
         // Auto-refresh toutes les 5s (seulement si connecte)

@@ -1,15 +1,25 @@
 package com.alarm.critical
 
 import android.Manifest
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
+import android.view.Gravity
 import android.view.View
+import android.view.animation.AccelerateDecelerateInterpolator
 import android.widget.Button
+import android.widget.FrameLayout
+import android.widget.ImageButton
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import androidx.drawerlayout.widget.DrawerLayout
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -18,8 +28,11 @@ import android.util.Log
 import com.alarm.critical.api.ApiProvider
 import com.alarm.critical.model.AlarmResponse
 import com.alarm.critical.model.FcmTokenRequest
+import com.alarm.critical.model.FcmTokenDeleteRequest
 import com.alarm.critical.service.AlarmPollingService
 import com.alarm.critical.service.AlarmSoundManager
+import com.alarm.critical.util.AppLogger
+import com.alarm.critical.view.ArcTimerView
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.*
@@ -34,8 +47,10 @@ class DashboardActivity : AppCompatActivity() {
     private var connectionLostSoundManager: AlarmSoundManager? = null
     private var currentAlarm: AlarmResponse? = null
     private var isAcknowledged = false
-    private var alarmGoneDuringAck = false  // true quand l'alarme a disparu après ack (suspension)
-    private var acknowledgedAlarmId: Int? = null  // ID de l'alarme acquittée par cet utilisateur
+    private var alarmGoneDuringAck = false
+    private var acknowledgedAlarmId: Int? = null
+    private var pulseAnimator: ObjectAnimator? = null
+    private var lastCardState: String = "calm"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -57,10 +72,22 @@ class DashboardActivity : AppCompatActivity() {
         val prefs = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
         val userName = prefs.getString("user_name", "Utilisateur") ?: "Utilisateur"
 
-        // Afficher uniquement le nom (pas de bienvenue, pas d'email)
-        findViewById<TextView>(R.id.userNameText).text = userName
+        AppLogger.log("Dashboard", "Ouvert (user=$userName)")
 
-        // Enregistrer le token FCM au demarrage (couvre le cas SharedPrefs injectees)
+        // Header : nom + initiale
+        findViewById<TextView>(R.id.userNameText).text = userName
+        findViewById<TextView>(R.id.userInitial).text = userName.take(1).uppercase()
+
+        // Badge de garde
+        updateGuardBadge()
+
+        // Navigation Drawer
+        val drawerLayout = findViewById<DrawerLayout>(R.id.drawerLayout)
+        findViewById<TextView>(R.id.drawerInitial).text = userName.take(1).uppercase()
+        findViewById<TextView>(R.id.drawerUserName).text = userName
+        updateDrawerGuardStatus()
+
+        // Enregistrer le token FCM au demarrage
         lifecycleScope.launch {
             try {
                 val fcmToken = FirebaseMessaging.getInstance().token.await()
@@ -75,20 +102,32 @@ class DashboardActivity : AppCompatActivity() {
             }
         }
 
-        // Demarrer le service de polling UNIQUEMENT si on-call ou reveille par FCM
+        // Demarrer le service de polling
         val isOncall = prefs.getBoolean("is_oncall", true)
         val startedByFcm = prefs.getBoolean("started_by_fcm", false)
         if (isOncall || startedByFcm) {
             startPollingService()
         }
 
-        // Bouton déconnexion
-        findViewById<Button>(R.id.logoutButton).setOnClickListener {
-            prefs.edit().clear().apply()
-            stopPollingService()
-            soundManager?.stopAlarmSound()
-            startActivity(Intent(this, MainActivity::class.java))
-            finish()
+        // Bouton hamburger -> ouvre le drawer
+        findViewById<ImageButton>(R.id.menuButton).setOnClickListener {
+            drawerLayout.openDrawer(findViewById<LinearLayout>(R.id.drawerContent))
+        }
+
+        // Logout dans le drawer
+        findViewById<LinearLayout>(R.id.drawerLogout).setOnClickListener {
+            drawerLayout.close()
+            performLogout()
+        }
+
+        // Bouton reconnexion (dans alerte)
+        findViewById<Button>(R.id.reconnectButton).setOnClickListener {
+            performLogout()
+        }
+
+        // Bouton aide flottant — export logs
+        findViewById<LinearLayout>(R.id.helpFab).setOnClickListener {
+            shareLogs()
         }
 
         // Bouton acquitter
@@ -96,7 +135,7 @@ class DashboardActivity : AppCompatActivity() {
             acknowledgeCurrentAlarm()
         }
 
-        // Mise à jour du statut toutes les secondes
+        // Mise a jour du statut toutes les secondes
         statusUpdateJob = lifecycleScope.launch {
             while (isActive) {
                 updateStatus()
@@ -113,6 +152,72 @@ class DashboardActivity : AppCompatActivity() {
         }
     }
 
+    private fun updateGuardBadge() {
+        val prefs = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
+        val isOncall = prefs.getBoolean("is_oncall", false)
+        val escalationPosition = prefs.getInt("escalation_position", -1)
+        val badge = findViewById<TextView>(R.id.guardBadge)
+        val oncallLabel = findViewById<TextView>(R.id.oncallLabel)
+
+        // Badge escalade : toujours afficher la position si dans la chaine
+        if (escalationPosition > 0) {
+            badge.text = "ESCALADE n\u00b0$escalationPosition"
+            badge.setBackgroundResource(R.drawable.badge_escalation)
+            badge.setTextColor(Color.parseColor("#94a3b8"))
+            badge.visibility = View.VISIBLE
+        } else {
+            badge.visibility = View.GONE
+        }
+
+        // Etiquette "Actuellement de garde" : uniquement si position 1
+        if (isOncall) {
+            oncallLabel.visibility = View.VISIBLE
+        } else {
+            oncallLabel.visibility = View.GONE
+        }
+    }
+
+    private fun updateDrawerGuardStatus() {
+        val prefs = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
+        val isOncall = prefs.getBoolean("is_oncall", false)
+        val escalationPosition = prefs.getInt("escalation_position", -1)
+        val drawerStatus = findViewById<TextView>(R.id.drawerGuardStatus)
+
+        when {
+            isOncall -> drawerStatus.text = "Actuellement de garde \u2014 Escalade n\u00b0$escalationPosition"
+            escalationPosition > 0 -> drawerStatus.text = "Escalade n\u00b0$escalationPosition"
+            else -> drawerStatus.text = "Hors chaine d'escalade"
+        }
+    }
+
+    private fun performLogout() {
+        val prefs = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
+        val t = token
+        val deviceId = prefs.getString("device_token", null)
+
+        // Supprimer le token FCM cote backend avant de partir
+        if (t != null && deviceId != null) {
+            lifecycleScope.launch {
+                try {
+                    ApiProvider.service.deleteFcmToken(
+                        "Bearer $t",
+                        FcmTokenDeleteRequest(device_id = deviceId)
+                    )
+                    Log.d("Dashboard", "FCM token deleted from backend")
+                } catch (e: Exception) {
+                    Log.e("Dashboard", "FCM token delete failed: ${e.message}")
+                }
+            }
+        }
+
+        prefs.edit().clear().apply()
+        stopPollingService()
+        soundManager?.stopAlarmSound()
+        connectionLostSoundManager?.stopAlarmSound()
+        startActivity(Intent(this, MainActivity::class.java))
+        finish()
+    }
+
     private fun startPollingService() {
         val intent = Intent(this, AlarmPollingService::class.java)
         intent.putExtra(AlarmPollingService.EXTRA_TOKEN, token)
@@ -125,69 +230,97 @@ class DashboardActivity : AppCompatActivity() {
 
     private fun updateStatus() {
         runOnUiThread {
-            // Statut connexion avec icône
-            findViewById<TextView>(R.id.connectionStatus).text =
-                if (AlarmPollingService.lastHeartbeatOk) "\u2705 Connexion avec le serveur ok"
-                else "\u274C Déconnecté"
+            // ========== STATUT SYSTEME SIMPLIFIE ==========
+            val systemStatus = findViewById<TextView>(R.id.systemStatus)
+            val prefs2 = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
+            val isOncallNow = prefs2.getBoolean("is_oncall", false)
+            val isConnected = AlarmPollingService.isRunning && AlarmPollingService.lastHeartbeatOk
 
-            // Alerte connexion perdue (après timeout heartbeat)
+            when {
+                isConnected -> {
+                    systemStatus.text = "\u25CF Connecte au serveur"
+                    systemStatus.setTextColor(Color.parseColor("#22c55e"))
+                }
+                !AlarmPollingService.isRunning && !isOncallNow -> {
+                    // Non-astreinte sans polling actif = en attente de push
+                    systemStatus.text = "\u25CF En attente"
+                    systemStatus.setTextColor(Color.parseColor("#f59e0b"))
+                }
+                else -> {
+                    systemStatus.text = "\u25CF Deconnecte"
+                    systemStatus.setTextColor(Color.parseColor("#ef4444"))
+                }
+            }
+
+            // ========== ALERTE CONNEXION / AUTH ==========
+            val connectionLostContainer = findViewById<LinearLayout>(R.id.connectionLostContainer)
             val connectionLostAlert = findViewById<TextView>(R.id.connectionLostAlert)
+            val reconnectButton = findViewById<Button>(R.id.reconnectButton)
+
             if (AlarmPollingService.authErrorAlarm) {
-                // Session expirée — sonnerie continue + message permanent
-                connectionLostAlert.text = "\u26A0\uFE0F ${AlarmPollingService.authErrorMessage}"
-                connectionLostAlert.visibility = View.VISIBLE
+                connectionLostAlert.text = AlarmPollingService.authErrorMessage ?: "Session expiree"
+                connectionLostContainer.visibility = View.VISIBLE
+                reconnectButton.visibility = View.VISIBLE
                 if (connectionLostSoundManager == null) {
                     connectionLostSoundManager = AlarmSoundManager(this@DashboardActivity)
                 }
                 connectionLostSoundManager?.startAlarmSound()
             } else if (AlarmPollingService.heartbeatLostAlarm) {
-                connectionLostAlert.text = "\u26A0\uFE0F Connexion perdue avec le serveur"
-                connectionLostAlert.visibility = View.VISIBLE
+                connectionLostAlert.text = "Connexion perdue avec le serveur"
+                connectionLostContainer.visibility = View.VISIBLE
+                reconnectButton.visibility = View.GONE
                 if (connectionLostSoundManager == null) {
                     connectionLostSoundManager = AlarmSoundManager(this@DashboardActivity)
                 }
                 connectionLostSoundManager?.startAlarmSound()
             } else {
-                connectionLostAlert.visibility = View.GONE
+                connectionLostContainer.visibility = View.GONE
                 connectionLostSoundManager?.stopAlarmSound()
             }
 
-            // Statut service
-            findViewById<TextView>(R.id.serviceStatus).text =
-                "Service : ${if (AlarmPollingService.isRunning) "En cours" else "Arrêté"}"
+            // ========== BADGE DE GARDE (rafraichi depuis prefs, mis a jour par FCM) ==========
+            updateGuardBadge()
 
-            // Alarme en cours
+            // ========== CARTE ALARME HERO ==========
             val alarm = AlarmPollingService.currentAlarm
+            val alarmCard = findViewById<LinearLayout>(R.id.alarmCard)
+            val alarmDot = findViewById<View>(R.id.alarmDot)
             val alarmLine = findViewById<TextView>(R.id.currentAlarmLine)
             val titleView = findViewById<TextView>(R.id.alarmTitle)
             val messageView = findViewById<TextView>(R.id.alarmMessage)
             val durationView = findViewById<TextView>(R.id.alarmDuration)
             val ackButton = findViewById<Button>(R.id.dashboardAckButton)
-
             val ackStatus = findViewById<TextView>(R.id.ackStatusText)
-            val ackRemaining = findViewById<TextView>(R.id.ackRemainingTime)
+            val arcTimer = findViewById<ArcTimerView>(R.id.ackArcTimer)
 
-            val currentUserName = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
-                .getString("user_name", "") ?: ""
-
-            // Reset ack si une AUTRE alarme arrive (ID différent)
+            // Reset ack si une AUTRE alarme arrive (ID different)
             if (alarm != null && isAcknowledged && alarm.id != acknowledgedAlarmId) {
                 isAcknowledged = false
                 alarmGoneDuringAck = false
                 acknowledgedAlarmId = null
             }
 
-            // Si l'alarme revient après avoir disparu pendant l'ack → fin de suspension
+            // Si l'alarme revient apres avoir disparu pendant l'ack
             if (alarm != null && isAcknowledged && alarmGoneDuringAck) {
                 isAcknowledged = false
                 alarmGoneDuringAck = false
             }
 
+            // Reset ack quand le backend remet l'alarme en "active" apres expiry
+            if (alarm != null && isAcknowledged && alarm.id == acknowledgedAlarmId
+                && alarm.status != "acknowledged") {
+                isAcknowledged = false
+                alarmGoneDuringAck = false
+                acknowledgedAlarmId = null
+            }
+
             if (alarm != null && alarm.status == "acknowledged" && !isAcknowledged) {
-                // Alarme acquittée par quelqu'un d'autre → afficher info, pas de son, pas de bouton
+                // Alarme acquittee par quelqu'un d'autre
+                setCardState(alarmCard, alarmDot, "acked")
                 currentAlarm = alarm
                 val ackerName = alarm.acknowledged_by_name ?: "?"
-                alarmLine.text = "\uD83D\uDD34 Alarme active"  // 🔴
+                alarmLine.text = "Alarme active"
+                alarmLine.setTextColor(Color.parseColor("#22c55e"))
 
                 titleView.text = alarm.title
                 titleView.visibility = View.VISIBLE
@@ -199,26 +332,24 @@ class DashboardActivity : AppCompatActivity() {
                 durationView.visibility = View.VISIBLE
 
                 ackButton.visibility = View.GONE
-
-                ackStatus.text = "\u2705 Acquitt\u00e9e par $ackerName"
+                ackStatus.text = "Acquittee par $ackerName"
                 ackStatus.visibility = View.VISIBLE
 
                 val remaining = alarm.ack_remaining_seconds ?: 0
-                val min = remaining / 60
-                ackRemaining.text = "$min min restantes"
-                ackRemaining.visibility = View.VISIBLE
+                arcTimer.setTime(1800, remaining)
+                arcTimer.visibility = View.VISIBLE
 
                 soundManager?.stopAlarmSound()
 
             } else if (alarm != null && !isAcknowledged) {
-                // Alarme active et non acquittée → afficher alarme + sonnerie
+                // Alarme active non acquittee
+                setCardState(alarmCard, alarmDot, "active")
                 currentAlarm = alarm
-
-                alarmLine.text = "\uD83D\uDD34 Alarme active"  // 🔴
+                alarmLine.text = "Alarme active"
+                alarmLine.setTextColor(Color.parseColor("#ef4444"))
 
                 titleView.text = alarm.title
                 titleView.visibility = View.VISIBLE
-
                 messageView.text = alarm.message
                 messageView.visibility = View.VISIBLE
 
@@ -228,7 +359,7 @@ class DashboardActivity : AppCompatActivity() {
 
                 ackButton.visibility = View.VISIBLE
                 ackStatus.visibility = View.GONE
-                ackRemaining.visibility = View.GONE
+                arcTimer.visibility = View.GONE
 
                 if (soundManager == null) {
                     soundManager = AlarmSoundManager(this)
@@ -236,9 +367,11 @@ class DashboardActivity : AppCompatActivity() {
                 soundManager?.startAlarmSound()
 
             } else if (alarm != null && isAcknowledged) {
-                // Alarme acquittée par nous → garder l'affichage, countdown dynamique
+                // Alarme acquittee par nous
+                setCardState(alarmCard, alarmDot, "acked")
                 currentAlarm = alarm
-                alarmLine.text = "\uD83D\uDD34 Alarme active"  // 🔴
+                alarmLine.text = "Acquittee"
+                alarmLine.setTextColor(Color.parseColor("#22c55e"))
 
                 titleView.text = alarm.title
                 titleView.visibility = View.VISIBLE
@@ -251,51 +384,85 @@ class DashboardActivity : AppCompatActivity() {
 
                 ackButton.visibility = View.GONE
 
-                // Mettre à jour le countdown depuis le serveur
                 val remaining = alarm.ack_remaining_seconds ?: 0
-                val min = remaining / 60
-                ackRemaining.text = "$min min restantes"
-                ackRemaining.visibility = View.VISIBLE
+                arcTimer.setTime(1800, remaining)
+                arcTimer.visibility = View.VISIBLE
 
             } else if (alarm == null && isAcknowledged) {
-                // Alarme disparue (résolue pendant ack) → garder l'affichage acquitté
+                // Alarme disparue pendant ack
+                setCardState(alarmCard, alarmDot, "calm")
                 alarmGoneDuringAck = true
-                alarmLine.text = "\u26AA Aucune alarme"  // ⚪
+                alarmLine.text = "Tout est calme"
+                alarmLine.setTextColor(Color.parseColor("#94a3b8"))
                 titleView.visibility = View.GONE
                 messageView.visibility = View.GONE
                 durationView.visibility = View.GONE
                 ackButton.visibility = View.GONE
-                // ackStatus et ackRemaining restent visibles
+                arcTimer.visibility = View.GONE
 
                 soundManager?.stopAlarmSound()
 
             } else {
-                // Pas d'alarme, pas d'acquittement
+                // Pas d'alarme
+                setCardState(alarmCard, alarmDot, "calm")
                 currentAlarm = null
                 isAcknowledged = false
-                alarmLine.text = "\u26AA Aucune alarme"  // ⚪
+                alarmLine.text = "Tout est calme"
+                alarmLine.setTextColor(Color.parseColor("#94a3b8"))
 
                 titleView.visibility = View.GONE
                 messageView.visibility = View.GONE
                 durationView.visibility = View.GONE
                 ackButton.visibility = View.GONE
+                arcTimer.visibility = View.GONE
 
                 soundManager?.stopAlarmSound()
 
                 ackStatus.visibility = View.GONE
-                ackRemaining.visibility = View.GONE
             }
 
-            // Indicateur sonnerie
+            // ========== CHIP SONNERIE (visible uniquement quand active) ==========
             val isSounding = (soundManager?.isPlaying() == true) ||
                              (connectionLostSoundManager?.isPlaying() == true)
-            findViewById<TextView>(R.id.soundStatus).text =
-                if (isSounding) "\uD83D\uDD14 Sonnerie ACTIVE"   // 🔔
-                else "\uD83D\uDD07 Sonnerie inactive"             // 🔇
-            findViewById<TextView>(R.id.soundStatus).setTextColor(
-                if (isSounding) android.graphics.Color.parseColor("#ef4444")
-                else android.graphics.Color.parseColor("#94a3b8")
-            )
+            val soundChip = findViewById<LinearLayout>(R.id.soundChip)
+            if (isSounding) {
+                soundChip.visibility = View.VISIBLE
+                findViewById<TextView>(R.id.soundStatus).text = "Sonnerie ACTIVE"
+                findViewById<TextView>(R.id.soundStatus).setTextColor(Color.parseColor("#ef4444"))
+                findViewById<View>(R.id.soundDot).setBackgroundResource(R.drawable.dot_red)
+            } else {
+                soundChip.visibility = View.GONE
+            }
+        }
+    }
+
+    private fun setCardState(card: LinearLayout, dot: View, state: String) {
+        if (state == lastCardState) return
+        lastCardState = state
+
+        pulseAnimator?.cancel()
+        pulseAnimator = null
+
+        when (state) {
+            "calm" -> {
+                card.setBackgroundResource(R.drawable.card_calm)
+                dot.setBackgroundResource(R.drawable.dot_green)
+            }
+            "active" -> {
+                card.setBackgroundResource(R.drawable.card_alarm_active)
+                dot.setBackgroundResource(R.drawable.dot_red)
+                pulseAnimator = ObjectAnimator.ofFloat(card, "alpha", 1f, 0.85f).apply {
+                    duration = 800
+                    repeatMode = ValueAnimator.REVERSE
+                    repeatCount = ValueAnimator.INFINITE
+                    interpolator = AccelerateDecelerateInterpolator()
+                    start()
+                }
+            }
+            "acked" -> {
+                card.setBackgroundResource(R.drawable.card_alarm_acked)
+                dot.setBackgroundResource(R.drawable.dot_green)
+            }
         }
     }
 
@@ -311,25 +478,21 @@ class DashboardActivity : AppCompatActivity() {
                     isAcknowledged = true
                     acknowledgedAlarmId = alarm.id
                     runOnUiThread {
-                        // Masquer le bouton
                         findViewById<Button>(R.id.dashboardAckButton).visibility = View.GONE
 
-                        // Afficher statut acquitté
                         val statusText = findViewById<TextView>(R.id.ackStatusText)
-                        statusText.text = "\u2705 Acquitt\u00e9e"
+                        statusText.text = "Acquittee"
                         statusText.visibility = View.VISIBLE
 
-                        // Afficher temps restant (dynamique depuis la réponse)
-                        val remainingText = findViewById<TextView>(R.id.ackRemainingTime)
                         val remaining = response.body()?.ack_remaining_seconds ?: 1800
-                        val min = remaining / 60
-                        remainingText.text = "$min min restantes"
-                        remainingText.visibility = View.VISIBLE
+                        val arcTimer = findViewById<ArcTimerView>(R.id.ackArcTimer)
+                        arcTimer.setTime(1800, remaining)
+                        arcTimer.visibility = View.VISIBLE
                     }
                 } else {
                     runOnUiThread {
                         Toast.makeText(this@DashboardActivity,
-                            "Échec de l'acquittement : ${response.code()}",
+                            "Echec de l'acquittement : ${response.code()}",
                             Toast.LENGTH_SHORT).show()
                     }
                 }
@@ -369,16 +532,97 @@ class DashboardActivity : AppCompatActivity() {
         section.visibility = View.VISIBLE
         list.removeAllViews()
 
-        for (alarm in alarms) {
-            val entry = TextView(this).apply {
-                text = "${alarm.title} — ${formatDate(alarm.created_at)} → ${formatDate(alarm.acknowledged_at)}"
-                textSize = 13f
-                setTextColor(0xFF94a3b8.toInt())
-                setPadding(0, 4, 0, 4)
+        for ((index, alarm) in alarms.withIndex()) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
             }
-            list.addView(entry)
+
+            val timelineCol = FrameLayout(this).apply {
+                layoutParams = LinearLayout.LayoutParams(24.dpToPx(), LinearLayout.LayoutParams.MATCH_PARENT)
+            }
+
+            val dotView = View(this).apply {
+                val dotSize = 8.dpToPx()
+                layoutParams = FrameLayout.LayoutParams(dotSize, dotSize).apply {
+                    gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                    topMargin = 6.dpToPx()
+                }
+                setBackgroundResource(
+                    when (alarm.status) {
+                        "acknowledged" -> R.drawable.history_dot_green
+                        "resolved" -> R.drawable.history_dot_gray
+                        else -> R.drawable.history_dot_red
+                    }
+                )
+            }
+            timelineCol.addView(dotView)
+
+            if (index < alarms.size - 1) {
+                val lineView = View(this).apply {
+                    layoutParams = FrameLayout.LayoutParams(2.dpToPx(), FrameLayout.LayoutParams.MATCH_PARENT).apply {
+                        gravity = Gravity.CENTER_HORIZONTAL
+                        topMargin = 18.dpToPx()
+                    }
+                    setBackgroundResource(R.drawable.history_line)
+                }
+                timelineCol.addView(lineView)
+            }
+            row.addView(timelineCol)
+
+            val contentCol = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    marginStart = 8.dpToPx()
+                }
+                setPadding(0, 0, 0, 16.dpToPx())
+            }
+
+            val titleText = TextView(this).apply {
+                text = alarm.title
+                textSize = 14f
+                setTextColor(Color.WHITE)
+                typeface = Typeface.DEFAULT_BOLD
+            }
+            contentCol.addView(titleText)
+
+            val timeText = TextView(this).apply {
+                val created = formatDate(alarm.created_at)
+                val acked = if (alarm.acknowledged_at != null) {
+                    val ackerName = alarm.acknowledged_by_name ?: ""
+                    " — acquittee par $ackerName"
+                } else {
+                    " — resolue"
+                }
+                text = "$created$acked"
+                textSize = 12f
+                setTextColor(Color.parseColor("#94a3b8"))
+            }
+            contentCol.addView(timeText)
+
+            row.addView(contentCol)
+            list.addView(row)
         }
     }
+
+    private fun shareLogs() {
+        val prefs = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
+        val userName = prefs.getString("user_name", "?") ?: "?"
+        val version = try { packageManager.getPackageInfo(packageName, 0).versionName } catch (_: Exception) { "?" }
+        val logs = AppLogger.exportLogs(userName, version ?: "?")
+
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, "Alarme Murgat - Logs de diagnostic")
+            putExtra(Intent.EXTRA_TEXT, logs)
+        }
+        startActivity(Intent.createChooser(intent, "Envoyer les logs via..."))
+    }
+
+    private fun Int.dpToPx(): Int = (this * resources.displayMetrics.density).toInt()
 
     private fun computeDuration(createdAt: String): String {
         return try {
@@ -413,6 +657,7 @@ class DashboardActivity : AppCompatActivity() {
     override fun onDestroy() {
         statusUpdateJob?.cancel()
         historyJob?.cancel()
+        pulseAnimator?.cancel()
         soundManager?.stopAlarmSound()
         connectionLostSoundManager?.stopAlarmSound()
         super.onDestroy()

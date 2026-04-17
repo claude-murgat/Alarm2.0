@@ -121,6 +121,32 @@ class TestNavigation:
 
 
 # ---------------------------------------------------------------------------
+# Onglet Utilisateurs
+# ---------------------------------------------------------------------------
+
+class TestUsersTab:
+
+    def test_users_tab_shows_all_users(self, dashboard: Page):
+        """L'onglet Utilisateurs affiche tous les utilisateurs dans le tableau."""
+        dashboard.locator(".tab:text('Utilisateurs')").click()
+        dashboard.wait_for_timeout(2000)
+
+        rows = dashboard.locator("#usersTable tr")
+        count = rows.count()
+        assert count >= 3, (
+            f"Le tableau utilisateurs doit contenir au moins 3 lignes (admin, user1, user2), "
+            f"got {count}"
+        )
+
+        # Verifier que les noms attendus sont presents
+        table_text = dashboard.locator("#usersTable").inner_text()
+        for name in ["admin", "user1", "user2"]:
+            assert name in table_text, (
+                f"L'utilisateur '{name}' doit apparaitre dans l'onglet Utilisateurs"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Escalade — Drag-and-drop
 # ---------------------------------------------------------------------------
 

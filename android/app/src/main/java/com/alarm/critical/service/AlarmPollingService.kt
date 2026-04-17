@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import com.alarm.critical.AlarmActivity
 import com.alarm.critical.api.ApiClient
 import com.alarm.critical.api.ApiProvider
@@ -23,6 +24,7 @@ class AlarmPollingService : Service() {
     companion object {
         const val CHANNEL_ID = "alarm_polling_channel"
         const val NOTIFICATION_ID = 1
+        const val ALARM_NOTIFICATION_ID = 999
         const val EXTRA_TOKEN = "token"
         var isRunning = false
         var lastConnectionStatus = "Unknown"
@@ -48,6 +50,9 @@ class AlarmPollingService : Service() {
 
         // Flag : service demarre par un push FCM (mode veille)
         var startedByFcm = false
+
+        // ID de l'alarme pour laquelle on a déjà lancé l'AlarmActivity
+        var alarmActivityLaunchedForId: Int = -1
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -72,6 +77,7 @@ class AlarmPollingService : Service() {
         val notification = buildNotification("Surveillance des alarmes...")
         startForeground(NOTIFICATION_ID, notification)
         isRunning = true
+        com.alarm.critical.util.AppLogger.log("Service", "Polling demarre (fcm=${startedByFcm})")
 
         // Trouver le primary avant de demarrer le polling
         scope.launch {
@@ -141,7 +147,24 @@ class AlarmPollingService : Service() {
                         currentAlarm = alarms.firstOrNull()
 
                         if (alarms.isNotEmpty()) {
-                            Log.i(TAG, "Active alarm detected: ${alarms.first().title}")
+                            val alarm = alarms.first()
+                            Log.i(TAG, "Active alarm detected: ${alarm.title}")
+                            com.alarm.critical.util.AppLogger.log("Alarme", "Detectee: ${alarm.title} (id=${alarm.id}, status=${alarm.status})")
+
+                            // Lancer l'AlarmActivity via full-screen notification (une seule fois par alarme)
+                            if (alarm.id != alarmActivityLaunchedForId && !AlarmActivity.isVisible) {
+                                alarmActivityLaunchedForId = alarm.id
+                                Log.w(TAG, "Launching AlarmActivity from service for alarm #${alarm.id}")
+                                launchAlarmActivity(
+                                    alarmId = alarm.id,
+                                    title = alarm.title,
+                                    message = alarm.message,
+                                    severity = alarm.severity
+                                )
+                            }
+                        } else {
+                            // Plus d'alarme active → reset du flag
+                            alarmActivityLaunchedForId = -1
                         }
 
                         updateNotification("Surveillance - ${alarms.size} alarme(s) active(s)")
@@ -226,6 +249,7 @@ class AlarmPollingService : Service() {
         val elapsed = now - heartbeatLostSince
         if (elapsed >= heartbeatLossTimeoutMs && !heartbeatLostAlarm) {
             heartbeatLostAlarm = true
+            com.alarm.critical.util.AppLogger.log("Heartbeat", "PERDU depuis ${(System.currentTimeMillis() - heartbeatLostSince)/1000}s")
             Log.w(TAG, "Heartbeat perdu depuis ${elapsed}ms — alerte connexion déclenchée")
         }
     }
@@ -268,6 +292,7 @@ class AlarmPollingService : Service() {
         // Ne PAS faire de logout silencieux — déclencher une alarme sonore continue
         // et afficher un message permanent compréhensible par un utilisateur lambda
         authErrorAlarm = true
+        com.alarm.critical.util.AppLogger.log("Auth", "ERREUR: ${authErrorMessage}")
         authErrorMessage = "Votre session a expiré et n'a pas pu être renouvelée. Veuillez vous reconnecter."
         Log.e(TAG, "Échec du renouvellement de session — sonnerie d'alerte déclenchée")
     }
@@ -281,7 +306,39 @@ class AlarmPollingService : Service() {
             putExtra("alarm_severity", severity)
             putExtra("token", token)
         }
-        startActivity(intent)
+
+        // Full-screen intent notification — le mécanisme officiel pour afficher
+        // une activité urgente même quand l'app est en arrière-plan (Android 10+)
+        val fullScreenPendingIntent = PendingIntent.getActivity(
+            this, alarmId, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val alarmChannelId = "alarm_critical_channel"
+        val channel = NotificationChannel(
+            alarmChannelId,
+            "Alarmes critiques",
+            NotificationManager.IMPORTANCE_HIGH
+        ).apply {
+            description = "Notifications d'alarmes critiques"
+            setBypassDnd(true)
+            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+        }
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(channel)
+
+        val notification = NotificationCompat.Builder(this, alarmChannelId)
+            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setContentTitle("ALARME CRITIQUE")
+            .setContentText(title)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setFullScreenIntent(fullScreenPendingIntent, true)
+            .setAutoCancel(true)
+            .build()
+
+        manager.notify(ALARM_NOTIFICATION_ID, notification)
+        Log.w(TAG, "Full-screen alarm notification posted for alarm #$alarmId")
     }
 
     private fun createNotificationChannel() {
@@ -298,7 +355,7 @@ class AlarmPollingService : Service() {
 
     private fun buildNotification(text: String): Notification {
         return Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("Système d'alarme critique")
+            .setContentTitle("Alarme Murgat")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_dialog_alert)
             .setOngoing(true)

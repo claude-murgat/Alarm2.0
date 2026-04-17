@@ -1,0 +1,291 @@
+{
+  "method": "independent_critical_audit",
+  "auditor": "Claude Opus 4.7 (independent review, not validating prior Cowork analysis)",
+  "run_date": "2026-04-17",
+  "scope": "Tests suite + backend business logic audit. Focus: fiabilite (zero-bug) pour pipeline CI/CD avec IA autonome.",
+  "verdict_summary": "La suite actuelle donne une FAUSSE ASSURANCE de robustesse. Elle teste surtout le 'happy path' a travers le cluster entier, mais passe a cote de 3 bugs reels (code non-teste) et de toute une classe de race conditions. L'architecture 'tout E2E live' est INADAPTEE au cahier des charges (CI/CD + IA autonome + zero-bug). Ce n'est pas un probleme de lenteur, c'est un probleme de COUVERTURE logique.",
+
+  "real_bugs_discovered_during_audit": [
+    {
+      "id": "BUG-01",
+      "severity": "HIGH",
+      "file": "backend/app/api/alarms.py",
+      "line": 168,
+      "description": "alarm.suspended_until = now + timedelta(minutes=30). Hardcode 30 min. Or la clef 'ack_suspension_minutes' est seedee (main.py:65) et suggere configurabilite. Elle n'est LUE NULLE PART dans le backend.",
+      "evidence": "grep 'ack_suspension_minutes' dans backend/ retourne 1 seul match (le seed). Aucune lecture.",
+      "impact": "La promesse de config (UI ? docs ?) ne fonctionne pas. Admin change la valeur -> aucun effet. Tests passent car ils ne verifient jamais que la config est respectee.",
+      "test_gap": "Aucun test ne modifie ack_suspension_minutes puis verifie que suspended_until respecte la nouvelle valeur."
+    },
+    {
+      "id": "BUG-02",
+      "severity": "MEDIUM",
+      "file": "backend/app/api/alarms.py",
+      "line": 22,
+      "description": "_add_notified_user() ne passe PAS notified_at=clock_now(). La colonne a un default datetime.utcnow (temps reel Python, pas l'horloge injectable). En revanche, escalation.py:31 passe bien notified_at=clock_now().",
+      "evidence": "grep 'notified_at=clock_now' -> UN SEUL match (escalation.py:31). Les 2 autres call sites (alarms.py, test_api.py:trigger_escalation) utilisent le default.",
+      "impact": "Incoherence de reference temporelle entre les deux chemins de creation. Le timer SMS/Call (sms_call_delay_minutes) se comporte differemment selon QUI a ajoute l'utilisateur a la notification table. Visible uniquement quand l'horloge est avancee entre deux operations.",
+      "test_gap": "Aucun test ne prouve que notified_at utilise clock_now(). test_sms_written_to_queue_on_escalation passe par hasard car dans le test, l'alarme est creee AVANT advance_clock donc la difference n'importe pas."
+    },
+    {
+      "id": "BUG-03",
+      "severity": "HIGH",
+      "file": "backend/app/api/test_api.py",
+      "line": "219-253 (trigger_escalation)",
+      "description": "Le endpoint /test/trigger-escalation est CENSE simuler un tick de la boucle d'escalade, mais il ne fait qu'UNE PARTIE du vrai tick. Il manque: (a) ack expiry reactivation (lignes 118-144 de escalation.py), (b) reset de alarm.created_at = now (la vraie boucle le fait ligne 204), (c) enqueue SMS/Call timer-based (lignes 220-248), (d) _check_oncall_heartbeat (ligne 251). Les tests 'deterministes' utilisant trigger-escalation ne couvrent donc PAS le comportement reel de la boucle.",
+      "evidence": "Comparaison ligne-a-ligne entre escalation.py::escalation_loop() et test_api.py::trigger_escalation(). 4 sections majeures manquantes.",
+      "impact": "Une regression dans ack expiry, oncall heartbeat, ou SMS timer ne sera PAS detectee par les tests rapides (TestEscalation). Seuls les tests lents avec time.sleep(12) les couvrent -- donc l'IA autonome qui itere vite ne verra jamais le bug.",
+      "test_gap": "Systemique. trigger-escalation est une PROXY INCOMPLETE du comportement reel."
+    }
+  ],
+
+  "blind_spots": {
+    "critical_untested_logic": [
+      {
+        "area": "Race conditions inter-requetes",
+        "examples": [
+          "2 POST /alarms/send en parallele -> seule 1 doit creer l'alarme (409 sur l'autre). Non teste en concurrence reelle (pas de threading.Thread ni asyncio.gather dans les tests).",
+          "ACK + escalation tick au meme instant: que se passe-t-il si la boucle tente d'escalader une alarme qui vient d'etre ack-ee dans la meme milliseconde ?",
+          "DELETE /users/{id} pendant qu'une alarme lui est assignee ET qu'une escalade s'execute: test_alarm_reassigned_when_user_deleted ne simule pas la concurrence.",
+          "Changement de chaine d'escalade (POST /config/escalation/bulk) pendant une alarme active: la nouvelle chaine prend effet immediatement, mais le test ne verifie jamais que l'alarme courante suit la NOUVELLE chaine au prochain tick."
+        ]
+      },
+      {
+        "area": "Invariants de donnees apres escalade",
+        "examples": [
+          "alarm.created_at est REECRIT a chaque escalade (escalation.py:204). Consequence: stats et audit perdent la vraie date de creation. Aucun test ne couvre cette derive -- les tests stats sont sur des alarmes non escaladees.",
+          "Apres plusieurs escalades, escalation_count monotone croissant: que se passe-t-il a escalation_count == 1000 ? (overflow theorique, pas un probleme pratique mais revelateur d'absence d'invariant check)",
+          "Apres reset_alarms(), db.query(AlarmNotification).delete() ne purge PAS les CallQueue ni SmsQueue qui referencent alarm_id via FK. Potentielle violation FK si tests sont executes dans un ordre different."
+        ]
+      },
+      {
+        "area": "Chemins d'erreur (error paths)",
+        "examples": [
+          "send_fcm_to_user sans device_token: log 'skip' mais rien ne verifie ce comportement. Si demain quelqu'un leve une exception a la place, tests passent toujours (sauf integration).",
+          "Email SMTP timeout/failure: email_service est suppose best-effort, mais aucun test ne simule une exception SMTP. Si send_alert_email() leve, est-ce que send_alarm() rollback la transaction ? (Non verifie.)",
+          "Patroni injoignable pendant >5s: is_leader est clear() par le loop. Que deviennent les alarmes en cours ? Pas de test.",
+          "DB commit failure au milieu de la boucle d'escalade: quel etat est laisse ? Alarme partiellement escaladee ?"
+        ]
+      },
+      {
+        "area": "Configuration dynamique",
+        "examples": [
+          "escalation_delay_minutes modifie pendant alarme active -> test_no_escalation_before_delay utilise 15 min hardcode, pas le flux 'j'ai change la config a 5 min'.",
+          "fcm_escalation_delay_minutes (veille): aucune trace dans tests pour verifier qu'il est respecte (le test_escalation_fast_for_veille_user dans test_fcm.py verifie partiellement, mais avec TICK_WAIT=12s c'est fragile).",
+          "Changement d'email_alert via API: testee seulement pour read/write, pas pour 'changement pendant alarme -> email part au NOUVEAU destinataire'.",
+          "ack_suspension_minutes: voir BUG-01 -- pas testee du tout."
+        ]
+      },
+      {
+        "area": "Rate limiting et security",
+        "examples": [
+          "RATE_LIMIT_MAX_FAILURES=10 par username: ZERO test (grep 'RATE_LIMIT' dans tests/ = 0 match). 11e tentative doit renvoyer 429. Non verifie.",
+          "Login avec mot de passe vide/null/SQL injection: tests basiques seulement.",
+          "ENABLE_TEST_ENDPOINTS=false doit rendre /api/test/* -> 404. Aucun test avec cette variable FALSE (tous les tests supposent qu'elle est TRUE sinon rien ne marche). Probleme: la prod est supposee avoir ENABLE_TEST_ENDPOINTS=false, mais rien ne le PROUVE en CI.",
+          "CORS: allowed_origins lu depuis env. Aucun test qui verifie que les requetes cross-origin refusees sont bien refusees (requete Origin: malicious.com sur un endpoint sensible)."
+        ]
+      },
+      {
+        "area": "Cluster et replication",
+        "examples": [
+          "Split-brain: 2 noeuds se croient primary simultanement (Patroni election bug). Le test 'exactly_one_primary' est photo-finish; il ne simule pas la partition reseau.",
+          "Lag de replication: alarme creee sur primary, query immediate sur replica (avant replication). Pas de test de ce cas de race (replica peut repondre 'alarme absente' pendant 1-2s apres creation).",
+          "Advisory lock contention ancien code: commentaires parlent d'advisory lock, le code actuel utilise Patroni HTTP -- divergence potentielle non documentee.",
+          "Failover AU MILIEU d'une ecriture (alarme en cours de commit -> primary crash): aucun test de rollback/recovery."
+        ]
+      },
+      {
+        "area": "Android cote client (assumptions)",
+        "examples": [
+          "Rotation circulaire des URLs backend (failover client): documente CLAUDE.md, mais les 22 tests Espresso utilisent FakeApiService -- impossible de verifier la rotation reelle contre 3 noeuds down/up.",
+          "App en background / Doze mode / batterie saver: pas de test.",
+          "App recoit un FCM alors qu'une alarme est deja affichee: deduplication ?",
+          "Perte reseau pendant ACK -> retry client ?"
+        ]
+      },
+      {
+        "area": "Watchdog et oncall",
+        "examples": [
+          "User online -> offline -> online dans la meme minute: le watchdog (timeout 60s) et _check_oncall_heartbeat (delay 15 min) interagissent comment ?",
+          "Oncall qui perd son heartbeat EXACTEMENT a 15 min pile: boundary condition, pas testee (test_oncall_offline_15min_creates_alarm utilise 16 min).",
+          "Deux alarmes oncall creees coup sur coup (loop tick long): le guard is_oncall_alarm + any_active empeche doublon. Pas de test de ce race.",
+          "User oncall avec phone_number null: que passe-t-il (SMS skip mais FCM aussi ?) -- pas de test explicite."
+        ]
+      }
+    ],
+
+    "tests_that_prove_nothing": [
+      {
+        "test": "TestEscalation::test_no_escalation_if_no_active_alarm",
+        "problem": "Assert escalated == 0 quand aucune alarme n'existe. Trivial, passerait aussi si trigger-escalation etait no-op.",
+        "fix": "Mieux: test 'escalade d'une alarme resolved ne la ressuscite pas', 'escalade d'une alarme acknowledged ne la debloque pas'."
+      },
+      {
+        "test": "TestBackendResilience (tous)",
+        "problem": "Tests generiques 404/401. Ne prouvent pas la resilience de la boucle d'escalade ou du leader election -- c'est du smoke test d'API.",
+        "fix": "Renommer 'TestApiContractNegative' pour clarifier. Ajouter VRAIS tests de resilience (DB down, Patroni down, etc.)."
+      },
+      {
+        "test": "TestEscalationReachesOffline::test_escalation_wraps_even_all_offline",
+        "problem": "Assert que escalated == 1 (l'escalade a eu lieu). Mais ne verifie PAS que le FCM a ete envoye (meme best-effort), ni que l'alarme reste active, ni qu'un SMS est enqueued pour un numero joignable. 'L'escalade suit l'ordre' c'est tout.",
+        "fix": "Verifier l'etat complet: nouvel assigned_user_id, notified_ids etendu, FCM tentative enregistree dans get_last_fcm_list()."
+      },
+      {
+        "test": "TestRedundancy::test_heartbeat_on_backend2_visible_on_backend1",
+        "problem": "Test verifie la visibilite, mais l'effet du heartbeat sur la logique metier (reactivation apres oncall alarm) n'est pas verifie cross-noeud.",
+        "fix": "Coverage: heartbeat sur n1 -> oncall alarm sur n2 resolue automatiquement au prochain tick."
+      },
+      {
+        "test": "test_dtmf_decoder.py",
+        "problem": "6 tests purement algorithmiques avec ondes sinusoidales pures. Aucun input real-world (bruit USB, signaux modem reels, attenuation).",
+        "fix": "Pas urgent, mais: golden corpus de samples audio reels (enregistres sur le SIM7600E-H de prod)."
+      }
+    ],
+
+    "hidden_coupling": [
+      "Les 'test_improvements.py' ont eu 2 echecs isoles a cause d'une 'alarme active residuelle' (audit_results.json:30). Ca confirme que le shared state entre tests est TOXIQUE. Ce n'est pas un probleme de flakiness, c'est un probleme d'isolation de design.",
+      "TestOnCallDisconnectionAlarm::setup fait time.sleep(12) APRES reset pour 'attendre un cycle du background task avec l'etat propre'. Cela revele que le RESET n'est pas atomique vis-a-vis de la boucle: la boucle peut re-creer une oncall alarm entre les deux POST /alarms/reset. Ce coupling est inseparable de l'architecture live-cluster.",
+      "_find_primary_url() est appele dans l'autouse fixture, donc CHAQUE test fait 3 requetes HTTP pour trouver le primary. Si le cluster est en failover pendant le test, BASE_URL change au milieu -- source de flakiness non quantifiee."
+    ]
+  },
+
+  "architecture_opinion": {
+    "current_structure_verdict": "INADEQUATE pour le cahier des charges (zero-bug + CI/CD avec IA autonome).",
+    "reasoning": [
+      "PROBLEME #1 -- Couverture logique insuffisante malgre 187 tests. Les 3 bugs trouves pendant cet audit (ack_suspension_minutes ignoree, notified_at incoherent, trigger-escalation incomplet) N'ONT PAS ete detectes par la suite existante. Ce n'est pas un probleme de quantite, c'est un probleme de DESIGN des tests: quand tout passe par le cluster, les invariants internes (fonctions pures) ne sont jamais verifies en isolation.",
+      "PROBLEME #2 -- Feedback loop trop long pour une IA. 66 min pour un run complet. Une IA qui itere sur un fix va devoir faire 2-3 runs avant de committer => 2h+ par iteration. C'est le DERNIER probleme a resoudre, mais il est reel.",
+      "PROBLEME #3 -- Fragilite intrinseque au modele 'advance-clock + sleep(12)'. Le tick 10s hardcode force le pattern 'avance 16 min, sleep 12s, verifie'. Tout ecart (CI sous charge, docker lent) casse les tests. En CI l'IA verra des flaky tests et devra decider 'bug reel ou flaky'. Mauvaise experience pour l'IA.",
+      "PROBLEME #4 -- Les tests ne documentent pas les invariants. Un nouveau dev (ou une IA) qui lit les tests ne comprend PAS les contrats implicites (ex: 'apres ack, suspended_until est necessairement dans le futur; apres escalade, notified_ids contient l'ancien ET le nouveau'). Les tests sont des scripts imperatifs, pas des specifications.",
+      "PROBLEME #5 -- Absence totale de property-based testing. Pour un systeme avec des chaines d'escalade de taille variable, des ordres temporels, des combinaisons d'etat (online/offline x assigned/notified x active/ack/resolved), du property-based (hypothesis) generait 1000 configurations par test et trouverait des cas oublies. Zero utilisation actuelle."
+    ],
+
+    "recommended_architecture": {
+      "philosophy": "Pyramide des tests. La base doit etre large, rapide, et deterministe. Le sommet (E2E live) doit couvrir les 'golden paths' et les scenarios qui NECESSITENT vraiment le cluster.",
+      "levels": [
+        {
+          "level": 1,
+          "name": "Unit tests purs (target: 200+ tests, <30s total)",
+          "target": "Fonctions extraites en pure logic: evaluate_escalation(state, now, config) -> NextAction. _find_next_user, _check_oncall_heartbeat, _enqueue_sms_for_user, logique du TimerGate SMS/Call, decision ack expiry.",
+          "dependencies": "Aucune (pas de DB, pas de FastAPI, pas de cluster). Mock explicite pour SessionLocal, ou mieux: fonctions qui prennent state en parametre et retournent des Actions pures.",
+          "ci_gating": "Blocking sur chaque commit. Doit passer en <30s."
+        },
+        {
+          "level": 2,
+          "name": "Integration tests (target: 60 tests, <3 min total)",
+          "target": "FastAPI TestClient + SQLite temp file par test (transactional rollback). Couvre tout le backend en isolation -- pas de cluster, pas de Patroni, pas de FCM reel. Remplace la MAJORITE de test_e2e.py actuel.",
+          "dependencies": "pytest-asyncio, FastAPI TestClient, SQLite en memoire avec migrations auto.",
+          "ci_gating": "Blocking sur chaque PR.",
+          "example_scenarios": [
+            "Race condition 2 alarmes en parallele -> 1 seule passe (threading.Thread).",
+            "Chaine d'escalade modifiee pendant alarme -> alarme suit nouvelle chaine.",
+            "Rate limiting login 11e tentative -> 429.",
+            "ENABLE_TEST_ENDPOINTS=false -> /api/test/* renvoie 404."
+          ]
+        },
+        {
+          "level": 3,
+          "name": "E2E cluster (target: 15-20 tests, <5 min total)",
+          "target": "Ne tester QUE ce qui necessite vraiment 3 noeuds: leader election, replication lag visible, token cross-node, heartbeat redirection. Scenarios 'golden paths' business (create -> escalate -> ack -> resolve).",
+          "dependencies": "Docker compose cluster complet.",
+          "ci_gating": "Non-blocking sur PR (run async), blocking avant merge sur main."
+        },
+        {
+          "level": 4,
+          "name": "Chaos/Failover tests (target: 5-10 tests, nightly ou manuel)",
+          "target": "Tue un noeud pendant ecriture, partition reseau, Patroni down, DB disk full.",
+          "dependencies": "Docker compose + tc (traffic control) ou toxiproxy.",
+          "ci_gating": "Nightly report. Jamais blocking (trop fragile)."
+        }
+      ],
+      "enablers": [
+        "Extraire la logique metier en fonctions pures: escalation.py actuellement mele DB access et logique de decision. Refactor pour que la decision soit computable a partir d'un dict d'etat.",
+        "Tick configurable via ESCALATION_TICK_SECONDS (env) -- mais SURTOUT: endpoint /test/evaluate-now qui appelle la fonction pure synchronously sur l'etat actuel. Remplace trigger-escalation (qui est incomplet).",
+        "Horloge injectable pas juste globale mais PASSEE en parametre aux fonctions pures -- evite la magie du 'clock module-level'.",
+        "Property-based avec hypothesis pour les chaines d'escalade.",
+        "Contract tests OpenAPI: generer un client Python depuis le schema, et tester que toutes les routes sont reachables avec les bons types.",
+        "Snapshot testing pour les reponses JSON (AlarmResponse, UserResponse) -- detecte les breaking changes pour le client Android."
+      ]
+    }
+  },
+
+  "priority_actions": [
+    {
+      "rank": 1,
+      "title": "Extraire la logique metier en fonctions pures + ajouter 100 tests unitaires <1s",
+      "impact_on_reliability": "CRITIQUE -- c'est ce qui aurait attrape les 3 bugs detectes dans cet audit. Sans ca, les bugs internes continueront de passer inapercus.",
+      "why_first": "Tant que la logique reste mele a la DB + FastAPI + cluster, aucun test rapide ne peut verifier les invariants. Tous les autres points dependent de cette extraction.",
+      "scope": [
+        "escalation.py::escalation_loop -> decomposer en: evaluate_ack_expiry(alarms, now) -> list[AckReactivation], evaluate_escalation(alarms, chain, now, config) -> list[EscalationDecision], evaluate_sms_call_timers(notifs, now, config) -> list[Enqueue], evaluate_oncall_heartbeat(chain, users, alarms, now) -> Optional[OncallAction].",
+        "Chaque fonction prend un snapshot d'etat et retourne des Actions (pas d'effets de bord). Un dispatcher applique les Actions en DB.",
+        "Tests: 100+ cas unitaires avec hypothesis pour les combinaisons. Detecte les bugs AVANT qu'ils ne soient committes."
+      ],
+      "estimated_effort": "3-5 jours. Gain: chaque futur bug est attrape en CI en <30s."
+    },
+    {
+      "rank": 2,
+      "title": "Corriger les 3 bugs reels avant d'ajouter des tests",
+      "impact_on_reliability": "HIGH -- si on teste du code casse on verrouille le comportement casse.",
+      "why_second": "Avant d'ajouter de la coverage, il faut que le code de prod soit juste. Sinon les tests vont figer le bug.",
+      "scope": [
+        "BUG-01: alarms.py:168 -> lire SystemConfig.ack_suspension_minutes au lieu de hardcode 30. Ajouter test de changement dynamique.",
+        "BUG-02: alarms.py::_add_notified_user -> passer notified_at=clock_now() comme escalation.py. Ajouter assertion sur egalite des references temporelles.",
+        "BUG-03: test_api.py::trigger_escalation -> soit le rendre equivalent au tick reel (ajouter ack expiry, SMS/call, oncall check, reset created_at), soit le RENOMMER en force-escalation-step pour clarifier qu'il n'est PAS un tick complet, et creer un vrai /test/evaluate-now qui appelle la (future) fonction pure extraite."
+      ],
+      "estimated_effort": "1 jour."
+    },
+    {
+      "rank": 3,
+      "title": "Ajouter des tests de race conditions et d'invariants",
+      "impact_on_reliability": "HIGH -- c'est la classe de bugs la plus dangereuse en prod (apparait sous charge, disparait en dev).",
+      "scope": [
+        "threading.Thread x 10: 10 alarmes en parallele -> 1 succes, 9 x 409. Verifier l'etat final.",
+        "ACK + escalation au meme instant (controler via clock step-by-step).",
+        "DELETE user pendant alarme active assignee a lui (ordre: alarm actif -> delete -> verifier reassignation + pas de FK orphan).",
+        "Invariants testes explicitement: apres toute operation, si status=acknowledged alors suspended_until > now. Si status in (active, escalated) alors len(notified_user_ids) >= 1. Etc.",
+        "Property-based (hypothesis): genere des chaines de 1-10 users, des ordres d'escalade, et verifie que les invariants tiennent."
+      ],
+      "estimated_effort": "2-3 jours. Necessite level 2 infrastructure (TestClient + SQLite temp)."
+    },
+    {
+      "rank": 4,
+      "title": "Restructurer la suite en niveaux avec gating CI explicite",
+      "impact_on_reliability": "MEDIUM-HIGH -- change la maniere dont l'IA autonome percoit les feedbacks. Tier 1 (unit) doit passer pour committer; Tier 3 (E2E) peut etre flaky sans bloquer. Sans cette separation, l'IA va soit bloquer sur des flaky tests, soit apprendre a ignorer les erreurs.",
+      "scope": [
+        "Markers pytest: @pytest.mark.unit, @pytest.mark.integration, @pytest.mark.e2e, @pytest.mark.chaos.",
+        "GitHub Actions 3 jobs paralleles: tier1 (bloquant, <30s), tier2 (bloquant, <3min), tier3 (nightly).",
+        "Dashboard de flakiness: tracker quels tests ont flake dans les 30 derniers runs. L'IA doit pouvoir filter sur 'tests stables uniquement' pour son fix-cycle.",
+        "Supprimer --skip-failover / --only-failover (ambigu); remplacer par -m 'unit or integration' et -m 'e2e'."
+      ],
+      "estimated_effort": "1-2 jours. A faire APRES les 3 premiers points."
+    },
+    {
+      "rank": 5,
+      "title": "Ajouter tests pour error paths et configuration dynamique (les plus ignores aujourd'hui)",
+      "impact_on_reliability": "MEDIUM -- moins critique que les race conditions, mais revele les bugs 'longue traine' qui apparaissent 6 mois apres le deploiement.",
+      "scope": [
+        "Rate limiting login (11 tentatives -> 429).",
+        "FCM failure: simuler exception dans send_fcm_to_user -> verifier que send_alarm reussit quand meme (best-effort confirme).",
+        "SMTP failure: simuler exception dans send_alert_email -> idem.",
+        "DB connection failure au milieu d'une operation: TestClient + transaction abort -> verifier rollback.",
+        "Config change pendant alarme: escalation_delay_minutes de 15 -> 5 pendant qu'une alarme est a 10 min d'age -> verifier qu'elle escalade au prochain tick.",
+        "ENABLE_TEST_ENDPOINTS=false en CI -> verifier que /api/test/* renvoie 404 (au moins un test qui run avec cette config)."
+      ],
+      "estimated_effort": "3-4 jours reparti sur plusieurs PR."
+    }
+  ],
+
+  "what_cowork_got_right": [
+    "Le tick configurable EST une vraie amelioration, mais secondaire (gain de vitesse, pas de fiabilite).",
+    "L'endpoint /test/evaluate-now synchrone EST une bonne idee -- c'est meme indispensable, pas juste utile. Mais doit etre implemente comme proxy d'une fonction pure, pas comme duplication de la boucle.",
+    "Structuration en niveaux fast/timing/frontend/failover: direction correcte, c'est mon point 4."
+  ],
+
+  "what_cowork_missed": [
+    "Les 3 bugs reels dans le code de prod. L'analyse Cowork s'est arretee a la SURFACE (sleep, flakiness, Playwright timeout) sans auditer la couverture LOGIQUE. C'est la difference entre 'rendre la suite rapide' et 'rendre la suite fiable'.",
+    "L'incompletude de trigger-escalation (BUG-03). Tous les tests 'deterministes' reposent dessus, donc tout fix rapide ne fait que VERROUILLER l'incompletude.",
+    "L'absence totale de property-based testing pour un systeme avec autant d'etats combinatoires.",
+    "La difference entre 'tests flaky' (probleme de vitesse) et 'tests qui ne testent pas ce qu'ils pretendent' (probleme de design). Corriger le premier sans le second donne une FAUSSE CONFIANCE.",
+    "L'impact specifique sur l'IA autonome: un agent qui itere sur des fix a besoin de (a) feedback rapide, (b) feedback deterministe, (c) feedback specifique (pas 'le cluster entier a flake'). La suite actuelle echoue sur (b) et (c)."
+  ],
+
+  "final_statement_for_owner": "Ne commencez PAS par la vitesse. Commencez par la COUVERTURE. Extraire la logique, ajouter les tests unitaires, trouver les bugs caches. Ensuite seulement, rendez la suite rapide. Un test rapide qui passe alors que le code est casse est PIRE qu'un test lent qui echoue. Pour une IA autonome, la deterministe + la specificite du feedback sont prioritaires sur le temps total. Une suite de 15 min qui donne des messages d'erreur actionnables vaut mieux qu'une suite de 5 min qui donne 'cluster flake'."
+}

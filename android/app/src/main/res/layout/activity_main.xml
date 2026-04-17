@@ -10,7 +10,7 @@
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="&#x1F6A8; Alarme Critique"
+        android:text="Alarme Murgat"
         android:textSize="28sp"
         android:textColor="#FF4444"
         android:textStyle="bold"

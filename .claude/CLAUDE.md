@@ -1,4 +1,4 @@
-# Contexte projet — Alarm 2.0
+# Contexte projet — Alarme Murgat
 
 ## Process TDD établi avec l'utilisateur
 
@@ -31,46 +31,102 @@
 - `tests/test_e2e.py` : 119 tests backend (pytest) — principal
 - `tests/test_fcm.py` : 11 tests FCM
 - `tests/test_improvements.py` : 28 tests améliorations
-- `tests/test_user_modes.py` : 3 tests modes astreinte/veille
-- `tests/test_frontend.py` : 17 tests interface web
+- `tests/test_user_modes.py` : 5 tests modes astreinte/veille + escalation_position
+- `tests/test_frontend.py` : 18 tests interface web (inclut TestUsersTab)
 - `tests/test_failback.py` : tests failback (cluster)
-- **Total backend : 178 tests**
+- **Total backend : ~181 tests**
 - `android/app/src/androidTest/java/com/alarm/critical/AlarmE2ETest.kt` : 22 tests Espresso
-- `android/app/src/androidTest/java/com/alarm/critical/FakeApiService.kt` : Fake API
-- `android/app/src/androidTest/java/com/alarm/critical/PollingIdlingResource.kt` : IdlingResource
-- **Total : 200 tests (178 backend + 22 Android)**
+- **Total : ~203 tests (181 backend + 22 Android)**
 
-## Architecture DI (Dependency Injection)
+## Architecture
+
+### DI (Dependency Injection)
 - `ApiProvider` : singleton holder, `override(mock)` / `reset()`
 - Production : `ApiProvider.service = ApiClient.service` (Retrofit)
 - Tests : `ApiProvider.override(FakeApiService())`
 
+### Infrastructure (cluster 3 noeuds)
+- **Patroni + PostgreSQL** : replication HA (1 leader + 2 replicas)
+- **etcd** : consensus distribue pour Patroni (3 instances)
+- **Backends** : 3 instances FastAPI (ports 8000, 8001, 8002)
+- **Failover Android** : rotation circulaire des URLs backend (ApiClient)
+- **Fichiers env** : `.env.node1`, `.env.node2`, `.env.node3`, `.env.dev` (single-node)
+
+### Android — Ecrans
+- **MainActivity** : login (pre-rempli en debug)
+- **DashboardActivity** : dashboard principal avec Navigation Drawer, carte hero alarme, ArcTimerView, badge escalade/garde, bouton aide flottant (export logs)
+- **AlarmActivity** : ecran plein ecran alarme avec pulsation, transition vert post-ack, ArcTimerView
+
+### Android — Composants customs
+- **ArcTimerView** (`view/ArcTimerView.kt`) : arc de cercle animé pour timer acquittement
+- **AppLogger** (`util/AppLogger.kt`) : collecte les 500 derniers events, export via share intent pour debug par messagerie
+
+### Backend — Endpoints notables
+- `GET /api/stats/kpi?weeks=8&hors_heures_only=true` : KPIs astreinte (alarmes/semaine, taux escalade, MTTR, top recurrentes)
+- `GET /api/alarms/?days=10` : historique alarmes limite a N jours (defaut 10, max 90)
+- `POST /api/config/escalation/bulk` : modifie la chaine + envoie push FCM a tous les utilisateurs
+- `GET /api/config/escalation` : chaine d'escalade (public, pas d'auth)
+
+### Frontend web
+- Single-file HTML (`backend/app/templates/index.html`) avec Chart.js
+- Onglets : Tableau de bord, Escalade, Statistiques, Utilisateurs, Alarmes, Tests, Log, Cluster
+- Stats : graphe barres alarmes/semaine, camembert escalade, top recurrentes, filtre hors heures France
+
 ## Décisions techniques
+- **Nom de l'app** : "Alarme Murgat" (renomme depuis "Alarme Critique")
+- **Gravite supprimee** : toujours "critical", pas de selection utilisateur
+- **Assignation supprimee** : toujours auto-escalade, pas de selection manuelle
 - **SQLite → PostgreSQL** migration faite (Docker volume `pgdata`)
-- **Email** : champ supprimé, login par nom d'utilisateur uniquement
-- **Noms** : lowercase, sans espaces, case-insensitive au login
-- **Une seule alarme active** à la fois (HTTP 409 si doublon)
-- **Rotation bloquée** en portrait sur l'app mobile
-- **Sonnerie continue** pour : alarme active, perte heartbeat > 2min, échec refresh token
-- **Escalade cumulative** : tous les utilisateurs appelés continuent de sonner, pas seulement le dernier
+- **Login par nom uniquement** : lowercase, sans espaces, case-insensitive
+- **Une seule alarme active** a la fois (HTTP 409 si doublon)
+- **Rotation bloquee** en portrait sur l'app mobile
+- **Sonnerie continue** pour : alarme active, perte heartbeat > 2min, echec refresh token
+- **Escalade cumulative** : tous les utilisateurs appeles continuent de sonner
+- **Logout supprime le token FCM** cote backend (plus de push apres deconnexion)
+- **Push FCM sur changement chaine** : notifie tous les utilisateurs de leur nouvelle position
+- **Statut "En attente"** pour les non-astreinte (pas de heartbeat actif, reveille par push)
+- **Hors heures France** : filtre stats — exclut 8h-12h / 14h-17h semaine, inclut WE + feries
 
 ## Comptes de test
 - admin / admin123 (admin, escalade position 3)
-- user1 / user123 (escalade position 1)
+- user1 / user123 (escalade position 1, de garde)
 - user2 / user123 (escalade position 2)
 
 ## Commandes courantes
 ```bash
-# Lancer le backend
-docker compose up --build -d
+# Lancer le cluster complet (3 noeuds)
+# 1. D'abord les 3 etcd
+COMPOSE_PROFILES=mailhog docker compose --env-file .env.node1 -p node1 up -d etcd
+docker compose --env-file .env.node2 -p node2 up -d etcd
+docker compose --env-file .env.node3 -p node3 up -d etcd
+# 2. Attendre healthy puis lancer le reste
+COMPOSE_PROFILES=mailhog docker compose --env-file .env.node1 -p node1 up --build -d
+docker compose --env-file .env.node2 -p node2 up --build -d
+docker compose --env-file .env.node3 -p node3 up --build -d
+
+# Lancer en mode dev single-node
+COMPOSE_PROFILES=mailhog docker compose --env-file .env.dev -p dev up --build -d
 
 # Tests backend
 python -m pytest tests/test_e2e.py -v
+python -m pytest tests/test_user_modes.py -v
+python -m pytest tests/test_frontend.py -v  # necessite playwright
 
-# Tests Android
-cd android && ./gradlew connectedAndroidTest
-
-# Installer l'app sur émulateur
+# Build + install Android sur emulateur
+cd android && ./gradlew assembleDebug
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
-adb reverse tcp:8000 tcp:8000
+adb shell pm clear com.alarm.critical  # reset donnees
+adb shell am start -n com.alarm.critical/.MainActivity
+
+# Emulateur avec reseau fonctionnel
+# Utiliser AVD "alarm_explore" (alarm_test a le reseau casse)
+# URLs emulateur : 10.0.2.2 (build.gradle.kts)
+# URLs telephone physique : changer en IP reseau (ex: 172.16.2.191)
 ```
+
+## Améliorations futures
+- **Agent autonome de debug** : deployer un agent IA capable de recevoir les logs exportes par l'app (via bouton aide) et d'effectuer un diagnostic de premier niveau en autonomie (analyse des patterns d'erreur, verification etat du cluster, suggestions de resolution)
+- **Remote logging Firebase Crashlytics** : tracer les erreurs client sans intervention utilisateur
+- **Push silencieux** pour changements de config (en complement du push visible actuel)
+- **RecyclerView** pour l'historique si le volume d'alarmes depasse 200+ items
+- **Tests Espresso** pour les nouveaux ecrans (Navigation Drawer, ArcTimerView, bouton aide)

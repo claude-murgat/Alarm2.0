@@ -103,6 +103,59 @@ class TestIsOncall:
             f"user2 (position 2) devrait etre is_oncall=false, got {data['is_oncall']}"
         )
 
+    def test_login_returns_escalation_position(self):
+        """Login retourne la position d'escalade de l'utilisateur."""
+        # user1 est en position 1
+        r1 = requests.post(f"{API}/auth/login", json={
+            "name": USER1_NAME, "password": USER1_PASSWORD,
+        })
+        assert r1.status_code == 200
+        data1 = r1.json()
+        assert "escalation_position" in data1, (
+            "La reponse de login doit contenir 'escalation_position'"
+        )
+        assert data1["escalation_position"] == 1, (
+            f"user1 devrait etre en position 1, got {data1['escalation_position']}"
+        )
+
+        # user2 est en position 2
+        r2 = requests.post(f"{API}/auth/login", json={
+            "name": USER2_NAME, "password": USER2_PASSWORD,
+        })
+        assert r2.status_code == 200
+        data2 = r2.json()
+        assert data2["escalation_position"] == 2, (
+            f"user2 devrait etre en position 2, got {data2['escalation_position']}"
+        )
+
+    def test_login_returns_null_position_if_not_in_chain(self):
+        """Login retourne escalation_position=null si l'utilisateur n'est pas dans la chaine."""
+        admin_h = _admin_headers()
+        users = requests.get(f"{API}/users/", headers=admin_h).json()
+        uid1 = next(u["id"] for u in users if u["name"] == USER1_NAME)
+        uid2 = next(u["id"] for u in users if u["name"] == USER2_NAME)
+
+        # Chaine avec seulement user1 et user2 (pas admin)
+        requests.post(f"{API}/config/escalation/bulk", json={
+            "user_ids": [uid1, uid2],
+        }, headers=admin_h)
+
+        try:
+            r = requests.post(f"{API}/auth/login", json={
+                "name": ADMIN_NAME, "password": ADMIN_PASSWORD,
+            })
+            assert r.status_code == 200
+            data = r.json()
+            assert data["escalation_position"] is None, (
+                f"admin hors chaine devrait avoir position=null, got {data['escalation_position']}"
+            )
+        finally:
+            # Restaurer
+            uid_admin = next(u["id"] for u in users if u["name"] == ADMIN_NAME)
+            requests.post(f"{API}/config/escalation/bulk", json={
+                "user_ids": [uid1, uid2, uid_admin],
+            }, headers=admin_h)
+
     def test_oncall_changes_when_chain_updated(self):
         """Modifier la chaine d'escalade change le is_oncall au prochain login."""
         admin_h = _admin_headers()

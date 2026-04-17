@@ -41,6 +41,7 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
     user: UserResponse
     is_oncall: bool = False
+    escalation_position: Optional[int] = None
 
 
 class FcmTokenRequest(BaseModel):

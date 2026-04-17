@@ -21,10 +21,11 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // URLs backend : 3 noeuds HA (Patroni + etcd)
-        // localhost fonctionne via adb reverse tcp:PORT tcp:PORT
-        buildConfigField("String", "PRIMARY_BACKEND_URL", "\"http://localhost:8000/\"")
-        buildConfigField("String", "FALLBACK_BACKEND_URL", "\"http://localhost:8001/\"")
-        buildConfigField("String", "FALLBACK_BACKEND_URL_2", "\"http://localhost:8002/\"")
+        // 10.0.2.2 = alias localhost du PC depuis l'émulateur Android
+        // Pour téléphone physique, remplacer par l'IP réseau (ex: 172.16.2.191)
+        buildConfigField("String", "PRIMARY_BACKEND_URL", "\"http://10.0.2.2:8000/\"")
+        buildConfigField("String", "FALLBACK_BACKEND_URL", "\"http://10.0.2.2:8001/\"")
+        buildConfigField("String", "FALLBACK_BACKEND_URL_2", "\"http://10.0.2.2:8002/\"")
     }
 
     buildTypes {

@@ -83,11 +83,14 @@ class MainActivity : AppCompatActivity() {
                         AlarmPollingService.authErrorAlarm = false
                         AlarmPollingService.authErrorMessage = null
 
+                        val escalationPosition = tokenResponse.escalation_position ?: -1
+
                         prefs.edit()
                             .putString("token", token)
                             .putString("user_name", tokenResponse.user.name)
                             .putInt("user_id", tokenResponse.user.id)
                             .putBoolean("is_oncall", isOncall)
+                            .putInt("escalation_position", escalationPosition)
                             .putBoolean("started_by_fcm", false)
                             .apply()
 

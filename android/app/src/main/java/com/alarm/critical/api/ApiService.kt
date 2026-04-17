@@ -27,7 +27,10 @@ interface ApiService {
     ): Response<AlarmResponse>
 
     @GET("api/alarms/")
-    suspend fun getAlarmHistory(@Header("Authorization") auth: String): Response<List<AlarmResponse>>
+    suspend fun getAlarmHistory(
+        @Header("Authorization") auth: String,
+        @Query("days") days: Int = 10
+    ): Response<List<AlarmResponse>>
 
     @POST("api/auth/refresh")
     suspend fun refreshToken(@Header("Authorization") auth: String): Response<TokenResponse>
