@@ -13,14 +13,15 @@ router = APIRouter(prefix="/api/alarms", tags=["alarms"])
 
 
 def _add_notified_user(db, alarm, user_id: int):
-    """Ajoute un user_id à la table alarm_notifications s'il n'y est pas déjà."""
+    """Ajoute un user_id à la table alarm_notifications s'il n'y est pas déjà.
+    INV-066 : notified_at = clock_now() pour coherence avec l'horloge injectable."""
     existing = (
         db.query(AlarmNotification)
         .filter(AlarmNotification.alarm_id == alarm.id, AlarmNotification.user_id == user_id)
         .first()
     )
     if not existing:
-        db.add(AlarmNotification(alarm_id=alarm.id, user_id=user_id))
+        db.add(AlarmNotification(alarm_id=alarm.id, user_id=user_id, notified_at=clock_now()))
 
 
 def _alarm_response(alarm, db):

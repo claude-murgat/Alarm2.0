@@ -13,7 +13,8 @@ from .events import log_event
 from .logging_config import correlation_id_var
 from .logic.ack_expiry import evaluate_ack_expiry
 from .logic.escalation import evaluate_escalation
-from .logic.models import AlarmSnapshot, EscalationChainEntry
+from .logic.sms_timer import evaluate_sms_call_timers
+from .logic.models import AlarmSnapshot, EscalationChainEntry, NotificationSnapshot
 
 logger = logging.getLogger("escalation")
 
@@ -260,33 +261,59 @@ async def escalation_loop():
                     db.commit()
 
                 # --- 3. Timer-based SMS/Call enqueue ---
+                # Logique de decision extraite dans logic/sms_timer.py (testee unit).
                 sms_call_delay_cfg = db.query(SystemConfig).filter(
                     SystemConfig.key == "sms_call_delay_minutes"
                 ).first()
                 sms_call_delay = float(sms_call_delay_cfg.value) if sms_call_delay_cfg else 2.0
 
-                for alarm in active_alarms:
-                    # Ne pas envoyer SMS/call pour les alarmes acquittees (suspended)
-                    if alarm.status == "acknowledged":
-                        continue
-                    notifs = (
+                if active_alarms:
+                    active_alarm_ids = [a.id for a in active_alarms]
+                    all_notifs_orm = (
                         db.query(AlarmNotification)
-                        .filter(AlarmNotification.alarm_id == alarm.id)
+                        .filter(AlarmNotification.alarm_id.in_(active_alarm_ids))
                         .all()
                     )
-                    for notif in notifs:
-                        if not notif.notified_at:
-                            continue
-                        elapsed = (now - notif.notified_at).total_seconds() / 60.0
-                        if elapsed >= sms_call_delay:
-                            user = db.query(User).filter(User.id == notif.user_id).first()
-                            if user:
-                                if not notif.sms_sent:
-                                    _enqueue_sms_for_user(db, user, alarm)
-                                    notif.sms_sent = True
-                                if not notif.call_sent:
-                                    _enqueue_call_for_user(db, user, alarm)
-                                    notif.call_sent = True
+                    notif_snapshots = [
+                        NotificationSnapshot(
+                            id=n.id,
+                            alarm_id=n.alarm_id,
+                            user_id=n.user_id,
+                            notified_at=n.notified_at,
+                            sms_sent=n.sms_sent,
+                            call_sent=n.call_sent,
+                        )
+                        for n in all_notifs_orm
+                    ]
+                    alarm_snapshots_for_sms = [_alarm_to_snapshot(a) for a in active_alarms]
+
+                    sms_call_actions = evaluate_sms_call_timers(
+                        alarm_snapshots_for_sms,
+                        notif_snapshots,
+                        sms_call_delay,
+                        now,
+                    )
+
+                    # Appliquer : insert DB + set flag sms_sent / call_sent
+                    notif_by_id = {n.id: n for n in all_notifs_orm}
+                    alarm_by_id_sms = {a.id: a for a in active_alarms}
+
+                    for sms_enq in sms_call_actions.sms_enqueues:
+                        notif = notif_by_id[sms_enq.notification_id]
+                        alarm = alarm_by_id_sms[sms_enq.alarm_id]
+                        user = db.query(User).filter(User.id == sms_enq.user_id).first()
+                        if user:
+                            _enqueue_sms_for_user(db, user, alarm)
+                            notif.sms_sent = True
+
+                    for call_enq in sms_call_actions.call_enqueues:
+                        notif = notif_by_id[call_enq.notification_id]
+                        alarm = alarm_by_id_sms[call_enq.alarm_id]
+                        user = db.query(User).filter(User.id == call_enq.user_id).first()
+                        if user:
+                            _enqueue_call_for_user(db, user, alarm)
+                            notif.call_sent = True
+
                     db.commit()
 
                 # --- 4. On-call monitoring: user #1 heartbeat ---

@@ -74,7 +74,8 @@ def send_test_alarm(db: Session = Depends(get_db)):
     db.add(alarm)
     db.flush()
     if user_id:
-        db.add(AlarmNotification(alarm_id=alarm.id, user_id=user_id))
+        # INV-066 : notified_at=clock_now() pour coherence horloge injectable
+        db.add(AlarmNotification(alarm_id=alarm.id, user_id=user_id, notified_at=clock_now()))
     db.commit()
     db.refresh(alarm)
     log_event("alarm_created", db=db, alarm_id=alarm.id, assigned_to=user_id, source="test")
@@ -243,7 +244,10 @@ def trigger_escalation(db: Session = Depends(get_db)):
                 .first()
             )
             if not existing_notif:
-                db.add(AlarmNotification(alarm_id=alarm.id, user_id=next_user.user_id))
+                # INV-066 : notified_at=clock_now() pour coherence horloge injectable
+                db.add(AlarmNotification(
+                    alarm_id=alarm.id, user_id=next_user.user_id, notified_at=clock_now()
+                ))
                 db.flush()  # Flush pour que la query notified_ids voie le nouvel ajout
             alarm.status = "escalated"
             alarm.escalation_count += 1

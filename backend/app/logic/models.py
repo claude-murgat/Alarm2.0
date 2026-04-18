@@ -86,3 +86,39 @@ class EscalationActions:
     """
     escalations: tuple["EscalationDecision", ...]
     wake_ups: tuple["FCMWakeUp", ...]
+
+
+@dataclass(frozen=True)
+class NotificationSnapshot:
+    """État d'une AlarmNotification à un instant donné."""
+    id: int
+    alarm_id: int
+    user_id: int
+    notified_at: Optional[datetime]
+    sms_sent: bool
+    call_sent: bool
+
+
+@dataclass(frozen=True)
+class SmsEnqueue:
+    """Action : insérer un SMS dans la queue pour l'utilisateur notifié.
+    L'appelant doit aussi positionner notif.sms_sent = True."""
+    notification_id: int
+    alarm_id: int
+    user_id: int
+
+
+@dataclass(frozen=True)
+class CallEnqueue:
+    """Action : insérer un Call dans la queue pour l'utilisateur notifié.
+    L'appelant doit aussi positionner notif.call_sent = True."""
+    notification_id: int
+    alarm_id: int
+    user_id: int
+
+
+@dataclass(frozen=True)
+class SmsCallActions:
+    """Retour de evaluate_sms_call_timers."""
+    sms_enqueues: tuple["SmsEnqueue", ...]
+    call_enqueues: tuple["CallEnqueue", ...]
