@@ -14,7 +14,10 @@ from .logging_config import correlation_id_var
 from .logic.ack_expiry import evaluate_ack_expiry
 from .logic.escalation import evaluate_escalation
 from .logic.sms_timer import evaluate_sms_call_timers
-from .logic.models import AlarmSnapshot, EscalationChainEntry, NotificationSnapshot
+from .logic.oncall import evaluate_oncall_heartbeat
+from .logic.models import (
+    AlarmSnapshot, EscalationChainEntry, NotificationSnapshot, UserSnapshot,
+)
 
 logger = logging.getLogger("escalation")
 
@@ -317,7 +320,8 @@ async def escalation_loop():
                     db.commit()
 
                 # --- 4. On-call monitoring: user #1 heartbeat ---
-                _check_oncall_heartbeat(db, now, escalation_chain)
+                # Logique de decision extraite dans logic/oncall.py (testee unit).
+                _apply_oncall_heartbeat(db, now, escalation_chain)
 
             finally:
                 db.close()
@@ -327,103 +331,86 @@ async def escalation_loop():
         await asyncio.sleep(10)
 
 
-def _check_oncall_heartbeat(db: Session, now, escalation_chain):
-    """Vérifie si l'utilisateur d'astreinte (#1) a perdu son heartbeat.
-    Si oui depuis > 15 min, crée une alarme automatique.
-    Si #1 revient en ligne, auto-résout l'alarme.
-    Si personne n'est connecté, envoie un email."""
+def _apply_oncall_heartbeat(db: Session, now, escalation_chain):
+    """Applique les actions retournees par evaluate_oncall_heartbeat (logique pure).
 
+    Charge les snapshots, appelle la fonction pure, applique les Actions en DB + SMTP.
+    """
     if not escalation_chain:
         return
 
-    # L'utilisateur d'astreinte est le #1 (plus petite position)
-    oncall_ec = escalation_chain[0]
-    oncall_user = db.query(User).filter(User.id == oncall_ec.user_id).first()
-    if not oncall_user:
-        return
+    chain_snapshot = [
+        EscalationChainEntry(position=ec.position, user_id=ec.user_id)
+        for ec in escalation_chain
+    ]
+    user_snapshots = [
+        UserSnapshot(
+            id=u.id,
+            name=u.name,
+            is_online=u.is_online,
+            last_heartbeat=u.last_heartbeat,
+        )
+        for u in db.query(User).all()
+    ]
+    # Alarmes is_oncall_alarm + alarmes actives (pour l'unicite INV-001)
+    alarms_orm = db.query(Alarm).filter(
+        Alarm.status.in_(["active", "escalated", "resolved"])
+    ).all()
+    alarm_snapshots = [_alarm_to_snapshot(a) for a in alarms_orm]
 
-    # Vérifier s'il y a déjà une alarme d'astreinte active
-    existing_oncall = (
-        db.query(Alarm)
-        .filter(Alarm.is_oncall_alarm == True, Alarm.status.in_(["active", "escalated"]))
-        .first()
+    actions = evaluate_oncall_heartbeat(
+        chain_snapshot,
+        user_snapshots,
+        alarm_snapshots,
+        ONCALL_OFFLINE_DELAY_MINUTES,
+        now,
     )
 
-    # Si l'utilisateur d'astreinte est en ligne → résoudre l'alarme d'astreinte si elle existe
-    if oncall_user.is_online:
-        if existing_oncall:
-            logger.info(f"On-call user {oncall_user.name} back online, resolving oncall alarm {existing_oncall.id}")
-            existing_oncall.status = "resolved"
+    alarm_by_id = {a.id: a for a in alarms_orm}
+
+    # INV-051 : resoudre les alarmes oncall existantes
+    for resolution in actions.resolutions:
+        alarm = alarm_by_id.get(resolution.alarm_id)
+        if alarm is not None:
+            logger.info(
+                f"On-call user back online, resolving oncall alarm {alarm.id}"
+            )
+            alarm.status = "resolved"
             db.commit()
-        return
 
-    # L'utilisateur d'astreinte est offline
-    if not oncall_user.last_heartbeat:
-        return  # Jamais eu de heartbeat, on ne peut pas savoir
-
-    # Depuis combien de temps est-il offline ?
-    offline_duration = (now - oncall_user.last_heartbeat).total_seconds() / 60.0
-
-    if offline_duration < ONCALL_OFFLINE_DELAY_MINUTES:
-        return  # Pas encore assez longtemps
-
-    # Vérifier si quelqu'un est connecté
-    online_users = db.query(User).filter(User.is_online == True).all()
-
-    if not online_users:
-        # Personne connecté → email direction technique
+    # INV-053 : email direction technique (personne online)
+    for email in actions.emails:
         config = db.query(SystemConfig).filter(SystemConfig.key == "alert_email").first()
         recipient = config.value if config else "direction_technique@charlesmurgat.com"
         send_alert_email(
-            subject="Alerte: aucun utilisateur connecté — astreinte perdue",
+            subject="Alerte: aucun utilisateur connecte - astreinte perdue",
             body=(
-                f"L'utilisateur d'astreinte '{oncall_user.name}' est hors ligne depuis "
-                f"{offline_duration:.0f} minutes et aucun autre utilisateur n'est connecté."
+                f"L'utilisateur d'astreinte '{email.oncall_user_name}' est hors ligne depuis "
+                f"{email.offline_duration_minutes:.0f} minutes et aucun autre utilisateur n'est connecte."
             ),
             to=recipient,
         )
-        return
 
-    # Il y a des gens connectés mais pas le #1 → créer l'alarme d'astreinte
-    if existing_oncall:
-        return  # Alarme déjà active, l'escalade se charge du reste
-
-    # Trouver le prochain utilisateur online dans la chaîne (pas le #1)
-    assigned_user_id = None
-    for ec in escalation_chain:
-        if ec.user_id == oncall_user.id:
-            continue
-        u = db.query(User).filter(User.id == ec.user_id).first()
-        if u and u.is_online:
-            assigned_user_id = u.id
-            break
-
-    if not assigned_user_id and online_users:
-        assigned_user_id = online_users[0].id
-
-    if not assigned_user_id:
-        return
-
-    # Vérifier qu'il n'y a pas déjà une alarme active (contrainte alarme unique)
-    any_active = db.query(Alarm).filter(Alarm.status.in_(["active", "escalated"])).first()
-    if any_active:
-        return  # Ne pas créer de doublon
-
-    alarm = Alarm(
-        title=f"Utilisateur d'astreinte hors connexion ({oncall_user.name})",
-        message=f"{oncall_user.name} est hors ligne depuis {offline_duration:.0f} minutes",
-        severity="critical",
-        assigned_user_id=assigned_user_id,
-        is_oncall_alarm=True,
-    )
-    db.add(alarm)
-    db.flush()  # Obtenir l'ID avant d'ajouter la notification
-    _add_notified_user(db, alarm, assigned_user_id)
-    db.commit()
-    logger.warning(
-        f"On-call alarm created: {oncall_user.name} offline for {offline_duration:.0f}min, "
-        f"assigned to user {assigned_user_id}"
-    )
+    # INV-050 : creer l'alarme oncall
+    for creation in actions.creations:
+        alarm = Alarm(
+            title=f"Utilisateur d'astreinte hors connexion ({creation.oncall_user_name})",
+            message=(
+                f"{creation.oncall_user_name} est hors ligne depuis "
+                f"{creation.offline_duration_minutes:.0f} minutes"
+            ),
+            severity="critical",
+            assigned_user_id=creation.assigned_user_id,
+            is_oncall_alarm=True,
+        )
+        db.add(alarm)
+        db.flush()  # Obtenir l'ID avant d'ajouter la notification
+        _add_notified_user(db, alarm, creation.assigned_user_id)
+        db.commit()
+        logger.warning(
+            f"On-call alarm created: {creation.oncall_user_name} offline for "
+            f"{creation.offline_duration_minutes:.0f}min, assigned to user {creation.assigned_user_id}"
+        )
 
 
 def _find_next_user(db, escalation_chain, current_position, current_user_id):

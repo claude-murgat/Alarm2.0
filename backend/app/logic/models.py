@@ -122,3 +122,56 @@ class SmsCallActions:
     """Retour de evaluate_sms_call_timers."""
     sms_enqueues: tuple["SmsEnqueue", ...]
     call_enqueues: tuple["CallEnqueue", ...]
+
+
+@dataclass(frozen=True)
+class UserSnapshot:
+    """État d'un utilisateur à un instant donné."""
+    id: int
+    name: str
+    is_online: bool
+    last_heartbeat: Optional[datetime]
+
+
+@dataclass(frozen=True)
+class OncallAlarmResolution:
+    """Action : résoudre l'alarme oncall existante (l'user d'astreinte est revenu online).
+
+    L'appelant doit appliquer :
+    - alarm.status = 'resolved'
+    - log_event("alarm_resolved", alarm_id=alarm_id, reason="oncall_back_online")
+    """
+    alarm_id: int
+
+
+@dataclass(frozen=True)
+class OncallAlarmCreation:
+    """Action : créer une alarme automatique oncall (is_oncall_alarm=True).
+
+    L'appelant doit appliquer :
+    - Alarm(title=f"Utilisateur d'astreinte hors connexion ({oncall_user_name})",
+            message=f"{oncall_user_name} est hors ligne depuis {offline_duration_minutes:.0f} minutes",
+            severity='critical', assigned_user_id=assigned_user_id, is_oncall_alarm=True)
+    - _add_notified_user(alarm, assigned_user_id)
+    - log_event("alarm_created", ...)
+    """
+    oncall_user_name: str
+    offline_duration_minutes: float
+    assigned_user_id: int
+
+
+@dataclass(frozen=True)
+class DirectionTechniqueEmail:
+    """Action : envoyer un email d'alerte à la direction technique (INV-053).
+    L'appelant construit subject/body à partir du payload et appelle send_alert_email."""
+    oncall_user_name: str
+    offline_duration_minutes: float
+
+
+@dataclass(frozen=True)
+class OncallActions:
+    """Retour de evaluate_oncall_heartbeat. Au plus UN élément dans chaque tuple
+    (la logique actuelle ne produit pas plusieurs actions du même type par tick)."""
+    resolutions: tuple["OncallAlarmResolution", ...]
+    creations: tuple["OncallAlarmCreation", ...]
+    emails: tuple["DirectionTechniqueEmail", ...]
