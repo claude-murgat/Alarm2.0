@@ -329,32 +329,34 @@ class TestEscalationWithFcm:
             f"got assigned_user_id={current['assigned_user_id']}"
         )
 
-    def test_escalation_fast_for_veille_user(self):
-        """User en position 2 (veille) : escalade en 2 min, pas 15."""
-        # Assigner l'alarme a user2 (position 2 = mode veille)
+    def test_no_fast_escalation_for_veille_user_inv011(self):
+        """INV-011 : delai UNIFORME 15 min pour chaque user, y compris les positions 2+ (veille).
+        A 3 min, meme un user en position 'veille' ne doit PAS etre escalade.
+        Remplace l'ancien test_escalation_fast_for_veille_user qui presupposait un split 15/2."""
+        # Assigner l'alarme a user2 (position 2 = "veille" dans le vocabulaire Android)
         r = requests.post(f"{API}/alarms/send", json={
-            "title": "Fast Esc", "message": "m", "severity": "critical",
+            "title": "No Fast Esc", "message": "m", "severity": "critical",
             "assigned_user_id": self.uid2,
         }, headers=self.admin_headers)
         alarm_id = r.json()["id"]
 
-        # Avancer de 3 min (> 2 min delai veille, < 15 min delai normal)
+        # Avancer de 3 min (bien en dessous du seuil uniforme 15 min)
         _advance_clock_all_nodes(3)
-        # Garder les users online pour heartbeat
         requests.post(f"{API}/devices/heartbeat", headers=self.headers1)
         requests.post(f"{API}/devices/heartbeat", headers=self.headers2)
-        time.sleep(12)  # Attendre un tick escalade
+        time.sleep(12)
 
-        # L'alarme devrait deja etre escaladee (delai 2 min depasse)
+        # L'alarme NE DOIT PAS etre escaladee (delai uniforme INV-011)
         alarms = requests.get(f"{API}/alarms/", headers=self.admin_headers).json()
         current = next(a for a in alarms if a["id"] == alarm_id)
-        assert current["assigned_user_id"] != self.uid2, (
-            f"L'alarme devrait etre escaladee apres 3 min (delai veille = 2 min), "
-            f"mais toujours assignee a user2"
+        assert current["assigned_user_id"] == self.uid2, (
+            f"INV-011 : delai uniforme 15 min. A 3 min, user2 ne doit pas etre escalade, "
+            f"got assigned_user_id={current['assigned_user_id']}"
         )
 
     def test_escalation_slow_for_oncall_user(self):
-        """User en position 1 (astreinte) : escalade en 15 min, pas 2."""
+        """INV-011 : delai uniforme 15 min. A 5 min, pas d'escalade pour position 1 non plus.
+        (Test conserve, semantique inchangee apres INV-011 car 5 < 15.)"""
         # Assigner l'alarme a user1 (position 1 = astreinte)
         r = requests.post(f"{API}/alarms/send", json={
             "title": "Slow Esc", "message": "m", "severity": "critical",
@@ -362,16 +364,15 @@ class TestEscalationWithFcm:
         }, headers=self.admin_headers)
         alarm_id = r.json()["id"]
 
-        # Avancer de 5 min (> 2 min, < 15 min)
         _advance_clock_all_nodes(5)
         requests.post(f"{API}/devices/heartbeat", headers=self.headers1)
         requests.post(f"{API}/devices/heartbeat", headers=self.headers2)
         time.sleep(12)
 
-        # L'alarme ne devrait PAS etre escaladee (delai astreinte = 15 min)
+        # L'alarme ne doit PAS etre escaladee (delai uniforme 15 min)
         alarms = requests.get(f"{API}/alarms/", headers=self.admin_headers).json()
         current = next(a for a in alarms if a["id"] == alarm_id)
         assert current["assigned_user_id"] == self.uid1, (
-            f"L'alarme ne devrait PAS etre escaladee apres 5 min (delai astreinte = 15 min), "
-            f"mais assignee a {current['assigned_user_id']} au lieu de {self.uid1}"
+            f"INV-011 : delai uniforme 15 min. A 5 min, user1 ne doit pas etre escalade, "
+            f"got assigned_user_id={current['assigned_user_id']} au lieu de {self.uid1}"
         )

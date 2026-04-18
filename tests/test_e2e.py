@@ -1303,6 +1303,11 @@ class TestOnCallDisconnectionAlarm:
 
         # Avancer 16 min → alarme créée
         _advance_clock_all_nodes(16)
+        # Refresh user2 heartbeat apres advance-clock pour eviter qu'il ne soit marque
+        # offline par le watchdog (last_heartbeat stale apres clock skip), ce qui
+        # empecherait la creation de l'alarme oncall (il faut qu'au moins 1 user online).
+        # Meme pattern que test_oncall_offline_15min_creates_alarm.
+        requests.post(f"{API}/devices/heartbeat", headers={"Authorization": f"Bearer {token2}"})
         time.sleep(11)
 
         alarms = requests.get(f"{API}/alarms/active", headers=admin_h).json()

@@ -12,7 +12,8 @@ from .fcm_service import send_fcm_to_user
 from .events import log_event
 from .logging_config import correlation_id_var
 from .logic.ack_expiry import evaluate_ack_expiry
-from .logic.models import AlarmSnapshot
+from .logic.escalation import evaluate_escalation
+from .logic.models import AlarmSnapshot, EscalationChainEntry
 
 logger = logging.getLogger("escalation")
 
@@ -164,78 +165,99 @@ async def escalation_loop():
                     db.commit()
 
                 # --- 2. Escalation of active/escalated alarms ---
+                # Logique de decision extraite dans logic/escalation.py (testee unit).
+                # Delai UNIFORME pour tous (INV-011) + FCM wake-up si offline (INV-015b).
                 active_alarms = (
                     db.query(Alarm)
                     .filter(Alarm.status.in_(["active", "escalated"]))
                     .all()
                 )
 
+                # escalation_chain charge AU NIVEAU DE LA BOUCLE (pas conditionnel)
+                # car utilise aussi par _check_oncall_heartbeat (section 4).
                 escalation_chain = (
                     db.query(EscalationConfig)
                     .order_by(EscalationConfig.position)
                     .all()
                 )
 
-                for alarm in active_alarms:
-                    if not escalation_chain:
-                        continue
-
-                    current_position = -1
-                    assigned_position = -1
-                    for ec in escalation_chain:
-                        if ec.user_id == alarm.assigned_user_id:
-                            current_position = ec.position
-                            assigned_position = ec.position
-                            break
-
-                    # Delai 2 paliers : astreinte (pos 1) = delai normal, veille (pos 2+) = delai accelere
-                    delay_config = db.query(SystemConfig).filter(
+                if escalation_chain and active_alarms:
+                    # Delai uniforme (INV-011) depuis SystemConfig
+                    delay_cfg = db.query(SystemConfig).filter(
                         SystemConfig.key == "escalation_delay_minutes"
                     ).first()
-                    if assigned_position == 1:
-                        # Position 1 = astreinte → delai normal
-                        current_delay = float(delay_config.value) if delay_config else 15.0
-                    else:
-                        # Positions 2+ = veille → delai accelere FCM
-                        fcm_delay = db.query(SystemConfig).filter(
-                            SystemConfig.key == "fcm_escalation_delay_minutes"
-                        ).first()
-                        current_delay = float(fcm_delay.value) if fcm_delay else 2.0
+                    delay_minutes = float(delay_cfg.value) if delay_cfg else 15.0
 
-                    elapsed = (now - alarm.created_at).total_seconds() / 60.0
+                    # Snapshot des users online (pour FCM wake-up INV-015b)
+                    users_online = {u.id: u.is_online for u in db.query(User).all()}
 
-                    if elapsed >= current_delay:
-                        next_user = _find_next_user(
-                            db, escalation_chain, current_position, alarm.assigned_user_id
+                    # Snapshots pour la fonction pure
+                    chain_snapshot = [
+                        EscalationChainEntry(position=ec.position, user_id=ec.user_id)
+                        for ec in escalation_chain
+                    ]
+                    alarm_snapshots = [_alarm_to_snapshot(a) for a in active_alarms]
+
+                    actions = evaluate_escalation(
+                        alarm_snapshots, chain_snapshot, users_online, delay_minutes, now
+                    )
+
+                    alarm_by_id = {a.id: a for a in active_alarms}
+
+                    # INV-015b : FCM wake-up aux users courants offline AVANT l'escalade
+                    for wake_up in actions.wake_ups:
+                        alarm = alarm_by_id[wake_up.alarm_id]
+                        try:
+                            send_fcm_to_user(db, wake_up.user_id, alarm.title, alarm.message,
+                                             {"alarm_id": str(alarm.id), "severity": alarm.severity,
+                                              "wake_up": "true"})
+                        except Exception:
+                            pass  # FCM best-effort
+
+                    # Alarmes qui meritent un FCM cumulative :
+                    # - celles qui sont escaladees (decisions)
+                    # - celles dont elapsed >= delay meme sans escalade (ex : chaine a 1 user)
+                    # Calcul AVANT de reset alarm.created_at sur les escalades.
+                    alarm_ids_needing_reminder = {d.alarm_id for d in actions.escalations}
+                    for alarm_snap in alarm_snapshots:
+                        if alarm_snap.status not in ("active", "escalated"):
+                            continue
+                        elapsed = (now - alarm_snap.created_at).total_seconds() / 60.0
+                        if elapsed >= delay_minutes:
+                            alarm_ids_needing_reminder.add(alarm_snap.id)
+
+                    # Escalades
+                    for decision in actions.escalations:
+                        alarm = alarm_by_id[decision.alarm_id]
+                        logger.info(
+                            f"Escalating alarm {alarm.id} from user {decision.from_user_id} "
+                            f"to user {decision.to_user_id}"
                         )
+                        alarm.assigned_user_id = decision.to_user_id
+                        _add_notified_user(db, alarm, decision.to_user_id)
+                        alarm.status = "escalated"
+                        alarm.escalation_count += 1
+                        # Reset timer pour le prochain palier
+                        alarm.created_at = now
+                        notified_ids = _get_notified_user_ids(db, alarm.id)
+                        log_event("alarm_escalated", db=db, alarm_id=alarm.id,
+                                  from_user=decision.from_user_id, to_user=decision.to_user_id,
+                                  notified_user_ids=notified_ids)
 
-                        if next_user and next_user.user_id != alarm.assigned_user_id:
-                            prev_user = alarm.assigned_user_id
-                            logger.info(
-                                f"Escalating alarm {alarm.id} from user {prev_user} "
-                                f"to user {next_user.user_id} (position {next_user.position})"
-                            )
-                            alarm.assigned_user_id = next_user.user_id
-                            # Ajouter le nouvel utilisateur à la table des notifiés
-                            _add_notified_user(db, alarm, next_user.user_id)
-                            alarm.status = "escalated"
-                            alarm.escalation_count += 1
-                            # Reset timer pour que le prochain palier ait son propre délai
-                            alarm.created_at = now
-                            notified = _get_notified_user_ids(db, alarm.id)
-                            log_event("alarm_escalated", db=db, alarm_id=alarm.id,
-                                      from_user=prev_user, to_user=next_user.user_id,
-                                      notified_user_ids=notified)
-
-                        # FCM a tous les utilisateurs notifies (cumulative)
+                    # FCM cumulative : rappel aux notifies pour toutes les alarmes eligibles.
+                    for alarm_id in alarm_ids_needing_reminder:
+                        alarm = alarm_by_id.get(alarm_id)
+                        if alarm is None:
+                            continue
                         notified_ids = _get_notified_user_ids(db, alarm.id)
                         for uid in notified_ids:
                             try:
                                 send_fcm_to_user(db, uid, alarm.title, alarm.message,
-                                                 {"alarm_id": str(alarm.id), "severity": alarm.severity})
+                                                 {"alarm_id": str(alarm.id),
+                                                  "severity": alarm.severity})
                             except Exception:
-                                pass  # FCM est best-effort
-                        db.commit()
+                                pass  # FCM best-effort
+                    db.commit()
 
                 # --- 3. Timer-based SMS/Call enqueue ---
                 sms_call_delay_cfg = db.query(SystemConfig).filter(
