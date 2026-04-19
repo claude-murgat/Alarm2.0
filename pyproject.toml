@@ -5,6 +5,9 @@
 [tool.pytest.ini_options]
 minversion = "7.0"
 testpaths = ["tests"]
+# pythonpath = racine du repo : permet `from backend.app.logic.X import Y` sans installer
+# le repo en package. Indispensable sur runners Linux ou cwd != sys.path par defaut.
+pythonpath = ["."]
 addopts = [
     "-ra",
     "--strict-markers",
