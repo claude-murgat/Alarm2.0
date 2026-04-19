@@ -15,12 +15,12 @@
 
 services:
   gh-runner:
-    image: myoung34/github-runner:2.319.1
+    image: myoung34/github-runner:2.333.1
     restart: always
     environment:
       REPO_URL: https://github.com/${GH_OWNER}/${GH_REPO}
       APP_ID: ${APP_ID}
-      APP_PRIVATE_KEY_PATH: /opt/runner-secrets/app-private-key.pem
+      APP_PRIVATE_KEY: ${APP_PRIVATE_KEY}
       APP_LOGIN: ${APP_LOGIN}
       RUNNER_NAME_PREFIX: alarm-runner
       RUNNER_SCOPE: repo
@@ -30,6 +30,5 @@ services:
       RUN_AS_ROOT: "false"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./alarm-bot.private-key.pem:/opt/runner-secrets/app-private-key.pem:ro
     deploy:
       replicas: 2
