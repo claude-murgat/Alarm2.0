@@ -32,5 +32,9 @@ services:
       RUN_AS_ROOT: "true"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+    # host.docker.internal indispensable : les jobs spawn des conteneurs sur le host
+    # via DooD, et doivent pouvoir les joindre via les ports mappes du host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     deploy:
       replicas: 2

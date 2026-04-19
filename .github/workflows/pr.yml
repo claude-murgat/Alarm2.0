@@ -128,11 +128,13 @@ jobs:
 
       - name: Compute backend URL
         run: |
+          # host.docker.internal : depuis le runner conteneurise, les conteneurs des
+          # tests tournent sur le host (DooD), pas sur le runner lui-meme.
           case "${{ matrix.worker }}" in
             1) PORT=18000 ;;
             2) PORT=28000 ;;
           esac
-          echo "BACKEND_URL=http://localhost:$PORT" >> $GITHUB_ENV
+          echo "BACKEND_URL=http://host.docker.internal:$PORT" >> $GITHUB_ENV
 
       - name: Pre-cleanup (au cas ou un run precedent a echoue)
         run: ./scripts/ci-cleanup.sh "$PROJECT" || true
