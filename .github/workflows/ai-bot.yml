@@ -1,0 +1,157 @@
+# Bot IA — phase 1 POC.
+#
+# But : valider la chaine identite (GitHub App token -> commit bot -> push -> PR).
+# Pas encore d'agent Claude. Produit une PR marker "vide" a fermer apres verif.
+#
+# Trigger : workflow_dispatch manuel avec numero d'issue.
+# Cible runner : ubuntu-latest cloud (gratuit, repo public). Migre vers
+#                self-hosted dedie (label alarm-bot) en phase 3 si besoin.
+#
+# Voir docs/AI_STRATEGY.md section 1 + MEMO design D1-D7.
+
+name: AI Bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Numero d'issue GitHub a referencer (doit exister)"
+        required: true
+        type: string
+
+concurrency:
+  group: ai-bot-issue-${{ inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  poc_identity:
+    name: Phase 1 — POC identite chain
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      # Permissions du GITHUB_TOKEN natif (non utilisees : on passe par un
+      # token GitHub App). On les met explicitement pour eviter les permissions
+      # par defaut trop larges.
+      contents: read
+
+    steps:
+      - name: Generate installation token (GitHub App)
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.ALARM_BOT_APP_ID }}
+          private-key: ${{ secrets.ALARM_BOT_PRIVATE_KEY }}
+          # Defense en profondeur : token restreint au strict necessaire
+          # meme si l'App a plus de permissions (cf D4).
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+
+      - name: Checkout master
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          ref: master
+          fetch-depth: 0
+
+      - name: Configure git identity as bot
+        run: |
+          git config user.name "alarm-murgat-bot[bot]"
+          git config user.email "3428066+alarm-murgat-bot[bot]@users.noreply.github.com"
+
+      - name: Verify source issue exists
+        id: issue
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          TITLE=$(gh issue view "${{ inputs.issue_number }}" --json title -q .title)
+          echo "title=${TITLE}" >> "$GITHUB_OUTPUT"
+          echo "Issue #${{ inputs.issue_number }}: ${TITLE}"
+
+      - name: Create bot branch + marker commit
+        id: branch
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          BRANCH="ai/phase1-poc/issue-${ISSUE_NUMBER}-run-${RUN_ID}"
+          git checkout -b "$BRANCH"
+
+          # Marker a la racine (pas dans tmp/ qui est gitignored).
+          TIMESTAMP=$(date -u -Iseconds)
+          cat > ai-bot-phase1-marker.md <<EOF
+          # Phase 1 marker
+
+          Test de la chaine identite du bot IA.
+
+          - Run       : ${RUN_ID}
+          - Issue     : #${ISSUE_NUMBER}
+          - Auteur    : alarm-murgat-bot[bot] (attendu)
+          - Workflow  : .github/workflows/ai-bot.yml
+          - Timestamp : ${TIMESTAMP}
+
+          Cette PR ne doit PAS etre mergee. A fermer apres verification manuelle
+          que l'auteur apparait bien comme alarm-murgat-bot[bot].
+          EOF
+
+          git add ai-bot-phase1-marker.md
+          git commit -m "chore(ai-bot): phase 1 POC marker (issue #${ISSUE_NUMBER})"
+          git push origin "$BRANCH"
+          echo "name=${BRANCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Open PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          RUN_ID: ${{ github.run_id }}
+          BRANCH: ${{ steps.branch.outputs.name }}
+        run: |
+          set -euo pipefail
+
+          # Heredoc quote ('EOF') : aucune interpolation bash, contenu litteral.
+          cat > /tmp/pr-body.md <<'EOF'
+          POC phase 1 du bot IA — validation de la chaine identite.
+
+          <!-- AI-BOT-METADATA
+          phase: 1
+          iteration: 1/1
+          kind: poc-identity
+          -->
+
+          ## But
+
+          Valider que :
+
+          1. La GitHub App alarm-murgat-bot peut generer un installation token
+          2. Un commit peut etre pousse sous l'identite alarm-murgat-bot[bot]
+          3. Une PR peut etre ouverte automatiquement
+          4. L'issue source est liee
+
+          ## A verifier humain
+
+          - [ ] Cette PR est authored par **alarm-murgat-bot[bot]**
+          - [ ] Le commit porte le meme auteur
+          - [ ] La CI se declenche (tier 1+2+3)
+          - [ ] Puis fermer cette PR sans merge
+          EOF
+
+          PR_URL=$(gh pr create \
+            --base master \
+            --head "${BRANCH}" \
+            --title "[AI Bot phase 1] POC identity (issue #${ISSUE_NUMBER})" \
+            --body-file /tmp/pr-body.md)
+
+          echo "url=${PR_URL}" >> "$GITHUB_OUTPUT"
+          echo "PR opened: ${PR_URL}"
+
+      - name: Comment on source issue
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          gh issue comment "${{ inputs.issue_number }}" \
+            --body "Phase 1 POC du bot IA : PR ouverte -> ${{ steps.pr.outputs.url }}"
