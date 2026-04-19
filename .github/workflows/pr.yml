@@ -1,0 +1,56 @@
+# CI Alarme Murgat — Pipeline 3 tiers (J2 : tier 1 uniquement, tier 2/3 ajoutes plus tard).
+# Strategie : tier 1+2 sur runner cloud GitHub (gratuit), tier 3 sur self-hosted (cluster Patroni).
+# Voir docs/AI_STRATEGY.md section 3.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master, "ci/**"]
+
+# Annule les runs precedents sur la meme PR/branche → economie + pas d'empilement IA.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tier1_unit:
+    name: Tier 1 — Unit (logique pure)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run tier 1 (unit tests)
+        run: |
+          mkdir -p reports
+          pytest tests/unit -m unit -n auto \
+            --randomly-seed=last \
+            --junitxml=reports/tier1.xml \
+            --cov --cov-report=xml:reports/coverage-tier1.xml \
+            --cov-report=term-missing
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier1-reports
+          path: reports/
+          retention-days: 14
