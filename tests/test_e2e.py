@@ -11,8 +11,13 @@ Prérequis :
 import os
 import time
 import subprocess
+from pathlib import Path
 import requests
 import pytest
+
+# Racine du repo (cwd portable pour subprocess docker compose ...).
+# Remplace les anciens chemins Windows hardcodes qui cassaient en CI Linux.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 _ALL_BACKEND_URLS = ["http://localhost:8000", "http://localhost:8001", "http://localhost:8002"]
 
@@ -1036,7 +1041,7 @@ class TestTokenAutoRenewal:
 
 # ── #6 Persistence après crash Docker ─────────────────────────────────────────
 
-DOCKER = os.getenv("DOCKER_CMD", "C:/Program Files/Docker/Docker/resources/bin/docker.exe")
+DOCKER = os.getenv("DOCKER_CMD", "docker")
 
 
 class TestPersistenceAfterCrash:
@@ -1063,7 +1068,7 @@ class TestPersistenceAfterCrash:
         # Restart le backend Docker
         subprocess.run(
             [DOCKER, "compose", "restart", "backend"],
-            cwd="C:/Users/Charles/Desktop/Projet Claude/Alarm2.0",
+            cwd=str(PROJECT_ROOT),
             capture_output=True, timeout=60,
         )
 
@@ -1860,7 +1865,7 @@ class TestRedundancy:
         # Identifier le primary
         primary_url = _find_primary_url()
         primary_project = _url_to_project(primary_url)
-        project_dir = "C:/Users/Charles/Desktop/Projet Claude/Alarm2.0"
+        project_dir = str(PROJECT_ROOT)
 
         # Creer une alarme avant le failover
         headers = _admin_headers(f"{primary_url}/api")
@@ -2161,7 +2166,7 @@ class TestHeartbeatFailover:
         requests.post(f"{primary}/api/test/reset", timeout=5)
         yield
         # Cleanup : s'assurer que les 3 noeuds sont up
-        project_dir = "C:/Users/Charles/Desktop/Projet Claude/Alarm2.0"
+        project_dir = str(PROJECT_ROOT)
         for p in ["node1", "node2", "node3"]:
             subprocess.run([DOCKER, "compose", "-p", p, "start"],
                           cwd=project_dir, capture_output=True, timeout=30)
@@ -2176,7 +2181,7 @@ class TestHeartbeatFailover:
 
     def test_heartbeat_survives_leader_death(self):
         """Le heartbeat d'un user est accepte par le nouveau primary apres failover."""
-        project_dir = "C:/Users/Charles/Desktop/Projet Claude/Alarm2.0"
+        project_dir = str(PROJECT_ROOT)
         primary_url = _find_primary_url()
         primary_project = _url_to_project(primary_url)
 
@@ -2302,7 +2307,7 @@ class TestAndroidHeartbeatFailover:
         yield
 
         # Cleanup : remonter tous les noeuds
-        project_dir = "C:/Users/Charles/Desktop/Projet Claude/Alarm2.0"
+        project_dir = str(PROJECT_ROOT)
         for p in ["node1", "node2", "node3"]:
             subprocess.run([DOCKER, "compose", "-p", p, "start"],
                           cwd=project_dir, capture_output=True, timeout=30)
@@ -2352,7 +2357,7 @@ class TestAndroidHeartbeatFailover:
     def test_android_heartbeat_survives_leader_death(self):
         """L'app Android envoie des heartbeats, le leader meurt, l'app rebascule
         et les heartbeats PERSISTENT sur le nouveau leader (pas juste un flash)."""
-        project_dir = "C:/Users/Charles/Desktop/Projet Claude/Alarm2.0"
+        project_dir = str(PROJECT_ROOT)
         primary_url = _find_primary_url()
         primary_project = _url_to_project(primary_url)
 
