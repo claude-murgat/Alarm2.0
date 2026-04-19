@@ -1,4 +1,4 @@
-# CI Alarme Murgat — Pipeline 3 tiers (J6 : tier 1+2 ; tier 3 ajoute plus tard).
+# CI Alarme Murgat — Pipeline 3 tiers complets (J8).
 # Strategie : tier 1+2 sur runner cloud GitHub (gratuit), tier 3 sur self-hosted (cluster Patroni).
 # Voir docs/AI_STRATEGY.md section 3.
 
@@ -94,5 +94,87 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tier2-reports
+          path: reports/
+          retention-days: 14
+
+  tier3_e2e:
+    name: Tier 3 — E2E cluster (worker ${{ matrix.worker }}/2)
+    needs: tier2_integration
+    runs-on: [self-hosted, linux, docker, alarm-ci]
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        worker: [1, 2]
+    env:
+      PROJECT: ci-w${{ matrix.worker }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            requirements-dev.txt
+
+      - name: Install pytest deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt requests pyjwt
+
+      - name: Compute backend URL
+        run: |
+          case "${{ matrix.worker }}" in
+            1) PORT=18000 ;;
+            2) PORT=28000 ;;
+          esac
+          echo "BACKEND_URL=http://localhost:$PORT" >> $GITHUB_ENV
+
+      - name: Pre-cleanup (au cas ou un run precedent a echoue)
+        run: ./scripts/ci-cleanup.sh "$PROJECT" || true
+
+      - name: Provide dummy firebase service account
+        # Le compose mount backend/firebase-service-account.json. En CI on n'a pas
+        # de vraies creds FCM — on cree un fichier vide pour ne pas bloquer le mount.
+        run: |
+          [[ -f backend/firebase-service-account.json ]] || echo '{}' > backend/firebase-service-account.json
+
+      - name: Boot cluster (compose up)
+        run: |
+          docker compose --env-file ".env.ci-w${{ matrix.worker }}" -p "$PROJECT" up -d --build
+
+      - name: Wait for cluster ready
+        run: ./scripts/ci-wait-cluster.sh "$PROJECT" 180
+
+      - name: Run tier 3 (e2e tests, split ${{ matrix.worker }}/2)
+        # pytest-split repartit les tests entre les 2 workers (par count, faute de
+        # cache de durees). Skip failover (tier 4 nightly).
+        run: |
+          mkdir -p reports
+          pytest tests/ \
+            --ignore=tests/unit \
+            --ignore=tests/integration \
+            --skip-failover \
+            --splits 2 --group ${{ matrix.worker }} \
+            --junitxml=reports/tier3-w${{ matrix.worker }}.xml
+
+      - name: Upload compose logs (always)
+        if: always()
+        run: |
+          docker compose -p "$PROJECT" logs --no-color > reports/compose-w${{ matrix.worker }}.log 2>&1 || true
+
+      - name: Cleanup cluster
+        if: always()
+        run: ./scripts/ci-cleanup.sh "$PROJECT"
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier3-w${{ matrix.worker }}-reports
           path: reports/
           retention-days: 14
