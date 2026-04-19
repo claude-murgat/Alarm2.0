@@ -80,9 +80,12 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run tier 2 (integration tests)
+        # Pas de -n auto : les workers xdist partageraient le meme SQLite et race sur
+        # le seed users (UNIQUE constraint). A reactiver avec une DB par worker quand
+        # le volume justifiera la complexite.
         run: |
           mkdir -p reports
-          pytest tests/integration -m integration -n auto \
+          pytest tests/integration -m integration \
             --randomly-seed=last \
             --junitxml=reports/tier2.xml
 
