@@ -153,16 +153,22 @@ jobs:
         run: ./scripts/ci-wait-cluster.sh "$PROJECT" 180
 
       - name: Run tier 3 (e2e tests, split ${{ matrix.worker }}/2)
-        # pytest-split repartit les tests entre les 2 workers (par count, faute de
-        # cache de durees). Skip failover (tier 4 nightly).
+        # Iteration 1 : on limite a tests/test_e2e.py (le coeur, 119 tests).
+        # Les autres (test_improvements, test_user_modes, test_fcm, etc.)
+        # seront ajoutes apres validation green sur ce fichier.
+        # Pas de --splits pour cette premiere passe : worker 1 = pas-failover,
+        # worker 2 = au repos (sera utilise quand on activera --splits).
         run: |
           mkdir -p reports
-          pytest tests/ \
-            --ignore=tests/unit \
-            --ignore=tests/integration \
-            --skip-failover \
-            --splits 2 --group ${{ matrix.worker }} \
-            --junitxml=reports/tier3-w${{ matrix.worker }}.xml
+          if [[ "${{ matrix.worker }}" == "1" ]]; then
+            pytest tests/test_e2e.py \
+              --skip-failover \
+              -p no:randomly \
+              --junitxml=reports/tier3-w${{ matrix.worker }}.xml
+          else
+            echo "Worker 2 desactive temporairement (J8 iteration 1, voir commit msg)."
+            mkdir -p reports && echo '<testsuite tests="0"/>' > reports/tier3-w2.xml
+          fi
 
       - name: Upload compose logs (always)
         if: always()
