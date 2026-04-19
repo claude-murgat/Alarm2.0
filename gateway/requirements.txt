@@ -1,3 +1,7 @@
-requests>=2.31.0
-pyserial>=3.5
-numpy>=1.24
+# Versions epinglees pour reproductibilite CI.
+# Si tu mets a jour : ajuster aussi backend/requirements.txt si la dep est commune
+# (ex: requests doit rester aligne entre les deux).
+
+requests==2.31.0
+pyserial==3.5
+numpy==1.26.4

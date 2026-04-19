@@ -1,0 +1,26 @@
+# Configuration outils (pytest, coverage, ruff). Pas de [project] : ce repo n'est pas
+# packageable — backend/, gateway/ et tests/ sont des arbres separes installes via leurs
+# propres requirements*.txt.
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+]
+# Markers declares dans tests/conftest.py (failover, unit, integration, e2e, chaos).
+# Ne pas dupliquer ici sinon divergence.
+
+[tool.coverage.run]
+branch = true
+source = ["backend/app"]
+omit = ["*/tests/*", "*/__pycache__/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
