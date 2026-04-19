@@ -1044,6 +1044,17 @@ class TestTokenAutoRenewal:
 DOCKER = os.getenv("DOCKER_CMD", "docker")
 
 
+def _compose_project_args():
+    """Args `-p <project>` pour docker compose si on est dans un cluster CI nomme.
+
+    Sans ca, `docker compose restart` utilise le nom du cwd ("Alarm2.0") comme
+    projet et ne touche pas le cluster ci-w1/ci-w2 → restart silencieux, le test
+    "passe par hasard" sans rien prouver (anti-pattern P6).
+    """
+    project = os.getenv("PROJECT") or os.getenv("COMPOSE_PROJECT_NAME")
+    return ["-p", project] if project else []
+
+
 class TestPersistenceAfterCrash:
     """#6 — Les données survivent à un redémarrage du backend."""
 
@@ -1065,12 +1076,15 @@ class TestPersistenceAfterCrash:
         persist_alarm = next((a for a in alarms if a["title"] == "Persistence Test"), None)
         assert persist_alarm is not None
 
-        # Restart le backend Docker
-        subprocess.run(
-            [DOCKER, "compose", "restart", "backend"],
+        # Restart le backend Docker (cible explicitement le projet du cluster CI)
+        result = subprocess.run(
+            [DOCKER, "compose", *_compose_project_args(), "restart", "backend"],
             cwd=str(PROJECT_ROOT),
             capture_output=True, timeout=60,
         )
+        # Garantit que le restart a bien eu lieu (sinon le test passerait par hasard).
+        assert result.returncode == 0, \
+            f"docker compose restart a echoue: rc={result.returncode} stderr={result.stderr.decode(errors='replace')[:500]}"
 
         # Attendre que le backend soit prêt
         for _ in range(20):
