@@ -2647,10 +2647,17 @@ class TestAuditTrail:
         assert "alarm_created" in types
 
     def test_alarm_lifecycle_audit_events(self):
-        """Cycle complet create → ack → resolve doit produire 3 événements."""
+        """Cycle complet create → ack → resolve doit produire 3 événements.
+        INV-031 : l'ACK doit etre fait par un user notifie. On assigne explicitement
+        l'alarme a admin pour qu'admin puisse l'acquitter."""
         admin_h = _admin_headers()
+        # Recuperer l'id admin pour l'assigner explicitement
+        users = requests.get(f"{API}/users/", headers=admin_h).json()
+        admin_id = next(u["id"] for u in users if u["name"] == ADMIN_NAME)
+
         r = requests.post(f"{API}/alarms/send", json={
-            "title": "Lifecycle", "message": "msg", "severity": "critical"
+            "title": "Lifecycle", "message": "msg", "severity": "critical",
+            "assigned_user_id": admin_id,  # INV-031 : admin doit etre notifie pour ACK
         }, headers=admin_h)
         alarm_id = r.json()["id"]
 

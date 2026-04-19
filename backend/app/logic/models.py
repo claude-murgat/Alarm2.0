@@ -175,3 +175,27 @@ class OncallActions:
     resolutions: tuple["OncallAlarmResolution", ...]
     creations: tuple["OncallAlarmCreation", ...]
     emails: tuple["DirectionTechniqueEmail", ...]
+
+
+@dataclass(frozen=True)
+class AlarmCreationPlan:
+    """Plan de création d'alarme retourné par evaluate_alarm_creation_plan.
+
+    - assigned_user_id : peut être None si aucun fallback possible (pas d'user existant)
+    - needs_direction_technique_email : True si la chaîne est vide (INV-080)
+    - email_reason : sémantique de l'email ("chain_empty" pour l'instant, extensible)
+    """
+    assigned_user_id: Optional[int]
+    needs_direction_technique_email: bool
+    email_reason: Optional[str]
+
+
+@dataclass(frozen=True)
+class AckAuthorization:
+    """Décision d'autorisation retournée par evaluate_ack_authorization (INV-031).
+
+    allowed=True si current_user_id est dans notified_user_ids.
+    reason=None si autorisé, sinon "not_notified" ou "alarm_not_found".
+    """
+    allowed: bool
+    reason: Optional[str]
