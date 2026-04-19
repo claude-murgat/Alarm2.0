@@ -38,11 +38,11 @@ while [[ $(date +%s) -lt $deadline ]]; do
     sleep $INTERVAL
 done
 
-# 3. Backend repond sur /health (s'il existe) sinon racine /
-echo "[wait-cluster] $PROJECT : backend up..."
-BACKEND_PORT="${BACKEND_PORT:-8000}"
+# 3. Backend repond depuis le host (image python:slim n'a pas curl, on check de l'exterieur)
+url="${BACKEND_URL:-http://localhost:8000}"
+echo "[wait-cluster] $PROJECT : backend up sur $url ..."
 while [[ $(date +%s) -lt $deadline ]]; do
-    if docker compose -p "$PROJECT" exec -T backend curl -sf "http://localhost:8000/" >/dev/null 2>&1; then
+    if curl -sf "$url/" >/dev/null 2>&1 || curl -sf "$url/health" >/dev/null 2>&1; then
         echo "[wait-cluster] $PROJECT : backend repond"
         echo "[wait-cluster] $PROJECT : OK (cluster pret en $(($(date +%s) - (deadline - TIMEOUT)))s)"
         exit 0
