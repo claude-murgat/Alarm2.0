@@ -19,8 +19,22 @@ import pytest
 _ALL_BACKEND_URLS = ["http://localhost:8000", "http://localhost:8001", "http://localhost:8002"]
 
 
+def _test_endpoint_urls():
+    """Backends qui doivent recevoir les ordres /api/test/* (reset, clock).
+
+    En CI single-node : BACKEND_URL set → cibler ce seul backend (les 3 ports
+    historiques n'existent pas en CI et le `except: pass` masquait l'echec).
+    En dev 3-noeuds : BACKEND_URL absent → liste historique.
+    Cf meme pattern dans test_e2e.py:_test_endpoint_urls().
+    """
+    env_url = os.getenv("BACKEND_URL")
+    if env_url:
+        return [env_url.rstrip("/")]
+    return _ALL_BACKEND_URLS
+
+
 def _find_primary_url():
-    for url in _ALL_BACKEND_URLS:
+    for url in _test_endpoint_urls():
         try:
             r = requests.get(f"{url}/health", timeout=2)
             if r.status_code == 200 and r.json().get("role") == "primary":
@@ -47,7 +61,7 @@ TICK_WAIT = 22  # 2 ticks escalation loop (10s chacun) + marge
 
 
 def _reset_clock_all_nodes():
-    for url in _ALL_BACKEND_URLS:
+    for url in _test_endpoint_urls():
         try:
             requests.post(f"{url}/api/test/reset-clock", params={"peer": "false"}, timeout=2)
         except Exception:
@@ -55,7 +69,7 @@ def _reset_clock_all_nodes():
 
 
 def _advance_clock_all_nodes(minutes):
-    for url in _ALL_BACKEND_URLS:
+    for url in _test_endpoint_urls():
         try:
             requests.post(f"{url}/api/test/advance-clock",
                          params={"minutes": minutes, "peer": "false"}, timeout=2)

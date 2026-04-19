@@ -1,0 +1,56 @@
+# Reduit la taille du contexte Docker (build plus rapide, moins de cache invalide).
+
+# VCS
+.git/
+.gitignore
+.gitattributes
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+venv/
+.venv/
+
+# IDE / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Android (jamais dans une image backend)
+android/
+
+# Tests / docs
+tests/
+docs/
+*.md
+!README.md
+
+# Logs / data / runtime
+*.log
+backend.log
+data/
+backend/data/
+docker-data/
+*.pid
+*.db
+
+# Secrets (defense en profondeur — ne JAMAIS s'y fier comme seul rempart)
+*.pem
+*.key
+.env
+.env.*
+!.env.example
+backend/firebase-service-account.json
+
+# CI / infra (pas besoin dans une image applicative)
+.github/
+infra/
+.actrc

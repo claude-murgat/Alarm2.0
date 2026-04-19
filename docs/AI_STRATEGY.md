@@ -71,117 +71,88 @@ Un test flaky (passe parfois, échoue parfois) est **plus dangereux** qu'un bug.
 
 ## 3. Architecture CI en niveaux
 
+> **Cette section décrit l'état IMPLÉMENTÉ.** Workflow de référence : [.github/workflows/pr.yml](../.github/workflows/pr.yml).
+> Branche actuelle de travail : `ci/pipeline`.
+
 Tous les tests doivent passer avant un merge. Les niveaux ne filtrent pas — ils **ordonnent** l'exécution pour que l'échec arrive vite et informativement.
 
-### Tier 1 — Unit tests purs (<30s)
-- **Cible** : logique métier extraite en fonctions pures (`evaluate_escalation`, `evaluate_ack_expiry`, `evaluate_oncall_heartbeat`, etc.).
+### Tier 1 — Unit tests purs (~25s observé)
+- **Cible** : logique métier extraite en fonctions pures (`evaluate_escalation`, `evaluate_ack_expiry`, `evaluate_oncall_heartbeat`, `evaluate_sms_call_timers`, `evaluate_ack_authorization`, `evaluate_alarm_creation`).
 - **Dépendances** : aucune (pas de DB, pas de FastAPI, pas de cluster).
-- **Outils** : `pytest`, `hypothesis` (property-based), `mutmut` (mutation testing nightly).
-- **Gating** : **pre-commit hook**. `git commit` échoue localement si un test casse.
-- **Temps de feedback** : 5-30 secondes.
-- **Ce qu'il teste** : invariants INV-001 à INV-085 en isolation.
+- **Runner** : `ubuntu-latest` (cloud GitHub gratuit). **Pas self-hosted** : pas besoin de Docker, on économise les ressources self-hosted pour le tier 3.
+- **Localisation** : `tests/unit/` (87 tests aujourd'hui, marker `@pytest.mark.unit`).
+- **Outils** : `pytest`, `pytest-xdist` (`-n auto`), `pytest-randomly`, `pytest-cov`, `hypothesis` (installé mais non utilisé pour l'instant).
+- **Gating** : required status check GitHub Actions (branch protection master active).
+- **Pre-commit hook** : pas en place (TODO si l'IA push souvent du code cassé).
 
-### Tier 2 — Integration tests (<3 min)
-- **Cible** : endpoints FastAPI via `TestClient` + SQLite temp file par test (transactional rollback).
-- **Dépendances** : Python seulement, pas de Docker, pas de Patroni.
-- **Outils** : `pytest-asyncio`, `FastAPI TestClient`, `schemathesis` (contract tests).
-- **Gating** : **required status check GitHub Actions** sur la PR. Bouton "Merge" grisé si fail.
-- **Temps de feedback** : 1-3 minutes.
-- **Ce qu'il teste** : routes API, auth, validation Pydantic, race conditions API (via `threading.Thread`).
+### Tier 2 — Integration tests (~25s observé, croîtra)
+- **Cible** : contrat API FastAPI via `TestClient`.
+- **Dépendances** : Python seulement (TestClient = pas de serveur live, pas de Docker).
+- **Backend de DB** : **SQLite temp**, fichier unique partagé (session-scoped). Postgres service container abandonné pour v1 (complexité non justifiée pour 4 tests). À reconsidérer si le tier 2 hit des features Postgres-specific (jsonb, advisory locks).
+- **Runner** : `ubuntu-latest` (cloud).
+- **Localisation** : `tests/integration/` (4 tests aujourd'hui, marker `@pytest.mark.integration`).
+- **Outils** : `pytest`, `FastAPI TestClient`. Pas de `pytest-asyncio` (TestClient gère le sync). Pas de `schemathesis` (à ajouter si on veut des contract tests OpenAPI auto).
+- **Parallélisation** : DÉSACTIVÉE (`-n 1`). Cause : race xdist sur seed users SQLite (bug CI-BUG-02). Réactiver avec DB par worker quand >30 tests.
+- **Gating** : required status check.
 
-### Tier 3 — E2E cluster (<5 min)
-- **Cible** : scénarios business de bout en bout contre le cluster 3 nœuds.
-- **Dépendances** : Docker Compose complet (Patroni + etcd + 3 backends + Mailhog).
-- **Outils** : `pytest` + `requests` (code actuel).
-- **Gating** : **required status check avant merge sur main**.
-- **Temps de feedback** : 3-5 minutes.
-- **Ce qu'il teste** : replication cross-node, token cross-node, golden paths (création → escalade → ack → résolution).
+### Tier 3 — E2E cluster (~7 min observé sur worker 1, ~6m37 pour 119 tests)
+- **Cible** : scénarios business end-to-end contre un vrai backend FastAPI sur Patroni/etcd.
+- **Dépendances** : Docker Compose (Patroni + etcd + backend + Mailhog), 1 cluster single-node par worker.
+- **Runner** : `[self-hosted, linux, docker, alarm-ci]` (2 runners Docker locaux via `infra/runner/`).
+- **Localisation** : `tests/test_e2e.py` + `tests/test_*.py` (sauf `unit/` et `integration/`). Pas de marker `@pytest.mark.e2e` à ce stade — sélection par chemin (ignore `tests/unit`, `tests/integration`).
+- **Parallélisation** :
+  - **Plan cible** : matrix `worker: [1, 2]` + `pytest-split --splits 2 --group N` → ~3 min par worker.
+  - **État actuel (J8 itération 1)** : worker 2 désactivé temporairement, worker 1 fait `tests/test_e2e.py` seul. Pytest-split installé mais pas activé. Rampe progressive après green.
+- **Ports** : worker 1 = 18xxx, worker 2 = 28xxx (cf `.env.ci-w1`, `.env.ci-w2`). Pas de conflit avec `.env.dev` (8xxx).
+- **Bootstrap** : `scripts/ci-wait-cluster.sh` polling Patroni leader + backend `/health` (180s timeout). Remplace les `sleep` magiques.
+- **Cleanup** : `scripts/ci-cleanup.sh` en `if: always()`. Cible UNIQUEMENT le projet du worker (pas de prune global).
+- **Gating** : **PAS** required status check pour l'instant. La branch protection ne couvre que tier 1+2 le temps que tier 3 stabilise. À ajouter quand 100% green sur 5 runs consécutifs.
+- **BACKEND_URL** : `http://host.docker.internal:18000` (resp. 28000). Le runner conteneurisé ne peut joindre les conteneurs sur le host qu'à travers `host.docker.internal:host-gateway` (cf CI-BUG-05).
 
-### Tier 4 — Chaos / Failover (nightly, non-blocking)
-- **Cible** : tests qui cassent volontairement l'infra.
-- **Exemples concrets** :
-  - `docker compose stop` primary pendant écriture alarme
-  - Coupure 2 des 3 etcd (perte de quorum)
-  - Latence réseau 500ms entre nœuds (`tc`, `toxiproxy`)
-  - Disque primary plein
-  - Modem SIM7600 tué en plein appel
-- **Gating** : **aucun**. Notification Slack/email si fail.
-- **Temps** : peut prendre 20-30 min, lancé à 2h du matin.
-- **Ce qu'il teste** : résistance aux pannes réelles — la classe de bug qui fait perdre une alarme un jour de panne.
+### Tier 4 — Chaos / Failover (PAS IMPLÉMENTÉ)
+- **Statut** : non implémenté. Tests `@pytest.mark.failover` existent dans `tests/test_e2e.py` mais skip volontaire en tier 3 via `--skip-failover`.
+- **Plan futur** :
+  - Workflow `nightly.yml` séparé (cron 2h du matin)
+  - Tests qui cassent volontairement : `docker compose stop` primary, perte quorum etcd, latence `tc`/`toxiproxy`, disque plein, SIM7600 tué.
+  - Pas de gating, notification si rouge.
 
-### Parallélisation — essentielle pour tenir les temps
+### Parallélisation — état réel
 
-Sans parallélisation, les 187 tests actuels prennent 66 min. **Inutilisable pour une IA qui itère.** Deux leviers :
+#### Inter-niveaux : SÉQUENTIEL strict
+`tier2.needs: tier1` et `tier3.needs: tier2`. Si tier 1 fail, tier 2/3 ne tournent pas. Économise les runners self-hosted et accélère le feedback IA (échec tier 1 visible en 25s au lieu d'attendre 7 min).
 
-#### Levier 1 — Parallélisation INTRA-niveau (pytest-xdist)
-Chaque niveau lance ses tests en parallèle sur N workers.
-- **Tier 1** : trivial (fonctions pures sans état partagé). `pytest -n auto`.
-- **Tier 2** : chaque test a son propre SQLite temp → isolation totale. `pytest -n auto`.
-- **Tier 3** : un cluster Docker par worker (`docker compose -p worker1`, `-p worker2`). Plus coûteux mais faisable sur 2-4 workers.
-- **Gain** : tier 3 passe de ~15 min (séquentiel) à ~4-5 min (4 workers).
+#### Intra-niveau
+| Tier | Stratégie | État |
+|---|---|---|
+| Tier 1 | `pytest -n auto` (xdist) | ✅ Activé |
+| Tier 2 | `-n 1` (séquentiel) | ⚠️ Race SQLite, à fixer si volume |
+| Tier 3 | `pytest-split --splits 2 --group N` via matrix worker | ⚠️ Installé, désactivé J8 itération 1 |
 
-#### Levier 2 — Parallélisation INTER-niveaux
-Tous les tiers tournent en même temps au lieu de `tier2.needs: tier1`.
+#### Concurrency PR
+`concurrency: { group: ci-${ref}, cancel-in-progress: true }` — chaque nouveau push annule le run précédent sur la même branche. Évite l'empilement quand l'IA itère vite.
 
-| Stratégie | Temps total | Coût CI | Feedback précoce | Verdict |
-|---|---|---|---|---|
-| **Séquentiel** (tier1 → tier2 → tier3) | somme | minimal | oui, tier 1 échoue vite | ✅ recommandé si tier 1 est fiable |
-| **Parallèle** (tous en même temps) | max | 3× | non, tout est lancé quand même | ⚠️ gâchis si tier 1 fail régulièrement |
+### Temps total observé (sur PR)
 
-**Recommandation** : **séquentiel inter-niveaux, parallèle intra-niveau**. Tier 1 est rapide (30s) donc le "coût d'attente" est négligeable. Si tier 1 fail, lancer tier 2 et 3 est du gâchis (même bug, détecté plus tard).
+- Tier 1 : ~25s
+- Tier 2 : ~25s
+- Tier 3 worker 1 : ~7 min (boot 30s + 119 tests 6m37)
+- **Total séquentiel** : ~8 min, tenable pour l'IA.
 
-### Estimation réaliste APRÈS extraction logique pure (priorité 1)
+### Schéma GitHub Actions
 
-Sur les 187 tests actuels, l'extraction en fonctions pures redistribue :
-- ~120 tests → tier 1 (logique pure, <30s total avec xdist)
-- ~45 tests → tier 2 (API, <2 min avec xdist)
-- ~20 tests → tier 3 (cluster, <5 min avec 2 workers)
-- ~2 tests → tier 4 (failover complet, nightly)
+Le workflow réel évolue plus vite que cette doc. **Référence canonique** : [.github/workflows/pr.yml](../.github/workflows/pr.yml).
 
-**Temps total PR (séquentiel inter + parallèle intra)** : ~7-8 minutes. Acceptable pour l'IA.
-
-**Sans extraction** : impossible de passer sous 30 min, peu importe la stratégie.
-
-### Schéma GitHub Actions (proposé)
-
-```yaml
-name: CI
-on: [push, pull_request]
-
-jobs:
-  tier1_unit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: pytest -m unit -n auto --randomly-seed=last   # ← xdist parallèle intra
-    timeout-minutes: 2
-
-  tier2_integration:
-    needs: tier1_unit   # ← séquentiel inter : si tier1 fail, pas la peine de lancer tier2
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: pytest -m integration -n auto   # ← parallèle intra
-    timeout-minutes: 3
-
-  tier3_e2e:
-    needs: tier2_integration
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        worker: [1, 2]   # ← 2 clusters Docker en parallèle
-    steps:
-      - run: docker compose -p worker${{ matrix.worker }} up -d
-      - run: pytest -m e2e --worker-id=${{ matrix.worker }}
-    timeout-minutes: 6
-
-  tier4_chaos:
-    if: github.event_name == 'schedule'   # ← nightly cron uniquement
-    runs-on: ubuntu-latest
-    steps:
-      - run: pytest -m chaos
-    timeout-minutes: 45
-    continue-on-error: true   # ← pas de blocage
+Structure résumée :
+```
+ci/pipeline branch
+   ├── tier1_unit (ubuntu-latest, ~25s)
+   └── needs → tier2_integration (ubuntu-latest, ~25s)
+        └── needs → tier3_e2e (matrix [1,2], self-hosted alarm-ci, ~7 min)
+            ├── compose up cluster (.env.ci-wN)
+            ├── wait-cluster.sh
+            ├── pytest tests/test_e2e.py
+            ├── compose logs → artifact
+            └── cleanup.sh (if always)
 ```
 
 ---
@@ -302,29 +273,47 @@ Les utilitaires (`_reset_clock_all_nodes`, `_login_user`, `FakeApiService`) ne s
 
 ## 6. Outils et stack
 
-| Outil | Rôle | Niveau |
-|---|---|---|
-| `pytest` | Runner | Tous |
-| `hypothesis` | Property-based testing | Tier 1, 2 |
-| `mutmut` | Mutation testing | Tier 1 (nightly) |
-| `pytest-randomly` | Ordre aléatoire des tests (détecte couplings) | Tous |
-| `pytest-testmon` | Re-run uniquement les tests impactés par un diff | Tier 1, 2 (accélération IA) |
-| `pytest-xdist` | Parallélisation (après extraction logique pure) | Tier 1, 2 |
-| `schemathesis` | Contract tests depuis OpenAPI | Tier 2 |
-| `FastAPI TestClient` | Test endpoints sans serveur live | Tier 2 |
-| `toxiproxy` | Injection de panne réseau | Tier 4 |
-| Linter Ruff custom | Règles anti-tests-pourris | Pre-commit |
+> Source de vérité : [requirements-dev.txt](../requirements-dev.txt) + [pyproject.toml](../pyproject.toml).
+
+| Outil | Rôle | État | Notes |
+|---|---|---|---|
+| `pytest` 8.3.4 | Runner | ✅ Installé | Tous tiers |
+| `pytest-xdist` 3.6.1 | Parallélisation intra-niveau | ✅ Installé | Activé tier 1, désactivé tier 2 (race SQLite) |
+| `pytest-randomly` 3.16.0 | Ordre aléatoire (détecte couplings) | ✅ Installé | Activé tier 1+2, désactivé tier 3 (debug) |
+| `pytest-cov` 6.0.0 | Coverage | ✅ Installé | Tier 1 uniquement |
+| `pytest-split` 0.9.0 | Répartition tests entre matrix workers | ✅ Installé | Activable en tier 3 (J8 itération 2) |
+| `hypothesis` 6.122.3 | Property-based testing | ⚠️ Installé, 0 usage | À utiliser pour invariants combinatoires |
+| `FastAPI TestClient` (via fastapi) | Test endpoints sans serveur live | ✅ Installé | Tier 2 |
+| `mutmut` | Mutation testing | ❌ Non installé | À ajouter quand on attaquera G1 (nightly) |
+| `pytest-testmon` | Re-run tests impactés par un diff | ❌ Non installé | Optionnel, accélération IA |
+| `pytest-asyncio` | Tests async natifs | ❌ Non installé | Pas nécessaire avec TestClient |
+| `schemathesis` | Contract tests OpenAPI | ❌ Non installé | À évaluer quand le tier 2 grandit |
+| `toxiproxy` | Injection panne réseau | ❌ Non installé | Tier 4 (chaos), pas implémenté |
+| Linter Ruff custom (G5) | Règles anti-tests-pourris | ❌ Non configuré | À ajouter en pre-commit |
+| `requests`, `pyjwt`, `pyyaml` | Helpers tests/CI | ✅ Installés | Tests + scripts diagnostic |
+
+**Outils d'infra CI (hors pytest)** :
+- `myoung34/github-runner:2.333.1` (image runner Docker, cf `infra/runner/docker-compose.runner.yml`)
+- GitHub App `alarm-murgat-bot` (App ID 3428066, installation 125174785, repo claude-murgat/Alarm2.0)
+- Branch protection sur `master` : required checks `Tier 1 — Unit (logique pure)` + `Tier 2 — Integration (FastAPI TestClient + SQLite)`. Tier 3 PAS required (le temps de stabiliser).
 
 ---
 
 ## 7. Questions ouvertes / décisions à prendre
 
-1. **Qui est l'IA ?** Claude via API ? Un agent dédié ? Comment elle est branchée (webhook GitHub, polling d'issues) ?
-2. **Niveau d'autonomie** : merge automatique si tous verts, ou review humain obligatoire ?
-3. **Seuils mutation testing** : 80% est une suggestion. À calibrer selon le périmètre.
-4. **Périmètre tier 1** : toute la logique métier extraite ? Aussi les validations Pydantic ? Les helpers de schéma ?
-5. **Budget total CI par PR** : combien de minutes on s'autorise avant que le feedback devienne "trop lent pour l'IA" ?
+### Tranchées (J1-J9)
+
+1. ~~**Qui est l'IA ?**~~ → **Claude Code**, via session interactive. Identité robot pour le code = GitHub App `alarm-murgat-bot`. Webhook IA pas encore branché.
+4. ~~**Périmètre tier 1**~~ → **logique métier extraite uniquement** (`backend/app/logic/*`). Pas de validations Pydantic ni helpers schéma à ce stade. 87 tests.
+5. ~~**Budget temps CI par PR**~~ → ~8 min observé, OK. Plafond cible : 10 min. Au-delà → optimiser ou splitter.
+
+### Encore ouvertes
+
+2. **Niveau d'autonomie IA** : merge automatique si tous verts, ou review humain obligatoire ? **Décision provisoire** : review humain obligatoire tant que l'IA n'a pas fait 10 PRs propres consécutives.
+3. **Seuils mutation testing** : 80% est une suggestion. À calibrer quand mutmut sera activé (pas avant que tier 1 soit complet).
 6. **Gestion des flaky** : suppression automatique après N échecs en M jours ? Qui décide ?
+7. **Tier 3 required ?** : pour l'instant non required (instable). À promouvoir required après 5 runs verts consécutifs.
+8. **Hypothesis non utilisé** : installé mais 0 test property-based. Décider d'un premier test pilote (ex: invariant `evaluate_escalation` sur des entrées combinatoires) ou retirer la dep.
 
 ---
 
@@ -335,29 +324,156 @@ Checklist pour un Claude (ou autre) qui rouvre ce projet demain :
 - [ ] Lire [.claude/CLAUDE.md](../.claude/CLAUDE.md) (contexte projet)
 - [ ] Lire [tests/INVARIANTS.md](../tests/INVARIANTS.md) (source de vérité business)
 - [ ] Lire [tests/audit_v2.json](../tests/audit_v2.json) (bugs connus, priorités)
-- [ ] Lire ce document (stratégie CI + process IA)
-- [ ] Consulter `git log` pour voir l'état récent
+- [ ] Lire ce document **dans son intégralité, en particulier la section 8bis** (bugs CI déjà identifiés et workarounds appliqués — ne pas tomber dans les mêmes pièges)
+- [ ] `git log --oneline -20` pour voir l'état récent
+- [ ] `git branch --show-current` puis `gh run list --branch <branche> --limit 5` pour voir l'état CI
 - [ ] Vérifier le statut des priorités dans audit_v2.json (section `priority_actions`)
 
-**Priorités actuelles** (rappel) :
-1. Extraire la logique métier en fonctions pures + 100 unit tests rapides
+**État au 2026-04-19** :
+- ✅ Extraction logique pure : 95% complète (6 modules dans `backend/app/logic/`, 87 unit tests verts)
+- ✅ Pipeline CI 3 tiers : opérationnel (tier 1+2 verts en cloud, tier 3 sur self-hosted Docker local — voir section 3)
+- ✅ Branch protection master active (required tier 1+2)
+- ✅ GitHub App `alarm-murgat-bot` + 2 runners self-hosted
+- ⚠️ Tier 3 : 88/119 verts sur premier run, 12 fails à fixer (cf prompt session annexe)
+- ❌ Tier 4 chaos : non implémenté
+- ❌ Mutation testing (mutmut) : non installé
+- ❌ Bot IA branché en webhook : non, mode interactif uniquement
+
+**Priorités originales** (encore valables, à réordonner selon l'état) :
+1. Extraire la logique métier en fonctions pures + 100 unit tests rapides ← **fait à 95%**
 2. Corriger les bugs catalogués (INV-011, INV-018, INV-019, INV-031, INV-015b, INV-066, INV-082, INV-084, INV-085, BUG-03)
 3. Tests de race conditions + property-based (hypothesis)
-4. Mettre en place les 4 niveaux CI avec gating approprié
+4. Mettre en place les 4 niveaux CI avec gating approprié ← **3/4 fait**
 5. Tests error paths et config dynamique
 
-**Point de départ recommandé** : étape 1 (extraction logique pure). Elle débloque toutes les autres.
+**Point de départ recommandé maintenant** :
+- Si tu débarques **fraîche** : commence par lire la section 8bis pour comprendre les pièges CI déjà documentés. Puis regarde l'état actuel via `gh run list`.
+- Si tu vises à **stabiliser le tier 3** : c'est l'enjeu actuel. Voir le prompt dédié donné à l'autre session (12 tests rouges à analyser).
+- Si tu vises à **étoffer tier 2** : ajouter des tests intégration sur les contrats critiques (escalation, ack, alarme creation). Budget P4 = 5 par feature.
+
+---
+
+## 8bis. Bugs CI connus — à réévaluer avant de fixer
+
+> **Règle d'or** : avant de toucher à un de ces bugs, relire la rubrique correspondante,
+> évaluer si le contexte a changé, et confirmer que le coût du fix est inférieur au coût
+> de continuer à vivre avec. Cf. principe P4 (budget de tests/complexité fixé).
+
+### CI-BUG-01 — Image runner GitHub Actions vieillit côté serveur
+
+**Statut** : workaround appliqué (image bumpée 2.319.1 → 2.333.1, J4).
+**Symptôme attendu de réapparition** : `Forbidden Runner version vX.Y.Z is deprecated and cannot receive messages` dans les logs du conteneur runner. Les workflows partent en timeout côté GitHub.
+**Échéance probable** : 6-12 mois après chaque pin (GitHub déprécie les versions au fil du temps).
+**Fix court (~10 min)** : bump manuel du tag dans `infra/runner/docker-compose.runner.yml` + `runner.sh down/up`.
+**Fix long (~30 min, à évaluer)** : Renovate ou Dependabot configuré sur l'image. PRs auto, 1/mois.
+**À réévaluer si** :
+- Le bug réapparaît une 2e fois (= pattern, mérite l'auto)
+- Le runner part sur OVH (downtime moins acceptable, monitoring + upgrade auto plus pertinents)
+- L'équipe grossit (un humain qui rate le bump = blocage CI pour tous)
+
+### CI-BUG-02 — Race xdist sur seed users SQLite (tier 2)
+
+**Statut** : workaround appliqué (`pytest -n 1` sur tier 2, J6).
+**Symptôme** : `sqlite3.IntegrityError: UNIQUE constraint failed: users.name` en CI multi-CPU. Invisible en local mono-CPU.
+**Cause** : workers xdist partagent `os.environ["TEST_DB_FILE"]`, donc même fichier SQLite, donc race sur le seed users du lifespan FastAPI.
+**Coût actuel** : tier 2 séquentiel = ~3s pour 4 tests. Acceptable.
+**Fix court (~1h)** : DB par worker via `PYTEST_XDIST_WORKER` dans `tests/integration/conftest.py`.
+**À réévaluer si** :
+- Tier 2 dépasse ~30 tests OU sa durée totale dépasse 30s
+- Décision de basculer sur Postgres service container (refactor du conftest de toute façon)
+- Tests intégration commencent à hit des routes qui modifient les users (le state partagé devient un problème de correctness, pas juste de perf)
+
+### CI-BUG-03 — Bit exécutable des scripts shell pas préservé sous Windows
+
+**Statut** : fix appliqué (`git update-index --chmod=+x`, J8 itération 1).
+**Symptôme** : `Permission denied` sur `./scripts/ci-cleanup.sh` ou `./scripts/ci-wait-cluster.sh` lors du run sur runner Linux. `chmod +x` local ne suffit pas — Git sous Windows ne propage pas le bit exec dans l'index.
+**Cause** : `core.fileMode` souvent à `false` sous Git Windows. Le bit exec doit être marqué dans l'index via une commande dédiée.
+**Fix permanent** : `git update-index --chmod=+x scripts/*.sh infra/runner/runner.sh` (mode 100755 dans l'index, vérifiable via `git ls-files --stage`).
+**À réévaluer si** : tu ajoutes un nouveau script `.sh` — penser à `git update-index --chmod=+x` AVANT le premier push, sinon CI rouge.
+
+### CI-BUG-04 — `RUN_AS_ROOT=false` casse l'accès docker.sock (DooD)
+
+**Statut** : fix appliqué (`RUN_AS_ROOT=true`, J8 itération 2).
+**Symptôme** : `permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock`.
+**Cause** : le runner non-root ne peut pas lire le socket Docker monté (qui appartient à `root:docker`). On a choisi DooD via socket mount → root effectif quel que soit le user du runner.
+**Fix** : `RUN_AS_ROOT: "true"` dans `infra/runner/docker-compose.runner.yml`. Acceptable car threat model DooD déjà acté (cf section 8bis intro).
+**À réévaluer si** : on passe à un runner rootless (Docker rootless ou Sysbox) — alors revenir à `RUN_AS_ROOT=false` après avoir donné l'accès au socket via groupe docker. Pas avant que ce soit nécessaire.
+
+### CI-BUG-05 — `localhost` ≠ host depuis runner conteneurisé (DooD)
+
+**Statut** : fix appliqué (`extra_hosts: host.docker.internal:host-gateway` partout, J8 itération 3).
+**Symptôme** : tests échouent à se connecter à `http://localhost:18000` (le backend lancé par le runner). `wait-cluster.sh` timeout sur "backend up" alors que les conteneurs sont healthy.
+**Cause** : depuis le runner conteneurisé (DooD), `localhost` = loopback du runner, PAS du host. Les conteneurs des tests tournent sur le host (via socket mount). Pour les joindre depuis le runner, utiliser `host.docker.internal`.
+**Fix** :
+- `infra/runner/docker-compose.runner.yml` : `extra_hosts: ["host.docker.internal:host-gateway"]` sur le service runner
+- `docker-compose.yml` (cluster Patroni) : pareil sur etcd, patroni, backend (pour Linux où `host.docker.internal` n'est pas natif)
+- Workflow tier 3 : `BACKEND_URL=http://host.docker.internal:$PORT` (pas `localhost`)
+**À réévaluer si** : on passe à un runner non-conteneurisé (`actions-runner` natif sur host) — alors revenir à `localhost`. Cf migration OVH.
+
+### CI-BUG-06 — Tier 3 worker 2 désactivé temporairement
+
+**Statut** : workaround actif (J8 itération 1, voir `.github/workflows/pr.yml`).
+**Symptôme** : aucun (la matrix tourne sur worker 1, worker 2 émet un junit XML vide).
+**Cause** : premier run tier 3 a échoué pendant la collection pytest avec une trace illisible (capture.py noise + `1 error in collection`). Réduction de scope pour isoler.
+**Fix court (15-30 min)** : sur le worker 1 isolé qui passe (88/119 verts), réactiver progressivement :
+1. Réintégrer les autres fichiers (`test_improvements.py`, `test_user_modes.py`, etc.) un par un, voir ce qui collecte mal.
+2. Réactiver `pytest-randomly` (`-p no:randomly` enlever).
+3. Réactiver matrix worker 2 + `pytest-split --splits 2 --group N`.
+**À réévaluer** : DOIT être adressé. Workaround acceptable pour 1-2 itérations max, sinon on perd la moitié de la capacité tier 3 et on n'attrape pas les bugs sur les autres fichiers.
+
+### CI-BUG-07 — `tests/test_e2e.py::test_data_persists_after_restart` chemin Windows hardcodé
+
+**Statut** : en cours de fix (session annexe, J8 itération 5).
+**Symptôme** : `FileNotFoundError: [Errno 2] No such file or directory: 'C:/Users/Charles/Desktop/Projet Claude/Alarm2.0'`.
+**Cause** : chemin absolu Windows hardcodé dans le test. Marchait par hasard chez l'auteur, casse en CI Linux.
+**Fix** : remplacer par chemin relatif au repo OU détection OS. Vérifier `grep -rn "C:/" tests/` pour d'autres occurrences.
+**À réévaluer** : ajouter un linter custom pour interdire les chemins absolus dans les tests (cf G5 anti-patterns). Optionnel pour l'instant.
+
+### CI-BUG-08 — Actions GitHub sur Node.js 20 dépréciées (échéance juin 2026)
+
+**Statut** : warning, pas bloquant.
+**Symptôme** : annotation jaune dans tous les runs : "Node.js 20 actions are deprecated... Will be forced to Node.js 24 by default starting June 2nd, 2026. Removed Sept 16th, 2026."
+**Actions concernées** : `actions/checkout@v4`, `actions/setup-python@v5`, `actions/upload-artifact@v4`.
+**Fix prévu** : attendre les versions majeures suivantes de ces actions (v5/v6/v5 respectivement) qui passeront sur Node.js 24. Ou forcer Node.js 24 maintenant via `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` env var.
+**À réévaluer** : printemps 2026, vérifier les nouvelles versions disponibles. Fix = bump des `@vN` dans le workflow, 5 min.
+
+---
+
+### Pattern à retenir pour les futurs bugs CI
+
+Tout fix infra a un coût caché : maintenance, divergence entre runners local/cloud,
+courbe d'apprentissage pour le suivant. Avant d'agir :
+
+1. Le bug se manifeste-t-il **maintenant** ou **dans le futur** ? (futur → souvent OK d'attendre)
+2. Le workaround a-t-il un coût récurrent ou one-shot ? (récurrent → fixer plus vite)
+3. Le fix introduit-il de la complexité que personne d'autre que toi ne comprendra ? (oui → écrire la doc avant le fix)
+4. Y a-t-il un message d'erreur clair quand le bug réapparaît ? (oui → coût de re-fix faible, attendre OK)
 
 ---
 
 ## 9. Références croisées
 
+### Process / business
 - [.claude/CLAUDE.md](../.claude/CLAUDE.md) — contexte projet, conventions TDD
 - [tests/INVARIANTS.md](../tests/INVARIANTS.md) — catalogue des règles business
 - [tests/audit_v2.json](../tests/audit_v2.json) — audit critique de la suite actuelle
 - [tests/audit_results.json](../tests/audit_results.json) — métriques de durée des tests
 - [tests/audit_tests.py](../tests/audit_tests.py) — script d'audit trimestriel
-- [IMPROVEMENTS.md](../IMPROVEMENTS.md) — backlog historique du projet
+
+### Infra CI (mise en place J1-J9, branche `ci/pipeline`)
+- [.github/workflows/pr.yml](../.github/workflows/pr.yml) — workflow 3 tiers (référence canonique)
+- [pyproject.toml](../pyproject.toml) — config pytest (markers, pythonpath, coverage)
+- [requirements-dev.txt](../requirements-dev.txt) — outils tests/CI
+- [.gitattributes](../.gitattributes) — LF forcé sur scripts/Python (portabilité Linux)
+- [.dockerignore](../.dockerignore) — réduit contexte build images
+- [infra/runner/](../infra/runner/) — runner Docker self-hosted (compose, README, script wrapper)
+- [scripts/ci-wait-cluster.sh](../scripts/ci-wait-cluster.sh) — polling Patroni leader + backend ready
+- [scripts/ci-cleanup.sh](../scripts/ci-cleanup.sh) — cleanup ciblé sur 1 projet (pas de prune global)
+- [.env.ci-w1](../.env.ci-w1), [.env.ci-w2](../.env.ci-w2) — config cluster CI ports décalés
+- [tests/integration/conftest.py](../tests/integration/conftest.py) — TestClient + SQLite temp
+
+### Projet (autre)
+- [IMPROVEMENTS.md](../IMPROVEMENTS.md) — backlog historique
 - [README.md](../README.md) — vue d'ensemble utilisateur
 - [ARCHITECTURE_SMS_VOIX.md](../ARCHITECTURE_SMS_VOIX.md) — architecture SMS/voix
 - [docs/architecture_option_B_3vps_patroni.md](architecture_option_B_3vps_patroni.md) — architecture cluster
@@ -366,4 +482,5 @@ Checklist pour un Claude (ou autre) qui rouvre ce projet demain :
 
 ## 10. Dernière mise à jour
 
+- **2026-04-19** : refonte sections 3, 6, 7, 8, 8bis, 9 après mise en place CI 3 tiers (J1-J9). Ajout de 6 bugs CI (CI-BUG-03 à 08). État réel divergent du plan initial — sections marquées "implémenté" font foi.
 - **2026-04-17** : création du document. Synthèse de la session d'audit et d'alignement doc.

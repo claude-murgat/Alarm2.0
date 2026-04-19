@@ -3,7 +3,13 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
 venv/
+.venv/
 *.db
 
 # Android
@@ -44,3 +50,14 @@ docker-data/
 
 # Local Claude settings
 .claude/settings.local.json
+
+# Runner self-hosted (secrets — ne jamais commiter)
+infra/runner/.env
+infra/runner/*.pem
+infra/runner/*.private-key*
+
+# Reports CI (artefacts locaux)
+reports/
+
+# act (GitHub Actions runner local)
+.actrc.local

@@ -1,0 +1,40 @@
+# Runner self-hosted GitHub Actions, dockerise.
+#
+# Image : myoung34/github-runner (mature, ~5M pulls, supporte ephemeral + GitHub App)
+# Mode  : DooD (Docker-out-of-Docker) via mount /var/run/docker.sock
+#         → les conteneurs lances par les tests (compose Patroni etc.) tournent sur
+#           le host, pas dans le runner. Perfs natives.
+# Auth  : GitHub App (App ID + Installation ID + cle privee .pem bind-mount).
+#         → token de registration auto-renouvele, pas de PAT a renouveler.
+# Cycle : ephemeral=true → conteneur detruit apres chaque job (pas de pollution).
+#
+# Lancer :   docker compose -f infra/runner/docker-compose.runner.yml --env-file infra/runner/.env up -d
+# Verifier : Settings → Actions → Runners du repo → 2 runners "Idle"
+#
+# Voir infra/runner/README.md pour la procedure complete (creation App, secrets, OVH).
+
+services:
+  gh-runner:
+    image: myoung34/github-runner:2.333.1
+    restart: always
+    environment:
+      REPO_URL: https://github.com/${GH_OWNER}/${GH_REPO}
+      APP_ID: ${APP_ID}
+      APP_PRIVATE_KEY: ${APP_PRIVATE_KEY}
+      APP_LOGIN: ${APP_LOGIN}
+      RUNNER_NAME_PREFIX: alarm-runner
+      RUNNER_SCOPE: repo
+      LABELS: self-hosted,linux,docker,alarm-ci
+      EPHEMERAL: "true"
+      DISABLE_AUTO_UPDATE: "true"
+      # true requis pour acceder au socket Docker monte (DooD).
+      # Acceptable car repo prive + threat model deja acte (cf docs/AI_STRATEGY.md 8bis).
+      RUN_AS_ROOT: "true"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    # host.docker.internal indispensable : les jobs spawn des conteneurs sur le host
+    # via DooD, et doivent pouvoir les joindre via les ports mappes du host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    deploy:
+      replicas: 2

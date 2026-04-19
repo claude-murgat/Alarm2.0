@@ -6,6 +6,12 @@
 services:
   etcd:
     image: quay.io/coreos/etcd:v3.5.17
+    # extra_hosts : sur Linux (CI/VM), Docker Desktop n'existe pas → host.docker.internal
+    # n'est pas resolu par defaut. host-gateway (Docker 20.10+) le resoud vers l'IP du
+    # host. Sur Docker Desktop Windows, host.docker.internal est natif → cette ligne est
+    # ignoree (pas de regression).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "${ETCD_CLIENT_PORT}:2379"
       - "${ETCD_PEER_PORT}:2380"
@@ -31,6 +37,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.patroni
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "${PG_PORT}:5432"
       - "${PATRONI_PORT}:8008"
@@ -52,6 +60,8 @@ services:
 
   backend:
     build: ./backend
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "0.0.0.0:${BACKEND_PORT}:8000"
     environment:

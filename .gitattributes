@@ -1,0 +1,44 @@
+# Force LF sur tout le code/script/config pour eviter divergence Windows (CRLF) / Linux (LF).
+# core.autocrlf=true cote local reste OK : le checkout reste CRLF sous Windows, mais le
+# blob stocke est en LF et c'est ce que voient les runners Linux / images Docker.
+
+* text=auto eol=lf
+
+# Scripts shell : LF obligatoire (sinon "bad interpreter: ^M" sur Linux)
+*.sh    text eol=lf
+*.bash  text eol=lf
+
+# Python / YAML / config
+*.py    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.toml  text eol=lf
+*.cfg   text eol=lf
+*.ini   text eol=lf
+*.json  text eol=lf
+
+# Dockerfile / compose
+Dockerfile*       text eol=lf
+docker-compose*   text eol=lf
+.dockerignore     text eol=lf
+.gitignore        text eol=lf
+.gitattributes    text eol=lf
+.env.*            text eol=lf
+
+# Specifiquement Windows
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# Binaires : pas de conversion
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.zip   binary
+*.gz    binary
+*.apk   binary
+*.aab   binary
+*.pem   binary
