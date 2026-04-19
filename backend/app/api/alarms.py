@@ -8,6 +8,9 @@ from ..models import Alarm, AlarmNotification, User, EscalationConfig
 from ..schemas import AlarmCreate, AlarmResponse
 from ..auth import get_current_user, get_current_admin
 from ..events import log_event
+from ..logic.alarm_creation import evaluate_alarm_creation_plan
+from ..logic.ack_authorization import evaluate_ack_authorization
+from ..logic.models import EscalationChainEntry, UserSnapshot
 
 router = APIRouter(prefix="/api/alarms", tags=["alarms"])
 
@@ -35,65 +38,72 @@ def send_alarm(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Send a new alarm. Only one active alarm at a time."""
+    """Send a new alarm. Only one active alarm at a time.
+    Logique de decision (INV-080 chaine vide, fallback assignation) extraite
+    dans logic/alarm_creation.py (testee unit)."""
     existing = db.query(Alarm).filter(Alarm.status.in_(["active", "escalated"])).first()
     if existing:
         raise HTTPException(status_code=409, detail="Une alarme est déjà active")
 
-    assigned_user_id = alarm_data.assigned_user_id
+    # Snapshots pour la fonction pure
+    chain_orm = db.query(EscalationConfig).order_by(EscalationConfig.position).all()
+    chain_snapshot = [
+        EscalationChainEntry(position=ec.position, user_id=ec.user_id)
+        for ec in chain_orm
+    ]
+    users_orm = db.query(User).all()
+    user_snapshots = [
+        UserSnapshot(id=u.id, name=u.name, is_online=u.is_online, last_heartbeat=u.last_heartbeat)
+        for u in users_orm
+    ]
 
-    if not assigned_user_id:
-        first_escalation = (
-            db.query(EscalationConfig)
-            .order_by(EscalationConfig.position)
-            .first()
+    plan = evaluate_alarm_creation_plan(
+        requested_assigned_user_id=alarm_data.assigned_user_id,
+        chain=chain_snapshot,
+        users=user_snapshots,
+    )
+
+    # INV-080 : email direction technique si chaine vide
+    if plan.needs_direction_technique_email:
+        from ..models import SystemConfig
+        from ..email_service import send_alert_email
+
+        config = db.query(SystemConfig).filter(SystemConfig.key == "alert_email").first()
+        recipient = config.value if config else "direction_technique@charlesmurgat.com"
+        send_alert_email(
+            subject="Alerte: chaîne d'escalade vide",
+            body=(
+                f"Une alarme a été envoyée mais la chaîne d'escalade est vide.\n"
+                f"Titre: {alarm_data.title}\n"
+                f"Message: {alarm_data.message}\n"
+                f"Sévérité: {alarm_data.severity}"
+            ),
+            to=recipient,
         )
-        if first_escalation:
-            assigned_user_id = first_escalation.user_id
-        else:
-            from ..models import SystemConfig
-            from ..email_service import send_alert_email
-
-            config = db.query(SystemConfig).filter(SystemConfig.key == "alert_email").first()
-            recipient = config.value if config else "direction_technique@charlesmurgat.com"
-
-            send_alert_email(
-                subject="Alerte: chaîne d'escalade vide",
-                body=(
-                    f"Une alarme a été envoyée mais la chaîne d'escalade est vide.\n"
-                    f"Titre: {alarm_data.title}\n"
-                    f"Message: {alarm_data.message}\n"
-                    f"Sévérité: {alarm_data.severity}"
-                ),
-                to=recipient,
-            )
-
-            first_user = db.query(User).first()
-            if first_user:
-                assigned_user_id = first_user.id
 
     alarm = Alarm(
         title=alarm_data.title,
         message=alarm_data.message,
         severity=alarm_data.severity,
-        assigned_user_id=assigned_user_id,
+        assigned_user_id=plan.assigned_user_id,
     )
     db.add(alarm)
     db.flush()  # Obtenir l'ID avant d'ajouter la notification
 
-    # Ajouter le premier utilisateur assigné à la table des notifiés
-    if assigned_user_id:
-        _add_notified_user(db, alarm, assigned_user_id)
+    # Ajouter l'utilisateur assigné à la table des notifiés
+    if plan.assigned_user_id is not None:
+        _add_notified_user(db, alarm, plan.assigned_user_id)
 
     db.commit()
     db.refresh(alarm)
-    log_event("alarm_created", db=db, alarm_id=alarm.id, user_id=current_user.id, assigned_to=alarm.assigned_user_id)
+    log_event("alarm_created", db=db, alarm_id=alarm.id, user_id=current_user.id,
+              assigned_to=alarm.assigned_user_id)
 
     # Envoyer FCM a l'utilisateur assigne (fire-and-forget)
-    if assigned_user_id:
+    if plan.assigned_user_id is not None:
         try:
             from ..fcm_service import send_fcm_to_user
-            send_fcm_to_user(db, assigned_user_id, alarm.title, alarm.message,
+            send_fcm_to_user(db, plan.assigned_user_id, alarm.title, alarm.message,
                              {"alarm_id": str(alarm.id), "severity": alarm.severity})
         except Exception:
             pass  # FCM est best-effort
@@ -157,9 +167,27 @@ def acknowledge_alarm(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """Acquitter une alarme.
+    INV-031 : seuls les users notifies (alarm_notifications) peuvent ACK.
+    Un user tiers (admin non notifie, mauvaise URL) recoit 403."""
     alarm = db.query(Alarm).filter(Alarm.id == alarm_id).first()
     if not alarm:
         raise HTTPException(status_code=404, detail="Alarm not found")
+
+    # INV-031 : verification d'autorisation (logic/ack_authorization.py)
+    notified_ids = [
+        n[0] for n in db.query(AlarmNotification.user_id)
+        .filter(AlarmNotification.alarm_id == alarm_id).all()
+    ]
+    auth = evaluate_ack_authorization(
+        notified_user_ids=notified_ids,
+        current_user_id=current_user.id,
+    )
+    if not auth.allowed:
+        raise HTTPException(
+            status_code=403,
+            detail="Seuls les utilisateurs notifies peuvent acquitter cette alarme",
+        )
 
     now = clock_now()
     alarm.status = "acknowledged"
