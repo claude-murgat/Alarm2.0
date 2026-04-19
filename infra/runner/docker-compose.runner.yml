@@ -27,7 +27,9 @@ services:
       LABELS: self-hosted,linux,docker,alarm-ci
       EPHEMERAL: "true"
       DISABLE_AUTO_UPDATE: "true"
-      RUN_AS_ROOT: "false"
+      # true requis pour acceder au socket Docker monte (DooD).
+      # Acceptable car repo prive + threat model deja acte (cf docs/AI_STRATEGY.md 8bis).
+      RUN_AS_ROOT: "true"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     deploy:
