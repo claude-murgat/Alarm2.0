@@ -350,6 +350,48 @@ Checklist pour un Claude (ou autre) qui rouvre ce projet demain :
 
 ---
 
+## 8bis. Bugs CI connus — à réévaluer avant de fixer
+
+> **Règle d'or** : avant de toucher à un de ces bugs, relire la rubrique correspondante,
+> évaluer si le contexte a changé, et confirmer que le coût du fix est inférieur au coût
+> de continuer à vivre avec. Cf. principe P4 (budget de tests/complexité fixé).
+
+### CI-BUG-01 — Image runner GitHub Actions vieillit côté serveur
+
+**Statut** : workaround appliqué (image bumpée 2.319.1 → 2.333.1, J4).
+**Symptôme attendu de réapparition** : `Forbidden Runner version vX.Y.Z is deprecated and cannot receive messages` dans les logs du conteneur runner. Les workflows partent en timeout côté GitHub.
+**Échéance probable** : 6-12 mois après chaque pin (GitHub déprécie les versions au fil du temps).
+**Fix court (~10 min)** : bump manuel du tag dans `infra/runner/docker-compose.runner.yml` + `runner.sh down/up`.
+**Fix long (~30 min, à évaluer)** : Renovate ou Dependabot configuré sur l'image. PRs auto, 1/mois.
+**À réévaluer si** :
+- Le bug réapparaît une 2e fois (= pattern, mérite l'auto)
+- Le runner part sur OVH (downtime moins acceptable, monitoring + upgrade auto plus pertinents)
+- L'équipe grossit (un humain qui rate le bump = blocage CI pour tous)
+
+### CI-BUG-02 — Race xdist sur seed users SQLite (tier 2)
+
+**Statut** : workaround appliqué (`pytest -n 1` sur tier 2, J6).
+**Symptôme** : `sqlite3.IntegrityError: UNIQUE constraint failed: users.name` en CI multi-CPU. Invisible en local mono-CPU.
+**Cause** : workers xdist partagent `os.environ["TEST_DB_FILE"]`, donc même fichier SQLite, donc race sur le seed users du lifespan FastAPI.
+**Coût actuel** : tier 2 séquentiel = ~3s pour 4 tests. Acceptable.
+**Fix court (~1h)** : DB par worker via `PYTEST_XDIST_WORKER` dans `tests/integration/conftest.py`.
+**À réévaluer si** :
+- Tier 2 dépasse ~30 tests OU sa durée totale dépasse 30s
+- Décision de basculer sur Postgres service container (refactor du conftest de toute façon)
+- Tests intégration commencent à hit des routes qui modifient les users (le state partagé devient un problème de correctness, pas juste de perf)
+
+### Pattern à retenir pour les futurs bugs CI
+
+Tout fix infra a un coût caché : maintenance, divergence entre runners local/cloud,
+courbe d'apprentissage pour le suivant. Avant d'agir :
+
+1. Le bug se manifeste-t-il **maintenant** ou **dans le futur** ? (futur → souvent OK d'attendre)
+2. Le workaround a-t-il un coût récurrent ou one-shot ? (récurrent → fixer plus vite)
+3. Le fix introduit-il de la complexité que personne d'autre que toi ne comprendra ? (oui → écrire la doc avant le fix)
+4. Y a-t-il un message d'erreur clair quand le bug réapparaît ? (oui → coût de re-fix faible, attendre OK)
+
+---
+
 ## 9. Références croisées
 
 - [.claude/CLAUDE.md](../.claude/CLAUDE.md) — contexte projet, conventions TDD
