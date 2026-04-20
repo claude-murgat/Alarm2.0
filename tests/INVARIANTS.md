@@ -13,12 +13,12 @@ plutôt que d'interpréter à partir du code (le code peut être buggy).
 
 ---
 
-## État d'avancement global (mis à jour au 2026-04-19)
+## État d'avancement global (mis à jour au 2026-04-20)
 
 **Extraction logique pure** : PR 1-5 terminés (cc35b7d sur master).
 - 87 unit tests en 0.14s (logic/ entièrement couvert)
 - Suite E2E : 239 passed / 17 skipped / 0 fail en 1h09
-- 5 bugs catalogue corrigés : INV-011, INV-015b, INV-031, INV-066, INV-102
+- 5 bugs catalogue corrigés : INV-011, INV-015b, INV-031, INV-066, INV-102 + INV-073 (rate limit déjà testé, cf. audit 2026-04-20)
 
 **Statut par catégorie** :
 
@@ -36,7 +36,7 @@ plutôt que d'interpréter à partir du code (le code peut être buggy).
 | 10. Observabilité | 1 | 2 | 0 | 0 (INV-102 ✅ PR0) |
 | 11. Stats | 0 | 2 | 0 | 0 |
 
-**Restant prioritaire** : INV-018 (`original_created_at`), INV-082 (atomicité bulk), INV-084 (délais paramétrables), INV-073 (rate limiting), INV-085 (quorum email).
+**Restant prioritaire** : INV-018 (`original_created_at`), INV-084 (délais paramétrables hardcodés), INV-085 (quorum email). INV-082 déjà atomique côté code (il manque juste un test de race — audit 2026-04-20). INV-073 déjà testé (audit 2026-04-20).
 
 ---
 
@@ -98,7 +98,7 @@ Les seules transitions autorisées sont :
 ### INV-011 [C] ✅ Délai d'escalade uniforme : 15 min pour chaque user
 Le délai entre chaque palier d'escalade est de `escalation_delay_minutes` (défaut 15) pour **tous** les users de la chaîne, quelle que soit leur position.
 - **Pourquoi** : chaque humain a droit au même temps pour répondre. Pas de "veille" accélérée.
-- **Fix** : PR2 (df9a43a). La lecture de `fcm_escalation_delay_minutes` a été retirée de `escalation.py`. Clé encore présente en DB mais plus utilisée → à supprimer du seed (voir INV-084).
+- **Fix** : PR2 (df9a43a). La lecture de `fcm_escalation_delay_minutes` a été retirée de `escalation.py`. La clé n'est plus seedée dans `main.py` non plus (vérifié 2026-04-20 — rien à nettoyer).
 - **Couverture** :
   - Unit : `test_escalation.py::TestUniformDelay` (6 tests paramétrisés position 1/2/3 × below/above delay)
   - E2E : `test_fcm.py::test_no_fast_escalation_for_veille_user_inv011` (assertion inversée de l'ancien test)
@@ -305,12 +305,14 @@ SMS/Call avec `retries >= 3` n'apparaît plus dans `/internal/sms|calls/pending`
 
 **Invariant** : toute écriture de timestamp (`notified_at`, `created_at`, `last_heartbeat`, `acknowledged_at`, `suspended_until`, etc.) doit utiliser `clock_now()`. Sinon, en test, une partie des timestamps est "temps simulé" et une autre est "temps réel" → incohérences.
 
-**Fix** : PR3 (0716174). 3 call sites corrigés :
+**Fix** : PR3 (0716174). 3 call sites `notified_at` corrigés :
 - `alarms.py::_add_notified_user` : ajout `notified_at=clock_now()`
 - `test_api.py::send_test_alarm` (POST `/api/test/send-alarm`) : idem
 - `test_api.py::trigger_escalation` (POST `/api/test/trigger-escalation`) : idem
 
 **Couverture** : l'invariant est maintenant respecté dans tous les call sites. Pas de test unit dédié (la fonction pure ne voit que des snapshots avec dates déjà calculées), mais les tests E2E qui combinent advance_clock + création d'alarme valident implicitement.
+
+**Écart latent connu (audit 2026-04-20)** : `send_alarm` dans `alarms.py:84-89` ne passe pas `created_at=clock_now()` explicitement ; l'objet `Alarm` récupère sa valeur via le default SQLAlchemy `datetime.utcnow` (`models.py:38`). Non problématique tant que les tests créent l'alarme **avant** tout `advance-clock`, mais un futur test qui ferait `advance-clock` puis `POST /alarms/send` verrait un `created_at` en « temps réel ». À forcer en `clock_now()` lors de l'implémentation d'INV-018 (ce sera le bon moment, puisqu'on touchera au modèle `Alarm`).
 
 ---
 
@@ -326,10 +328,11 @@ POST /auth/register avec "bad name" → 422 ou 400.
 ### INV-072 [M] ⚠️ Nom stocké en lowercase
 POST /auth/register avec "TestUser" → stocké "testuser".
 
-### INV-073 [H] ❌ Rate limiting login
+### INV-073 [H] ✅ Rate limiting login
 Plus de 10 tentatives échouées en 60s pour le même username → 429.
 - **Pourquoi** : protection brute-force.
-- **Test** : aucun actuellement.
+- **Code** : `backend/app/api/users.py:18-32` (`_check_rate_limit`, `RATE_LIMIT_MAX_FAILURES = 10`, `RATE_LIMIT_WINDOW = 60`), appelé ligne 62. Raise 429 au 11e échec.
+- **Couverture** (audit 2026-04-20) : E2E `tests/test_improvements.py::TestRateLimiting` — `test_login_rate_limited_after_many_failures` + `test_legitimate_login_still_works_after_rate_limit`.
 
 ### INV-074 [C] ⚠️ Refresh token produit un nouveau token
 POST /auth/refresh avec token valide → nouveau token différent.
@@ -364,12 +367,16 @@ POST /alarms/send avec chaîne vide → email direction technique, alarme persis
 POST /config/escalation/bulk → DELETE + INSERT de la chaîne + FCM push à tous les users affectés.
 - **Couverture** : E2E `TestEscalationChainBulk::test_save_escalation_chain_replaces_all`.
 
-### INV-082 [H] 🐛 /config/escalation/bulk est atomique (transaction unique)
-`POST /api/config/escalation/bulk` modifie la chaîne en supprimant TOUTES les règles existantes puis en insérant les nouvelles. Si cette opération n'est pas dans une seule transaction, il existe une **fenêtre de temps (~ms)** pendant laquelle la chaîne est VIDE en base.
+### INV-082 [H] ⚠️ /config/escalation/bulk est atomique (transaction unique)
+`POST /api/config/escalation/bulk` modifie la chaîne en supprimant TOUTES les règles existantes puis en insérant les nouvelles. Si cette opération n'était pas dans une seule transaction, il existerait une **fenêtre de temps (~ms)** pendant laquelle la chaîne serait VIDE en base.
 
-**Pourquoi c'est grave** : pendant cette fenêtre, si une alarme arrive (`POST /alarms/send`), le code voit `chaîne vide` → déclenche INV-080 (email direction technique + fallback user). L'alarme est envoyée à la mauvaise personne, et un email inutile est envoyé, juste parce qu'un admin modifiait la chaîne au mauvais moment.
+**Pourquoi c'est grave** : pendant cette fenêtre, si une alarme arrive (`POST /alarms/send`), le code verrait `chaîne vide` → déclencherait INV-080 (email direction technique + fallback user). L'alarme serait envoyée à la mauvaise personne, et un email inutile serait envoyé, juste parce qu'un admin modifiait la chaîne au mauvais moment.
 
 **Invariant** : DELETE + INSERT doivent être dans une transaction SQL unique. Une lecture (GET /config/escalation) concurrente ne doit jamais voir 0 lignes tant que la précédente chaîne était non-vide.
+
+**État du code (audit 2026-04-20)** : **l'invariant est déjà respecté**. `SessionLocal` est configurée `autocommit=False, autoflush=False` (`backend/app/database.py:15`). Le handler `save_escalation_chain_bulk` (`backend/app/api/config.py:120-144`) exécute DELETE puis INSERTs puis un seul `db.commit()` — donc une unique transaction. PostgreSQL READ COMMITTED garantit qu'aucune session concurrente ne voit la liste vide avant commit.
+
+**Ce qu'il reste à faire** : écrire le test de race ci-dessous pour **verrouiller** la propriété en régression (candidat pilote bot IA phase 5).
 
 **Test** : thread A fait POST /bulk dans une boucle, thread B fait GET /escalation dans une boucle. B ne doit JAMAIS voir une liste vide (si la chaîne précédente contenait au moins 1 user).
 
@@ -386,11 +393,13 @@ Aucun délai métier ne doit être hardcodé dans le code. Chaque valeur est lue
 |---|---|---|---|
 | `escalation_delay_minutes` | 15 | Délai entre chaque palier d'escalade (INV-011) | ✅ lu en DB (pure fn en prend la valeur en paramètre) |
 | `sms_call_delay_minutes` | 2 | Délai avant enqueue SMS/Call après notification (INV-060) | ✅ lu en DB |
-| `oncall_offline_delay_minutes` | 15 | Délai avant qu'oncall offline déclenche alarme (INV-050) | 🐛 **hardcodé** dans `escalation.py:17` (`ONCALL_OFFLINE_DELAY_MINUTES`), pure fn le prend en paramètre |
+| `oncall_offline_delay_minutes` | 15 | Délai avant qu'oncall offline déclenche alarme (INV-050) | 🐛 **hardcodé** dans `escalation.py:24` (`ONCALL_OFFLINE_DELAY_MINUTES`), pure fn le prend en paramètre |
 | `watchdog_timeout_seconds` | 60 | Délai avant marquer user offline (INV-041) | 🐛 seedé mais **hardcodé** dans `watchdog.py:14` |
-| `escalation_tick_seconds` | 10 | Période de la boucle d'escalade | 🐛 **hardcodé** dans `escalation.py:112, 258` |
-| `fcm_escalation_delay_minutes` | — | **À SUPPRIMER du seed** : plus lu depuis PR2 (INV-011 fixé) | ⚠️ clé encore seedée mais non lue |
+| `escalation_tick_seconds` | 10 | Période de la boucle d'escalade | 🐛 **hardcodé** dans `escalation.py:331` (+ `watchdog.py:48` avec 30s — voir note ci-dessous) |
+| ~~`fcm_escalation_delay_minutes`~~ | — | **Retiré**. Plus lu (PR2, INV-011) ni seedé (vérifié 2026-04-20). Rien à faire. | ✅ |
 | ~~`ack_suspension_minutes`~~ | — | **Non paramétrable** (décision IMPROVEMENTS #13) — 30 min hardcodé voulu | ✅ retiré du seed en PR0 |
+
+**Note audit 2026-04-20** : `watchdog.py:48` utilise `asyncio.sleep(30)` hors tableau ci-dessus. Quand on migrera `escalation_tick_seconds` en `SystemConfig`, décider si le watchdog partage la clé (probable : oui, simplifie) ou a la sienne (`watchdog_tick_seconds`). À trancher au moment du fix.
 
 **Pourquoi paramétrer les ticks** (`escalation_tick_seconds`, `watchdog_timeout_seconds`) :
 - Non seulement pour la flexibilité admin, mais surtout pour **accélérer les tests**. En test, `escalation_tick_seconds=1` réduit le temps d'attente de 10s à 1s par tick. Gain énorme sur une suite de 66 min.
@@ -403,8 +412,8 @@ Si le cluster perd son quorum (< majorité de noeuds healthy dans Patroni/etcd),
 - **Pourquoi** : sans quorum, aucun primary ne peut être élu → écritures bloquées → alarmes non traitées. Le système ne peut pas se récupérer tout seul.
 - **Conditions de déclenchement** :
   - `quorum.has_quorum == False` dans `/api/cluster` (moins de N/2+1 noeuds healthy)
-  - OU Patroni injoignable depuis tous les noeuds pendant > X minutes (seuil à définir, suggestion : 2 min)
-- **Anti-spam** : maximum 1 email par heure pour ce cas (éviter le flood si le problème persiste).
+  - OU Patroni injoignable depuis tous les noeuds pendant > **3 minutes** (seuil arbitré 2026-04-20 pour couvrir les glitches courts type redémarrage Patroni sans flapping)
+- **Anti-spam** : 1 email initial + reminders à **1h, 3h, 6h** jusqu'à résolution (arbitré 2026-04-20). Équilibre information opérateur ↔ bruit. Le reminder s'arrête dès que `has_quorum == True` à nouveau.
 - **🐛 Non implémenté** : le code actuel expose `/api/cluster` avec `has_quorum` mais ne déclenche aucun email.
 - **Test** : stopper 2 des 3 etcd → quorum perdu → email arrive dans Mailhog dans les 2 min.
 
@@ -511,9 +520,10 @@ Sinon → tests orphelins qui verrouillent un comportement mort.
 
 ## ❓ Questions restantes au propriétaire
 
-1. **INV-085 (quorum)** : le seuil de détection "Patroni injoignable depuis > X minutes" — je suggère 2 min, confirme ou ajuste.
-2. **INV-084 fcm_escalation_delay_minutes** : la clé est encore seedée mais plus lue. On la retire du seed dans un petit PR ménage, ou on la garde pour compatibilité future (répétition FCM pendant l'attente d'escalade) ?
-3. **Suivant** : rédiger `android/INVARIANTS.md` pour les invariants côté client (sonnerie continue, vibration, écran verrouillé, rotation bloquée, reprise post-boot, etc.).
+1. ~~**INV-085 (quorum)** : seuil "Patroni injoignable depuis > X minutes" ?~~ → **Tranché 2026-04-20 : 3 min** (voir INV-085 ci-dessus).
+2. ~~**INV-084 fcm_escalation_delay_minutes** : retirer du seed ?~~ → **Classée** : la clé n'est **pas** seedée (vérifié 2026-04-20). Question caduque.
+3. **INV-019 (positions uniques)** : tranché 2026-04-20. **Règle business confirmée** : `POST /config/escalation` avec position déjà occupée doit retourner **409 Conflict**, pas d'upsert silencieux. Le code actuel (`config.py:19-41`) fait un upsert → c'est un bug à corriger (voir backlog).
+4. **Suivant** : rédiger `android/INVARIANTS.md` pour les invariants côté client (sonnerie continue, vibration, écran verrouillé, rotation bloquée, reprise post-boot, etc.).
 
 ---
 
@@ -524,9 +534,9 @@ Ordre recommandé pour les prochains PRs :
 | INV | Criticité | Complexité | Note |
 |---|---|---|---|
 | INV-018 + INV-018b | C | ★★★ | Ajouter `original_created_at` immuable. Migration DB + 5 call sites (stats, schemas, frontend). Gros PR. |
-| INV-082 | H | ★★ | Transaction atomique `/config/escalation/bulk`. Test concurrence `threading.Thread`. |
-| INV-019 + INV-020 | M | ★ | Rejeter positions/user_id dupliqués dans `/config/escalation`. Validation Pydantic + test 409. |
-| INV-073 | H | ★ | Rate limiting login. Le code a déjà `_check_rate_limit`, il manque juste le test E2E (11 tentatives → 429). |
+| INV-082 | H | ★ | Code déjà atomique (cf. audit 2026-04-20) — test concurrence `threading.Thread` à ajouter pour verrouiller la propriété. **Candidat pilote bot IA**. |
+| INV-019 + INV-020 | M | ★ | Rejeter positions/user_id dupliqués dans `/config/escalation` (tranché 2026-04-20 : règle = 409 Conflict). Validation Pydantic + test 409. |
+| ~~INV-073~~ | H | — | ✅ déjà fixé et testé (audit 2026-04-20). |
 | INV-084 (reste) | C | ★★ | Migrer `ONCALL_OFFLINE_DELAY_MINUTES`, `WATCHDOG_TIMEOUT_SECONDS`, `escalation_tick_seconds` en SystemConfig. |
 | INV-085 | C | ★★ | Quorum perdu → email. Nécessite un ping Patroni périodique + anti-spam. |
 | INV-076 | C | ★ | Job CI dédié avec `ENABLE_TEST_ENDPOINTS=false` vérifiant que `/api/test/*` renvoie 404. |
