@@ -446,6 +446,28 @@ Checklist pour un Claude (ou autre) qui rouvre ce projet demain :
 **Fix prévu** : attendre les versions majeures suivantes de ces actions (v5/v6/v5 respectivement) qui passeront sur Node.js 24. Ou forcer Node.js 24 maintenant via `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` env var.
 **À réévaluer** : printemps 2026, vérifier les nouvelles versions disponibles. Fix = bump des `@vN` dans le workflow, 5 min.
 
+### CI-BUG-09 — Tier 3 worker cassé persistant entre runs (couplage PR)
+
+**Statut** : fix appliqué (cleanup robuste + retry compose up, 2026-04-20, session 4).
+**Symptôme observé** : runs consécutifs fail sur `tier3 worker N` avec `dependency failed to start: container ci-wN-patroni-1 exited (130)` ou `Network is unreachable sur host.docker.internal:N8000`. Worker 1 passe, worker 2 fail (ou inverse). Re-run seul ne change rien. **Toutes les PR suivantes sont bloquées** tant que l'état résiduel n'est pas nettoyé.
+**Cause** : le `ci-cleanup.sh` en `if: always()` pouvait timeout silencieusement (compose down bloqué sur container zombie, volume pgdata verrouillé), laissant des résidus (containers en état Error, volumes orphelins, network _default non supprimé). Le run suivant tente de recréer ces ressources → conflit → Patroni exit 130.
+**Fix appliqué** :
+1. `scripts/ci-cleanup.sh` robustifié :
+   - `timeout 30` / `timeout 10` sur chaque commande docker (empêche blocage illimité)
+   - Vérification état résiduel après down (containers + volumes + networks)
+   - Force-cleanup des résidus avec timeouts séparés
+   - Annotation `::error::` GitHub Actions + `exit 2` si état persiste (le problème devient visible dans les logs du run même)
+   - `set -uo pipefail` sans `-e` pour que chaque étape puisse être "défensive" sans kill le script au premier fail
+2. `.github/workflows/pr.yml` : step `Boot cluster` avec **1 retry** — si compose up fail au 1er coup, force-cleanup + retry. Au 2e fail, abandon clean avec annotation.
+3. Pattern applicable aux autres workers : le script est paramétré par `PROJECT` (ex: `ci-w1`, `ci-w2`).
+
+**À réévaluer si** :
+- Un nouveau symptôme apparaît que le retry ne résout pas (ex: runner Docker dans un état plus profond — nécessiterait restart du `gh-runner` conteneur)
+- Le volume de résidus grossit malgré tout (signal d'un leak ailleurs, ex: test qui crée des volumes hors compose)
+- Le temps de job rallongi trop (retry ~1 min supp quand activé — acceptable pour l'instant)
+
+**Principe à retenir** : une PR ne doit **jamais** être bloquée par l'état d'un run précédent. Chaque job doit pouvoir se récupérer d'un état résiduel sans intervention humaine. Le cleanup doit être **idempotent, timeouté, et bruyant** (annotation visible) en cas d'échec partiel.
+
 ---
 
 ### Pattern à retenir pour les futurs bugs CI
