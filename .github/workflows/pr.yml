@@ -102,6 +102,19 @@ jobs:
     needs: tier2_integration
     runs-on: [self-hosted, linux, docker, alarm-ci]
     timeout-minutes: 15
+    # Sérialise tier 3 à travers TOUTES les PRs par worker ID.
+    # Raison (observé 2026-04-20) : PROJECT=ci-w${worker} est fixe par matrix.
+    # Si 2 runs CI tournent en parallèle (2 PRs, ou push master + PR), leurs
+    # jobs worker 1 se battent pour `ci-w1` (containers, volumes, ports 18xxx)
+    # et idem worker 2 pour `ci-w2` (ports 28xxx). Résultat : "patroni is
+    # missing dependency etcd" ou "Cluster boot failed after 2 attempts" —
+    # une PR bloque toutes les autres.
+    # Fix : concurrency job-level par worker. Tier 1+2 restent parallèles
+    # (cloud, pas de namespace partagé). Seul tier 3 self-hosted est queued.
+    # cancel-in-progress:false → on attend son tour, on ne perd pas de run.
+    concurrency:
+      group: ci-tier3-worker-${{ matrix.worker }}
+      cancel-in-progress: false
     strategy:
       fail-fast: false
       matrix:

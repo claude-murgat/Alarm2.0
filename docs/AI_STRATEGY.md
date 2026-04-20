@@ -468,6 +468,34 @@ Checklist pour un Claude (ou autre) qui rouvre ce projet demain :
 
 **Principe à retenir** : une PR ne doit **jamais** être bloquée par l'état d'un run précédent. Chaque job doit pouvoir se récupérer d'un état résiduel sans intervention humaine. Le cleanup doit être **idempotent, timeouté, et bruyant** (annotation visible) en cas d'échec partiel.
 
+### CI-BUG-10 — Race condition tier 3 entre runs parallèles (PROJECT partagé)
+
+**Statut** : fix appliqué (concurrency job-level par worker, 2026-04-20, session 4 suite CI-BUG-09).
+**Symptôme** : 2+ runs CI tournant en parallèle (2 PRs différentes, ou push master + PR) fail aléatoirement sur `tier3_e2e worker N` avec `patroni is missing dependency etcd` ou `Cluster boot failed after 2 attempts (worker N)`, alors qu'un run solo sur la même branche passe. Des PRs individuellement testées vertes ne passent plus quand elles tournent ensemble.
+**Cause** : dans `pr.yml`, `env: PROJECT: ci-w${{ matrix.worker }}` est fixe par numéro de worker — identique à travers toutes les PRs. Deux jobs worker 2 de 2 runs différents essaient simultanément de :
+- créer les mêmes containers (`ci-w2-etcd-1`, `ci-w2-patroni-1`, `ci-w2-backend-1`)
+- binder les mêmes ports host (28000, 22379, 22380, etc. — définis en dur dans `.env.ci-w2`)
+- utiliser les mêmes volumes (`ci-w2_etcd_data`, `ci-w2_pg_data`)
+
+Résultat : l'un des deux fail sur conflit de ressource, généralement avec message docker compose cryptique ("missing dependency etcd" alors que etcd est défini mais ne peut pas bind son port).
+**Fix appliqué** : concurrency **job-level** par worker ID dans `pr.yml` :
+```yaml
+tier3_e2e:
+  concurrency:
+    group: ci-tier3-worker-${{ matrix.worker }}
+    cancel-in-progress: false
+```
+Effet : les jobs `tier3_e2e` avec `matrix.worker=N` sont sérialisés à travers **toutes** les PRs. Si 2 runs sont déclenchés, leurs tiers 3 w1 s'exécutent l'un après l'autre, idem pour w2. Tier 1+2 (cloud, pas de namespace partagé) restent parallèles.
+**Pourquoi pas cancel-in-progress=true** : on veut queue les jobs, pas cancel — chaque PR mérite son run CI.
+**Coût** : si 2 PRs poussent en même temps, la 2e attend ~7 min supp (durée tier 3 d'un run). Acceptable (volume normal = 1-3 PRs/jour, pas 10/h).
+
+**À réévaluer si** :
+- Le volume PR monte (>5/h) → mettre en place 4 runners self-hosted ou ports dynamiques par run_id
+- On passe en OVH/VPS multi-host → 1 cluster par host, plus de partage, concurrency inutile
+- Solution durable : suffixer PROJECT par `$GITHUB_RUN_ID` (ex: `ci-w2-${RUN_ID}`) + ports dynamiques via `.env` généré à la volée. Beaucoup plus complexe, pas phase actuelle.
+
+**Principe à retenir** : un test d'infra **parallèle** exige soit des **namespaces uniques par run**, soit une **sérialisation explicite**. Le premier cas est le plus robuste mais le plus cher à mettre en place. Le deuxième est une dette acceptable si le volume reste faible.
+
 ---
 
 ### Pattern à retenir pour les futurs bugs CI
