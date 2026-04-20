@@ -1,19 +1,28 @@
-# Bot IA — phase 2 : spawn agent Claude Code CLI headless.
+# Bot IA - phase 3B : triggers auto + mode retry.
 #
-# Workflow :
-#   1. Trigger : workflow_dispatch manuel (phase 3 : trigger auto sur label ai:fix).
-#   2. Genere un token GitHub App installation (permissions scopees).
-#   3. Cree une branche ai/issue-<N>/<RUN_ID> depuis master.
-#   4. Installe Claude Code CLI (npm global).
-#   5. Lance claude -p (Opus 4.7) avec :
-#      - system prompt = .github/ai-bot/prompt.md (regles P1-P6 + denylist soft)
-#      - user prompt = body de l'issue source
-#   6. Verifie qu'un diff non-vide a ete produit (abandon sinon).
-#   7. Commit (auteur alarm-murgat-bot[bot]) + push + PR vers master.
-#   8. Commente l'issue source avec le lien PR.
+# Structure :
+#   Job 1 "dispatch" (rapide, <30s) : determine si on continue et extrait les
+#     parametres (mode, issue_number, pr_number, branch, iteration).
+#     Filtre les events non-pertinents (label != ai:fix, bot lui-meme, etc.).
+#   Job 2 "agent_fix" (long, ~10 min) : lance Claude Code CLI, enforce denylist,
+#     commit, push, ouvre ou met a jour la PR.
 #
-# Phase 3 ajoutera : denylist check strict, trigger ai:fix, compteur iterations.
-# Voir docs/AI_STRATEGY.md section 1 + design notes D1-D7.
+# Modes :
+#   - new         : issue fraichement labeled ai:fix (ou workflow_dispatch
+#                   sans PR existante). Cree branche + commit + PR.
+#   - retry-ci    : CI a fail sur une PR bot. Re-execute l'agent avec les
+#                   logs CI enriches en contexte. Push sur meme branche.
+#   - retry-comment : humain a commente /ai-retry ou @alarm-murgat-bot sur
+#                     une PR bot. Idem retry-ci mais contexte = comment.
+#   - retry-manual : workflow_dispatch mais PR existe deja pour cette issue.
+#
+# Concurrency : globale "ai-bot". Un seul run bot a la fois repo-wide,
+#   simplifie et previent les collisions. Volume reel = 2-5x/semaine, queue OK.
+#
+# Limite iterations en 3B : 5 max (dur, sans raffinement). Phase 3C ajoutera
+#   le compteur propre + detection boucle (meme test fail 3x).
+#
+# Voir docs/AI_STRATEGY.md section 1 + design D1-D7 + .github/ai-bot/README.md.
 
 name: AI Bot
 
@@ -24,22 +33,252 @@ on:
         description: "Numero d'issue GitHub decrivant le bug"
         required: true
         type: string
+  issues:
+    types: [labeled]
+  check_run:
+    types: [completed]
+  issue_comment:
+    types: [created]
 
 concurrency:
-  group: ai-bot-issue-${{ inputs.issue_number }}
+  group: ai-bot
   cancel-in-progress: false
 
 jobs:
+  # ============================================================================
+  # Job 1 - dispatch : determine si on continue et extrait les parametres
+  # ============================================================================
+  dispatch:
+    name: Dispatch (mode + eligibility)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    outputs:
+      should_run: ${{ steps.decide.outputs.should_run }}
+      mode: ${{ steps.decide.outputs.mode }}
+      issue_number: ${{ steps.decide.outputs.issue_number }}
+      pr_number: ${{ steps.decide.outputs.pr_number }}
+      branch: ${{ steps.decide.outputs.branch }}
+      iteration: ${{ steps.decide.outputs.iteration }}
+      reject_reason: ${{ steps.decide.outputs.reject_reason }}
+    steps:
+      - name: Generate installation token (read-only)
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.ALARM_BOT_APP_ID }}
+          private-key: ${{ secrets.ALARM_BOT_PRIVATE_KEY }}
+          permission-contents: read
+          permission-pull-requests: read
+          permission-issues: read
+
+      - name: Early filter (label mismatch, bot comment, etc.)
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          LABEL_NAME: ${{ github.event.label.name }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+          CHECK_CONCLUSION: ${{ github.event.check_run.conclusion }}
+        run: |
+          set -euo pipefail
+
+          # Filter 1 : issues.labeled -> label.name doit etre 'ai:fix'
+          if [[ "$EVENT_NAME" == "issues" && "$LABEL_NAME" != "ai:fix" ]]; then
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "reason=label-not-ai:fix" >> "$GITHUB_OUTPUT"
+            echo "Ignored : label '$LABEL_NAME' != 'ai:fix'"
+            exit 0
+          fi
+
+          # Filter 2 : check_run -> conclusion doit etre 'failure'
+          if [[ "$EVENT_NAME" == "check_run" && "$CHECK_CONCLUSION" != "failure" ]]; then
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "reason=check-conclusion-not-failure" >> "$GITHUB_OUTPUT"
+            echo "Ignored : check_run conclusion '$CHECK_CONCLUSION' != 'failure'"
+            exit 0
+          fi
+
+          # Filter 3+4 : issue_comment
+          if [[ "$EVENT_NAME" == "issue_comment" ]]; then
+            # Anti-loop : ignore commentaires du bot lui-meme
+            if [[ "$COMMENT_AUTHOR" == "alarm-murgat-bot" || "$COMMENT_AUTHOR" == "alarm-murgat-bot[bot]" ]]; then
+              echo "eligible=false" >> "$GITHUB_OUTPUT"
+              echo "reason=comment-from-bot" >> "$GITHUB_OUTPUT"
+              echo "Ignored : comment from bot itself"
+              exit 0
+            fi
+
+            # Doit contenir /ai-retry OU @alarm-murgat-bot (redondance decouvrabilite)
+            if ! echo "$COMMENT_BODY" | grep -qE '(/ai-retry|@alarm-murgat-bot)'; then
+              echo "eligible=false" >> "$GITHUB_OUTPUT"
+              echo "reason=comment-no-trigger-keyword" >> "$GITHUB_OUTPUT"
+              echo "Ignored : comment lacks '/ai-retry' or '@alarm-murgat-bot'"
+              exit 0
+            fi
+          fi
+
+          echo "eligible=true" >> "$GITHUB_OUTPUT"
+          echo "Passed early filters for event=$EVENT_NAME"
+
+      - name: Determine mode + extract parameters
+        id: decide
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_ISSUE: ${{ inputs.issue_number }}
+          LABELED_ISSUE: ${{ github.event.issue.number }}
+          COMMENT_ISSUE: ${{ github.event.issue.number }}
+          CHECK_PRS_JSON: ${{ toJSON(github.event.check_run.pull_requests) }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ steps.filter.outputs.eligible }}" != "true" ]]; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "reject_reason=${{ steps.filter.outputs.reason }}" >> "$GITHUB_OUTPUT"
+            echo "Skipping decide step : early filter rejected event."
+            exit 0
+          fi
+
+          MODE=""
+          ISSUE_NUMBER=""
+          PR_NUMBER=""
+          BRANCH=""
+          ITERATION=1
+
+          # --- Etape 1 : determine le type d'event et target initial
+          case "$EVENT_NAME" in
+            workflow_dispatch)
+              ISSUE_NUMBER="$MANUAL_ISSUE"
+              # mode raffine apres (new ou retry-manual selon PR existante)
+              MODE="workflow_dispatch"
+              ;;
+            issues)
+              MODE="new"
+              ISSUE_NUMBER="$LABELED_ISSUE"
+              BRANCH="ai/issue-${ISSUE_NUMBER}/${RUN_ID}"
+              ;;
+            issue_comment)
+              # event.issue.number = issue OU PR number (API partage)
+              # Bot ne retry que sur PR (pas issue non-PR)
+              IS_PR=$(gh api "/repos/${REPO}/issues/$COMMENT_ISSUE" --jq '.pull_request // empty' || echo "")
+              if [[ -z "$IS_PR" ]]; then
+                echo "should_run=false" >> "$GITHUB_OUTPUT"
+                echo "reject_reason=comment-on-non-pr-issue" >> "$GITHUB_OUTPUT"
+                echo "Ignored : comment is on an issue (not a PR)."
+                exit 0
+              fi
+              MODE="retry-comment"
+              PR_NUMBER="$COMMENT_ISSUE"
+              ;;
+            check_run)
+              # Trouve la PR liee au check_run
+              PR_NUMBER=$(echo "$CHECK_PRS_JSON" | jq -r '.[0].number // empty')
+              if [[ -z "$PR_NUMBER" ]]; then
+                echo "should_run=false" >> "$GITHUB_OUTPUT"
+                echo "reject_reason=check-run-has-no-pr" >> "$GITHUB_OUTPUT"
+                echo "Ignored : check_run has no associated PR."
+                exit 0
+              fi
+              MODE="retry-ci"
+              ;;
+            *)
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              echo "reject_reason=unsupported-event" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          # --- Etape 2 : resolution mode retry (PR_NUMBER connu)
+          if [[ -n "$PR_NUMBER" ]]; then
+            # Verifier que la PR est bien une PR du bot (pas une PR humaine)
+            PR_AUTHOR=$(gh pr view "$PR_NUMBER" --json author --jq '.author.login' 2>/dev/null || echo "")
+            if [[ "$PR_AUTHOR" != "alarm-murgat-bot" && "$PR_AUTHOR" != "app/alarm-murgat-bot" ]]; then
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              echo "reject_reason=pr-not-from-bot" >> "$GITHUB_OUTPUT"
+              echo "Ignored : PR #$PR_NUMBER author='$PR_AUTHOR' is not the bot."
+              exit 0
+            fi
+
+            # Extract issue_number, iteration, branch depuis le body
+            PR_JSON=$(gh pr view "$PR_NUMBER" --json body,headRefName)
+            PR_BODY=$(echo "$PR_JSON" | jq -r '.body')
+            BRANCH=$(echo "$PR_JSON" | jq -r '.headRefName')
+
+            PARSED_ISSUE=$(echo "$PR_BODY" | grep -oE 'issue: [0-9]+' | head -1 | awk '{print $2}' || echo "")
+            PARSED_ITER=$(echo "$PR_BODY" | grep -oE 'iteration: [0-9]+' | head -1 | awk '{print $2}' || echo "1")
+
+            if [[ -z "$PARSED_ISSUE" ]]; then
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              echo "reject_reason=pr-missing-metadata-issue" >> "$GITHUB_OUTPUT"
+              echo "Ignored : PR #$PR_NUMBER body has no 'issue: N' in metadata."
+              exit 0
+            fi
+
+            ISSUE_NUMBER="$PARSED_ISSUE"
+            ITERATION=$((PARSED_ITER + 1))
+          fi
+
+          # --- Etape 3 : pour workflow_dispatch, check si PR existe deja
+          if [[ "$MODE" == "workflow_dispatch" ]]; then
+            EXISTING_PR=$(gh pr list --state open --search "AI-BOT-METADATA issue: $ISSUE_NUMBER in:body" \
+              --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
+            if [[ -n "$EXISTING_PR" ]]; then
+              MODE="retry-manual"
+              PR_NUMBER="$EXISTING_PR"
+              PR_JSON=$(gh pr view "$PR_NUMBER" --json body,headRefName)
+              PR_BODY=$(echo "$PR_JSON" | jq -r '.body')
+              BRANCH=$(echo "$PR_JSON" | jq -r '.headRefName')
+              PARSED_ITER=$(echo "$PR_BODY" | grep -oE 'iteration: [0-9]+' | head -1 | awk '{print $2}' || echo "1")
+              ITERATION=$((PARSED_ITER + 1))
+            else
+              MODE="new"
+              BRANCH="ai/issue-${ISSUE_NUMBER}/${RUN_ID}"
+              ITERATION=1
+            fi
+          fi
+
+          # --- Etape 4 : limite iterations (3B : 5 dur, 3C raffinera)
+          if [[ "$ITERATION" -gt 5 ]]; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "reject_reason=iteration-limit-5-exceeded (got $ITERATION)" >> "$GITHUB_OUTPUT"
+            echo "Rejected : iteration $ITERATION > 5 (limit)."
+            exit 0
+          fi
+
+          # --- Etape 5 : emission des outputs
+          echo "should_run=true" >> "$GITHUB_OUTPUT"
+          echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
+          echo "issue_number=${ISSUE_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "iteration=${ITERATION}" >> "$GITHUB_OUTPUT"
+
+          echo ""
+          echo "=== DISPATCH DECISION ==="
+          echo "Event      : $EVENT_NAME"
+          echo "Mode       : $MODE"
+          echo "Issue #    : $ISSUE_NUMBER"
+          echo "PR #       : ${PR_NUMBER:-(none yet)}"
+          echo "Branch     : $BRANCH"
+          echo "Iteration  : ${ITERATION}/5"
+
+  # ============================================================================
+  # Job 2 - agent_fix : spawn Claude Code CLI + commit + push + PR
+  # ============================================================================
   agent_fix:
-    name: Phase 2 — agent fix (Opus 4.7)
+    name: Agent fix (Opus 4.7, mode=${{ needs.dispatch.outputs.mode }})
+    needs: dispatch
+    if: needs.dispatch.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      # Le GITHUB_TOKEN natif n'est pas utilise (on passe par le token GH App).
       contents: read
-
     steps:
-      - name: Generate installation token (GitHub App)
+      - name: Generate installation token (write)
         id: app-token
         uses: actions/create-github-app-token@v1
         with:
@@ -48,12 +287,16 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
           permission-issues: write
+          # Lecture des check runs en mode retry-ci (pour enrichir le prompt
+          # avec les logs CI failed). Aucun write sur checks.
+          permission-checks: read
+          permission-actions: read
 
-      - name: Checkout master
+      - name: Checkout (master for new, existing branch for retry)
         uses: actions/checkout@v4
         with:
           token: ${{ steps.app-token.outputs.token }}
-          ref: master
+          ref: ${{ needs.dispatch.outputs.mode == 'new' && 'master' || needs.dispatch.outputs.branch }}
           fetch-depth: 0
 
       - name: Configure git identity as bot
@@ -65,18 +308,16 @@ jobs:
         id: issue
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ISSUE_NUMBER: ${{ needs.dispatch.outputs.issue_number }}
         run: |
           set -euo pipefail
-          gh issue view "$ISSUE_NUMBER" --json title,body,number \
-            > /tmp/issue.json
+          gh issue view "$ISSUE_NUMBER" --json title,body,number > /tmp/issue.json
           TITLE=$(jq -r .title /tmp/issue.json)
-          # Body dans un fichier pour eviter les problemes d'echappement multi-lignes
           jq -r .body /tmp/issue.json > /tmp/issue-body.txt
           echo "title=${TITLE}" >> "$GITHUB_OUTPUT"
           echo "Issue #${ISSUE_NUMBER}: ${TITLE}"
 
-      - name: Setup Node.js (for Claude Code CLI)
+      - name: Setup Node.js (Claude Code CLI)
         uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -87,38 +328,100 @@ jobs:
           npm install -g @anthropic-ai/claude-code
           claude --version
 
-      - name: Create bot branch from master
-        id: branch
+      - name: Create bot branch (mode=new)
+        if: needs.dispatch.outputs.mode == 'new'
         env:
-          ISSUE_NUMBER: ${{ inputs.issue_number }}
-          RUN_ID: ${{ github.run_id }}
+          BRANCH: ${{ needs.dispatch.outputs.branch }}
         run: |
           set -euo pipefail
-          BRANCH="ai/issue-${ISSUE_NUMBER}/${RUN_ID}"
           git checkout -b "$BRANCH"
-          echo "name=${BRANCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare retry context (mode=retry-*)
+        if: needs.dispatch.outputs.mode != 'new'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          MODE: ${{ needs.dispatch.outputs.mode }}
+          PR_NUMBER: ${{ needs.dispatch.outputs.pr_number }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          : > /tmp/retry-context.md
+
+          case "$MODE" in
+            retry-ci)
+              echo "## Contexte : echec CI a corriger" > /tmp/retry-context.md
+              echo "" >> /tmp/retry-context.md
+              HEAD_SHA=$(git rev-parse HEAD)
+              # Fetch les check runs failed du dernier commit
+              FAILED_CHECKS=$(gh api "/repos/${REPO}/commits/${HEAD_SHA}/check-runs" \
+                --jq '.check_runs[] | select(.conclusion == "failure") | {name, id, details_url: .details_url, summary: .output.summary, text: .output.text}' 2>/dev/null || echo "")
+              if [[ -z "$FAILED_CHECKS" ]]; then
+                echo "(Aucun check run failed trouve pour le HEAD actuel. Il se peut" >> /tmp/retry-context.md
+                echo "que la CI ait ete re-declenchee entre temps. Regarde quand meme" >> /tmp/retry-context.md
+                echo "l'etat de la PR pour comprendre ce qui est attendu.)" >> /tmp/retry-context.md
+              else
+                # Limite a 200 lignes total pour eviter d'exploser le context
+                echo "$FAILED_CHECKS" | jq -r '"### Check : \(.name)\nSummary:\n\(.summary // "(no summary)")\n\nText:\n\(.text // "(no text)")\n---\n"' \
+                  | head -200 >> /tmp/retry-context.md
+              fi
+              ;;
+            retry-comment)
+              echo "## Contexte : commentaire humain sur la PR" > /tmp/retry-context.md
+              echo "" >> /tmp/retry-context.md
+              echo "$COMMENT_BODY" | head -50 >> /tmp/retry-context.md
+              ;;
+            retry-manual)
+              echo "## Contexte : redeclenchement manuel de l'humain" > /tmp/retry-context.md
+              echo "Regarde git log et le diff vs master, identifie ce qui est deja fait" >> /tmp/retry-context.md
+              echo "et ce qui reste a completer pour respecter l'invariant du bug report." >> /tmp/retry-context.md
+              ;;
+          esac
+
+          echo ""
+          echo "--- /tmp/retry-context.md ---"
+          cat /tmp/retry-context.md
+          echo "---"
+          echo "Context lines : $(wc -l < /tmp/retry-context.md)"
 
       - name: Prepare agent prompt
         env:
-          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ISSUE_NUMBER: ${{ needs.dispatch.outputs.issue_number }}
           ISSUE_TITLE: ${{ steps.issue.outputs.title }}
+          MODE: ${{ needs.dispatch.outputs.mode }}
+          ITERATION: ${{ needs.dispatch.outputs.iteration }}
         run: |
           set -euo pipefail
-          # Agent input : bug context. System prompt (regles P1-P6) injecte
-          # separement via --append-system-prompt.
           {
-            echo "Bug report a corriger (issue #${ISSUE_NUMBER}) :"
+            echo "Bug report a traiter (issue #${ISSUE_NUMBER}) - iteration ${ITERATION}/5 - mode=${MODE}"
             echo ""
-            echo "Title : ${ISSUE_TITLE}"
+            echo "## Title"
+            echo "${ISSUE_TITLE}"
             echo ""
-            echo "Body :"
+            echo "## Body"
             cat /tmp/issue-body.txt
             echo ""
-            echo "---"
-            echo ""
-            echo "Suis les regles de ton system prompt. Produis un test RED qui"
-            echo "REPRODUIT le bug, puis le fix GREEN minimal. Ne commit RIEN —"
-            echo "le workflow s'en charge. Termine par un resume final."
+            if [[ "$MODE" != "new" ]]; then
+              echo "---"
+              echo ""
+              echo "**ATTENTION : reprise d'une iteration existante.**"
+              echo ""
+              echo "Tu as deja produit des commits precedents sur cette branche. Consulte :"
+              echo "  - \`git log --oneline origin/master..HEAD\` pour voir les commits du bot"
+              echo "  - \`git diff origin/master...HEAD\` pour voir l'ensemble des changements"
+              echo ""
+              echo "Ne refais pas le meme travail : complete, corrige, ou adapte selon le"
+              echo "contexte ci-dessous."
+              echo ""
+              cat /tmp/retry-context.md 2>/dev/null || echo "(pas de contexte retry capture)"
+              echo ""
+              echo "---"
+              echo ""
+            fi
+            echo "Suis les regles de ton system prompt (P1-P6, denylist, TDD strict)."
+            echo "Produis ou complete le test RED et le fix GREEN. Ne commit RIEN - le"
+            echo "workflow s'en charge. Termine par un resume final."
           } > /tmp/agent-input.md
           echo "Agent input prepared ($(wc -l < /tmp/agent-input.md) lines)"
 
@@ -127,58 +430,44 @@ jobs:
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
-          set -euo pipefail
-          # Agent lance en mode headless :
-          #   -p             : user prompt (issue body)
-          #   --append-system-prompt : regles P1-P6 + denylist soft
-          #   --model        : Opus 4.7 (choix D2)
-          #   --output-format stream-json : chaque event = 1 ligne JSON
-          #   --verbose      : detail tool calls (requis avec stream-json)
-          #   --dangerously-skip-permissions : non-interactive CI
-          #     -> compensations : denylist check (phase 3), runner ephemeral,
-          #        token scope strict
-          # Anti-boucle infinie : timeout-minutes du job (20) + quota tokens Max.
-          # Ajouter un plafond tours/tokens sur une version ulterieure de la CLI
-          # si le flag devient disponible.
+          set -eu  # PAS -o pipefail : on veut continuer si claude fail
+          # Phase 3A : tee pour live log + file (cf commit 899198e).
           claude -p "$(cat /tmp/agent-input.md)" \
             --append-system-prompt "$(cat .github/ai-bot/prompt.md)" \
             --model claude-opus-4-7 \
             --output-format stream-json \
             --verbose \
             --dangerously-skip-permissions \
-            > /tmp/agent-output.jsonl 2>&1 || AGENT_EXIT=$?
-
-          AGENT_EXIT=${AGENT_EXIT:-0}
+            2>&1 | tee /tmp/agent-output.jsonl
+          AGENT_EXIT=${PIPESTATUS[0]}
           echo "Agent exit code : ${AGENT_EXIT}"
-          echo "Stream lines : $(wc -l < /tmp/agent-output.jsonl)"
 
-          # Extrait le message final de l'agent (type=result)
-          # pour le log + commit message.
           AGENT_SUMMARY=$(jq -rs 'map(select(.type == "result")) | last | .result // "(no summary)"' \
             /tmp/agent-output.jsonl 2>/dev/null || echo "(jq parse error)")
-
-          # Sauve pour les steps suivants
           echo "$AGENT_SUMMARY" > /tmp/agent-summary.md
-          echo "exit_code=${AGENT_EXIT}" >> "$GITHUB_OUTPUT"
           echo "=== AGENT SUMMARY ==="
           echo "$AGENT_SUMMARY"
           echo "====================="
 
       - name: Verify agent produced a diff
         id: diff
+        env:
+          MODE: ${{ needs.dispatch.outputs.mode }}
         run: |
           set -euo pipefail
+          # Mode retry : on compare avec le HEAD actuel de la branche (depuis dernier commit)
+          # Mode new   : on compare avec master (mais git status --porcelain suffit)
           CHANGES=$(git status --porcelain)
           if [[ -z "$CHANGES" ]]; then
-            echo "::warning::Agent produced no diff. Interpretation : abandon."
+            echo "::warning::Agent produced no diff (mode=$MODE). Interpretation : abandon."
             echo "produced=false" >> "$GITHUB_OUTPUT"
           else
-            echo "Agent modified the following files :"
+            echo "Agent modified files :"
             echo "$CHANGES"
             echo "produced=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Upload agent artifacts (always, for debug)
+      - name: Upload agent artifacts (always)
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -188,19 +477,24 @@ jobs:
             /tmp/agent-output.jsonl
             /tmp/agent-summary.md
             /tmp/issue-body.txt
+            /tmp/retry-context.md
           retention-days: 14
+          if-no-files-found: ignore
 
       - name: Abort if agent abandoned
         if: steps.diff.outputs.produced == 'false'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ISSUE_NUMBER: ${{ needs.dispatch.outputs.issue_number }}
+          PR_NUMBER: ${{ needs.dispatch.outputs.pr_number }}
+          MODE: ${{ needs.dispatch.outputs.mode }}
+          ITERATION: ${{ needs.dispatch.outputs.iteration }}
           RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
           SUMMARY=$(cat /tmp/agent-summary.md 2>/dev/null || echo "(no summary)")
           BODY=$(cat <<EOF
-          Phase 2 : l'agent a abandonne sans produire de diff.
+          L'agent a abandonne sans produire de diff (mode=${MODE}, iteration=${ITERATION}/5).
 
           **Resume final de l'agent** :
 
@@ -209,25 +503,101 @@ jobs:
           Voir les artifacts du run : https://github.com/claude-murgat/Alarm2.0/actions/runs/${RUN_ID}
           EOF
           )
-          gh issue comment "$ISSUE_NUMBER" --body "$BODY"
+          # Commente la PR si retry, sinon l'issue
+          TARGET="${PR_NUMBER:-$ISSUE_NUMBER}"
+          gh issue comment "$TARGET" --body "$BODY"
           exit 1
+
+      # === Phase 3A : enforcement denylist =====================================
+      - name: Enforce denylist
+        id: denylist
+        if: steps.diff.outputs.produced == 'true'
+        run: |
+          set -euo pipefail
+          DENYLIST_FILE=".github/ai-bot/denylist.txt"
+          if [[ ! -f "$DENYLIST_FILE" ]]; then
+            echo "::error::Denylist file missing : ${DENYLIST_FILE}"
+            exit 1
+          fi
+
+          mapfile -t CHANGED_PATHS < <(git status --porcelain | sed 's/^...//')
+
+          VIOLATIONS=""
+          while IFS= read -r pattern || [[ -n "$pattern" ]]; do
+            pattern="${pattern%%#*}"
+            pattern="$(echo "$pattern" | xargs)"
+            [[ -z "$pattern" ]] && continue
+
+            for path in "${CHANGED_PATHS[@]}"; do
+              if [[ "$path" == "$pattern" || "$path" == "$pattern"/* ]]; then
+                VIOLATIONS+="  - ${path} (matches denylist rule: ${pattern})"$'\n'
+              fi
+            done
+          done < "$DENYLIST_FILE"
+
+          if [[ -n "$VIOLATIONS" ]]; then
+            echo "::error::Bot modified denylisted paths — aborting PR creation."
+            echo ""
+            echo "Violations :"
+            echo "$VIOLATIONS"
+            printf '%s' "$VIOLATIONS" > /tmp/denylist-violations.txt
+            exit 1
+          fi
+
+          echo "Denylist check passed (no restricted paths modified)."
+
+      - name: Handle denylist violation (notify human + label)
+        if: failure() && steps.denylist.conclusion == 'failure' && steps.diff.outputs.produced == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ needs.dispatch.outputs.issue_number }}
+          PR_NUMBER: ${{ needs.dispatch.outputs.pr_number }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          VIOLATIONS=$(cat /tmp/denylist-violations.txt 2>/dev/null || echo "(details missing)")
+          SUMMARY=$(cat /tmp/agent-summary.md 2>/dev/null || echo "(no summary)")
+          BODY=$(cat <<EOF
+          ## Violation denylist detectee
+
+          Le bot a tente de modifier des fichiers interdits (cf \`.github/ai-bot/denylist.txt\`).
+          **Aucune PR mise a jour.** Intervention humaine requise.
+
+          ### Fichiers concernes
+
+          \`\`\`
+          ${VIOLATIONS}\`\`\`
+
+          ### Resume agent
+
+          > ${SUMMARY}
+
+          ### Logs
+
+          https://github.com/claude-murgat/Alarm2.0/actions/runs/${RUN_ID}
+          EOF
+          )
+          TARGET="${PR_NUMBER:-$ISSUE_NUMBER}"
+          gh issue comment "$TARGET" --body "$BODY"
+          gh issue edit "$ISSUE_NUMBER" --add-label "ai:denied" || true
+      # === /Phase 3A ============================================================
 
       - name: Commit agent's changes
         if: steps.diff.outputs.produced == 'true'
         env:
-          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ISSUE_NUMBER: ${{ needs.dispatch.outputs.issue_number }}
+          MODE: ${{ needs.dispatch.outputs.mode }}
+          ITERATION: ${{ needs.dispatch.outputs.iteration }}
         run: |
           set -euo pipefail
           git add -A
 
-          # Commit message via fichier (-F) pour echapper proprement
-          # les guillemets/sauts de ligne eventuels dans le resume.
           {
-            echo "fix(ai-bot): issue #${ISSUE_NUMBER}"
+            echo "fix(ai-bot): issue #${ISSUE_NUMBER} (iteration ${ITERATION}/5, mode=${MODE})"
             echo ""
             cat /tmp/agent-summary.md 2>/dev/null || echo "(no summary)"
             echo ""
-            echo "Generated by alarm-murgat-bot (phase 2 POC)."
+            echo "Generated by alarm-murgat-bot (phase 3B)."
           } > /tmp/commit-msg.txt
 
           git commit -F /tmp/commit-msg.txt
@@ -235,30 +605,33 @@ jobs:
       - name: Push branch
         if: steps.diff.outputs.produced == 'true'
         env:
-          BRANCH: ${{ steps.branch.outputs.name }}
+          BRANCH: ${{ needs.dispatch.outputs.branch }}
         run: |
           set -euo pipefail
+          # Mode new : push une nouvelle branche
+          # Mode retry : push un nouveau commit sur branche existante (pas force)
           git push origin "$BRANCH"
 
-      - name: Open PR
-        id: pr
-        if: steps.diff.outputs.produced == 'true'
+      - name: Open PR (mode=new only)
+        id: pr-new
+        if: steps.diff.outputs.produced == 'true' && needs.dispatch.outputs.mode == 'new'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ISSUE_NUMBER: ${{ needs.dispatch.outputs.issue_number }}
           ISSUE_TITLE: ${{ steps.issue.outputs.title }}
-          BRANCH: ${{ steps.branch.outputs.name }}
+          BRANCH: ${{ needs.dispatch.outputs.branch }}
+          ITERATION: ${{ needs.dispatch.outputs.iteration }}
           RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
           SUMMARY=$(cat /tmp/agent-summary.md 2>/dev/null || echo "(no summary)")
 
           cat > /tmp/pr-body.md <<EOF
-          Fix propose par alarm-murgat-bot (phase 2 POC) pour l'issue #${ISSUE_NUMBER}.
+          Fix propose par alarm-murgat-bot pour l'issue #${ISSUE_NUMBER}.
 
           <!-- AI-BOT-METADATA
-          phase: 2
-          iteration: 1/3
+          phase: 3B
+          iteration: ${ITERATION}
           issue: ${ISSUE_NUMBER}
           model: claude-opus-4-7
           run: ${RUN_ID}
@@ -266,24 +639,28 @@ jobs:
 
           ## Issue source
 
-          #${ISSUE_NUMBER} — ${ISSUE_TITLE}
+          #${ISSUE_NUMBER} - ${ISSUE_TITLE}
 
-          ## Resume de l'agent
+          ## Resume agent (iteration ${ITERATION})
 
           ${SUMMARY}
 
-          ## A verifier humain
-
-          - [ ] Le test RED ajoute reproduit bien le bug rapporte (avant le fix, il FAIL)
-          - [ ] Le fix est minimal et ne modifie que le necessaire
-          - [ ] Aucun fichier de la denylist modifie (cf docs/AI_STRATEGY.md)
-          - [ ] Tier 1+2+3 verts
-          - [ ] Le test respecte les regles P1-P6
-
           ## Artifacts
 
-          Logs complets du run (stream-json, prompt, resume) :
-          https://github.com/claude-murgat/Alarm2.0/actions/runs/${RUN_ID}
+          Logs du run : https://github.com/claude-murgat/Alarm2.0/actions/runs/${RUN_ID}
+
+          ---
+
+          ## 🤖 Comment me repondre
+
+          | Tu veux... | Fais... |
+          |---|---|
+          | **Demander correction/ajout** | Commente avec \`/ai-retry <instructions>\` ou mentionne \`@alarm-murgat-bot\` |
+          | **Valider et merger** | Pose le label \`ai:approved\` (phase 4 a venir) |
+          | **Me dire d'abandonner** | Ferme la PR |
+          | **Autre** | Je ne lis que \`/ai-retry\` ou les mentions. Les commentaires libres sont ignores. |
+
+          Limite : 5 iterations max par PR (phase 3B). Au-dela, j'abandonne.
           EOF
 
           PR_URL=$(gh pr create \
@@ -291,17 +668,55 @@ jobs:
             --head "${BRANCH}" \
             --title "fix(ai-bot): ${ISSUE_TITLE}" \
             --body-file /tmp/pr-body.md)
-
           echo "url=${PR_URL}" >> "$GITHUB_OUTPUT"
           echo "PR opened : ${PR_URL}"
 
-      - name: Comment on source issue
-        if: steps.diff.outputs.produced == 'true'
+          # Commentaire initial (decouvrabilite).
+          # Passe par un fichier pour eviter les indents du YAML block scalar
+          # qui se retrouveraient dans le comment rendu.
+          PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
+          {
+            echo "Salut ! J'ai produit un fix + test pour l'issue #${ISSUE_NUMBER}."
+            echo ""
+            echo "Si tu veux que je corrige quelque chose, commente avec \`/ai-retry <instructions>\` ou mentionne \`@alarm-murgat-bot\`. Si tu valides, pose le label \`ai:approved\` (phase 4 a venir)."
+          } > /tmp/pr-initial-comment.md
+          gh pr comment "$PR_NUMBER" --body-file /tmp/pr-initial-comment.md
+
+      - name: Update PR body (mode=retry-*)
+        if: steps.diff.outputs.produced == 'true' && needs.dispatch.outputs.mode != 'new'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          ISSUE_NUMBER: ${{ inputs.issue_number }}
-          PR_URL: ${{ steps.pr.outputs.url }}
+          PR_NUMBER: ${{ needs.dispatch.outputs.pr_number }}
+          ITERATION: ${{ needs.dispatch.outputs.iteration }}
+          RUN_ID: ${{ github.run_id }}
+          MODE: ${{ needs.dispatch.outputs.mode }}
+        run: |
+          set -euo pipefail
+
+          # Recupere body actuel, update iteration dans le metadata block.
+          # sed sans flag g = premier match = metadata block (les sections
+          # "## Resume iteration X" appendees n'ont pas de `:` apres iteration).
+          {
+            gh pr view "$PR_NUMBER" --json body --jq '.body' \
+              | sed -E "s/iteration: [0-9]+/iteration: ${ITERATION}/"
+            echo ""
+            echo "## Resume iteration ${ITERATION} (mode=${MODE})"
+            echo ""
+            cat /tmp/agent-summary.md 2>/dev/null || echo "(no summary)"
+            echo ""
+            echo "Run : https://github.com/claude-murgat/Alarm2.0/actions/runs/${RUN_ID}"
+          } > /tmp/pr-body-updated.md
+
+          gh pr edit "$PR_NUMBER" --body-file /tmp/pr-body-updated.md
+          echo "PR #$PR_NUMBER body updated (iteration ${ITERATION})."
+
+      - name: Comment on source issue (mode=new only)
+        if: steps.diff.outputs.produced == 'true' && needs.dispatch.outputs.mode == 'new'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ needs.dispatch.outputs.issue_number }}
+          PR_URL: ${{ steps.pr-new.outputs.url }}
         run: |
           set -euo pipefail
           gh issue comment "$ISSUE_NUMBER" \
-            --body "Phase 2 : agent a produit une PR pour ce bug -> ${PR_URL}"
+            --body "alarm-murgat-bot a produit une PR pour ce bug : ${PR_URL}"
