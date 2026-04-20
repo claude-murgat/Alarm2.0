@@ -1,0 +1,63 @@
+# Denylist du bot IA — chemins que le bot n'a pas le droit de modifier.
+#
+# Format : un pattern par ligne, commentaires avec #. Les motifs sont
+# interpretes par bash avec globbing standard (pas regex). Un chemin de
+# fichier est "matche" si :
+#   - il est egal exactement au pattern, OU
+#   - il commence par "<pattern>/" (le pattern est considere comme prefixe
+#     de repertoire)
+#
+# Si le bot touche un fichier denyliste, le step "Enforce denylist" du
+# workflow ai-bot.yml fail le job avant push/PR, pose le label ai:denied
+# sur l'issue, et commente la raison.
+#
+# Cette denylist est elle-meme dans la denylist (.github/ai-bot).
+# Seul un humain peut la modifier, via une PR que CODEOWNERS protege
+# (phase 4 a venir).
+
+# ===== CI elle-meme (auto-reference dangereuse) =====
+.github/workflows
+.github/ai-bot
+.github/CODEOWNERS
+scripts/ci-wait-cluster.sh
+scripts/ci-cleanup.sh
+
+# ===== Infra (cles, runners) =====
+infra
+
+# ===== Cluster & env =====
+docker-compose.yml
+.env
+.env.ci-w1
+.env.ci-w2
+.env.dev
+.env.node1
+.env.node2
+.env.node3
+
+# ===== Tooling Python =====
+pyproject.toml
+requirements-dev.txt
+backend/requirements.txt
+
+# ===== Fixtures tests critiques (harness partage) =====
+tests/conftest.py
+tests/integration/conftest.py
+
+# ===== Sources de verite business (seul l'humain modifie) =====
+tests/INVARIANTS.md
+tests/audit_v2.json
+docs/AI_STRATEGY.md
+android/INVARIANTS.md
+
+# ===== Contexte IA (pas d'auto-reprogrammation) =====
+.claude
+CLAUDE.md
+
+# ===== Gouvernance / meta git =====
+.gitattributes
+.gitignore
+
+# ===== Android critique (phase 1 : bot scope backend uniquement) =====
+android/app/src/main/AndroidManifest.xml
+android/app/build.gradle.kts

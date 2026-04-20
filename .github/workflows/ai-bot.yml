@@ -127,7 +127,7 @@ jobs:
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
-          set -euo pipefail
+          set -eu  # PAS -o pipefail : on veut continuer si claude fail
           # Agent lance en mode headless :
           #   -p             : user prompt (issue body)
           #   --append-system-prompt : regles P1-P6 + denylist soft
@@ -135,20 +135,23 @@ jobs:
           #   --output-format stream-json : chaque event = 1 ligne JSON
           #   --verbose      : detail tool calls (requis avec stream-json)
           #   --dangerously-skip-permissions : non-interactive CI
-          #     -> compensations : denylist check (phase 3), runner ephemeral,
-          #        token scope strict
+          #     -> compensations : denylist CI check (ci-dessous), runner
+          #        ephemeral, token GH App scope strict
           # Anti-boucle infinie : timeout-minutes du job (20) + quota tokens Max.
-          # Ajouter un plafond tours/tokens sur une version ulterieure de la CLI
-          # si le flag devient disponible.
+          #
+          # Phase 3A : `tee` pour avoir le stream-json dans les logs GH Actions
+          # EN TEMPS REEL (tu vois l'agent lire INVARIANTS.md, editer un fichier,
+          # lancer pytest...) + dans le fichier pour les artifacts.
+          # PIPESTATUS[0] capture le code retour de `claude`, pas de `tee`.
           claude -p "$(cat /tmp/agent-input.md)" \
             --append-system-prompt "$(cat .github/ai-bot/prompt.md)" \
             --model claude-opus-4-7 \
             --output-format stream-json \
             --verbose \
             --dangerously-skip-permissions \
-            > /tmp/agent-output.jsonl 2>&1 || AGENT_EXIT=$?
+            2>&1 | tee /tmp/agent-output.jsonl
+          AGENT_EXIT=${PIPESTATUS[0]}
 
-          AGENT_EXIT=${AGENT_EXIT:-0}
           echo "Agent exit code : ${AGENT_EXIT}"
           echo "Stream lines : $(wc -l < /tmp/agent-output.jsonl)"
 
@@ -211,6 +214,87 @@ jobs:
           )
           gh issue comment "$ISSUE_NUMBER" --body "$BODY"
           exit 1
+
+      # === Phase 3A : enforcement denylist =====================================
+      - name: Enforce denylist
+        id: denylist
+        if: steps.diff.outputs.produced == 'true'
+        run: |
+          set -euo pipefail
+          DENYLIST_FILE=".github/ai-bot/denylist.txt"
+          if [[ ! -f "$DENYLIST_FILE" ]]; then
+            echo "::error::Denylist file missing : ${DENYLIST_FILE}"
+            exit 1
+          fi
+
+          # Fichiers modifies (stage + working + untracked), relatif repo root.
+          # git status --porcelain format : "XY path" ou "XY "path with spaces"".
+          # On extrait juste le chemin (3e caractere jusqu'a fin de ligne).
+          mapfile -t CHANGED_PATHS < <(git status --porcelain | sed 's/^...//')
+
+          VIOLATIONS=""
+          while IFS= read -r pattern || [[ -n "$pattern" ]]; do
+            # Skip lignes vides et commentaires
+            pattern="${pattern%%#*}"                    # strip trailing comment
+            pattern="$(echo "$pattern" | xargs)"        # trim whitespace
+            [[ -z "$pattern" ]] && continue
+
+            for path in "${CHANGED_PATHS[@]}"; do
+              # Match exact OU path est sous le pattern/ (directory prefix)
+              if [[ "$path" == "$pattern" || "$path" == "$pattern"/* ]]; then
+                VIOLATIONS+="  - ${path} (matches denylist rule: ${pattern})"$'\n'
+              fi
+            done
+          done < "$DENYLIST_FILE"
+
+          if [[ -n "$VIOLATIONS" ]]; then
+            echo "::error::Bot modified denylisted paths — aborting PR creation."
+            echo ""
+            echo "Violations :"
+            echo "$VIOLATIONS"
+            # Persist pour le step suivant (notification humain)
+            printf '%s' "$VIOLATIONS" > /tmp/denylist-violations.txt
+            exit 1
+          fi
+
+          echo "Denylist check passed (no restricted paths modified)."
+          echo "Changed paths :"
+          printf '  - %s\n' "${CHANGED_PATHS[@]}"
+
+      - name: Handle denylist violation (notify human + label)
+        if: failure() && steps.denylist.conclusion == 'failure' && steps.diff.outputs.produced == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          VIOLATIONS=$(cat /tmp/denylist-violations.txt 2>/dev/null || echo "(details missing)")
+          SUMMARY=$(cat /tmp/agent-summary.md 2>/dev/null || echo "(no summary)")
+
+          BODY=$(cat <<EOF
+          ## Violation denylist detectee
+
+          Le bot a tente de modifier des fichiers interdits (cf \`.github/ai-bot/denylist.txt\`).
+          **Aucune PR n'a ete ouverte.** Intervention humaine requise.
+
+          ### Fichiers concernes
+
+          \`\`\`
+          ${VIOLATIONS}\`\`\`
+
+          ### Resume agent
+
+          > ${SUMMARY}
+
+          ### Logs
+
+          https://github.com/claude-murgat/Alarm2.0/actions/runs/${RUN_ID}
+          EOF
+          )
+          gh issue comment "$ISSUE_NUMBER" --body "$BODY"
+          gh issue edit "$ISSUE_NUMBER" --add-label "ai:denied"
+      # === /Phase 3A ============================================================
 
       - name: Commit agent's changes
         if: steps.diff.outputs.produced == 'true'
