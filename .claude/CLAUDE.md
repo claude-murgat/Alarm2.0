@@ -142,8 +142,30 @@ adb shell am start -n com.alarm.critical/.MainActivity
 # URLs telephone physique : changer en IP reseau (ex: 172.16.2.191)
 ```
 
+## Bot IA contributeur (alarm-murgat-bot)
+
+Le projet dispose d'un bot IA qui transforme des bug reports GitHub en PRs
+(test RED + fix GREEN) via Claude Code CLI headless en CI.
+
+- **Identité** : GitHub App `alarm-murgat-bot[bot]` (App ID 3428066, installation 125174785)
+- **Modèle** : Opus 4.7 (OAuth Max via `CLAUDE_CODE_OAUTH_TOKEN` en secret GH)
+- **Workflow** : `.github/workflows/ai-bot.yml`
+- **System prompt** : `.github/ai-bot/prompt.md` (règles P1-P6 du projet)
+- **Déclencher aujourd'hui (phase 2)** : `gh workflow run ai-bot.yml -f issue_number=<N>`
+- **Déclencher phase 3 (à venir)** : poser label `ai:fix` sur une issue
+- **Doc utilisateur** : `.github/ai-bot/README.md`
+- **Stratégie & design** : `docs/AI_STRATEGY.md`
+
+Règles appliquées par le bot :
+- Tests viennent de **INVARIANTS.md** (spec), jamais du code (P1)
+- TDD strict : test RED prouvé avant le fix, sinon abandon (P5)
+- Budget 5 tests par fix maximum (P4)
+- Denylist dure : `.github/workflows/**`, `infra/**`, `tests/INVARIANTS.md`,
+  `tests/conftest.py`, `docs/AI_STRATEGY.md`, `.claude/**`, etc.
+- Review humaine obligatoire tant que le bot n'a pas 10 PRs propres consécutives
+
 ## Améliorations futures
-- **Agent autonome de debug** : deployer un agent IA capable de recevoir les logs exportes par l'app (via bouton aide) et d'effectuer un diagnostic de premier niveau en autonomie (analyse des patterns d'erreur, verification etat du cluster, suggestions de resolution)
+- **Agent autonome de debug Android** : déployer un agent IA capable de recevoir les logs exportés par l'app (via bouton aide) et d'effectuer un diagnostic de premier niveau en autonomie. Distinct du bot IA contributeur (ci-dessus) — ce dernier fixe des bugs GH, pas des logs runtime Android.
 - **Remote logging Firebase Crashlytics** : tracer les erreurs client sans intervention utilisateur
 - **Push silencieux** pour changements de config (en complement du push visible actuel)
 - **RecyclerView** pour l'historique si le volume d'alarmes depasse 200+ items
