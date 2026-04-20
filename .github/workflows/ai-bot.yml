@@ -1,13 +1,19 @@
-# Bot IA — phase 1 POC.
+# Bot IA — phase 2 : spawn agent Claude Code CLI headless.
 #
-# But : valider la chaine identite (GitHub App token -> commit bot -> push -> PR).
-# Pas encore d'agent Claude. Produit une PR marker "vide" a fermer apres verif.
+# Workflow :
+#   1. Trigger : workflow_dispatch manuel (phase 3 : trigger auto sur label ai:fix).
+#   2. Genere un token GitHub App installation (permissions scopees).
+#   3. Cree une branche ai/issue-<N>/<RUN_ID> depuis master.
+#   4. Installe Claude Code CLI (npm global).
+#   5. Lance claude -p (Opus 4.7) avec :
+#      - system prompt = .github/ai-bot/prompt.md (regles P1-P6 + denylist soft)
+#      - user prompt = body de l'issue source
+#   6. Verifie qu'un diff non-vide a ete produit (abandon sinon).
+#   7. Commit (auteur alarm-murgat-bot[bot]) + push + PR vers master.
+#   8. Commente l'issue source avec le lien PR.
 #
-# Trigger : workflow_dispatch manuel avec numero d'issue.
-# Cible runner : ubuntu-latest cloud (gratuit, repo public). Migre vers
-#                self-hosted dedie (label alarm-bot) en phase 3 si besoin.
-#
-# Voir docs/AI_STRATEGY.md section 1 + MEMO design D1-D7.
+# Phase 3 ajoutera : denylist check strict, trigger ai:fix, compteur iterations.
+# Voir docs/AI_STRATEGY.md section 1 + design notes D1-D7.
 
 name: AI Bot
 
@@ -15,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       issue_number:
-        description: "Numero d'issue GitHub a referencer (doit exister)"
+        description: "Numero d'issue GitHub decrivant le bug"
         required: true
         type: string
 
@@ -24,14 +30,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  poc_identity:
-    name: Phase 1 — POC identite chain
+  agent_fix:
+    name: Phase 2 — agent fix (Opus 4.7)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     permissions:
-      # Permissions du GITHUB_TOKEN natif (non utilisees : on passe par un
-      # token GitHub App). On les met explicitement pour eviter les permissions
-      # par defaut trop larges.
+      # Le GITHUB_TOKEN natif n'est pas utilise (on passe par le token GH App).
       contents: read
 
     steps:
@@ -41,8 +45,6 @@ jobs:
         with:
           app-id: ${{ secrets.ALARM_BOT_APP_ID }}
           private-key: ${{ secrets.ALARM_BOT_PRIVATE_KEY }}
-          # Defense en profondeur : token restreint au strict necessaire
-          # meme si l'App a plus de permissions (cf D4).
           permission-contents: write
           permission-pull-requests: write
           permission-issues: write
@@ -59,99 +61,247 @@ jobs:
           git config user.name "alarm-murgat-bot[bot]"
           git config user.email "3428066+alarm-murgat-bot[bot]@users.noreply.github.com"
 
-      - name: Verify source issue exists
+      - name: Fetch issue content
         id: issue
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
         run: |
           set -euo pipefail
-          TITLE=$(gh issue view "${{ inputs.issue_number }}" --json title -q .title)
+          gh issue view "$ISSUE_NUMBER" --json title,body,number \
+            > /tmp/issue.json
+          TITLE=$(jq -r .title /tmp/issue.json)
+          # Body dans un fichier pour eviter les problemes d'echappement multi-lignes
+          jq -r .body /tmp/issue.json > /tmp/issue-body.txt
           echo "title=${TITLE}" >> "$GITHUB_OUTPUT"
-          echo "Issue #${{ inputs.issue_number }}: ${TITLE}"
+          echo "Issue #${ISSUE_NUMBER}: ${TITLE}"
 
-      - name: Create bot branch + marker commit
+      - name: Setup Node.js (for Claude Code CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Claude Code CLI
+        run: |
+          set -euo pipefail
+          npm install -g @anthropic-ai/claude-code
+          claude --version
+
+      - name: Create bot branch from master
         id: branch
         env:
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          BRANCH="ai/issue-${ISSUE_NUMBER}/${RUN_ID}"
+          git checkout -b "$BRANCH"
+          echo "name=${BRANCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare agent prompt
+        env:
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ISSUE_TITLE: ${{ steps.issue.outputs.title }}
+        run: |
+          set -euo pipefail
+          # Agent input : bug context. System prompt (regles P1-P6) injecte
+          # separement via --append-system-prompt.
+          {
+            echo "Bug report a corriger (issue #${ISSUE_NUMBER}) :"
+            echo ""
+            echo "Title : ${ISSUE_TITLE}"
+            echo ""
+            echo "Body :"
+            cat /tmp/issue-body.txt
+            echo ""
+            echo "---"
+            echo ""
+            echo "Suis les regles de ton system prompt. Produis un test RED qui"
+            echo "REPRODUIT le bug, puis le fix GREEN minimal. Ne commit RIEN —"
+            echo "le workflow s'en charge. Termine par un resume final."
+          } > /tmp/agent-input.md
+          echo "Agent input prepared ($(wc -l < /tmp/agent-input.md) lines)"
+
+      - name: Run Claude Code agent
+        id: agent
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Agent lance en mode headless :
+          #   -p             : user prompt (issue body)
+          #   --append-system-prompt : regles P1-P6 + denylist soft
+          #   --model        : Opus 4.7 (choix D2)
+          #   --output-format stream-json : chaque event = 1 ligne JSON
+          #   --verbose      : detail tool calls (requis avec stream-json)
+          #   --dangerously-skip-permissions : non-interactive CI
+          #     -> compensations : denylist check (phase 3), runner ephemeral,
+          #        token scope strict
+          # Anti-boucle infinie : timeout-minutes du job (20) + quota tokens Max.
+          # Ajouter un plafond tours/tokens sur une version ulterieure de la CLI
+          # si le flag devient disponible.
+          claude -p "$(cat /tmp/agent-input.md)" \
+            --append-system-prompt "$(cat .github/ai-bot/prompt.md)" \
+            --model claude-opus-4-7 \
+            --output-format stream-json \
+            --verbose \
+            --dangerously-skip-permissions \
+            > /tmp/agent-output.jsonl 2>&1 || AGENT_EXIT=$?
+
+          AGENT_EXIT=${AGENT_EXIT:-0}
+          echo "Agent exit code : ${AGENT_EXIT}"
+          echo "Stream lines : $(wc -l < /tmp/agent-output.jsonl)"
+
+          # Extrait le message final de l'agent (type=result)
+          # pour le log + commit message.
+          AGENT_SUMMARY=$(jq -rs 'map(select(.type == "result")) | last | .result // "(no summary)"' \
+            /tmp/agent-output.jsonl 2>/dev/null || echo "(jq parse error)")
+
+          # Sauve pour les steps suivants
+          echo "$AGENT_SUMMARY" > /tmp/agent-summary.md
+          echo "exit_code=${AGENT_EXIT}" >> "$GITHUB_OUTPUT"
+          echo "=== AGENT SUMMARY ==="
+          echo "$AGENT_SUMMARY"
+          echo "====================="
+
+      - name: Verify agent produced a diff
+        id: diff
+        run: |
+          set -euo pipefail
+          CHANGES=$(git status --porcelain)
+          if [[ -z "$CHANGES" ]]; then
+            echo "::warning::Agent produced no diff. Interpretation : abandon."
+            echo "produced=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Agent modified the following files :"
+            echo "$CHANGES"
+            echo "produced=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload agent artifacts (always, for debug)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-bot-run-${{ github.run_id }}
+          path: |
+            /tmp/agent-input.md
+            /tmp/agent-output.jsonl
+            /tmp/agent-summary.md
+            /tmp/issue-body.txt
+          retention-days: 14
+
+      - name: Abort if agent abandoned
+        if: steps.diff.outputs.produced == 'false'
+        env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
           RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
-          BRANCH="ai/phase1-poc/issue-${ISSUE_NUMBER}-run-${RUN_ID}"
-          git checkout -b "$BRANCH"
+          SUMMARY=$(cat /tmp/agent-summary.md 2>/dev/null || echo "(no summary)")
+          BODY=$(cat <<EOF
+          Phase 2 : l'agent a abandonne sans produire de diff.
 
-          # Marker a la racine (pas dans tmp/ qui est gitignored).
-          TIMESTAMP=$(date -u -Iseconds)
-          cat > ai-bot-phase1-marker.md <<EOF
-          # Phase 1 marker
+          **Resume final de l'agent** :
 
-          Test de la chaine identite du bot IA.
+          > $SUMMARY
 
-          - Run       : ${RUN_ID}
-          - Issue     : #${ISSUE_NUMBER}
-          - Auteur    : alarm-murgat-bot[bot] (attendu)
-          - Workflow  : .github/workflows/ai-bot.yml
-          - Timestamp : ${TIMESTAMP}
-
-          Cette PR ne doit PAS etre mergee. A fermer apres verification manuelle
-          que l'auteur apparait bien comme alarm-murgat-bot[bot].
+          Voir les artifacts du run : https://github.com/claude-murgat/Alarm2.0/actions/runs/${RUN_ID}
           EOF
+          )
+          gh issue comment "$ISSUE_NUMBER" --body "$BODY"
+          exit 1
 
-          git add ai-bot-phase1-marker.md
-          git commit -m "chore(ai-bot): phase 1 POC marker (issue #${ISSUE_NUMBER})"
-          git push origin "$BRANCH"
-          echo "name=${BRANCH}" >> "$GITHUB_OUTPUT"
-
-      - name: Open PR
-        id: pr
+      - name: Commit agent's changes
+        if: steps.diff.outputs.produced == 'true'
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
-          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          git add -A
+
+          # Commit message via fichier (-F) pour echapper proprement
+          # les guillemets/sauts de ligne eventuels dans le resume.
+          {
+            echo "fix(ai-bot): issue #${ISSUE_NUMBER}"
+            echo ""
+            cat /tmp/agent-summary.md 2>/dev/null || echo "(no summary)"
+            echo ""
+            echo "Generated by alarm-murgat-bot (phase 2 POC)."
+          } > /tmp/commit-msg.txt
+
+          git commit -F /tmp/commit-msg.txt
+
+      - name: Push branch
+        if: steps.diff.outputs.produced == 'true'
+        env:
           BRANCH: ${{ steps.branch.outputs.name }}
         run: |
           set -euo pipefail
+          git push origin "$BRANCH"
 
-          # Heredoc quote ('EOF') : aucune interpolation bash, contenu litteral.
-          cat > /tmp/pr-body.md <<'EOF'
-          POC phase 1 du bot IA — validation de la chaine identite.
+      - name: Open PR
+        id: pr
+        if: steps.diff.outputs.produced == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ISSUE_TITLE: ${{ steps.issue.outputs.title }}
+          BRANCH: ${{ steps.branch.outputs.name }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          SUMMARY=$(cat /tmp/agent-summary.md 2>/dev/null || echo "(no summary)")
+
+          cat > /tmp/pr-body.md <<EOF
+          Fix propose par alarm-murgat-bot (phase 2 POC) pour l'issue #${ISSUE_NUMBER}.
 
           <!-- AI-BOT-METADATA
-          phase: 1
-          iteration: 1/1
-          kind: poc-identity
+          phase: 2
+          iteration: 1/3
+          issue: ${ISSUE_NUMBER}
+          model: claude-opus-4-7
+          run: ${RUN_ID}
           -->
 
-          ## But
+          ## Issue source
 
-          Valider que :
+          #${ISSUE_NUMBER} — ${ISSUE_TITLE}
 
-          1. La GitHub App alarm-murgat-bot peut generer un installation token
-          2. Un commit peut etre pousse sous l'identite alarm-murgat-bot[bot]
-          3. Une PR peut etre ouverte automatiquement
-          4. L'issue source est liee
+          ## Resume de l'agent
+
+          ${SUMMARY}
 
           ## A verifier humain
 
-          - [ ] Cette PR est authored par **alarm-murgat-bot[bot]**
-          - [ ] Le commit porte le meme auteur
-          - [ ] La CI se declenche (tier 1+2+3)
-          - [ ] Puis fermer cette PR sans merge
+          - [ ] Le test RED ajoute reproduit bien le bug rapporte (avant le fix, il FAIL)
+          - [ ] Le fix est minimal et ne modifie que le necessaire
+          - [ ] Aucun fichier de la denylist modifie (cf docs/AI_STRATEGY.md)
+          - [ ] Tier 1+2+3 verts
+          - [ ] Le test respecte les regles P1-P6
+
+          ## Artifacts
+
+          Logs complets du run (stream-json, prompt, resume) :
+          https://github.com/claude-murgat/Alarm2.0/actions/runs/${RUN_ID}
           EOF
 
           PR_URL=$(gh pr create \
             --base master \
             --head "${BRANCH}" \
-            --title "[AI Bot phase 1] POC identity (issue #${ISSUE_NUMBER})" \
+            --title "fix(ai-bot): ${ISSUE_TITLE}" \
             --body-file /tmp/pr-body.md)
 
           echo "url=${PR_URL}" >> "$GITHUB_OUTPUT"
-          echo "PR opened: ${PR_URL}"
+          echo "PR opened : ${PR_URL}"
 
       - name: Comment on source issue
+        if: steps.diff.outputs.produced == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          PR_URL: ${{ steps.pr.outputs.url }}
         run: |
           set -euo pipefail
-          gh issue comment "${{ inputs.issue_number }}" \
-            --body "Phase 1 POC du bot IA : PR ouverte -> ${{ steps.pr.outputs.url }}"
+          gh issue comment "$ISSUE_NUMBER" \
+            --body "Phase 2 : agent a produit une PR pour ce bug -> ${PR_URL}"
