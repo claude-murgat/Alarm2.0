@@ -303,7 +303,7 @@ Les utilitaires (`_reset_clock_all_nodes`, `_login_user`, `FakeApiService`) ne s
 
 ### Tranchées (J1-J9)
 
-1. ~~**Qui est l'IA ?**~~ → **Claude Code**, via session interactive. Identité robot pour le code = GitHub App `alarm-murgat-bot`. Webhook IA pas encore branché.
+1. ~~**Qui est l'IA ?**~~ → **Claude Code** (headless en CI + session interactive en local). Identité robot = GitHub App `alarm-murgat-bot` (App ID 3428066, installation 125174785). **Bot opérationnel** via `.github/workflows/ai-bot.yml` (phase 2/5 — `workflow_dispatch` manuel, Opus 4.7 headless). Voir `.github/ai-bot/README.md` pour l'utilisation. Phases 3 (trigger auto `ai:fix` + denylist CI) et 4 (merge auto `ai:approved`) à venir.
 4. ~~**Périmètre tier 1**~~ → **logique métier extraite uniquement** (`backend/app/logic/*`). Pas de validations Pydantic ni helpers schéma à ce stade. 87 tests.
 5. ~~**Budget temps CI par PR**~~ → ~8 min observé, OK. Plafond cible : 10 min. Au-delà → optimiser ou splitter.
 
@@ -329,15 +329,24 @@ Checklist pour un Claude (ou autre) qui rouvre ce projet demain :
 - [ ] `git branch --show-current` puis `gh run list --branch <branche> --limit 5` pour voir l'état CI
 - [ ] Vérifier le statut des priorités dans audit_v2.json (section `priority_actions`)
 
-**État au 2026-04-19** :
+**État au 2026-04-20** :
 - ✅ Extraction logique pure : 95% complète (6 modules dans `backend/app/logic/`, 87 unit tests verts)
 - ✅ Pipeline CI 3 tiers : opérationnel (tier 1+2 verts en cloud, tier 3 sur self-hosted Docker local — voir section 3)
-- ✅ Branch protection master active (required tier 1+2)
+- ✅ Branch protection master active (required tier 1+2+3w1+3w2)
 - ✅ GitHub App `alarm-murgat-bot` + 2 runners self-hosted
 - ⚠️ Tier 3 : 88/119 verts sur premier run, 12 fails à fixer (cf prompt session annexe)
 - ❌ Tier 4 chaos : non implémenté
 - ❌ Mutation testing (mutmut) : non installé
-- ❌ Bot IA branché en webhook : non, mode interactif uniquement
+- ⚠️ **Bot IA contributeur autonome : phase 2/5 opérationnelle** :
+  - ✅ Phase 1 — identité GH App → token → commit → push → PR validée (PR #2 mergée)
+  - ✅ Phase 2 — spawn Claude Code CLI headless (Opus 4.7) validé bout-en-bout sur issue #6 (INV-031) : agent a correctement abandonné car bug déjà fixé, respect P5 TDD strict (PR #5 mergée)
+  - ❌ Phase 3 — trigger auto `issues.labeled == 'ai:fix'` + denylist CI check + compteur itérations + `tee` live log (à faire)
+  - ❌ Phase 4 — merge auto sur label `ai:approved` (à faire)
+  - ❌ Phase 5 — tests pilotes sur vrais bugs encore présents (à lancer après audit INVARIANTS)
+  - Actuellement : trigger = `workflow_dispatch` manuel (`gh workflow run ai-bot.yml -f issue_number=<N>`)
+  - Voir `.github/ai-bot/README.md` pour l'utilisation détaillée
+
+**Problème révélé par le premier pilote** : `tests/INVARIANTS.md` contient des invariants marqués 🐛 qui ont déjà été fixés dans le code (ex: INV-031 fixé par commit `cc35b7d`). **Audit complet du catalogue requis** avant de lancer les pilotes phase 5.
 
 **Priorités originales** (encore valables, à réordonner selon l'état) :
 1. Extraire la logique métier en fonctions pures + 100 unit tests rapides ← **fait à 95%**
