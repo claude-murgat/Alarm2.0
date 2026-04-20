@@ -137,6 +137,9 @@ jobs:
           echo "BACKEND_URL=http://host.docker.internal:$PORT" >> $GITHUB_ENV
 
       - name: Pre-cleanup (au cas ou un run precedent a echoue)
+        # Le script ci-cleanup.sh est idempotent : rien a nettoyer = exit 0.
+        # On garde `|| true` defensif au cas ou un residu persistant bloque
+        # (le boot cluster tentera quand meme avec retry, cf etape suivante).
         run: ./scripts/ci-cleanup.sh "$PROJECT" || true
 
       - name: Provide dummy firebase service account
@@ -145,9 +148,25 @@ jobs:
         run: |
           [[ -f backend/firebase-service-account.json ]] || echo '{}' > backend/firebase-service-account.json
 
-      - name: Boot cluster (compose up)
+      - name: Boot cluster (compose up, with 1 retry)
+        # CI-BUG-09 (2026-04-20) : le boot cluster peut fail sur Patroni
+        # ayant un volume pgdata residuel, un etcd qui prend du temps a
+        # former quorum, etc. Au lieu de fail tout le job au 1er echec,
+        # on cleanup + retry une fois. Au 2e echec, abandon clair.
         run: |
-          docker compose --env-file ".env.ci-w${{ matrix.worker }}" -p "$PROJECT" up -d --build
+          set -e
+          for attempt in 1 2; do
+            echo "=== Boot cluster attempt ${attempt}/2 (worker ${{ matrix.worker }}) ==="
+            if docker compose --env-file ".env.ci-w${{ matrix.worker }}" -p "$PROJECT" up -d --build; then
+              echo "Compose up OK at attempt ${attempt}"
+              exit 0
+            fi
+            echo "::warning::Compose up failed at attempt ${attempt}, cleaning up before retry..."
+            ./scripts/ci-cleanup.sh "$PROJECT" || true
+            sleep 5
+          done
+          echo "::error::Cluster boot failed after 2 attempts (worker ${{ matrix.worker }})"
+          exit 1
 
       - name: Wait for cluster ready
         run: ./scripts/ci-wait-cluster.sh "$PROJECT" 180
