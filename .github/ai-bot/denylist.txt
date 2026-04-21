@@ -46,13 +46,28 @@ tests/integration/conftest.py
 
 # ===== Sources de verite business (seul l'humain modifie) =====
 tests/INVARIANTS.md
+tests/INVARIANTS_AUDIT.md
 tests/audit_v2.json
-docs/AI_STRATEGY.md
+docs
 android/INVARIANTS.md
+
+# ===== Docs projet racine (stables, humain uniquement) =====
+README.md
+IMPROVEMENTS.md
+ARCHITECTURE_SMS_VOIX.md
+PROMPT_SMS_VOIX.md
+PROMPT_SSE_FCM.md
+SITE_SECURITY_NOTES.md
 
 # ===== Contexte IA (pas d'auto-reprogrammation) =====
 .claude
 CLAUDE.md
+
+# ===== Frontend web (phase backend only pour l'instant) =====
+backend/app/templates
+
+# ===== Secrets FCM (defense en profondeur, deja gitignored) =====
+backend/firebase-service-account.json
 
 # ===== Gouvernance / meta git =====
 .gitattributes

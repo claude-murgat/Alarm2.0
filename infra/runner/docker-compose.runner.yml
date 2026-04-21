@@ -37,4 +37,11 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     deploy:
-      replicas: 2
+      # Scale 2 -> 4 le 2026-04-21 : permet le parallelisme intra-run
+      # garanti (tier 3 w1+w2 de la meme PR) meme quand 1 autre run
+      # tourne en parallele. Volume observe post-pilotes : 4-5 PRs bot
+      # par session, besoin de serialize mais pas trop agressif.
+      # RAM PC : +~2 GB (chaque runner ~500 MB idle). Acceptable.
+      # Cf CI-BUG-10 dans docs/AI_STRATEGY.md §8bis pour le diagnostic
+      # initial capacite limitee.
+      replicas: 4

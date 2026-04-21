@@ -26,7 +26,7 @@ export APP_PRIVATE_KEY="$(cat "$KEY_FILE")"
 
 case "$ACTION" in
     up)
-        docker compose -f docker-compose.runner.yml --env-file "$ENV_FILE" up -d --scale gh-runner=2
+        docker compose -f docker-compose.runner.yml --env-file "$ENV_FILE" up -d --scale gh-runner=4
         echo ""
         echo "Runner lance. Verifie qu'il apparait Idle :"
         echo "  https://github.com/$(grep GH_OWNER "$ENV_FILE" | cut -d= -f2)/$(grep GH_REPO "$ENV_FILE" | cut -d= -f2)/settings/actions/runners"
