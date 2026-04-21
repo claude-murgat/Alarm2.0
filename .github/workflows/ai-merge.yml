@@ -52,6 +52,16 @@ jobs:
           permission-pull-requests: write
           permission-issues: write
 
+      - name: Checkout master (for gh CLI to locate the repo)
+        # Sans checkout, `gh pr view` dans les steps suivants echoue avec
+        # "fatal: not a git repository" car il tente d'auto-detecter le
+        # repo depuis cwd. Fix decouvert 2026-04-21 suite au 1er test live
+        # ai-merge sur PR #20.
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 1
+
       - name: Verify PR checks are all green
         id: checks
         env:
