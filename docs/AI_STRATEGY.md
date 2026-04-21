@@ -228,10 +228,16 @@ NE JAMAIS : interpréter le comportement voulu depuis le code.
 Le problème : au fil des fix, les tests s'accumulent. Beaucoup deviennent obsolètes, tautologiques, ou verrouillent des bugs qu'on a fixés autrement. **Sans garde-fou, la suite devient un poids mort**.
 
 ### G1. Mutation testing comme gate qualité
-- **Outil** : `mutmut run` en nightly.
+- **Outil** : `mutmut run` en nightly. ✅ **Installé** (2026-04-21) :
+  - Workflow : [.github/workflows/mutation-testing.yml](../.github/workflows/mutation-testing.yml)
+  - Trigger : `schedule: '0 2 * * *'` (2h UTC) + `workflow_dispatch`
+  - Cible : `backend/app/logic/` uniquement (6 modules fonctions pures)
+  - Config : [`[tool.mutmut]` dans pyproject.toml](../pyproject.toml) (paths, tests_dir, runner `pytest -x --assert=plain tests/unit/`)
+  - Helper : [.github/scripts/mutation_score.py](../.github/scripts/mutation_score.py) calcule le score depuis junit XML
 - **Règle** : score mutation > 80% sur les fonctions pures (tier 1).
-- **Si < 80%** : identifier les mutations survivantes, renforcer ou supprimer les tests correspondants.
-- **Quand l'utiliser** : chaque fois que l'IA ajoute un test, mesurer le delta de mutation score.
+- **Si < 80%** : workflow emet `::warning::` visible dans le run summary (pas `::error::`). G1 **n'est PAS un required check** de branch protection — objectif = tracker la qualité des tests sur la durée, pas bloquer les PRs sur un scan nightly. L'humain regarde le rapport HTML uploadé en artifact (`mutation-reports-<run_id>`) pour identifier les mutations survivantes.
+- **Quand l'utiliser** : automatique chaque nuit. Manuel via `gh workflow run mutation-testing.yml` pour checker un delta après ajout de tests. Chaque fois que l'IA ajoute un test, un reviewer humain peut demander un run manuel avant merge.
+- **Durée** : ~15-30 min (chaque mutation = un full run du tier 1 unit tests). Tolérable pour nightly. Pas tolérable pour PR CI → d'où le choix nightly séparé.
 
 ### G2. Audit trimestriel des tests
 Script `tests/audit_tests.py` (déjà présent) tourne chaque trimestre et produit un rapport :
@@ -284,7 +290,7 @@ Les utilitaires (`_reset_clock_all_nodes`, `_login_user`, `FakeApiService`) ne s
 | `pytest-split` 0.9.0 | Répartition tests entre matrix workers | ✅ Installé | Activable en tier 3 (J8 itération 2) |
 | `hypothesis` 6.122.3 | Property-based testing | ⚠️ Installé, 0 usage | À utiliser pour invariants combinatoires |
 | `FastAPI TestClient` (via fastapi) | Test endpoints sans serveur live | ✅ Installé | Tier 2 |
-| `mutmut` | Mutation testing | ❌ Non installé | À ajouter quand on attaquera G1 (nightly) |
+| `mutmut` 2.5.0 | Mutation testing | ✅ Installé | Workflow nightly `.github/workflows/mutation-testing.yml`. Cible `backend/app/logic/`. Non-bloquant (warning si score < 80 %). |
 | `pytest-testmon` | Re-run tests impactés par un diff | ❌ Non installé | Optionnel, accélération IA |
 | `pytest-asyncio` | Tests async natifs | ❌ Non installé | Pas nécessaire avec TestClient |
 | `schemathesis` | Contract tests OpenAPI | ❌ Non installé | À évaluer quand le tier 2 grandit |
@@ -336,7 +342,7 @@ Checklist pour un Claude (ou autre) qui rouvre ce projet demain :
 - ✅ GitHub App `alarm-murgat-bot` + 2 runners self-hosted
 - ⚠️ Tier 3 : 88/119 verts sur premier run, 12 fails à fixer (cf prompt session annexe)
 - ❌ Tier 4 chaos : non implémenté
-- ❌ Mutation testing (mutmut) : non installé
+- ✅ Mutation testing (mutmut) : **installé** (2026-04-21, workflow nightly non-bloquant, cf §5 G1)
 - ✅ **Bot IA contributeur autonome : phases 1-4 + 5 pilotes validés bout-en-bout 2026-04-21** :
   - ✅ Phase 1 — identité GH App → token → commit → push → PR (PR #2)
   - ✅ Phase 2 — spawn Claude Code CLI headless Opus 4.7 (PR #5)

@@ -8,3 +8,9 @@ pytest-randomly==3.16.0
 pytest-cov==6.0.0
 hypothesis==6.122.3
 pytest-split==0.9.0
+
+# Mutation testing (G1 du doc AI_STRATEGY.md). Utilise UNIQUEMENT par le
+# workflow nightly `.github/workflows/mutation-testing.yml`. Pas requis
+# pour les tier 1/2/3 de la CI PR. Target : backend/app/logic/ (fonctions
+# pures). Duree typique : 15-30 min pour 6 modules. Seuil warning : 80 %.
+mutmut==2.5.0
