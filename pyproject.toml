@@ -27,3 +27,28 @@ exclude_lines = [
     "raise NotImplementedError",
     "if __name__ == .__main__.:",
 ]
+
+# Mutation testing (cf docs/AI_STRATEGY.md §5 G1 + workflow
+# .github/workflows/mutation-testing.yml).
+#
+# Cible : logique metier extraite en fonctions pures — les 6 modules sous
+# backend/app/logic/. Ne mute PAS le reste du backend : API/routes/services
+# sont couverts par les tier 2 (integration) + tier 3 (E2E cluster) qui sont
+# trop longs a tourner sous mutmut (~15 min par mutation * milliers = jours).
+#
+# Runner : pytest tier 1 uniquement (tests/unit/). --assert=plain pour la
+# vitesse (pas d'assertion rewriting). -x pour fail-fast sur la premiere
+# assertion KO (kill rapide).
+#
+# Tests_dir : indique a mutmut ou vivent les tests, pour qu'il NE mute PAS
+# ces fichiers (mutations dans les tests n'ont aucun sens).
+#
+# Seuil : score > 80 % emet un warning mais ne fail pas la CI (workflow
+# nightly non-bloquant, cf AI_STRATEGY §5 G1).
+[tool.mutmut]
+paths_to_mutate = "backend/app/logic/"
+tests_dir = "tests/unit/"
+runner = "python -m pytest -x --assert=plain tests/unit/"
+# backup=false : mutmut modifie le code en place pendant une mutation et
+# restore ensuite. Pas besoin de backups *.bak polluant le repo.
+backup = false

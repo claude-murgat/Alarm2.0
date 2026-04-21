@@ -1,0 +1,171 @@
+# Mutation testing nightly — garde-fou G1 de docs/AI_STRATEGY.md §5.
+#
+# Pourquoi : un test qui passe avec une implementation buggy ne prouve rien.
+# Mutation testing injecte des bugs artificiels dans le code (ex: > devient
+# >=, + devient -, True devient False) et verifie que les tests CASSENT.
+# - Mutation KILLED : test casse -> bon, le test prouve quelque chose.
+# - Mutation SURVIVED : test continue a passer -> le test est faible ou
+#   tautologique, a renforcer / clarifier.
+#
+# Le score = killed / (killed + survived). Objectif : > 80 %.
+#
+# Cible : backend/app/logic/ uniquement (6 modules de fonctions pures).
+# Le reste du backend (API, services, routes) est couvert par tier 2+3 qui
+# ne peuvent pas tourner sous mutmut pour des raisons de duree (chaque
+# mutation = un full run de la suite).
+#
+# Non-bloquant : ce workflow ne fait PAS partie des required checks de
+# branch protection. Il tourne la nuit, emet un warning si score < 80 %,
+# uploade l'HTML report en artifact. L'humain regarde quand il a le temps.
+#
+# Trigger : schedule (2h UTC) + workflow_dispatch pour runs manuels.
+
+name: Mutation Testing (nightly)
+
+on:
+  schedule:
+    # 02:00 UTC chaque nuit. Heure "morte" en Europe (~3-4 AM France) donc
+    # aucune interference avec les PR actives.
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      threshold_warning:
+        description: "Score % en-dessous duquel emettre un warning (pas un fail)"
+        required: false
+        default: "80"
+
+# Un seul run a la fois. Si un run nightly commence pendant qu'un run manuel
+# tourne encore, on queue (pas cancel — la longueur justifie de ne pas
+# perdre un run deja entame).
+concurrency:
+  group: mutation-testing
+  cancel-in-progress: false
+
+jobs:
+  mutmut_run:
+    name: Run mutmut on backend/app/logic/
+    runs-on: ubuntu-latest
+    # Timeout confortable : 15-30 min attendu pour 6 modules, marge pour
+    # croissance future. Au-dela, probablement un bug -> abort.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      # Pas d'ecriture : on ne commit/push rien depuis ce workflow.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Sanity check — tier 1 tests passent avant mutation
+        # Prerequis mutmut : les tests doivent TOUS passer sur le code non-
+        # mute avant qu'on commence a muter. Si la baseline est rouge,
+        # mutmut produit des resultats inexploitables (tout "killed" mais
+        # par le mauvais fail).
+        run: |
+          python -m pytest tests/unit -m unit \
+            -p no:randomly \
+            -q \
+            --no-cov
+
+      - name: Run mutmut
+        # Config lue depuis pyproject.toml [tool.mutmut]. Les args CLI
+        # explicites sont fallback au cas ou le [tool.mutmut] n'est pas
+        # lu par cette version de mutmut.
+        #
+        # Exit codes mutmut (bit-OR combines) :
+        #   0 = all killed (score 100 %)
+        #   1 = fatal error (vrai probleme infra -> on abort)
+        #   2 = one or more mutants survived (NORMAL, score < 100 %)
+        #   4 = timeouts (comptes comme killed)
+        #   8 = suspicious (tests 2x trop longs)
+        # On continue pour 2/4/8/combinaisons, on fail le job pour 1.
+        id: mutmut_run
+        run: |
+          set +e
+          mutmut run \
+            --paths-to-mutate backend/app/logic/ \
+            --tests-dir tests/unit/ \
+            --runner "python -m pytest -x --assert=plain tests/unit/" \
+            2>&1 | tee /tmp/mutmut-run.log
+          EXIT=${PIPESTATUS[0]}
+          echo "mutmut exit code: $EXIT"
+          # Bit 0 set (EXIT & 1) = fatal. Le reste (2/4/8) = informatif.
+          if (( EXIT & 1 )); then
+            echo "::error::mutmut fatal error (exit code $EXIT includes bit 1). See /tmp/mutmut-run.log"
+            exit 1
+          fi
+          echo "mutmut_exit=${EXIT}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate reports (results + HTML + junit)
+        # Meme si mutmut run s'est termine avec survived, on veut tjrs les
+        # rapports pour l'humain.
+        if: always()
+        run: |
+          set +e
+          mkdir -p reports/mutation
+
+          # Results texte (console-friendly) pour le log
+          mutmut results > reports/mutation/results.txt 2>&1 || true
+          echo "=== mutmut results (first 100 lines) ==="
+          head -100 reports/mutation/results.txt || true
+
+          # HTML report (browsable)
+          mutmut html || echo "::warning::mutmut html failed (may be OK on clean run)"
+          if [[ -d html ]]; then
+            mv html reports/mutation/html
+          fi
+
+          # Junit XML pour parsing automatique
+          mutmut junitxml > reports/mutation/junit.xml 2>&1 || true
+          echo "=== Junit XML first 30 lines ==="
+          head -30 reports/mutation/junit.xml || true
+
+      - name: Compute mutation score + gate on threshold
+        id: score
+        if: always()
+        env:
+          THRESHOLD: ${{ inputs.threshold_warning || '80' }}
+        run: |
+          set -euo pipefail
+          # Le script parse reports/mutation/junit.xml, calcule
+          # killed / (killed + survived), et retourne exit 0.
+          # En cas de score < THRESHOLD, emet ::warning:: (pas ::error::)
+          # et en logue un GITHUB_STEP_SUMMARY.
+          python .github/scripts/mutation_score.py \
+            reports/mutation/junit.xml \
+            --threshold "$THRESHOLD" \
+            --summary-file "${GITHUB_STEP_SUMMARY:-/tmp/step-summary.md}" \
+            --output-file "$GITHUB_OUTPUT" \
+          || {
+            # Le script lui-meme ne doit jamais fail le job (G1 est
+            # non-bloquant). Si python plante, warning visible + on continue.
+            echo "::warning::mutation_score.py crashed. See logs. Score unknown."
+            echo "score=unknown" >> "$GITHUB_OUTPUT"
+            echo "killed=0" >> "$GITHUB_OUTPUT"
+            echo "survived=0" >> "$GITHUB_OUTPUT"
+          }
+
+      - name: Upload mutation reports (HTML + junit + text)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-reports-${{ github.run_id }}
+          path: |
+            reports/mutation/
+            /tmp/mutmut-run.log
+          retention-days: 30
+          if-no-files-found: warn
