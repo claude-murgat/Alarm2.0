@@ -9,10 +9,21 @@ on:
   push:
     branches: [master, "ci/**"]
 
-# Annule les runs precedents sur la meme PR/branche → economie + pas d'empilement IA.
+# Queue les runs sur la meme PR/branche plutot que de les annuler.
+#
+# Historique (CI-BUG-11, 2026-04-21) : avec `cancel-in-progress: true`,
+# tout event pull_request.synchronize emis par un `update-branch`, un
+# `gh pr merge --auto`, ou un bot commentaire annulait le run en cours
+# sur la meme ref. Resultat : runs tier 3 cancelled AVANT fin, tier 3 w2
+# "cancelled" dans les checks, PR non-mergeable malgre tier 1+2 verts.
+#
+# Choix `false` : les runs queue. Cout additionnel reel = quasi nul car
+# (a) volume PR bas (2-5/semaine), (b) tier 3 self-hosted deja serialize
+# par worker (job-level, cf CI-BUG-10), donc empilement naturellement
+# borne. Gain : plus aucun cancel fantome.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   tier1_unit:

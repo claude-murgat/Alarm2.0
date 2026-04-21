@@ -500,6 +500,28 @@ Effet : les jobs `tier3_e2e` avec `matrix.worker=N` sont sérialisés à travers
 
 **Principe à retenir** : un test d'infra **parallèle** exige soit des **namespaces uniques par run**, soit une **sérialisation explicite**. Le premier cas est le plus robuste mais le plus cher à mettre en place. Le deuxième est une dette acceptable si le volume reste faible.
 
+### CI-BUG-11 — `cancel-in-progress: true` annule des runs utiles sur events synchronize
+
+**Statut** : fix appliqué (passage à `cancel-in-progress: false` workflow-level, 2026-04-21).
+**Symptôme** : runs CI `cancelled` sans raison apparente (pas de `cancel_reason` en API). Pattern observé :
+- `gh pr update-branch` ou `gh pr merge --auto` → GitHub émet un event `pull_request.synchronize` sur la même ref → concurrency cancel-in-progress annule le run en cours.
+- Plusieurs merges rapides sur master → chaque merge émet un event `push` sur `refs/heads/master` → les runs master précédents sont cancel.
+- Ex observés : runs #4, #43, #47, #48 cancelled dans la même session sur master et une PR.
+
+**Cause** : `concurrency.cancel-in-progress: true` au niveau workflow dans `pr.yml`. Utile quand un dev push 10 commits en 5 min (ne garde que le dernier). Inadapté à notre repo où :
+- Volume PR bas (2-5/semaine) — peu de rushes de commits successifs
+- Tier 3 coûteux (~7 min) — chaque cancel = signal perdu
+- Beaucoup de faux positifs dus aux events `synchronize` qui n'ajoutent rien au diff (auto-merge, update-branch, bot commentaire)
+- Tier 3 déjà sérialisé par worker via CI-BUG-10 → l'empilement naturel est borné
+
+**Fix appliqué** : passage à `cancel-in-progress: false` workflow-level dans `pr.yml`. Les runs queue au lieu d'être annulés. Jamais de perte de signal. Le serialize tier 3 existant limite l'empilement à 1 à la fois en pratique.
+
+**À réévaluer si** :
+- Volume monte à 20+ PRs/jour (rush de commits typique OSS) — repasser à `true` avec accompagnement utilisateur
+- On ajoute des tiers CI très rapides (< 2 min) qui n'ont pas besoin d'être queued — envisager concurrency par tier
+
+**Principe à retenir** : `cancel-in-progress` est une **optimisation de débit** utile seulement à fort volume. À bas volume avec CI coûteuse, `false` donne plus de fiabilité pour un coût quasi nul.
+
 ---
 
 ### Pattern à retenir pour les futurs bugs CI
