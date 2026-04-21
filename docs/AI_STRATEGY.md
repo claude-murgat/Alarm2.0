@@ -337,16 +337,20 @@ Checklist pour un Claude (ou autre) qui rouvre ce projet demain :
 - ⚠️ Tier 3 : 88/119 verts sur premier run, 12 fails à fixer (cf prompt session annexe)
 - ❌ Tier 4 chaos : non implémenté
 - ❌ Mutation testing (mutmut) : non installé
-- ⚠️ **Bot IA contributeur autonome : phase 2/5 opérationnelle** :
+- ⚠️ **Bot IA contributeur autonome : phases 1-3B + pilote #1 validées bout-en-bout** :
   - ✅ Phase 1 — identité GH App → token → commit → push → PR validée (PR #2 mergée)
   - ✅ Phase 2 — spawn Claude Code CLI headless (Opus 4.7) validé bout-en-bout sur issue #6 (INV-031) : agent a correctement abandonné car bug déjà fixé, respect P5 TDD strict (PR #5 mergée)
-  - ❌ Phase 3 — trigger auto `issues.labeled == 'ai:fix'` + denylist CI check + compteur itérations + `tee` live log (à faire)
-  - ❌ Phase 4 — merge auto sur label `ai:approved` (à faire)
-  - ❌ Phase 5 — tests pilotes sur vrais bugs encore présents (à lancer après audit INVARIANTS)
-  - Actuellement : trigger = `workflow_dispatch` manuel (`gh workflow run ai-bot.yml -f issue_number=<N>`)
-  - Voir `.github/ai-bot/README.md` pour l'utilisation détaillée
+  - ✅ Phase 3A — live log via `tee` + denylist CI enforcement + label `ai:denied` (PR #10 mergée)
+  - ✅ Phase 3B — triggers auto `issues.labeled == 'ai:fix'`, `check_run.completed=failure`, `issue_comment` (filtré par `/ai-retry` ou `@alarm-murgat-bot`, auteur ≠ bot) + mode retry (new/retry-ci/retry-comment/retry-manual) + commentaire initial de découvrabilité (PR #8 mergée)
+  - ✅ **Pilote #1 INV-082 validé 2026-04-21** : issue #13 labeled `ai:fix` → trigger auto → agent a écrit `tests/test_e2e.py::TestInv082ConcurrentBulk::test_concurrent_bulk_never_exposes_empty_chain` (103 lignes, 1 test, respect P4 budget) → PR #14 CI tier 1+2+3 verte → mergée (mode "test de verrouillage en régression", l'agent a reconnu que le code était déjà correct et n'a pas forcé un RED→GREEN artificiel)
+  - ❌ Phase 3C — compteur propre `N/3` + détection boucle (même test fail 3× consécutifs → abandon) + label `ai:abandoned` auto (à faire ; aujourd'hui limite brute à 5 sans détection boucle)
+  - ❌ Phase 4 — merge auto sur label `ai:approved` posé par humain (à faire ; aujourd'hui merge manuel)
 
-**Problème révélé par le premier pilote** : `tests/INVARIANTS.md` contient des invariants marqués 🐛 qui ont déjà été fixés dans le code (ex: INV-031 fixé par commit `cc35b7d`). **Audit complet du catalogue requis** avant de lancer les pilotes phase 5.
+  Actuellement : **trigger auto opérationnel** (label `ai:fix` → bot démarre seul). Voir `.github/ai-bot/README.md`.
+
+**Problème révélé par le pilote INV-031 puis corrigé** : `tests/INVARIANTS.md` contenait plusieurs 🐛 déjà fixés dans le code. Audit complet réalisé (PR #9 + #11 mergées 2026-04-21) — catalogue maintenant à jour. Bugs résiduels réels : INV-018/018b (`original_created_at`), INV-084 (3 délais hardcodés), INV-085 (quorum email).
+
+**Bugs CI découverts et résolus pendant la stabilisation** : CI-BUG-09 (cleanup silencieusement partiel → couplage PRs, cf §8bis), CI-BUG-10 (race condition tier 3 `PROJECT=ci-wN` partagé entre runs parallèles — fix concurrency job-level par worker, cf §8bis).
 
 **Priorités originales** (encore valables, à réordonner selon l'état) :
 1. Extraire la logique métier en fonctions pures + 100 unit tests rapides ← **fait à 95%**
