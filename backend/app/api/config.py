@@ -22,13 +22,19 @@ def add_escalation_config(
     current_user: User = Depends(get_current_admin),
     db: Session = Depends(get_db),
 ):
+    # INV-019 : position est unique. Si deja occupee, rejeter avec 409 pour eviter
+    # qu'un admin qui se trompe de position n'ecrase silencieusement un user
+    # (risque : sortir le seul user de garde de la chaine sans avertissement).
     existing = db.query(EscalationConfig).filter(EscalationConfig.position == config.position).first()
     if existing:
-        existing.user_id = config.user_id
-        existing.delay_minutes = config.delay_minutes
-        db.commit()
-        db.refresh(existing)
-        return existing
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"La position {config.position} est deja occupee. "
+                "Supprimez-la d'abord (DELETE /api/config/escalation/{id}) "
+                "ou utilisez POST /api/config/escalation/bulk pour remplacer toute la chaine."
+            ),
+        )
 
     ec = EscalationConfig(
         position=config.position,
