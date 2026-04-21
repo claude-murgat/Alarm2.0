@@ -79,11 +79,20 @@ jobs:
           # Les required checks sont definis dans branch protection ; on ne
           # peut pas les lister ici sans API call. Pragmatique : exiger que
           # TOUS les checks rollup-completed soient SUCCESS ou SKIPPED.
+          #
+          # EXCLUSION : on exclut de la verification les checks du workflow
+          # ai-merge lui-meme (name == "Verify + auto-merge PR bot"). Raison :
+          # si un premier run ai-merge a fail (ex: bug dans le workflow), ce
+          # fail reste dans le rollup de la PR et bloquerait tout re-run
+          # meme apres fix. Le check du ai-merge courant ne peut pas se
+          # verifier lui-meme de toute facon (il tourne en ce moment).
+          # Decouvert 2026-04-21 au test live sur PR #20.
           ROLLUP=$(gh pr view "$PR_NUMBER" --json statusCheckRollup --jq '.statusCheckRollup')
 
-          # Any non-success / non-skipped conclusion blocks merge.
-          FAILING=$(echo "$ROLLUP" | jq -r '.[] | select(.conclusion != null and .conclusion != "SUCCESS" and .conclusion != "SKIPPED" and .conclusion != "NEUTRAL") | .name')
-          PENDING=$(echo "$ROLLUP" | jq -r '.[] | select(.conclusion == null or .conclusion == "") | .name')
+          # Any non-success / non-skipped conclusion blocks merge, SAUF nos propres checks.
+          SELF_NAME="Verify + auto-merge PR bot"
+          FAILING=$(echo "$ROLLUP" | jq -r --arg self "$SELF_NAME" '.[] | select(.name != $self and .conclusion != null and .conclusion != "SUCCESS" and .conclusion != "SKIPPED" and .conclusion != "NEUTRAL") | .name')
+          PENDING=$(echo "$ROLLUP" | jq -r --arg self "$SELF_NAME" '.[] | select(.name != $self and (.conclusion == null or .conclusion == "")) | .name')
 
           if [[ -n "$FAILING" ]]; then
             echo "not_green=true" >> "$GITHUB_OUTPUT"
