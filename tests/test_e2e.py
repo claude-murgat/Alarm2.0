@@ -2619,6 +2619,109 @@ class TestEscalationChainBulk:
         assert chain[2]["user_id"] == u1
 
 
+# ── INV-082 : atomicite de /config/escalation/bulk sous concurrence ─────────
+
+class TestInv082ConcurrentBulk:
+    """INV-082 : POST /config/escalation/bulk doit etre atomique.
+
+    Verrouille en regression que sous race (writer modifie la chaine en boucle,
+    reader lit la chaine en boucle), le reader ne voit JAMAIS une liste vide.
+    Sans atomicite (DELETE puis INSERTs hors d'une transaction unique), il
+    existerait une fenetre ms ou GET /config/escalation retournerait []. Audit
+    2026-04-20 confirme l'invariant respecte (SessionLocal autocommit=False +
+    db.commit() unique + READ COMMITTED). Ce test verrouille la propriete pour
+    qu'un futur refactor cassant l'atomicite echoue immediatement en CI.
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        requests.post(f"{API}/test/reset")
+        yield
+        requests.post(f"{API}/test/reset")
+
+    def _get_user_id(self, name):
+        admin_h = _admin_headers()
+        return next(u["id"] for u in requests.get(f"{API}/users/", headers=admin_h).json()
+                    if u["name"] == name)
+
+    def test_concurrent_bulk_never_exposes_empty_chain(self):
+        """Race POST /bulk vs GET /escalation : reader ne voit jamais [] (INV-082)."""
+        import threading
+
+        admin_h = _admin_headers()
+        u1 = self._get_user_id(USER1_NAME)
+        u2 = self._get_user_id(USER2_NAME)
+        admin = self._get_user_id(ADMIN_NAME)
+
+        # Seed : chaine initiale non-vide (3 entrees) avant le demarrage des threads.
+        seed = requests.post(f"{API}/config/escalation/bulk", headers=admin_h,
+                             json={"user_ids": [u1, u2, admin]})
+        assert seed.status_code == 200, f"Seed failed: HTTP {seed.status_code} {seed.text}"
+
+        chain_a = [u1]
+        chain_b = [u1, u2]
+        writer_iters = 25
+        reader_iters = 60
+
+        empty_observations = []   # listes vides observees par le reader -> violation INV-082
+        errors = []               # erreurs HTTP/transport (writer ou reader)
+
+        def writer():
+            for i in range(writer_iters):
+                body = {"user_ids": chain_a if i % 2 == 0 else chain_b}
+                try:
+                    rr = requests.post(f"{API}/config/escalation/bulk",
+                                       headers=admin_h, json=body, timeout=15)
+                except Exception as exc:
+                    errors.append(f"writer iter {i} crashed: {exc!r}")
+                    return
+                if rr.status_code != 200:
+                    errors.append(f"writer iter {i}: HTTP {rr.status_code} {rr.text[:200]}")
+
+        def reader():
+            # GET /config/escalation est public (pas d'auth) — on tape sans header.
+            for i in range(reader_iters):
+                try:
+                    rr = requests.get(f"{API}/config/escalation", timeout=15)
+                except Exception as exc:
+                    errors.append(f"reader iter {i} crashed: {exc!r}")
+                    return
+                if rr.status_code != 200:
+                    errors.append(f"reader iter {i}: HTTP {rr.status_code}")
+                    continue
+                data = rr.json()
+                if not isinstance(data, list) or len(data) == 0:
+                    empty_observations.append({"iter": i, "data": data})
+
+        ta = threading.Thread(target=writer, name="inv082-writer")
+        tb = threading.Thread(target=reader, name="inv082-reader")
+        ta.start()
+        tb.start()
+        ta.join(timeout=180)
+        tb.join(timeout=180)
+
+        assert not ta.is_alive(), "Writer thread n'a pas termine dans le delai imparti"
+        assert not tb.is_alive(), "Reader thread n'a pas termine dans le delai imparti"
+        assert not errors, f"Erreurs HTTP/transport pendant la race : {errors[:5]}"
+        assert not empty_observations, (
+            f"INV-082 viole : reader a observe {len(empty_observations)} reponse(s) "
+            f"vide(s) alors que la chaine precedente etait toujours non-vide. "
+            f"DELETE+INSERT n'est plus atomique. Premieres observations : "
+            f"{empty_observations[:3]}"
+        )
+
+        # Apres join : la chaine finale doit etre coherente (= A ou B), jamais corrompue
+        # ni partielle. Si DELETE/INSERT etait fragmente, on pourrait voir un sous-ensemble.
+        final = requests.get(f"{API}/config/escalation").json()
+        assert isinstance(final, list) and len(final) >= 1, (
+            f"Etat final vide : {final}"
+        )
+        final_ids = [e["user_id"] for e in final]
+        assert final_ids in (chain_a, chain_b), (
+            f"Etat final corrompu : {final_ids}, attendu {chain_a} ou {chain_b}"
+        )
+
+
 # ── Frontend escalade ───────────────────────────────────────────────────────
 
 class TestEscalationFrontend:
