@@ -21,7 +21,7 @@ from .logic.models import (
 
 logger = logging.getLogger("escalation")
 
-ONCALL_OFFLINE_DELAY_MINUTES = 15.0
+ONCALL_OFFLINE_DELAY_MINUTES_DEFAULT = 15.0
 
 # Mis à jour à chaque tick — utilisé par /health pour détecter une boucle bloquée
 last_tick_at: Optional[object] = None
@@ -358,11 +358,20 @@ def _apply_oncall_heartbeat(db: Session, now, escalation_chain):
     ).all()
     alarm_snapshots = [_alarm_to_snapshot(a) for a in alarms_orm]
 
+    # INV-084 : lire le delai depuis SystemConfig a chaque tick pour qu'un
+    # changement admin (POST /api/config/system) prenne effet immediatement.
+    delay_cfg = db.query(SystemConfig).filter(
+        SystemConfig.key == "oncall_offline_delay_minutes"
+    ).first()
+    oncall_delay_minutes = (
+        float(delay_cfg.value) if delay_cfg else ONCALL_OFFLINE_DELAY_MINUTES_DEFAULT
+    )
+
     actions = evaluate_oncall_heartbeat(
         chain_snapshot,
         user_snapshots,
         alarm_snapshots,
-        ONCALL_OFFLINE_DELAY_MINUTES,
+        oncall_delay_minutes,
         now,
     )
 
