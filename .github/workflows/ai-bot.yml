@@ -19,8 +19,10 @@
 # Concurrency : globale "ai-bot". Un seul run bot a la fois repo-wide,
 #   simplifie et previent les collisions. Volume reel = 2-5x/semaine, queue OK.
 #
-# Limite iterations en 3B : 5 max (dur, sans raffinement). Phase 3C ajoutera
-#   le compteur propre + detection boucle (meme test fail 3x).
+# Limite iterations : 3 max (reduction phase 3C). Au-dela, abandon propre
+#   avec label ai:abandoned sur la PR et l'issue source.
+# Detection boucle stricte (meme test fail 3x consecutifs) = phase 3D
+#   (future ; necessite download/parsing des junit XML des runs CI precedents).
 #
 # Voir docs/AI_STRATEGY.md section 1 + design D1-D7 + .github/ai-bot/README.md.
 
@@ -241,11 +243,14 @@ jobs:
             fi
           fi
 
-          # --- Etape 4 : limite iterations (3B : 5 dur, 3C raffinera)
-          if [[ "$ITERATION" -gt 5 ]]; then
+          # --- Etape 4 : limite iterations (3C : reduction 5 -> 3)
+          if [[ "$ITERATION" -gt 3 ]]; then
             echo "should_run=false" >> "$GITHUB_OUTPUT"
-            echo "reject_reason=iteration-limit-5-exceeded (got $ITERATION)" >> "$GITHUB_OUTPUT"
-            echo "Rejected : iteration $ITERATION > 5 (limit)."
+            echo "reject_reason=iteration-limit-3-exceeded" >> "$GITHUB_OUTPUT"
+            echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+            echo "issue_number=${ISSUE_NUMBER}" >> "$GITHUB_OUTPUT"
+            echo "iteration=${ITERATION}" >> "$GITHUB_OUTPUT"
+            echo "Rejected : iteration $ITERATION > 3 (limit). Will notify human + label ai:abandoned."
             exit 0
           fi
 
@@ -264,7 +269,7 @@ jobs:
           echo "Issue #    : $ISSUE_NUMBER"
           echo "PR #       : ${PR_NUMBER:-(none yet)}"
           echo "Branch     : $BRANCH"
-          echo "Iteration  : ${ITERATION}/5"
+          echo "Iteration  : ${ITERATION}/3"
 
   # ============================================================================
   # Job 2 - agent_fix : spawn Claude Code CLI + commit + push + PR
@@ -394,7 +399,7 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "Bug report a traiter (issue #${ISSUE_NUMBER}) - iteration ${ITERATION}/5 - mode=${MODE}"
+            echo "Bug report a traiter (issue #${ISSUE_NUMBER}) - iteration ${ITERATION}/3 - mode=${MODE}"
             echo ""
             echo "## Title"
             echo "${ISSUE_TITLE}"
@@ -494,7 +499,7 @@ jobs:
           set -euo pipefail
           SUMMARY=$(cat /tmp/agent-summary.md 2>/dev/null || echo "(no summary)")
           BODY=$(cat <<EOF
-          L'agent a abandonne sans produire de diff (mode=${MODE}, iteration=${ITERATION}/5).
+          L'agent a abandonne sans produire de diff (mode=${MODE}, iteration=${ITERATION}/3).
 
           **Resume final de l'agent** :
 
@@ -506,6 +511,12 @@ jobs:
           # Commente la PR si retry, sinon l'issue
           TARGET="${PR_NUMBER:-$ISSUE_NUMBER}"
           gh issue comment "$TARGET" --body "$BODY"
+
+          # Phase 3C : pose label ai:needs-human (pas ai:abandoned qui
+          # est reserve au cas "iteration limit reached"). Ici l'agent n'a
+          # juste pas trouve quoi faire -> humain doit clarifier/reformuler.
+          gh issue edit "$ISSUE_NUMBER" --add-label "ai:needs-human" || true
+
           exit 1
 
       # === Phase 3A : enforcement denylist =====================================
@@ -660,7 +671,7 @@ jobs:
           | **Me dire d'abandonner** | Ferme la PR |
           | **Autre** | Je ne lis que \`/ai-retry\` ou les mentions. Les commentaires libres sont ignores. |
 
-          Limite : 5 iterations max par PR (phase 3B). Au-dela, j'abandonne.
+          Limite : 3 iterations max par PR (phase 3C). Au-dela, j'abandonne et pose le label \`ai:abandoned\`.
           EOF
 
           PR_URL=$(gh pr create \
@@ -720,3 +731,74 @@ jobs:
           set -euo pipefail
           gh issue comment "$ISSUE_NUMBER" \
             --body "alarm-murgat-bot a produit une PR pour ce bug : ${PR_URL}"
+
+  # ============================================================================
+  # Job 3 - notify_abandonment : tourne si dispatch a rejete la requete pour
+  # "iteration-limit-3-exceeded". Commente la PR + pose label ai:abandoned.
+  # N'empeche PAS un merge humain manuel — juste flag pour reprise humaine.
+  # Phase 3C.
+  # ============================================================================
+  notify_abandonment:
+    name: Notify abandonment (iteration limit reached)
+    needs: dispatch
+    if: |
+      needs.dispatch.outputs.should_run == 'false' &&
+      startsWith(needs.dispatch.outputs.reject_reason, 'iteration-limit')
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    steps:
+      - name: Generate installation token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.ALARM_BOT_APP_ID }}
+          private-key: ${{ secrets.ALARM_BOT_PRIVATE_KEY }}
+          permission-pull-requests: write
+          permission-issues: write
+
+      - name: Comment + label ai:abandoned
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ needs.dispatch.outputs.pr_number }}
+          ISSUE_NUMBER: ${{ needs.dispatch.outputs.issue_number }}
+          ITERATION: ${{ needs.dispatch.outputs.iteration }}
+          RUN_ID: ${{ github.run_id }}
+          REJECT_REASON: ${{ needs.dispatch.outputs.reject_reason }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## 🤖 Abandon — limite d'iterations atteinte"
+            echo ""
+            echo "J'ai tente **${ITERATION} fois** de fixer ce bug sans succes durable."
+            echo "Je m'arrete pour eviter de gacher des tokens / minutes CI et"
+            echo "pour laisser un humain prendre le relais."
+            echo ""
+            echo "**Reject reason** : \`${REJECT_REASON}\`"
+            echo ""
+            echo "### Pour reprendre"
+            echo ""
+            echo "- **Retirer le label \`ai:abandoned\`** quand tu as identifie la cause"
+            echo "- **Commenter sur la PR avec \`/ai-retry <nouvelles instructions>\`**"
+            echo "  pour me relancer avec un nouveau contexte (remet le compteur a 0 — ou plutot, le body PR contient deja l'historique de mes iterations, a lire pour ne pas refaire les memes erreurs)"
+            echo "- **Ou prendre la main manuellement** sur la branche \`ai/issue-N/...\`"
+            echo ""
+            echo "### Meta"
+            echo ""
+            echo "- PR : #${PR_NUMBER}"
+            echo "- Issue source : #${ISSUE_NUMBER}"
+            echo "- Run : https://github.com/${{ github.repository }}/actions/runs/${RUN_ID}"
+          } > /tmp/abandon-comment.md
+
+          # Commente la PR (cible primaire, c'est la ou les iterations se passent)
+          if [[ -n "$PR_NUMBER" ]]; then
+            gh pr comment "$PR_NUMBER" --body-file /tmp/abandon-comment.md
+            gh pr edit "$PR_NUMBER" --add-label "ai:abandoned" || true
+          fi
+
+          # Idem sur l'issue source (pour retrouvabilite)
+          gh issue comment "$ISSUE_NUMBER" --body-file /tmp/abandon-comment.md
+          gh issue edit "$ISSUE_NUMBER" --add-label "ai:abandoned" || true
+
+          echo "Abandonment notice posted on PR #${PR_NUMBER} and issue #${ISSUE_NUMBER}."
