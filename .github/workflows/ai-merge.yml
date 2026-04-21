@@ -1,0 +1,178 @@
+# Bot IA - phase 4 : merge auto sur label `ai:approved`.
+#
+# Trigger : un humain pose `ai:approved` sur une PR.
+# Le workflow :
+#   1. Verifie que la PR est ouverte par `alarm-murgat-bot[bot]` (pas une PR humaine)
+#   2. Verifie que TOUS les checks requis sont verts
+#   3. Merge squash + delete-branch via le token GH App
+#   4. Commente sur la PR pour trace
+#   5. Commente sur l'issue source pour cloture logique
+#
+# Si la verification fail, le label est RETIRE et un commentaire explique pourquoi.
+# Ca evite qu'une mauvaise pose de label (sur PR humaine, sur PR en erreur) n'entraine
+# un merge imprevu.
+#
+# Voir docs/AI_STRATEGY.md D7 + .github/ai-bot/README.md.
+
+name: AI Bot Merge
+
+on:
+  pull_request_target:
+    types: [labeled]
+
+# Un seul merge auto a la fois pour simplifier. Les events arrivent rarement
+# en rafale (label pose manuellement par humain). cancel-in-progress:false pour
+# ne pas perdre un merge si 2 labels sont poses tres vite.
+concurrency:
+  group: ai-merge-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  verify_and_merge:
+    name: Verify + auto-merge PR bot
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Filter tres tot : ne tourne QUE si le label pose est ai:approved ET
+    # que l'auteur de la PR est bien le bot. Eviter tout travail inutile.
+    if: |
+      github.event.label.name == 'ai:approved' &&
+      (github.event.pull_request.user.login == 'alarm-murgat-bot' ||
+       github.event.pull_request.user.login == 'alarm-murgat-bot[bot]')
+    permissions:
+      contents: read
+
+    steps:
+      - name: Generate installation token (write for merge)
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.ALARM_BOT_APP_ID }}
+          private-key: ${{ secrets.ALARM_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+
+      - name: Verify PR checks are all green
+        id: checks
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          # Fetch la rollup des checks. On accepte que seuls les checks
+          # REQUIRED soient verts (une review check non-required peut etre
+          # en attente sans bloquer).
+          #
+          # gh pr view expose statusCheckRollup avec .conclusion par check.
+          # On verifie qu'aucun required check n'a conclusion != "SUCCESS".
+          # Les required checks sont definis dans branch protection ; on ne
+          # peut pas les lister ici sans API call. Pragmatique : exiger que
+          # TOUS les checks rollup-completed soient SUCCESS ou SKIPPED.
+          ROLLUP=$(gh pr view "$PR_NUMBER" --json statusCheckRollup --jq '.statusCheckRollup')
+
+          # Any non-success / non-skipped conclusion blocks merge.
+          FAILING=$(echo "$ROLLUP" | jq -r '.[] | select(.conclusion != null and .conclusion != "SUCCESS" and .conclusion != "SKIPPED" and .conclusion != "NEUTRAL") | .name')
+          PENDING=$(echo "$ROLLUP" | jq -r '.[] | select(.conclusion == null or .conclusion == "") | .name')
+
+          if [[ -n "$FAILING" ]]; then
+            echo "not_green=true" >> "$GITHUB_OUTPUT"
+            echo "reason=failing_checks" >> "$GITHUB_OUTPUT"
+            {
+              echo "failing_list<<EOF"
+              echo "$FAILING"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "::error::PR has failing checks :"
+            echo "$FAILING"
+            exit 1
+          fi
+
+          if [[ -n "$PENDING" ]]; then
+            echo "not_green=true" >> "$GITHUB_OUTPUT"
+            echo "reason=pending_checks" >> "$GITHUB_OUTPUT"
+            {
+              echo "pending_list<<EOF"
+              echo "$PENDING"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "::error::PR has pending checks :"
+            echo "$PENDING"
+            exit 1
+          fi
+
+          echo "not_green=false" >> "$GITHUB_OUTPUT"
+          echo "All checks green — ready to merge."
+
+      - name: Merge PR (squash + delete branch)
+        id: merge
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh pr merge "$PR_NUMBER" --squash --delete-branch 2>&1 | tee /tmp/merge-output.txt
+          echo "merged=true" >> "$GITHUB_OUTPUT"
+          echo "PR #${PR_NUMBER} merged by ai-merge workflow."
+
+      - name: Comment on PR (success trace)
+        if: success() && steps.merge.outputs.merged == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # La PR est fermee (mergee) ; gh pr comment marche toujours pour une PR fermee.
+          gh pr comment "$PR_NUMBER" --body "Merge auto execute par le workflow ai-merge (label \`ai:approved\`). Run : https://github.com/${{ github.repository }}/actions/runs/${RUN_ID}" || true
+
+      # --- Cas d'echec : retirer le label + commenter
+      # `pull_request_target` ne permet pas de cancel-revert le label au niveau
+      # event. On le retire manuellement si un step pre-merge a fail (checks
+      # pas verts).
+      - name: Revert label on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+          FAILING: ${{ steps.checks.outputs.failing_list }}
+          PENDING: ${{ steps.checks.outputs.pending_list }}
+          REASON: ${{ steps.checks.outputs.reason }}
+        run: |
+          set -euo pipefail
+
+          # Retirer le label ai:approved (pas pret pour merge)
+          gh issue edit "$PR_NUMBER" --remove-label "ai:approved" || true
+
+          # Message selon cas
+          if [[ "$REASON" == "failing_checks" ]]; then
+            BODY="Merge auto refuse : checks en echec.
+
+          \`\`\`
+          ${FAILING}
+          \`\`\`
+
+          Le label \`ai:approved\` a ete retire. Fixer les checks puis reposer le label.
+
+          Run : https://github.com/${{ github.repository }}/actions/runs/${RUN_ID}"
+          elif [[ "$REASON" == "pending_checks" ]]; then
+            BODY="Merge auto refuse : checks encore en attente.
+
+          \`\`\`
+          ${PENDING}
+          \`\`\`
+
+          Le label \`ai:approved\` a ete retire. Attendre la fin des checks puis reposer le label.
+
+          Run : https://github.com/${{ github.repository }}/actions/runs/${RUN_ID}"
+          else
+            BODY="Merge auto refuse (raison inconnue, voir les logs).
+
+          Le label \`ai:approved\` a ete retire. Verifier l'etat de la PR et reposer le label si OK.
+
+          Run : https://github.com/${{ github.repository }}/actions/runs/${RUN_ID}"
+          fi
+
+          echo "$BODY" > /tmp/revert-comment.md
+          gh pr comment "$PR_NUMBER" --body-file /tmp/revert-comment.md || true
