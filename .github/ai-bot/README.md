@@ -205,12 +205,21 @@ manuellement avec le même numéro d'issue.
 | Date | Issue | Invariant | Résultat | PR produite |
 |---|---|---|---|---|
 | 2026-04-20 | #6 | INV-031 (ACK 403) | ✅ **Abandon propre** — bug déjà fixé par commit `cc35b7d`, l'agent a refusé de forcer un RED→GREEN artificiel (respect P5 strict). Révélé que le catalogue était stale → audit complet (PR #9, #11). | Aucune (abandon volontaire) |
-| 2026-04-21 | #13 | INV-082 (atomicité bulk) | ✅ **Test de verrouillage produit** — agent a reconnu le mode spécial "pas de bug à fixer, juste test de régression", a écrit 1 test concurrence (budget P4 respecté), CI tier 1+2+3 verte. | #14 mergée |
+| 2026-04-21 | #13 | INV-082 (atomicité bulk) | ✅ **Test de verrouillage produit** — agent a reconnu le mode spécial "pas de bug à fixer, juste test de régression", a écrit 1 test concurrence. | #14 mergée |
+| 2026-04-21 | #19 | INV-019 (positions 409) | ✅ **Fix code + test TDD strict** — issue humaine typique (symptôme + repro), agent a trouvé INV-019 sans ref, écrit test RED (prouve upsert silencieux), fix minimal 6 lignes `config.py` → 409 Conflict. Phase 4 merge auto validé. | #20 mergée via phase 4 |
+| 2026-04-21 | #24 | INV-084 oncall_offline (délai paramétrable) | ✅ **Fix config dynamique** — migration hardcode `ONCALL_OFFLINE_DELAY_MINUTES` vers lecture `SystemConfig` à chaque tick. Constante renommée `_DEFAULT` en fallback. Aligné sur pattern existant. | #25 mergée via phase 4 |
+| 2026-04-21 | #26 | INV-005 (monotonie escalation_count) | ✅ **Property-based hypothesis** — issue volontairement floue (style "Eric 2h du mat, pas dev"), agent a décodé le langage, audité 3 call sites muteurs, **première utilisation `hypothesis`** du projet (100 exemples aléatoires), mutation test manuel pour valider que le test détecte la violation. | #27 mergée via phase 4 |
+
+**Bilan 5 pilotes** : 1 abandon propre (catalogue stale, pas un bug), 4 PRs mergées (test de verrouillage, fix code classique, migration config, test property-based). Tous via le cycle complet `ai:fix` → agent → `ai:approved` → phase 4 merge auto.
 
 Bugs CI résolus pendant la stabilisation (visibles dans `docs/AI_STRATEGY.md §8bis`) :
 
 - **CI-BUG-09** : cleanup silencieusement partiel entre runs → PRs bloquées en cascade. Fix : cleanup robuste + retry boot cluster (PR #10).
 - **CI-BUG-10** : race condition tier 3 parce que `PROJECT=ci-wN` fixé par matrix, partagé entre runs parallèles. Fix : concurrency job-level par worker (PR #12).
+- **CI-BUG-11** : `cancel-in-progress: true` annulait les runs utiles sur events `synchronize` (update-branch, gh pr merge). Fix : passage à `false`, le serialize tier 3 suffit à éviter le pile-up (PR #18).
+- **Phase 4 bugs (3)** : ai-merge sans checkout, self-check dans rollup, up-to-date constraint. Tous fixés PR #21/22/23. Phase 4 validée en live sur les 3 pilotes qui ont fix+test.
+
+Scale runners : 2 → 4 (2026-04-21) pour garantir le parallélisme intra-PR `tier3_e2e` (w1+w2 en simultané) même avec un autre run CI concurrent. RAM +~2 GB.
 
 ## Références
 

@@ -337,20 +337,20 @@ Checklist pour un Claude (ou autre) qui rouvre ce projet demain :
 - ⚠️ Tier 3 : 88/119 verts sur premier run, 12 fails à fixer (cf prompt session annexe)
 - ❌ Tier 4 chaos : non implémenté
 - ❌ Mutation testing (mutmut) : non installé
-- ⚠️ **Bot IA contributeur autonome : phases 1-3B + pilote #1 validées bout-en-bout** :
-  - ✅ Phase 1 — identité GH App → token → commit → push → PR validée (PR #2 mergée)
-  - ✅ Phase 2 — spawn Claude Code CLI headless (Opus 4.7) validé bout-en-bout sur issue #6 (INV-031) : agent a correctement abandonné car bug déjà fixé, respect P5 TDD strict (PR #5 mergée)
-  - ✅ Phase 3A — live log via `tee` + denylist CI enforcement + label `ai:denied` (PR #10 mergée)
-  - ✅ Phase 3B — triggers auto `issues.labeled == 'ai:fix'`, `check_run.completed=failure`, `issue_comment` (filtré par `/ai-retry` ou `@alarm-murgat-bot`, auteur ≠ bot) + mode retry (new/retry-ci/retry-comment/retry-manual) + commentaire initial de découvrabilité (PR #8 mergée)
-  - ✅ **Pilote #1 INV-082 validé 2026-04-21** : issue #13 labeled `ai:fix` → trigger auto → agent a écrit `tests/test_e2e.py::TestInv082ConcurrentBulk::test_concurrent_bulk_never_exposes_empty_chain` (103 lignes, 1 test, respect P4 budget) → PR #14 CI tier 1+2+3 verte → mergée (mode "test de verrouillage en régression", l'agent a reconnu que le code était déjà correct et n'a pas forcé un RED→GREEN artificiel)
-  - ❌ Phase 3C — compteur propre `N/3` + détection boucle (même test fail 3× consécutifs → abandon) + label `ai:abandoned` auto (à faire ; aujourd'hui limite brute à 5 sans détection boucle)
-  - ❌ Phase 4 — merge auto sur label `ai:approved` posé par humain (à faire ; aujourd'hui merge manuel)
+- ✅ **Bot IA contributeur autonome : phases 1-4 + 5 pilotes validés bout-en-bout 2026-04-21** :
+  - ✅ Phase 1 — identité GH App → token → commit → push → PR (PR #2)
+  - ✅ Phase 2 — spawn Claude Code CLI headless Opus 4.7 (PR #5)
+  - ✅ Phase 3A — live log via `tee` + denylist CI enforcement + label `ai:denied` (PR #10)
+  - ✅ Phase 3B — triggers auto `issues.labeled`, `check_run.completed`, `issue_comment` (filtre `/ai-retry` + `@mention`, anti-loop bot) + mode retry (new/retry-ci/retry-comment/retry-manual) (PR #8)
+  - ✅ Phase 3C — compteur N/3 + labels `ai:abandoned` / `ai:needs-human` auto (PR #17)
+  - ✅ Phase 4 — merge auto sur `ai:approved` via `.github/workflows/ai-merge.yml` (PR #16 + 3 fixes #21/22/23)
+  - ✅ **5 pilotes bot IA 2026-04-21** : #6 INV-031 abandon propre (catalogue stale), #13 INV-082 test de verrouillage (PR #14), #19 INV-019 fix 409 Conflict (PR #20), #24 INV-084 migration SystemConfig (PR #25), #26 INV-005 property-based `hypothesis` (PR #27 — **premier usage hypothesis** du projet). Tous via le cycle complet `ai:fix` → agent → `ai:approved` → merge auto.
 
-  Actuellement : **trigger auto opérationnel** (label `ai:fix` → bot démarre seul). Voir `.github/ai-bot/README.md`.
+  Voir `.github/ai-bot/README.md` pour historique détaillé des pilotes.
 
-**Problème révélé par le pilote INV-031 puis corrigé** : `tests/INVARIANTS.md` contenait plusieurs 🐛 déjà fixés dans le code. Audit complet réalisé (PR #9 + #11 mergées 2026-04-21) — catalogue maintenant à jour. Bugs résiduels réels : INV-018/018b (`original_created_at`), INV-084 (3 délais hardcodés), INV-085 (quorum email).
+**Problème révélé par pilote INV-031 et corrigé** : `tests/INVARIANTS.md` contenait plusieurs 🐛 déjà fixés dans le code. Audit complet réalisé (PR #9 + #11 mergées 2026-04-21) — catalogue maintenant à jour. Bugs résiduels : INV-018/018b (`original_created_at`), INV-084 reste 2/3 sous-cas (`watchdog_timeout_seconds`, `escalation_tick_seconds` — `oncall_offline_delay_minutes` fixé PR #25), INV-085 (quorum email).
 
-**Bugs CI découverts et résolus pendant la stabilisation** : CI-BUG-09 (cleanup silencieusement partiel → couplage PRs, cf §8bis), CI-BUG-10 (race condition tier 3 `PROJECT=ci-wN` partagé entre runs parallèles — fix concurrency job-level par worker, cf §8bis).
+**Bugs CI découverts et résolus pendant la stabilisation (§8bis)** : CI-BUG-09 (cleanup silencieusement partiel), CI-BUG-10 (race `PROJECT=ci-wN` entre runs parallèles), CI-BUG-11 (`cancel-in-progress: true` annulait des runs sur events `synchronize`). **Scale runners 2 → 4** (2026-04-21) pour parallélisme intra-run garanti.
 
 **Priorités originales** (encore valables, à réordonner selon l'état) :
 1. Extraire la logique métier en fonctions pures + 100 unit tests rapides ← **fait à 95%**

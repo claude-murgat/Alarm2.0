@@ -18,7 +18,7 @@ plutôt que d'interpréter à partir du code (le code peut être buggy).
 **Extraction logique pure** : PR 1-5 terminés (cc35b7d sur master).
 - 87 unit tests en 0.14s (logic/ entièrement couvert)
 - Suite E2E : 239 passed / 17 skipped / 0 fail en 1h09
-- 5 bugs catalogue corrigés : INV-011, INV-015b, INV-031, INV-066, INV-102 + INV-073 (rate limit déjà testé, cf. audit 2026-04-20)
+- 8 bugs catalogue corrigés : INV-011, INV-015b, INV-031, INV-066, INV-102, INV-073 (audit 2026-04-20) + **INV-019 (PR #20)**, **INV-005 (PR #27)**, **INV-084 oncall_offline (PR #25)** — pilotes bot IA 2026-04-21
 
 **Statut par catégorie** :
 
@@ -36,7 +36,7 @@ plutôt que d'interpréter à partir du code (le code peut être buggy).
 | 10. Observabilité | 1 | 2 | 0 | 0 (INV-102 ✅ PR0) |
 | 11. Stats | 0 | 2 | 0 | 0 |
 
-**Restant prioritaire** : INV-018 (`original_created_at`), INV-084 (délais paramétrables hardcodés), INV-085 (quorum email). INV-082 déjà atomique côté code (il manque juste un test de race — audit 2026-04-20). INV-073 déjà testé (audit 2026-04-20).
+**Restant prioritaire** : INV-018 (`original_created_at`), INV-084 (reste 2/3 sous-cas : `watchdog_timeout_seconds` + `escalation_tick_seconds` — sous-cas `oncall_offline_delay_minutes` fixé PR #25), INV-085 (quorum email). INV-082 déjà atomique côté code (il manque juste un test de race — audit 2026-04-20). INV-073 déjà testé (audit 2026-04-20). INV-019 et INV-005 fixés par pilotes bot 2026-04-21.
 
 ---
 
@@ -66,10 +66,14 @@ Si `alarm.status IN ('active', 'escalated')` alors il existe au moins un `AlarmN
 - **Pourquoi** : une alarme sans destinataire n'est pas actionnable.
 - **Exception** : chaîne d'escalade vide → email direction technique + alarme persiste avec `assigned_user_id` = fallback user (voir INV-040).
 
-### INV-005 [H] ❌ escalation_count monotone croissant
+### INV-005 [H] ✅ escalation_count monotone croissant
 `alarm.escalation_count` ne peut que croître, jamais décroître, même après ack+réactivation.
 - **Pourquoi** : c'est un compteur historique utilisé par les stats.
-- **Test** : property-based — après N opérations mixtes, escalation_count[t+1] >= escalation_count[t].
+- **Fix** : PR #27 (pilote bot IA lvl 3, 2026-04-21). Audit a confirmé 3 call sites muteurs par `+= 1` uniquement (`escalation.py:243`, `test_api.py:253`, `calls.py:95`), aucun décrément nulle part. Pas de fix code, test de verrouillage en régression.
+- **Couverture** : `tests/unit/test_escalation_count_monotonic.py` (tier 1, 2 tests) :
+  - `test_eric_scenario_three_escalations_then_ack_reactivate_escalate` — séquence 3 esc → ack → reactivation → 1 esc, asserts counts = [0,1,2,3,3,3,4] monotone
+  - `test_escalation_count_monotone_under_random_operations` — **property-based `hypothesis`** (100 exemples, séquences aléatoires `{escalate, ack, ack_expire, resolve, advance_time}`)
+  - Mutation test manuel confirmé : injection `escalation_count=0` dans `_step_ack_expire` → les 2 tests fail, hypothesis shrink à la séquence minimale `['escalate_tick', 'ack', 'ack_expire_tick']`.
 
 ### INV-006 [M] ⚠️ Transitions de status valides
 Les seules transitions autorisées sont :
@@ -163,10 +167,13 @@ Les usages suivants doivent lire `original_created_at`, PAS `created_at` :
 - **Impact actuel** : une alarme escaladée 2h après création apparaît comme "il y a 2min" dans l'historique, compte dans la mauvaise semaine en KPI, et a un MTTR artificiellement raccourci.
 - **Seul usage qui garde `created_at` (timer)** : `escalation.py:185` (calcul `elapsed` pour décision d'escalade), `escalation.py:132, 204` (reset après ack expiry et escalade), `calls.py:96` (reset DTMF escalate).
 
-### INV-019 [M] ❌ Chaîne d'escalade : positions uniques → rejet
-Dans `EscalationConfig`, `position` est unique. POST /config/escalation avec position déjà occupée → **rejet** (400 ou 409), pas d'upsert silencieux.
+### INV-019 [M] ✅ Chaîne d'escalade : positions uniques → rejet 409
+Dans `EscalationConfig`, `position` est unique. POST /config/escalation avec position déjà occupée → **rejet 409 Conflict**, pas d'upsert silencieux.
 - **Pourquoi** : éviter qu'une mauvaise manip écrase silencieusement un user existant.
-- **Test** : POST avec position=1 alors que user1 est à position=1 → 409.
+- **Fix** : PR #20 (pilote bot IA lvl 1, 2026-04-21). `config.py:19-41` faisait un upsert silencieux, remplacé par `raise HTTPException(409, ...)` avec message actionnable (suggère DELETE puis POST, ou endpoint `/bulk`).
+- **Couverture** : `tests/integration/test_escalation_config_contract.py` (tier 2, 2 tests) :
+  - `test_post_existing_position_returns_409_and_does_not_overwrite`
+  - `test_post_new_position_still_succeeds` (garde-fou sur-fix)
 
 ### INV-020 [M] ❌ Chaîne d'escalade : user_id uniques
 Un même user ne peut pas être à 2 positions.
@@ -393,7 +400,7 @@ Aucun délai métier ne doit être hardcodé dans le code. Chaque valeur est lue
 |---|---|---|---|
 | `escalation_delay_minutes` | 15 | Délai entre chaque palier d'escalade (INV-011) | ✅ lu en DB (pure fn en prend la valeur en paramètre) |
 | `sms_call_delay_minutes` | 2 | Délai avant enqueue SMS/Call après notification (INV-060) | ✅ lu en DB |
-| `oncall_offline_delay_minutes` | 15 | Délai avant qu'oncall offline déclenche alarme (INV-050) | 🐛 **hardcodé** dans `escalation.py:24` (`ONCALL_OFFLINE_DELAY_MINUTES`), pure fn le prend en paramètre |
+| `oncall_offline_delay_minutes` | 15 | Délai avant qu'oncall offline déclenche alarme (INV-050) | ✅ **lu en DB** (PR #25 pilote bot 2026-04-21). Constante renommée en `ONCALL_OFFLINE_DELAY_MINUTES_DEFAULT` (fallback si clé absente), lecture `SystemConfig` à chaque tick d'escalade. |
 | `watchdog_timeout_seconds` | 60 | Délai avant marquer user offline (INV-041) | 🐛 seedé mais **hardcodé** dans `watchdog.py:14` |
 | `escalation_tick_seconds` | 10 | Période de la boucle d'escalade | 🐛 **hardcodé** dans `escalation.py:331` (+ `watchdog.py:48` avec 30s — voir note ci-dessous) |
 | ~~`fcm_escalation_delay_minutes`~~ | — | **Retiré**. Plus lu (PR2, INV-011) ni seedé (vérifié 2026-04-20). Rien à faire. | ✅ |
@@ -522,7 +529,7 @@ Sinon → tests orphelins qui verrouillent un comportement mort.
 
 1. ~~**INV-085 (quorum)** : seuil "Patroni injoignable depuis > X minutes" ?~~ → **Tranché 2026-04-20 : 3 min** (voir INV-085 ci-dessus).
 2. ~~**INV-084 fcm_escalation_delay_minutes** : retirer du seed ?~~ → **Classée** : la clé n'est **pas** seedée (vérifié 2026-04-20). Question caduque.
-3. **INV-019 (positions uniques)** : tranché 2026-04-20. **Règle business confirmée** : `POST /config/escalation` avec position déjà occupée doit retourner **409 Conflict**, pas d'upsert silencieux. Le code actuel (`config.py:19-41`) fait un upsert → c'est un bug à corriger (voir backlog).
+3. ~~**INV-019 (positions uniques)** : tranché 2026-04-20 — rejet 409~~ → **Fixé PR #20 (bot IA lvl 1, 2026-04-21)**.
 4. **Suivant** : rédiger `android/INVARIANTS.md` pour les invariants côté client (sonnerie continue, vibration, écran verrouillé, rotation bloquée, reprise post-boot, etc.).
 
 ---
@@ -535,11 +542,12 @@ Ordre recommandé pour les prochains PRs :
 |---|---|---|---|
 | INV-018 + INV-018b | C | ★★★ | Ajouter `original_created_at` immuable. Migration DB + 5 call sites (stats, schemas, frontend). Gros PR. |
 | INV-082 | H | ★ | Code déjà atomique (cf. audit 2026-04-20) — test concurrence `threading.Thread` à ajouter pour verrouiller la propriété. **Candidat pilote bot IA**. |
-| INV-019 + INV-020 | M | ★ | Rejeter positions/user_id dupliqués dans `/config/escalation` (tranché 2026-04-20 : règle = 409 Conflict). Validation Pydantic + test 409. |
+| ~~INV-019~~ | M | — | ✅ Fixé PR #20 (pilote bot IA lvl 1, 2026-04-21). |
+| INV-020 | M | ★ | Rejeter user_id dupliqués dans `POST /config/escalation` single endpoint (bulk déjà OK). Distinct de INV-019 qui portait sur position. |
 | ~~INV-073~~ | H | — | ✅ déjà fixé et testé (audit 2026-04-20). |
-| INV-084 (reste) | C | ★★ | Migrer `ONCALL_OFFLINE_DELAY_MINUTES`, `WATCHDOG_TIMEOUT_SECONDS`, `escalation_tick_seconds` en SystemConfig. |
-| INV-085 | C | ★★ | Quorum perdu → email. Nécessite un ping Patroni périodique + anti-spam. |
+| INV-084 (reste 2/3) | C | ★★ | Migrer `WATCHDOG_TIMEOUT_SECONDS`, `escalation_tick_seconds` en SystemConfig. Sous-cas `ONCALL_OFFLINE_DELAY_MINUTES` fixé PR #25 (2026-04-21). |
+| INV-085 | C | ★★ | Quorum perdu → email. Nécessite un ping Patroni périodique + anti-spam (seuil 3 min + reminders 1h/3h/6h, tranché 2026-04-20). |
 | INV-076 | C | ★ | Job CI dédié avec `ENABLE_TEST_ENDPOINTS=false` vérifiant que `/api/test/*` renvoie 404. |
-| INV-005 | H | ★ | Test property-based avec hypothesis pour `escalation_count` monotone. |
+| ~~INV-005~~ | H | — | ✅ Fixé PR #27 (pilote bot IA lvl 3, 2026-04-21) — property-based hypothesis. |
 
 **Parallèles possibles** : PR6 (endpoint `/test/evaluate-now` qui élimine le flaky `trigger-escalation` incomplet) — désirable avant d'attaquer INV-018 car va simplifier les tests.
