@@ -343,6 +343,7 @@ Checklist pour un Claude (ou autre) qui rouvre ce projet demain :
   - ✅ Phase 3A — live log via `tee` + denylist CI enforcement + label `ai:denied` (PR #10)
   - ✅ Phase 3B — triggers auto `issues.labeled`, `check_run.completed`, `issue_comment` (filtre `/ai-retry` + `@mention`, anti-loop bot) + mode retry (new/retry-ci/retry-comment/retry-manual) (PR #8)
   - ✅ Phase 3C — compteur N/3 + labels `ai:abandoned` / `ai:needs-human` auto (PR #17)
+  - ✅ Phase 3D — détection précoce de boucle sur junit XML (même tests fail 3× consécutifs → abandon avec reject_reason=`loop-detected` + message diagnostique au lieu du générique iteration-limit). Helper scripts [`parse_junit_failures.py`](../.github/ai-bot/scripts/parse_junit_failures.py) et [`compute_fail_streak.py`](../.github/ai-bot/scripts/compute_fail_streak.py). Metadata PR étendu avec `fail-streak:` et `last-fail-tests:` (rétrocompatible : insertion à la volée pour les PR pré-3D).
   - ✅ Phase 4 — merge auto sur `ai:approved` via `.github/workflows/ai-merge.yml` (PR #16 + 3 fixes #21/22/23)
   - ✅ **5 pilotes bot IA 2026-04-21** : #6 INV-031 abandon propre (catalogue stale), #13 INV-082 test de verrouillage (PR #14), #19 INV-019 fix 409 Conflict (PR #20), #24 INV-084 migration SystemConfig (PR #25), #26 INV-005 property-based `hypothesis` (PR #27 — **premier usage hypothesis** du projet). Tous via le cycle complet `ai:fix` → agent → `ai:approved` → merge auto.
 

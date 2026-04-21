@@ -1,28 +1,38 @@
-# Bot IA - phase 3B : triggers auto + mode retry.
+# Bot IA - phase 3D : triggers auto + mode retry + detection de boucle.
 #
 # Structure :
 #   Job 1 "dispatch" (rapide, <30s) : determine si on continue et extrait les
 #     parametres (mode, issue_number, pr_number, branch, iteration).
 #     Filtre les events non-pertinents (label != ai:fix, bot lui-meme, etc.).
+#     Phase 3D : pour mode=retry-ci, compare les tests qui viennent de fail
+#     (junit XML du run CI precedent) avec ceux de l'iteration precedente
+#     (stockes dans le body PR). Si 3 failures consecutives avec les memes
+#     tests (ou sous-ensemble), rejette avec reason=loop-detected AVANT de
+#     lancer l'agent, pour remonter un diagnostic precis a l'humain.
 #   Job 2 "agent_fix" (long, ~10 min) : lance Claude Code CLI, enforce denylist,
-#     commit, push, ouvre ou met a jour la PR.
+#     commit, push, ouvre ou met a jour la PR. Stocke fail-streak et
+#     last-fail-tests dans le body PR pour le prochain cycle.
+#   Job 3 "notify_abandonment" (rapide) : si dispatch a rejete pour
+#     iteration-limit ou loop-detected, commente PR + issue + pose label
+#     ai:abandoned. Message adapte a la raison precise.
 #
 # Modes :
 #   - new         : issue fraichement labeled ai:fix (ou workflow_dispatch
 #                   sans PR existante). Cree branche + commit + PR.
 #   - retry-ci    : CI a fail sur une PR bot. Re-execute l'agent avec les
 #                   logs CI enriches en contexte. Push sur meme branche.
+#                   Phase 3D active : detection de boucle sur junit XML.
 #   - retry-comment : humain a commente /ai-retry ou @alarm-murgat-bot sur
 #                     une PR bot. Idem retry-ci mais contexte = comment.
+#                     Phase 3D : pas de detection (humain a intervenu).
 #   - retry-manual : workflow_dispatch mais PR existe deja pour cette issue.
+#                    Phase 3D : pas de detection (humain a redeclencher).
 #
 # Concurrency : globale "ai-bot". Un seul run bot a la fois repo-wide,
 #   simplifie et previent les collisions. Volume reel = 2-5x/semaine, queue OK.
 #
-# Limite iterations : 3 max (reduction phase 3C). Au-dela, abandon propre
-#   avec label ai:abandoned sur la PR et l'issue source.
-# Detection boucle stricte (meme test fail 3x consecutifs) = phase 3D
-#   (future ; necessite download/parsing des junit XML des runs CI precedents).
+# Limite iterations : 3 max (phase 3C). Au-dela, abandon propre avec label
+# ai:abandoned sur la PR et l'issue source.
 #
 # Voir docs/AI_STRATEGY.md section 1 + design D1-D7 + .github/ai-bot/README.md.
 
@@ -53,17 +63,20 @@ jobs:
   dispatch:
     name: Dispatch (mode + eligibility)
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
     permissions:
       contents: read
     outputs:
-      should_run: ${{ steps.decide.outputs.should_run }}
+      should_run: ${{ steps.finalize.outputs.should_run }}
       mode: ${{ steps.decide.outputs.mode }}
       issue_number: ${{ steps.decide.outputs.issue_number }}
       pr_number: ${{ steps.decide.outputs.pr_number }}
       branch: ${{ steps.decide.outputs.branch }}
       iteration: ${{ steps.decide.outputs.iteration }}
-      reject_reason: ${{ steps.decide.outputs.reject_reason }}
+      reject_reason: ${{ steps.finalize.outputs.reject_reason }}
+      fail_streak: ${{ steps.finalize.outputs.fail_streak }}
+      current_fail_tests: ${{ steps.finalize.outputs.current_fail_tests }}
+      loop_tests: ${{ steps.finalize.outputs.loop_tests }}
     steps:
       - name: Generate installation token (read-only)
         id: app-token
@@ -74,6 +87,26 @@ jobs:
           permission-contents: read
           permission-pull-requests: read
           permission-issues: read
+          # Phase 3D : lecture des artifacts du run CI precedent (junit XML)
+          # pour detecter les boucles. gh run download + gh run list
+          # necessitent actions:read.
+          permission-actions: read
+
+      # Phase 3D : helper scripts (parse_junit_failures.py, compute_fail_streak.py)
+      # + stdlib Python pour les appeler.
+      - name: Checkout (helper scripts)
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          # Restreindre au minimum necessaire : on veut juste les scripts.
+          sparse-checkout: |
+            .github/ai-bot/scripts
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Python 3.12 (helper scripts)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Early filter (label mismatch, bot comment, etc.)
         id: filter
@@ -194,6 +227,10 @@ jobs:
               ;;
           esac
 
+          # Defaults pour mode=new (pas de PR existante). Overwrite si PR trouvee.
+          PARSED_FAIL_STREAK=0
+          PARSED_LAST_FAIL_TESTS=""
+
           # --- Etape 2 : resolution mode retry (PR_NUMBER connu)
           if [[ -n "$PR_NUMBER" ]]; then
             # Verifier que la PR est bien une PR du bot (pas une PR humaine)
@@ -212,6 +249,13 @@ jobs:
 
             PARSED_ISSUE=$(echo "$PR_BODY" | grep -oE 'issue: [0-9]+' | head -1 | awk '{print $2}' || echo "")
             PARSED_ITER=$(echo "$PR_BODY" | grep -oE 'iteration: [0-9]+' | head -1 | awk '{print $2}' || echo "1")
+
+            # Phase 3D : parse fail-streak + last-fail-tests si presents
+            # (PRs creees avant phase 3D n'ont pas ces champs -> defaults OK)
+            PARSED_FAIL_STREAK=$(echo "$PR_BODY" | grep -oE 'fail-streak: [0-9]+' | head -1 | awk '{print $2}' || echo "0")
+            # last-fail-tests: <value> OU last-fail-tests:\n -> capture la ligne
+            # entiere puis strip le prefixe. Vide si champ absent.
+            PARSED_LAST_FAIL_TESTS=$(echo "$PR_BODY" | grep -E '^last-fail-tests:' | head -1 | sed -E 's/^last-fail-tests:[[:space:]]*//' || echo "")
 
             if [[ -z "$PARSED_ISSUE" ]]; then
               echo "should_run=false" >> "$GITHUB_OUTPUT"
@@ -243,33 +287,264 @@ jobs:
             fi
           fi
 
-          # --- Etape 4 : limite iterations (3C : reduction 5 -> 3)
-          if [[ "$ITERATION" -gt 3 ]]; then
-            echo "should_run=false" >> "$GITHUB_OUTPUT"
-            echo "reject_reason=iteration-limit-3-exceeded" >> "$GITHUB_OUTPUT"
-            echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
-            echo "issue_number=${ISSUE_NUMBER}" >> "$GITHUB_OUTPUT"
-            echo "iteration=${ITERATION}" >> "$GITHUB_OUTPUT"
-            echo "Rejected : iteration $ITERATION > 3 (limit). Will notify human + label ai:abandoned."
-            exit 0
-          fi
-
-          # --- Etape 5 : emission des outputs
+          # --- Etape 4 : emission des outputs eligibles
+          # NOTE phase 3D : l'ancien check iter-limit (> 3) vivait ici et fait
+          # un "exit 0" imediat. Il a ete deplace dans le step "finalize" pour
+          # laisser loop_detect tourner AVANT. Motivation : quand iter=4 ET
+          # meme tests failent 3x, on veut reason=loop-detected (diagnostic)
+          # plutot que iteration-limit-3-exceeded (generique). loop_detect
+          # ne tourne que si should_run=true ici -> on ne peut pas cutter
+          # l'iter-limit dans decide sinon loop_detect skip.
           echo "should_run=true" >> "$GITHUB_OUTPUT"
           echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
           echo "issue_number=${ISSUE_NUMBER}" >> "$GITHUB_OUTPUT"
           echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
           echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
           echo "iteration=${ITERATION}" >> "$GITHUB_OUTPUT"
+          # Phase 3D : expose les metadatas parsees du body PR (ou defaults)
+          # pour les steps suivants (loop_detect + finalize).
+          echo "parsed_fail_streak=${PARSED_FAIL_STREAK}" >> "$GITHUB_OUTPUT"
+          # last-fail-tests peut contenir des ';' et ':' (stable vu que c'est
+          # "classname::name"). GITHUB_OUTPUT gere les multi-lignes avec le
+          # delimiter syntax, mais ici une ligne suffit.
+          echo "parsed_last_fail_tests=${PARSED_LAST_FAIL_TESTS}" >> "$GITHUB_OUTPUT"
 
           echo ""
-          echo "=== DISPATCH DECISION ==="
+          echo "=== DISPATCH DECISION (pre-finalize) ==="
           echo "Event      : $EVENT_NAME"
           echo "Mode       : $MODE"
           echo "Issue #    : $ISSUE_NUMBER"
           echo "PR #       : ${PR_NUMBER:-(none yet)}"
           echo "Branch     : $BRANCH"
-          echo "Iteration  : ${ITERATION}/3"
+          echo "Iteration  : ${ITERATION}/3 (iter-limit check deferred to finalize)"
+          echo "Prev streak: ${PARSED_FAIL_STREAK}"
+          echo "Prev tests : ${PARSED_LAST_FAIL_TESTS:-(none)}"
+
+      # ======================================================================
+      # Phase 3D - detection de boucle (retry-ci uniquement)
+      #
+      # Objectif : si l'agent refait la MEME erreur plusieurs fois de suite
+      # (meme test ou sous-ensemble qui fail), abandonner avec un message
+      # specifique plutot que d'attendre iteration-limit.
+      #
+      # Algorithme :
+      #   1. Download du junit XML du run CI qui vient de fail sur la PR.
+      #   2. Parse des <testcase> en failure/error -> "classname::name".
+      #   3. Compare avec le champ last-fail-tests du body PR (iteration N-1).
+      #   4. Si ensembles identiques OU current ⊆ last -> streak++
+      #      Sinon -> streak = 1 (reset)
+      #   5. Si streak >= 3 -> loop detecte, emet is_loop=true.
+      #
+      # Fallback : si pas de run CI trouve (artifact manquant, SHA invalide,
+      # event malforme), le step emet is_loop=false + propage les tests
+      # "inconnus". L'iter-limit normale prendra le relais.
+      # ======================================================================
+      - name: Phase 3D - detect loop (retry-ci only)
+        id: loop_detect
+        if: |
+          steps.decide.outputs.should_run == 'true' &&
+          steps.decide.outputs.mode == 'retry-ci'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.decide.outputs.pr_number }}
+          BRANCH: ${{ steps.decide.outputs.branch }}
+          PREV_STREAK: ${{ steps.decide.outputs.parsed_fail_streak }}
+          PREV_TESTS: ${{ steps.decide.outputs.parsed_last_fail_tests }}
+          # Preferer le details_url du check_run quand dispo (le RUN_ID est
+          # dedans) plutot que "dernier run failed pour HEAD" -> plus fiable.
+          CHECK_DETAILS_URL: ${{ github.event.check_run.details_url }}
+        run: |
+          set -uo pipefail  # PAS -e : fallback gracieux, on n'echoue jamais
+                            # ici - un fallback a is_loop=false est acceptable.
+
+          echo "=== Phase 3D loop detection ==="
+
+          # --- Etape 1 : trouver le run ID du run CI qui vient de fail
+          # Preferer check_run.details_url ("https://.../runs/<id>/job/<jid>")
+          # car le SHA peut etre partage avec plusieurs runs (re-run, push
+          # concurrent) et on veut exactement celui qui a declenche l'event.
+          RUN_ID=""
+          if [[ -n "${CHECK_DETAILS_URL:-}" ]]; then
+            RUN_ID=$(echo "$CHECK_DETAILS_URL" | grep -oE 'runs/[0-9]+' | head -1 | grep -oE '[0-9]+' || echo "")
+            echo "Extracted run_id from check_run.details_url : ${RUN_ID:-(none)}"
+          fi
+
+          if [[ -z "$RUN_ID" ]]; then
+            # Fallback : HEAD SHA + gh run list.
+            HEAD_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid --jq '.headRefOid' 2>/dev/null || echo "")
+            if [[ -n "$HEAD_SHA" ]]; then
+              RUN_ID=$(gh run list --commit "$HEAD_SHA" --workflow CI --limit 5 \
+                --json databaseId,conclusion,workflowName \
+                --jq '[.[] | select(.conclusion == "failure")][0].databaseId // empty' 2>/dev/null || echo "")
+              echo "Fallback SHA lookup : run_id=${RUN_ID:-(none)} for SHA=${HEAD_SHA}"
+            fi
+          fi
+
+          if [[ -z "$RUN_ID" ]]; then
+            echo "::warning::Phase 3D : no failed CI run found. Falling back to no-loop-detection (iter-limit will handle)."
+            echo "is_loop=false" >> "$GITHUB_OUTPUT"
+            echo "fail_streak=${PREV_STREAK}" >> "$GITHUB_OUTPUT"
+            echo "current_fail_tests=${PREV_TESTS}" >> "$GITHUB_OUTPUT"
+            echo "ran=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # --- Etape 2 : telecharger les artifacts junit du run
+          mkdir -p /tmp/junit-artifacts
+          # Nom des artifacts (cf .github/workflows/pr.yml) : tier1-reports,
+          # tier2-reports, tier3-w1-reports, tier3-w2-reports.
+          # Certains peuvent etre absents si le tier n'a pas tourne (skip) ou
+          # si le upload a fail. Chaque download est optionnel.
+          for ART in tier1-reports tier2-reports tier3-w1-reports tier3-w2-reports; do
+            gh run download "$RUN_ID" -R "$REPO" --name "$ART" --dir "/tmp/junit-artifacts/$ART" 2>/dev/null \
+              && echo "Downloaded $ART" \
+              || echo "(artifact $ART absent or inaccessible - skipped)"
+          done
+
+          # Verifier qu'on a au moins 1 XML ; sinon fallback.
+          if ! find /tmp/junit-artifacts -name '*.xml' -print -quit | grep -q .; then
+            echo "::warning::Phase 3D : no junit XML in artifacts of run $RUN_ID. Fallback."
+            echo "is_loop=false" >> "$GITHUB_OUTPUT"
+            echo "fail_streak=${PREV_STREAK}" >> "$GITHUB_OUTPUT"
+            echo "current_fail_tests=${PREV_TESTS}" >> "$GITHUB_OUTPUT"
+            echo "ran=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # --- Etape 3 : parser les failures
+          CURRENT_TESTS=$(python .github/ai-bot/scripts/parse_junit_failures.py /tmp/junit-artifacts || echo "")
+          echo "Current failing tests : ${CURRENT_TESTS:-(none)}"
+
+          if [[ -z "$CURRENT_TESTS" ]]; then
+            # CI flagged failure mais junit vide : infra fail (pas un vrai test
+            # failure). On ne peut pas comparer -> fallback no-loop.
+            echo "::warning::Phase 3D : run $RUN_ID conclusion=failure but 0 tests failed (infra/boot issue). Fallback."
+            echo "is_loop=false" >> "$GITHUB_OUTPUT"
+            echo "fail_streak=${PREV_STREAK}" >> "$GITHUB_OUTPUT"
+            echo "current_fail_tests=${PREV_TESTS}" >> "$GITHUB_OUTPUT"
+            echo "ran=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # --- Etape 4 : calcul du streak
+          COMPUTE_OUTPUT=$(python .github/ai-bot/scripts/compute_fail_streak.py \
+            --current "$CURRENT_TESTS" \
+            --last "$PREV_TESTS" \
+            --prev-streak "$PREV_STREAK")
+          echo "$COMPUTE_OUTPUT"
+
+          # Parse "key=value" lines en variables bash
+          NEW_STREAK=$(echo "$COMPUTE_OUTPUT" | grep '^fail_streak=' | cut -d= -f2)
+          IS_LOOP=$(echo "$COMPUTE_OUTPUT" | grep '^is_loop=' | cut -d= -f2)
+          SAME_OR_SUBSET=$(echo "$COMPUTE_OUTPUT" | grep '^same_or_subset=' | cut -d= -f2)
+
+          echo "is_loop=${IS_LOOP}" >> "$GITHUB_OUTPUT"
+          echo "fail_streak=${NEW_STREAK}" >> "$GITHUB_OUTPUT"
+          echo "current_fail_tests=${CURRENT_TESTS}" >> "$GITHUB_OUTPUT"
+          echo "ran=true" >> "$GITHUB_OUTPUT"
+
+          echo ""
+          echo "=== LOOP DETECTION RESULT ==="
+          echo "Previous streak : $PREV_STREAK"
+          echo "Same or subset  : $SAME_OR_SUBSET"
+          echo "New streak      : $NEW_STREAK"
+          echo "Loop detected   : $IS_LOOP"
+
+      # ======================================================================
+      # Finalize : consolide les outputs decide + loop_detect pour le job.
+      # Ordre de priorite (important pour le diagnostic humain) :
+      #   1. decide a rejete pour eligibility (filtre label/bot/etc.) -> pass
+      #      through. loop_detect ne tourne pas dans ce cas (mode != retry-ci
+      #      ou should_run=false).
+      #   2. loop_detect a detecte une boucle -> reject loop-detected.
+      #      Priorite sur iter-limit : a iter=4 avec 3 meme fails, on prefere
+      #      le message specifique (liste des tests) au generique.
+      #   3. ITERATION > 3 (iter-limit) -> reject iteration-limit-3-exceeded.
+      #   4. Sinon, should_run=true. Choisir fail_streak/current_fail_tests
+      #      selon mode (new/retry-ci avec loop_detect ran/retry-comment).
+      # ======================================================================
+      - name: Finalize dispatch outputs
+        id: finalize
+        env:
+          DECIDE_SHOULD_RUN: ${{ steps.decide.outputs.should_run }}
+          DECIDE_REJECT_REASON: ${{ steps.decide.outputs.reject_reason }}
+          DECIDE_MODE: ${{ steps.decide.outputs.mode }}
+          DECIDE_ITERATION: ${{ steps.decide.outputs.iteration }}
+          DECIDE_PARSED_STREAK: ${{ steps.decide.outputs.parsed_fail_streak }}
+          DECIDE_PARSED_TESTS: ${{ steps.decide.outputs.parsed_last_fail_tests }}
+          LOOP_RAN: ${{ steps.loop_detect.outputs.ran }}
+          LOOP_IS_LOOP: ${{ steps.loop_detect.outputs.is_loop }}
+          LOOP_STREAK: ${{ steps.loop_detect.outputs.fail_streak }}
+          LOOP_TESTS: ${{ steps.loop_detect.outputs.current_fail_tests }}
+        run: |
+          set -euo pipefail
+
+          # --- Cas 1 : decide a rejete pour eligibility (pre-iter-limit)
+          # Dans ce cas loop_detect n'a pas tourne (if: should_run=true),
+          # donc on propage decide tel quel. Couvre : label-not-ai:fix,
+          # comment-from-bot, pr-not-from-bot, pr-missing-metadata-issue, etc.
+          if [[ "$DECIDE_SHOULD_RUN" == "false" ]]; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "reject_reason=${DECIDE_REJECT_REASON}" >> "$GITHUB_OUTPUT"
+            echo "fail_streak=${DECIDE_PARSED_STREAK:-0}" >> "$GITHUB_OUTPUT"
+            echo "current_fail_tests=${DECIDE_PARSED_TESTS}" >> "$GITHUB_OUTPUT"
+            echo "loop_tests=" >> "$GITHUB_OUTPUT"
+            echo "=== FINALIZE : decide rejected eligibility (${DECIDE_REJECT_REASON}). ==="
+            exit 0
+          fi
+
+          # --- Cas 2 : loop_detect a detecte une boucle -> priorite sur iter-limit
+          if [[ "${LOOP_IS_LOOP:-false}" == "true" ]]; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "reject_reason=loop-detected" >> "$GITHUB_OUTPUT"
+            echo "fail_streak=${LOOP_STREAK}" >> "$GITHUB_OUTPUT"
+            echo "current_fail_tests=${LOOP_TESTS}" >> "$GITHUB_OUTPUT"
+            echo "loop_tests=${LOOP_TESTS}" >> "$GITHUB_OUTPUT"
+            echo "=== FINALIZE : loop detected, rejecting (streak=${LOOP_STREAK}). ==="
+            exit 0
+          fi
+
+          # --- Cas 3 : iter-limit (3C)
+          if [[ "${DECIDE_ITERATION:-0}" -gt 3 ]]; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "reject_reason=iteration-limit-3-exceeded" >> "$GITHUB_OUTPUT"
+            # Preserve les stats pour le body PR (au cas ou agent_fix ne
+            # tourne pas - sert de reference pour diagnostic humain)
+            if [[ "${LOOP_RAN:-false}" == "true" ]]; then
+              echo "fail_streak=${LOOP_STREAK}" >> "$GITHUB_OUTPUT"
+              echo "current_fail_tests=${LOOP_TESTS}" >> "$GITHUB_OUTPUT"
+            else
+              echo "fail_streak=${DECIDE_PARSED_STREAK:-0}" >> "$GITHUB_OUTPUT"
+              echo "current_fail_tests=${DECIDE_PARSED_TESTS}" >> "$GITHUB_OUTPUT"
+            fi
+            echo "loop_tests=" >> "$GITHUB_OUTPUT"
+            echo "=== FINALIZE : iter-limit (iter=${DECIDE_ITERATION} > 3). ==="
+            exit 0
+          fi
+
+          # --- Cas 4 : should_run=true, choisir fail_streak/current_fail_tests
+          echo "should_run=true" >> "$GITHUB_OUTPUT"
+          echo "reject_reason=" >> "$GITHUB_OUTPUT"
+          echo "loop_tests=" >> "$GITHUB_OUTPUT"
+
+          if [[ "${LOOP_RAN:-false}" == "true" ]]; then
+            # retry-ci avec donnees : utilise les valeurs calculees
+            echo "fail_streak=${LOOP_STREAK}" >> "$GITHUB_OUTPUT"
+            echo "current_fail_tests=${LOOP_TESTS}" >> "$GITHUB_OUTPUT"
+          elif [[ "$DECIDE_MODE" == "new" ]]; then
+            # Nouvelle PR : streak vierge
+            echo "fail_streak=0" >> "$GITHUB_OUTPUT"
+            echo "current_fail_tests=" >> "$GITHUB_OUTPUT"
+          else
+            # retry-comment, retry-manual, ou retry-ci en fallback :
+            # preserver les valeurs du body PR. L'humain intervient, on
+            # ne veut pas compter cette iteration comme une "boucle" supp.
+            echo "fail_streak=${DECIDE_PARSED_STREAK:-0}" >> "$GITHUB_OUTPUT"
+            echo "current_fail_tests=${DECIDE_PARSED_TESTS}" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "=== FINALIZE : should_run=true, mode=${DECIDE_MODE}, iter=${DECIDE_ITERATION}/3 ==="
 
   # ============================================================================
   # Job 2 - agent_fix : spawn Claude Code CLI + commit + push + PR
@@ -641,11 +916,13 @@ jobs:
           Fix propose par alarm-murgat-bot pour l'issue #${ISSUE_NUMBER}.
 
           <!-- AI-BOT-METADATA
-          phase: 3B
+          phase: 3D
           iteration: ${ITERATION}
           issue: ${ISSUE_NUMBER}
           model: claude-opus-4-7
           run: ${RUN_ID}
+          fail-streak: 0
+          last-fail-tests:
           -->
 
           ## Issue source
@@ -672,6 +949,7 @@ jobs:
           | **Autre** | Je ne lis que \`/ai-retry\` ou les mentions. Les commentaires libres sont ignores. |
 
           Limite : 3 iterations max par PR (phase 3C). Au-dela, j'abandonne et pose le label \`ai:abandoned\`.
+          Detection de boucle (phase 3D) : si 3 CI echecs consecutifs avec les memes tests, abandon anticipe avec reason=\`loop-detected\`.
           EOF
 
           PR_URL=$(gh pr create \
@@ -701,15 +979,56 @@ jobs:
           ITERATION: ${{ needs.dispatch.outputs.iteration }}
           RUN_ID: ${{ github.run_id }}
           MODE: ${{ needs.dispatch.outputs.mode }}
+          # Phase 3D : nouvelles valeurs a ecrire dans le metadata. Vient
+          # directement de dispatch.finalize (qui a calcule ou preserve selon
+          # le mode). Pas de logique metier ici : on reflete ce qu'a decide
+          # dispatch.
+          FAIL_STREAK: ${{ needs.dispatch.outputs.fail_streak }}
+          CURRENT_FAIL_TESTS: ${{ needs.dispatch.outputs.current_fail_tests }}
         run: |
           set -euo pipefail
 
-          # Recupere body actuel, update iteration dans le metadata block.
-          # sed sans flag g = premier match = metadata block (les sections
-          # "## Resume iteration X" appendees n'ont pas de `:` apres iteration).
+          # Recupere body actuel, update iteration + fail-streak + last-fail-tests
+          # dans le metadata block. Utilise Python (stdlib re) pour avoir un
+          # escaping fiable sur CURRENT_FAIL_TESTS (peut contenir ';', ':',
+          # '.', '[', ']' - aucun de ces chars n'est reserve sed mais autant
+          # etre robuste via Python).
+          ORIG_BODY=$(gh pr view "$PR_NUMBER" --json body --jq '.body')
+
+          UPDATED_BODY=$(python3 - "$ITERATION" "$FAIL_STREAK" "$CURRENT_FAIL_TESTS" <<'PYEOF'
+          import os, re, sys
+          iteration = sys.argv[1]
+          fail_streak = sys.argv[2]
+          last_tests = sys.argv[3]
+          body = os.environ.get("ORIG_BODY", "")
+
+          # Remplace iteration: N (premier match dans le metadata block)
+          body = re.sub(r'iteration: \d+', f'iteration: {iteration}', body, count=1)
+
+          # fail-streak : replace si present, sinon insert juste avant '-->'.
+          # str.replace (count=1) evite le piege f-string + \1 backref -> SOH.
+          if re.search(r'^fail-streak:', body, re.MULTILINE):
+              body = re.sub(r'^fail-streak:.*$',
+                            f'fail-streak: {fail_streak}',
+                            body, count=1, flags=re.MULTILINE)
+          else:
+              body = body.replace('\n-->', f'\nfail-streak: {fail_streak}\n-->', 1)
+
+          # last-fail-tests : idem.
+          if re.search(r'^last-fail-tests:', body, re.MULTILINE):
+              body = re.sub(r'^last-fail-tests:.*$',
+                            f'last-fail-tests: {last_tests}',
+                            body, count=1, flags=re.MULTILINE)
+          else:
+              body = body.replace('\n-->', f'\nlast-fail-tests: {last_tests}\n-->', 1)
+
+          sys.stdout.write(body)
+          PYEOF
+          )
+
           {
-            gh pr view "$PR_NUMBER" --json body --jq '.body' \
-              | sed -E "s/iteration: [0-9]+/iteration: ${ITERATION}/"
+            printf '%s' "$UPDATED_BODY"
+            echo ""
             echo ""
             echo "## Resume iteration ${ITERATION} (mode=${MODE})"
             echo ""
@@ -719,7 +1038,7 @@ jobs:
           } > /tmp/pr-body-updated.md
 
           gh pr edit "$PR_NUMBER" --body-file /tmp/pr-body-updated.md
-          echo "PR #$PR_NUMBER body updated (iteration ${ITERATION})."
+          echo "PR #$PR_NUMBER body updated (iteration ${ITERATION}, fail-streak ${FAIL_STREAK})."
 
       - name: Comment on source issue (mode=new only)
         if: steps.diff.outputs.produced == 'true' && needs.dispatch.outputs.mode == 'new'
@@ -734,16 +1053,23 @@ jobs:
 
   # ============================================================================
   # Job 3 - notify_abandonment : tourne si dispatch a rejete la requete pour
-  # "iteration-limit-3-exceeded". Commente la PR + pose label ai:abandoned.
+  # une raison qui demande une intervention humaine.
+  # Reasons gerees :
+  #   - iteration-limit-3-exceeded (phase 3C)  : 3 iterations epuisees, abandon
+  #     generique sans diagnostic du pattern d'echec.
+  #   - loop-detected (phase 3D)               : meme test fail 3x de suite,
+  #     message specifique pointant l'humain sur la cause (fix repete n'aide
+  #     pas -> probleme plus profond).
   # N'empeche PAS un merge humain manuel — juste flag pour reprise humaine.
-  # Phase 3C.
   # ============================================================================
   notify_abandonment:
-    name: Notify abandonment (iteration limit reached)
+    name: Notify abandonment (reject_reason=${{ needs.dispatch.outputs.reject_reason }})
     needs: dispatch
     if: |
-      needs.dispatch.outputs.should_run == 'false' &&
-      startsWith(needs.dispatch.outputs.reject_reason, 'iteration-limit')
+      needs.dispatch.outputs.should_run == 'false' && (
+        startsWith(needs.dispatch.outputs.reject_reason, 'iteration-limit') ||
+        needs.dispatch.outputs.reject_reason == 'loop-detected'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
@@ -766,30 +1092,81 @@ jobs:
           ITERATION: ${{ needs.dispatch.outputs.iteration }}
           RUN_ID: ${{ github.run_id }}
           REJECT_REASON: ${{ needs.dispatch.outputs.reject_reason }}
+          LOOP_TESTS: ${{ needs.dispatch.outputs.loop_tests }}
         run: |
           set -euo pipefail
-          {
-            echo "## 🤖 Abandon — limite d'iterations atteinte"
-            echo ""
-            echo "J'ai tente **${ITERATION} fois** de fixer ce bug sans succes durable."
-            echo "Je m'arrete pour eviter de gacher des tokens / minutes CI et"
-            echo "pour laisser un humain prendre le relais."
-            echo ""
-            echo "**Reject reason** : \`${REJECT_REASON}\`"
-            echo ""
-            echo "### Pour reprendre"
-            echo ""
-            echo "- **Retirer le label \`ai:abandoned\`** quand tu as identifie la cause"
-            echo "- **Commenter sur la PR avec \`/ai-retry <nouvelles instructions>\`**"
-            echo "  pour me relancer avec un nouveau contexte (remet le compteur a 0 — ou plutot, le body PR contient deja l'historique de mes iterations, a lire pour ne pas refaire les memes erreurs)"
-            echo "- **Ou prendre la main manuellement** sur la branche \`ai/issue-N/...\`"
-            echo ""
-            echo "### Meta"
-            echo ""
-            echo "- PR : #${PR_NUMBER}"
-            echo "- Issue source : #${ISSUE_NUMBER}"
-            echo "- Run : https://github.com/${{ github.repository }}/actions/runs/${RUN_ID}"
-          } > /tmp/abandon-comment.md
+
+          if [[ "$REJECT_REASON" == "loop-detected" ]]; then
+            # Phase 3D : diagnostic precis
+            # Reformate la liste des tests en Markdown (1 par ligne pour lisibilite)
+            FORMATTED_TESTS=""
+            if [[ -n "$LOOP_TESTS" ]]; then
+              FORMATTED_TESTS=$(echo "$LOOP_TESTS" | tr ';' '\n' | sed 's/^/- `/; s/$/`/')
+            else
+              FORMATTED_TESTS="(liste vide - voir artifacts du run CI)"
+            fi
+
+            {
+              echo "## 🤖 Abandon — boucle detectee (phase 3D)"
+              echo ""
+              echo "J'ai echoue **3 fois de suite** avec les **memes tests en failure**."
+              echo "Chaque iteration re-fixe quelque chose, mais la CI continue a fail"
+              echo "sur le meme ensemble de tests -> le probleme n'est pas la ou je"
+              echo "regarde. Intervention humaine requise."
+              echo ""
+              echo "### Tests qui failent en boucle"
+              echo ""
+              echo "${FORMATTED_TESTS}"
+              echo ""
+              echo "### Pourquoi je m'arrete maintenant"
+              echo ""
+              echo "Phase 3D : si \`fail-streak >= 3\` (3 CI echecs consecutifs avec"
+              echo "le meme ensemble ou un sous-ensemble de tests failing), j'abandonne"
+              echo "AVANT de consommer la derniere iteration. Mon fix repete n'aide pas"
+              echo "-> le bug est ailleurs que ce que je modifie."
+              echo ""
+              echo "### Pour reprendre"
+              echo ""
+              echo "1. **Regarder la PR** et mes iterations dans le body (sections \`## Resume iteration N\`)"
+              echo "2. **Regarder les logs d'un des runs CI** (artifacts \`tier*-reports\`) pour comprendre le pattern"
+              echo "3. **Hypotheses typiques** :"
+              echo "   - L'invariant n'est pas bien decrit dans \`tests/INVARIANTS.md\` -> clarifier, relancer"
+              echo "   - Le test RED attaque un symptome, pas la cause racine -> ecrire un test plus precis"
+              echo "   - Le fix touche le mauvais module (ex: logique dans \`routes/\` au lieu de \`logic/\`)"
+              echo "4. **Commenter sur la PR** avec \`/ai-retry <hint sur la cause racine>\` OU prendre la main manuellement"
+              echo ""
+              echo "### Meta"
+              echo ""
+              echo "- PR : #${PR_NUMBER}"
+              echo "- Issue source : #${ISSUE_NUMBER}"
+              echo "- Run : https://github.com/${{ github.repository }}/actions/runs/${RUN_ID}"
+              echo "- Reject reason : \`${REJECT_REASON}\`"
+            } > /tmp/abandon-comment.md
+          else
+            # Phase 3C : iteration-limit classique
+            {
+              echo "## 🤖 Abandon — limite d'iterations atteinte"
+              echo ""
+              echo "J'ai tente **${ITERATION} fois** de fixer ce bug sans succes durable."
+              echo "Je m'arrete pour eviter de gacher des tokens / minutes CI et"
+              echo "pour laisser un humain prendre le relais."
+              echo ""
+              echo "**Reject reason** : \`${REJECT_REASON}\`"
+              echo ""
+              echo "### Pour reprendre"
+              echo ""
+              echo "- **Retirer le label \`ai:abandoned\`** quand tu as identifie la cause"
+              echo "- **Commenter sur la PR avec \`/ai-retry <nouvelles instructions>\`**"
+              echo "  pour me relancer avec un nouveau contexte (remet le compteur a 0 — ou plutot, le body PR contient deja l'historique de mes iterations, a lire pour ne pas refaire les memes erreurs)"
+              echo "- **Ou prendre la main manuellement** sur la branche \`ai/issue-N/...\`"
+              echo ""
+              echo "### Meta"
+              echo ""
+              echo "- PR : #${PR_NUMBER}"
+              echo "- Issue source : #${ISSUE_NUMBER}"
+              echo "- Run : https://github.com/${{ github.repository }}/actions/runs/${RUN_ID}"
+            } > /tmp/abandon-comment.md
+          fi
 
           # Commente la PR (cible primaire, c'est la ou les iterations se passent)
           if [[ -n "$PR_NUMBER" ]]; then
@@ -801,4 +1178,4 @@ jobs:
           gh issue comment "$ISSUE_NUMBER" --body-file /tmp/abandon-comment.md
           gh issue edit "$ISSUE_NUMBER" --add-label "ai:abandoned" || true
 
-          echo "Abandonment notice posted on PR #${PR_NUMBER} and issue #${ISSUE_NUMBER}."
+          echo "Abandonment notice posted on PR #${PR_NUMBER} and issue #${ISSUE_NUMBER} (reason=${REJECT_REASON})."
