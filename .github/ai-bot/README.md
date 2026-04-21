@@ -30,24 +30,36 @@ S'exécute dans un workflow GitHub Actions sous l'identité de la GitHub App
 
 ## Comment déclencher le bot
 
-### Phase actuelle (phase 2 / 5) — `workflow_dispatch` manuel
+### Trigger principal — label `ai:fix` (phase 3B opérationnelle)
 
 ```bash
 # 1. Crée une issue qui décrit le bug (référence INV-XXX si possible)
-gh issue create --title "Bug INV-XYZ — description" --body "..."
+gh issue create --title "Bug INV-XYZ — description" --body "..." --label "ai:fix"
+# OU crée l'issue sans label, puis pose le label après :
+gh issue edit <N> --add-label "ai:fix"
 
-# 2. Note le numéro d'issue retourné (ex: 42)
-
-# 3. Déclenche le workflow
-gh workflow run ai-bot.yml -f issue_number=42
-
-# 4. Suis le run
-gh run watch --exit-status
+# 2. Le bot démarre automatiquement (~30s). Suis le run :
+gh run list --workflow ai-bot.yml --limit 1
+gh run watch <run-id> --exit-status
 ```
 
-### Phase 3 (à venir) — trigger auto sur label
+### Retry sur une PR bot existante
 
-Il suffira de poser le label `ai:fix` sur une issue pour que le bot démarre.
+Le bot reprend une PR existante si :
+
+- **`check_run.completed` avec conclusion `failure`** sur une PR bot → retry auto avec les logs CI failed dans le prompt
+- **`issue_comment.created`** sur une PR bot contenant `/ai-retry <instructions>` OU mentionnant `@alarm-murgat-bot` → retry avec le commentaire dans le prompt
+- **`workflow_dispatch` manuel** avec le même `issue_number` et une PR bot déjà ouverte → retry-manual
+
+Commentaires sans ces mots-clés, ou posés par le bot lui-même, sont ignorés (anti-boucle).
+
+### Fallback — `workflow_dispatch` manuel
+
+```bash
+gh workflow run ai-bot.yml -f issue_number=<N>
+```
+
+Utile pour tester manuellement ou re-déclencher sur une issue sans re-labeler.
 
 ---
 
@@ -188,9 +200,22 @@ manuellement avec le même numéro d'issue.
 
 ---
 
+## Historique pilotes
+
+| Date | Issue | Invariant | Résultat | PR produite |
+|---|---|---|---|---|
+| 2026-04-20 | #6 | INV-031 (ACK 403) | ✅ **Abandon propre** — bug déjà fixé par commit `cc35b7d`, l'agent a refusé de forcer un RED→GREEN artificiel (respect P5 strict). Révélé que le catalogue était stale → audit complet (PR #9, #11). | Aucune (abandon volontaire) |
+| 2026-04-21 | #13 | INV-082 (atomicité bulk) | ✅ **Test de verrouillage produit** — agent a reconnu le mode spécial "pas de bug à fixer, juste test de régression", a écrit 1 test concurrence (budget P4 respecté), CI tier 1+2+3 verte. | #14 mergée |
+
+Bugs CI résolus pendant la stabilisation (visibles dans `docs/AI_STRATEGY.md §8bis`) :
+
+- **CI-BUG-09** : cleanup silencieusement partiel entre runs → PRs bloquées en cascade. Fix : cleanup robuste + retry boot cluster (PR #10).
+- **CI-BUG-10** : race condition tier 3 parce que `PROJECT=ci-wN` fixé par matrix, partagé entre runs parallèles. Fix : concurrency job-level par worker (PR #12).
+
 ## Références
 
 - Stratégie IA : [`docs/AI_STRATEGY.md`](../../docs/AI_STRATEGY.md)
 - Catalogue d'invariants : [`tests/INVARIANTS.md`](../../tests/INVARIANTS.md)
+- Audit catalogue (2026-04-20) : [`tests/INVARIANTS_AUDIT.md`](../../tests/INVARIANTS_AUDIT.md)
 - Audit tests (bugs catalogués) : [`tests/audit_v2.json`](../../tests/audit_v2.json)
 - Convention TDD projet : [`.claude/CLAUDE.md`](../../.claude/CLAUDE.md)
