@@ -87,6 +87,47 @@ def wait_healthy(base, timeout=30):
     return False
 
 
+def wait_unhealthy(base, timeout=10):
+    """Polling : retourne True quand le backend ne repond plus.
+    Sert a confirmer un docker stop avant de continuer (evite la race
+    "stop envoye mais conteneur encore in-flight"). Substitue les sleep(3)
+    aveugles post-stop par une condition observable.
+    """
+    for _ in range(timeout):
+        if not healthy(base):
+            return True
+        time.sleep(1)
+    return False
+
+
+def wait_users_heartbeating(base, expected_count, max_age_seconds=5.0, timeout=20.0):
+    """Polling sur /api/test/connected-users-detailed (chantier #21 step 0a).
+    Retourne le nombre d'users heartbeating sur `base` depuis < max_age_seconds.
+
+    Substitue les blind `time.sleep(N)` apres setup apps / failover : on attend
+    la condition observable (heartbeat recu il y a < N secondes) plutot qu'une
+    duree majorante calee sur le pire cas. Heartbeat client = 3s donc max_age=5s
+    laisse 1+ heartbeat de marge.
+    """
+    deadline = time.time() + timeout
+    last_count = 0
+    while time.time() < deadline:
+        try:
+            r = requests.get(f"{base}/api/test/connected-users-detailed", timeout=3)
+            users = r.json().get("users", [])
+            recent = [
+                u for u in users
+                if u.get("age_seconds") is not None and u["age_seconds"] < max_age_seconds
+            ]
+            last_count = len(recent)
+            if last_count >= expected_count:
+                return last_count
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return last_count
+
+
 def check_emu_network(serial):
     """Verifie que l'emulateur peut joindre 10.0.2.2 (host)."""
     adb(serial, "reverse", "--remove-all")
@@ -149,8 +190,10 @@ for serial in working_emus:
     adb(serial, "shell", "am start -n com.alarm.critical/.MainActivity")
     print(f"  {name} sur {serial}")
 
-print("  Attente 10s (heartbeats)...")
-time.sleep(10)
+print(f"  Attente heartbeats sur VPS1 (polling observable, max 20s)...")
+n_hb = wait_users_heartbeating(VPS1, expected_count=len(working_emus),
+                                max_age_seconds=5.0, timeout=20.0)
+print(f"  {n_hb}/{len(working_emus)} apps heartbeating sur VPS1")
 
 for serial in working_emus:
     ok = app_connected(serial)
@@ -159,8 +202,14 @@ for serial in working_emus:
 # --- [3] Forcer les apps sur VPS2 (couper VPS1) ---
 print("\n[3] Forcer les apps sur VPS2 (couper VPS1)...")
 docker("docker", "compose", "stop", "backend")
-print("  VPS1 stoppe. Attente 15s...")
-time.sleep(15)
+print("  VPS1 stoppe. Attente que les apps basculent sur VPS2 (polling observable)...")
+# On attend que les apps soient detectees heartbeating sur VPS2 (rotation
+# circulaire ApiClient apres N echecs). Plus fiable que sleep(15) aveugle :
+# on sait l'instant exact ou la bascule a eu lieu, et on echoue tot si elle
+# n'a pas eu lieu (au lieu de continuer dans un etat invalide).
+n_hb_vps2 = wait_users_heartbeating(VPS2, expected_count=len(working_emus),
+                                     max_age_seconds=10.0, timeout=25.0)
+print(f"  {n_hb_vps2}/{len(working_emus)} apps heartbeating sur VPS2")
 
 for serial in working_emus:
     ok = app_connected(serial)
@@ -181,17 +230,16 @@ requests.post(f"{VPS1}/api/test/send-alarm", timeout=5)
 time.sleep(3)
 print("  Alarme creee")
 
-# Couper VPS2
+# Couper VPS2 (polling observable au lieu de sleep aveugle)
 docker("docker", "compose", "-f", "docker-compose.vps2.yml", "-p", "alarm-vps2", "stop", "backend")
-time.sleep(3)
-vps2_down = not healthy(VPS2)
+vps2_down = wait_unhealthy(VPS2, timeout=10)
 print(f"  VPS2 stoppe: {'OK' if vps2_down else 'ECHEC - ENCORE UP'}")
 if not vps2_down:
-    # Retry
+    # Retry : compose stop a foire silencieusement, on relance
+    print("  [docker] Retry compose stop (premier essai n'a pas eteint le conteneur)...")
     subprocess.run(["docker", "compose", "-f", "docker-compose.vps2.yml", "-p", "alarm-vps2",
                     "stop", "backend"], timeout=30, cwd=CWD)
-    time.sleep(3)
-    vps2_down = not healthy(VPS2)
+    vps2_down = wait_unhealthy(VPS2, timeout=10)
     print(f"  Retry: {'OK' if vps2_down else 'VPS2 REFUSE DE MOURIR'}")
 assert vps2_down, "VPS2 doit etre down"
 
