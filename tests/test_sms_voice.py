@@ -57,7 +57,12 @@ USER2_PASSWORD = "user123"
 GATEWAY_KEY = os.getenv("GATEWAY_KEY", "changeme-in-prod")
 GATEWAY_HEADERS = {"X-Gateway-Key": GATEWAY_KEY}
 
-TICK_WAIT = 22  # 2 ticks escalation loop (10s chacun) + marge
+# Boucle d'escalade backend : tick toutes les 10s (cf escalation.py asyncio.sleep(10)).
+# Pour verifier une PRESENCE (SMS/call enqueued), prefere _wait_for_sms / _wait_for_calls
+# qui pollent sur condition observable (timeout 20s, retour des l'apparition).
+# Pour verifier une ABSENCE, utilise _wait_one_tick() (sleep court 12s = 1 tick + marge).
+# Avant : TICK_WAIT=22s sur 21 sites + sleep(12) au setup ≈ 510s wall-clock par run tier 3.
+TICK_WAIT_BRIEF = 12
 
 
 def _reset_clock_all_nodes():
@@ -75,6 +80,67 @@ def _advance_clock_all_nodes(minutes):
                          params={"minutes": minutes, "peer": "false"}, timeout=2)
         except Exception:
             pass
+
+
+def _wait_one_tick():
+    """Bloque jusqu'a ce qu'un tick complet de la boucle d'escalade ait eu lieu.
+
+    Utilise UNIQUEMENT pour verifier une ABSENCE (pas de SMS, pas de call) ou il
+    n'y a pas de condition observable a poller. Pour une presence, prefere
+    _wait_for_sms / _wait_for_calls (retour des que la condition apparait).
+    """
+    time.sleep(TICK_WAIT_BRIEF)
+
+
+def _wait_for_sms(to_number, timeout=20.0, poll_interval=0.5, min_count=1):
+    """Poll /internal/sms/pending jusqu'a min_count SMS pour to_number, ou timeout.
+
+    Retourne la liste des SMS matchants (peut etre < min_count si timeout).
+    Garde-fou "team failover-blocking" : reduction d'attente jumelee a la condition
+    observable. Le test continue avec un assert sur la liste retournee.
+    """
+    deadline = time.monotonic() + timeout
+    matching = []
+    while True:
+        sms = _get_pending_sms()
+        matching = [s for s in sms if s["to_number"] == to_number]
+        if len(matching) >= min_count or time.monotonic() >= deadline:
+            return matching
+        time.sleep(poll_interval)
+
+
+def _wait_for_calls(to_number, timeout=20.0, poll_interval=0.5, min_count=1):
+    """Poll /internal/calls/pending jusqu'a min_count calls pour to_number, ou timeout."""
+    deadline = time.monotonic() + timeout
+    matching = []
+    while True:
+        calls = _get_pending_calls()
+        matching = [c for c in calls if c["to_number"] == to_number]
+        if len(matching) >= min_count or time.monotonic() >= deadline:
+            return matching
+        time.sleep(poll_interval)
+
+
+def _wait_for_alarm_assigned_to(alarm_id, expected_user_id, timeout=15.0, poll_interval=0.3):
+    """Poll l'alarme jusqu'a assigned_user_id == expected_user_id, ou timeout.
+
+    Retourne le dernier alarm dict observe (peut avoir un assigned_user_id different
+    si timeout — le test fera l'assert lui-meme).
+    """
+    admin_h = _admin_headers()
+    deadline = time.monotonic() + timeout
+    last_alarm = None
+    while True:
+        try:
+            r = requests.get(f"{API}/alarms/", headers=admin_h, params={"days": 1})
+            last_alarm = next((a for a in r.json() if a["id"] == alarm_id), None)
+        except Exception:
+            last_alarm = None
+        if last_alarm and last_alarm.get("assigned_user_id") == expected_user_id:
+            return last_alarm
+        if time.monotonic() >= deadline:
+            return last_alarm
+        time.sleep(poll_interval)
 
 
 def _login(name, password):
@@ -167,7 +233,9 @@ class TestSmsCallTimer:
         alarm_id = _send_alarm("SMS Timer Test", self.user1_id)
         _advance_clock_all_nodes(1)
         _refresh_all_heartbeats()
-        time.sleep(TICK_WAIT)
+        # Verification d'ABSENCE : on doit attendre au moins 1 tick complet pour
+        # garantir que la boucle a vu l'horloge avancee (et choisi de ne RIEN faire).
+        _wait_one_tick()
 
         pending = _get_pending_sms()
         sms_for_user1 = [s for s in pending if s["to_number"] == "+33600000001"]
@@ -179,14 +247,11 @@ class TestSmsCallTimer:
         alarm_id = _send_alarm("SMS+Call Timer Test", self.user1_id)
         _advance_clock_all_nodes(3)
         _refresh_all_heartbeats()
-        time.sleep(TICK_WAIT)
 
-        sms = _get_pending_sms()
-        sms_user1 = [s for s in sms if s["to_number"] == "+33600000001"]
+        sms_user1 = _wait_for_sms("+33600000001")
         assert len(sms_user1) >= 1, f"1 SMS attendu pour user1, got {len(sms_user1)}"
 
-        calls = _get_pending_calls()
-        calls_user1 = [c for c in calls if c["to_number"] == "+33600000001"]
+        calls_user1 = _wait_for_calls("+33600000001")
         assert len(calls_user1) >= 1, f"1 call attendu pour user1, got {len(calls_user1)}"
 
     def test_sms_call_delay_configurable(self):
@@ -198,20 +263,18 @@ class TestSmsCallTimer:
 
         alarm_id = _send_alarm("Delay Config Test", self.user1_id)
 
-        # +3min : pas de SMS (< 5min)
+        # +3min : pas de SMS (< 5min) — verification d'ABSENCE (sleep necessaire).
         _advance_clock_all_nodes(3)
         _refresh_all_heartbeats()
-        time.sleep(TICK_WAIT)
+        _wait_one_tick()
         sms = _get_pending_sms()
         sms_user1 = [s for s in sms if s["to_number"] == "+33600000001"]
         assert len(sms_user1) == 0, f"Pas de SMS a +3min (delai 5min), got {len(sms_user1)}"
 
-        # +6min total : SMS present (> 5min)
+        # +6min total : SMS present (> 5min) — polling sur condition observable.
         _advance_clock_all_nodes(3)
         _refresh_all_heartbeats()
-        time.sleep(TICK_WAIT)
-        sms = _get_pending_sms()
-        sms_user1 = [s for s in sms if s["to_number"] == "+33600000001"]
+        sms_user1 = _wait_for_sms("+33600000001")
         assert len(sms_user1) >= 1, f"SMS attendu a +6min (delai 5min), got {len(sms_user1)}"
 
         # Remettre le delai par defaut
@@ -231,10 +294,10 @@ class TestSmsCallTimer:
         r = requests.post(f"{API}/alarms/{alarm_id}/ack", headers=user1_h)
         assert r.status_code == 200, f"Ack failed: {r.status_code} {r.text}"
 
-        # Avancer de 3min
+        # Avancer de 3min — verification d'ABSENCE (sleep necessaire).
         _advance_clock_all_nodes(3)
         _refresh_all_heartbeats()
-        time.sleep(TICK_WAIT)
+        _wait_one_tick()
 
         sms = _get_pending_sms()
         sms_user1 = [s for s in sms if s["to_number"] == "+33600000001"]
@@ -245,30 +308,29 @@ class TestSmsCallTimer:
         """user1 recoit SMS a t+2min. Apres escalade (t+15), user2 recoit SMS a t+17."""
         alarm_id = _send_alarm("Per-User Timer Test", self.user1_id)
 
-        # t+3min : user1 doit avoir un SMS
+        # t+3min : user1 doit avoir un SMS — polling sur presence.
         _advance_clock_all_nodes(3)
         _refresh_all_heartbeats()
-        time.sleep(TICK_WAIT)
-        sms = _get_pending_sms()
-        sms_user1 = [s for s in sms if s["to_number"] == "+33600000001"]
+        sms_user1 = _wait_for_sms("+33600000001")
         assert len(sms_user1) >= 1, f"SMS user1 attendu a +3min"
 
-        # user2 ne doit PAS avoir de SMS (pas encore escalade)
+        # user2 ne doit PAS avoir de SMS (pas encore escalade) — read-once apres
+        # avoir vu user1, donc la boucle a deja tourne.
+        sms = _get_pending_sms()
         sms_user2 = [s for s in sms if s["to_number"] == "+33600000002"]
         assert len(sms_user2) == 0, f"Pas de SMS user2 avant escalade"
 
-        # t+16min : escalade (15min) → user2 notifie
+        # t+16min : escalade (15min) → user2 notifie. Polling sur escalation visible.
         _advance_clock_all_nodes(13)
         _refresh_all_heartbeats()
-        time.sleep(TICK_WAIT)
+        alarm_after_esc = _wait_for_alarm_assigned_to(alarm_id, self.user2_id)
+        assert alarm_after_esc is not None and alarm_after_esc.get("assigned_user_id") == self.user2_id, \
+            f"Escalade vers user2 attendue, got {alarm_after_esc}"
 
-        # t+19min : user2 devrait avoir SMS (2min apres notification a t+16)
+        # t+19min : user2 devrait avoir SMS (2min apres notification a t+16) — polling.
         _advance_clock_all_nodes(3)
         _refresh_all_heartbeats()
-        time.sleep(TICK_WAIT)
-
-        sms = _get_pending_sms()
-        sms_user2 = [s for s in sms if s["to_number"] == "+33600000002"]
+        sms_user2 = _wait_for_sms("+33600000002")
         assert len(sms_user2) >= 1, f"SMS user2 attendu apres escalade + delai"
 
     def test_no_duplicate_sms_on_multiple_ticks(self):
@@ -276,16 +338,16 @@ class TestSmsCallTimer:
         alarm_id = _send_alarm("No Dup SMS Test", self.user1_id)
         _advance_clock_all_nodes(3)
         _refresh_all_heartbeats()
-        time.sleep(TICK_WAIT)
 
-        # Premier check
-        sms = _get_pending_sms()
-        sms_user1 = [s for s in sms if s["to_number"] == "+33600000001"]
+        # Premier check : polling sur la presence du SMS initial.
+        sms_user1 = _wait_for_sms("+33600000001")
         count_first = len(sms_user1)
         assert count_first >= 1, "Au moins 1 SMS"
 
-        # Attendre encore 2 ticks
-        time.sleep(TICK_WAIT)
+        # Attendre encore 1 tick puis verifier qu'aucun SMS supplementaire n'apparait.
+        # Verification d'ABSENCE de doublon : sleep necessaire (pas de condition observable
+        # pour "rien de nouveau n'arrive").
+        _wait_one_tick()
         sms = _get_pending_sms()
         sms_user1 = [s for s in sms if s["to_number"] == "+33600000001"]
         assert len(sms_user1) == count_first, \
@@ -296,14 +358,13 @@ class TestSmsCallTimer:
         alarm_id = _send_alarm("No Dup Call Test", self.user1_id)
         _advance_clock_all_nodes(3)
         _refresh_all_heartbeats()
-        time.sleep(TICK_WAIT)
 
-        calls = _get_pending_calls()
-        calls_user1 = [c for c in calls if c["to_number"] == "+33600000001"]
+        calls_user1 = _wait_for_calls("+33600000001")
         count_first = len(calls_user1)
         assert count_first >= 1, "Au moins 1 call"
 
-        time.sleep(TICK_WAIT)
+        # ABSENCE de doublon : sleep necessaire (1 tick).
+        _wait_one_tick()
         calls = _get_pending_calls()
         calls_user1 = [c for c in calls if c["to_number"] == "+33600000001"]
         assert len(calls_user1) == count_first, \
@@ -437,13 +498,10 @@ class TestCallQueueEndpoints:
         )
         assert r.status_code == 200
 
-        # Attendre que l'escalade soit traitee
-        time.sleep(TICK_WAIT)
-
-        # Verifier que l'alarme est maintenant assignee a user2
-        admin_h = _admin_headers()
-        r = requests.get(f"{API}/alarms/", headers=admin_h, params={"days": 1})
-        alarm = next((a for a in r.json() if a["id"] == alarm_id), None)
+        # L'endpoint result=escalate change assigned_user_id de maniere SYNCHRONE
+        # (cf backend/app/api/calls.py#post_call_result), pas besoin d'attendre un tick.
+        # Polling court pour absorber d'eventuelles latences de commit DB.
+        alarm = _wait_for_alarm_assigned_to(alarm_id, user2_id)
         assert alarm is not None
         assert alarm["assigned_user_id"] == user2_id, \
             f"Alarme devrait etre escaladee vers user2 ({user2_id}), got {alarm['assigned_user_id']}"
@@ -559,26 +617,26 @@ class TestSmsCallIntegration:
         user2 notifie → user2 SMS a t+17min."""
         alarm_id = _send_alarm("Full Timeline Test", self.user1_id)
 
-        # t+3min : user1 SMS
+        # t+3min : user1 SMS — polling sur presence.
         _advance_clock_all_nodes(3)
         _refresh_all_heartbeats()
-        time.sleep(TICK_WAIT)
-        sms = _get_pending_sms()
-        assert any(s["to_number"] == "+33600000001" for s in sms), "user1 SMS a t+3"
+        sms_user1 = _wait_for_sms("+33600000001")
+        assert len(sms_user1) >= 1, "user1 SMS a t+3"
 
-        # t+16min : escalade (user2 notifie)
+        # t+16min : escalade (user2 notifie) — polling sur assigned_user_id.
         _advance_clock_all_nodes(13)
         _refresh_all_heartbeats()
-        time.sleep(TICK_WAIT)
+        alarm_after_esc = _wait_for_alarm_assigned_to(alarm_id, self.user2_id)
+        assert alarm_after_esc is not None and alarm_after_esc.get("assigned_user_id") == self.user2_id, \
+            f"Escalade vers user2 attendue, got {alarm_after_esc}"
 
-        # t+19min : user2 SMS
+        # t+19min : user2 SMS — polling sur presence.
         _advance_clock_all_nodes(3)
         _refresh_all_heartbeats()
-        time.sleep(TICK_WAIT)
-        sms = _get_pending_sms()
-        assert any(s["to_number"] == "+33600000002" for s in sms), "user2 SMS a t+19"
+        sms_user2 = _wait_for_sms("+33600000002")
+        assert len(sms_user2) >= 1, "user2 SMS a t+19"
 
-        # Calls doivent aussi etre presentes
+        # Calls doivent aussi etre presentes — deja la apres les ticks ci-dessus.
         calls = _get_pending_calls()
         assert any(c["to_number"] == "+33600000001" for c in calls), "user1 call"
         assert any(c["to_number"] == "+33600000002" for c in calls), "user2 call"
@@ -592,10 +650,10 @@ class TestSmsCallIntegration:
         r = requests.post(f"{API}/alarms/{alarm_id}/ack", headers=user1_h)
         assert r.status_code == 200
 
-        # Avancer au-dela du delai
+        # Avancer au-dela du delai — verification d'ABSENCE (sleep necessaire).
         _advance_clock_all_nodes(5)
         _refresh_all_heartbeats()
-        time.sleep(TICK_WAIT)
+        _wait_one_tick()
 
         sms = _get_pending_sms()
         sms_user1 = [s for s in sms if s["to_number"] == "+33600000001"]
@@ -614,26 +672,27 @@ class TestSmsCallIntegration:
         r = requests.post(f"{API}/alarms/{alarm_id}/ack", headers=user1_h)
         assert r.status_code == 200
 
-        # Avancer au-dela du delai SMS mais avant expiry ack (30min)
+        # Avancer au-dela du delai SMS mais avant expiry ack (30min) —
+        # ABSENCE attendue pendant la suspension : sleep necessaire.
         _advance_clock_all_nodes(5)
         _refresh_all_heartbeats()
-        time.sleep(TICK_WAIT)
+        _wait_one_tick()
 
         # Pas de SMS pendant la suspension
         requests.post(f"{API}/test/reset-sms-queue")
         requests.post(f"{API}/test/reset-call-queue")
 
-        # Avancer au-dela de l'expiry ack (30min total)
+        # Avancer au-dela de l'expiry ack (30min total) — la reactivation est un
+        # changement d'etat interne sans SMS visible immediat (le notif sms_sent
+        # est reset puis le SMS sera enqueued au prochain cycle apres delai).
+        # Sleep pour laisser un tick traiter la reactivation.
         _advance_clock_all_nodes(26)
         _refresh_all_heartbeats()
-        time.sleep(TICK_WAIT)
+        _wait_one_tick()
 
-        # L'alarme est reactivee → nouveau delai SMS
+        # L'alarme est reactivee → nouveau delai SMS — polling sur presence.
         _advance_clock_all_nodes(3)
         _refresh_all_heartbeats()
-        time.sleep(TICK_WAIT)
-
-        sms = _get_pending_sms()
-        sms_user1 = [s for s in sms if s["to_number"] == "+33600000001"]
+        sms_user1 = _wait_for_sms("+33600000001")
         assert len(sms_user1) >= 1, \
             f"SMS attendu apres reactivation post-expiry, got {len(sms_user1)}"
