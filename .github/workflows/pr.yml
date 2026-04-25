@@ -219,8 +219,14 @@ jobs:
           retention-days: 14
 
   tier3_e2e:
+    # Audit CI parallelization (2026-04-25) : decouple de tier2_integration.
+    # Tier 3 est hermetique (boot son propre cluster Patroni avec PROJECT/ports
+    # dedies, pas de dependance produit avec tier2). Le `needs: tier1_unit`
+    # suffit a eviter de gaspiller du runner si la baseline pure-logic est rouge.
+    # Tier 2 reste bloquant via branch protection — ne change pas la garantie merge.
+    # Gain : ~27s wall-clock en supprimant la serialisation tier1 -> tier2 -> tier3.
     name: Tier 3 — E2E cluster (worker ${{ matrix.worker }}/2)
-    needs: tier2_integration
+    needs: tier1_unit
     runs-on: [self-hosted, linux, docker, alarm-ci]
     timeout-minutes: 15
     # Plus de concurrency job-level (avant : ci-tier3-worker-${worker}).
