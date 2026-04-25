@@ -11,9 +11,18 @@ etcd3:
 
 bootstrap:
   dcs:
-    ttl: 30
-    loop_wait: 10
-    retry_timeout: 10
+    # Tuning chantier #21 step 1 (ha-expert recommendation, 2026-04-25) :
+    # - ttl 30 -> 20 : leader fail-detected en 20s au lieu de 30s (10-15s gain
+    #   sur failover). Plancher de 10s a NE PAS franchir (volatilite reseau VPS).
+    # - loop_wait 10 -> 8 : control loop tick 20% plus rapide (2-3s gain).
+    # - retry_timeout 10 -> 7 : DCS write retry plus tight (1-2s gain).
+    # IMPORTANT prod : ce patroni.yml ne s'applique qu'au bootstrap initial du
+    # cluster. Pour propager sur un cluster deja deploye, faire :
+    #   docker compose exec patroni patronictl edit-config alarm-cluster
+    # (puis modifier ttl/loop_wait/retry_timeout dans l'editeur).
+    ttl: 20
+    loop_wait: 8
+    retry_timeout: 7
     maximum_lag_on_failover: 1048576
     postgresql:
       use_pg_rewind: true
