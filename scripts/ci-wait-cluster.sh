@@ -4,12 +4,15 @@
 #
 # Usage : ./scripts/ci-wait-cluster.sh <project-name> [timeout-seconds]
 #   project-name   : nom du projet docker compose (-p), ex: ci-w1
-#   timeout        : defaut 120s
+#   timeout        : defaut 180s (chantier #21 step 1, anti-flake demarrage froid)
 
 set -euo pipefail
 
 PROJECT="${1:?usage: $0 <project-name> [timeout-seconds]}"
-TIMEOUT="${2:-120}"
+# Defaut 180s : 120s suffisait sur boot chaud, mais demarrage froid (etcd consensus
+# + 3 Patroni init + bootstrap PG + healthcheck propage) peut depasser 120s sous
+# charge runner. flakiness-auditor a flag ce timeout comme insuffisant pour cold start.
+TIMEOUT="${2:-180}"
 INTERVAL=2
 
 deadline=$(($(date +%s) + TIMEOUT))
