@@ -1,16 +1,18 @@
 """
 Tier 2 integration tests : contrat de POST /api/config/escalation.
 
-Couvre INV-019 (tranche 2026-04-20 dans tests/INVARIANTS.md) :
-  Dans EscalationConfig, `position` est unique. POST /api/config/escalation avec
-  position deja occupee doit retourner 409 Conflict, JAMAIS un upsert silencieux.
+Couvre INV-019 et INV-020 (tests/INVARIANTS.md) :
+  - INV-019 : position est unique. POST avec position occupee → 409.
+  - INV-020 : user_id est unique. POST avec user_id deja present → 409.
 
-Motivation (issue #19) : un admin qui se trompe de `position` dans sa requete
-risque d'ecraser un user existant sans avertissement, ce qui peut sortir de la
-chaine le seul user disponible un week-end d'astreinte.
+Motivation :
+  - INV-019 (issue #19) : un admin qui se trompe de position risque d'ecraser
+    un user existant.
+  - INV-020 (2026-04-25) : meme verrou mais sur user_id, pour eviter qu'un user
+    soit a 2 positions (sonneries doublees + casse l'invariant 'first occurrence'
+    sur lequel s'appuie la logique pure `_find_next_user_id`).
 
-Budget P4 : 5 tests max. Ici : 2 tests — 1 pour le 409, 1 pour la preservation
-de l'etat existant (invariant).
+Budget P4 : 5 tests max. Ici : 3 tests.
 """
 import pytest
 
@@ -116,3 +118,48 @@ def test_post_new_position_still_succeeds(client, admin_headers):
             if e["position"] == free_position:
                 client.delete(f"/api/config/escalation/{e['id']}", headers=admin_headers)
                 break
+
+
+def test_post_existing_user_id_returns_409_and_does_not_overwrite(client, admin_headers):
+    """INV-020 : POST /config/escalation avec un user_id deja present dans la chaine
+    doit retourner 409. Sinon le meme user serait sonne 2 fois (en plus de casser
+    l'invariant 'first occurrence' implicite dans `_find_next_user_id`).
+
+    Le verrou existe deja sur /escalation/bulk (validation 422 sur la liste user_ids) ;
+    ce test verifie qu'il existe aussi sur le single insert.
+    """
+    r = client.get("/api/config/escalation")
+    assert r.status_code == 200, r.text
+    chain = r.json()
+    assert len(chain) >= 1, f"seed chain should have >=1 entries, got {chain}"
+
+    # Cibler un user deja dans la chaine.
+    target = chain[0]
+    target_user_id = target["user_id"]
+    target_old_position = target["position"]
+
+    # Position libre (au-dessus du max existant) ou on tenterait de re-mettre target.
+    free_position = max((e["position"] for e in chain), default=0) + 10
+
+    r = client.post(
+        "/api/config/escalation",
+        json={"position": free_position, "user_id": target_user_id, "delay_minutes": 15.0},
+        headers=admin_headers,
+    )
+    assert r.status_code == 409, (
+        f"INV-020: POST avec user_id deja en chaine doit 409, got {r.status_code} {r.text}"
+    )
+
+    # L'user n'a pas bouge — toujours unique dans la chaine, position inchangee.
+    r = client.get("/api/config/escalation")
+    assert r.status_code == 200
+    chain_after = r.json()
+    user_entries = [e for e in chain_after if e["user_id"] == target_user_id]
+    assert len(user_entries) == 1, (
+        f"INV-020: user {target_user_id} doit rester unique dans la chaine, "
+        f"got {len(user_entries)} entries: {user_entries}"
+    )
+    assert user_entries[0]["position"] == target_old_position, (
+        f"user {target_user_id} a bouge de pos {target_old_position} a "
+        f"pos {user_entries[0]['position']} : 409 ne doit jamais autoriser un move silencieux"
+    )

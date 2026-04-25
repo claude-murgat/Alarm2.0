@@ -188,3 +188,54 @@ class TestPurity:
         r1 = evaluate_sms_call_timers([alarm], [notif], DELAY, NOW)
         r2 = evaluate_sms_call_timers([alarm], [notif], DELAY, NOW)
         assert r1 == r2
+
+
+class TestContinueSemantics:
+    """Tue les mutations `continue` -> `break` dans la boucle principale (mutmut
+    79, 82, 86, 92). Une notification skippee ne doit JAMAIS empecher le
+    traitement des notifications suivantes — sinon une seule notif anormale
+    silencerait toutes les autres et personne ne serait alerte."""
+
+    def test_skip_notified_at_none_continues_with_next(self):
+        """Mutmut 79 : if notified_at is None: continue (vs break)."""
+        notifs = [
+            _notif(notif_id=1, notified_at=None),  # skip via continue
+            _notif(notif_id=2, user_id=2),         # eligible
+        ]
+        result = evaluate_sms_call_timers([_alarm()], notifs, DELAY, NOW)
+        assert len(result.sms_enqueues) == 1
+        assert result.sms_enqueues[0].notification_id == 2
+
+    def test_skip_unknown_alarm_continues_with_next(self):
+        """Mutmut 82 : if alarm is None: continue (vs break)."""
+        notifs = [
+            _notif(notif_id=1, alarm_id=999),       # alarme inconnue → skip
+            _notif(notif_id=2, alarm_id=1, user_id=2),  # eligible
+        ]
+        result = evaluate_sms_call_timers([_alarm(alarm_id=1)], notifs, DELAY, NOW)
+        assert len(result.sms_enqueues) == 1
+        assert result.sms_enqueues[0].notification_id == 2
+
+    def test_skip_acked_alarm_continues_with_next(self):
+        """Mutmut 86 : if alarm.status not in (active, escalated): continue (vs break)."""
+        alarms = [
+            _alarm(alarm_id=1, status="acknowledged"),  # acked → skip
+            _alarm(alarm_id=2, status="active"),        # eligible
+        ]
+        notifs = [
+            _notif(notif_id=1, alarm_id=1, user_id=1),
+            _notif(notif_id=2, alarm_id=2, user_id=2),
+        ]
+        result = evaluate_sms_call_timers(alarms, notifs, DELAY, NOW)
+        assert len(result.sms_enqueues) == 1
+        assert result.sms_enqueues[0].notification_id == 2
+
+    def test_skip_too_fresh_continues_with_next(self):
+        """Mutmut 92 : if elapsed < delay: continue (vs break)."""
+        notifs = [
+            _notif(notif_id=1, notified_at=NOW - timedelta(minutes=1)),  # 1 < 2 → skip
+            _notif(notif_id=2, user_id=2),                                # 3 > 2 → eligible
+        ]
+        result = evaluate_sms_call_timers([_alarm()], notifs, DELAY, NOW)
+        assert len(result.sms_enqueues) == 1
+        assert result.sms_enqueues[0].notification_id == 2

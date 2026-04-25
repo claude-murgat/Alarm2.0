@@ -51,6 +51,7 @@ class TestChainNotEmpty:
         )
         assert plan.assigned_user_id == 3
         assert plan.needs_direction_technique_email is False
+        assert plan.email_reason is None  # pas d'email : la chaine n'est pas vide
 
 
 class TestInv080ChainEmpty:
@@ -88,6 +89,7 @@ class TestInv080ChainEmpty:
         )
         assert plan.assigned_user_id == 7
         assert plan.needs_direction_technique_email is True
+        assert plan.email_reason == "chain_empty"  # semantique de l'email
 
 
 class TestPurity:

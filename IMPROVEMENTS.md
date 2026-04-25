@@ -2,11 +2,11 @@
 
 ## Statut global
 - Date d'analyse : 2026-04-06
-- Derniere mise a jour : 2026-04-11
-- Total : 19 points identifies (11 logiciel + 8 fonctionnel)
-- Termines : 13/19
-- Rejetes : 3/19
-- Restants : 3/19
+- Derniere mise a jour : 2026-04-25
+- Total : 22 points identifies (14 logiciel + 8 fonctionnel)
+- Termines : 14/22
+- Rejetes : 3/22
+- Restants : 5/22
 
 ---
 
@@ -118,3 +118,39 @@ SmsQueue existe mais envoi pas clairement branche.
 ### 19. [TODO] Mode maintenance
 Pas de mecanisme pour prevenir les fausses escalades pendant une MAJ.
 - Flag maintenance + notification utilisateurs
+
+---
+
+## LOGICIEL (suite — chantiers post-audit 2026-04-25)
+
+### 20. [DONE] Atteindre 80% de score en mutation testing — score final : 100% (2026-04-25)
+Score initial : 71.7% (104 killed / 41 survived sur backend/app/logic/). Score final : **100%** (137/137 killed, 0 survived) verifie en local avec mutmut 2.5.0 en 2 min 46 s.
+
+Livrables :
+- `tests/unit/test_models.py` (NEW) : test parametre frozen=True sur 17 dataclasses + garde-fou exhaustivite. Kill 17 mutants en 1 test paramétré.
+- `tests/unit/test_alarm_creation.py` : +2 assertions sur `email_reason` (cas override `requested_assigned_user_id is not None` + chaine vide). Kill 2 mutants.
+- `tests/unit/test_sms_call_timers.py` : nouvelle classe `TestContinueSemantics` (4 tests pour `continue` -> `break` sur les 4 cas de skip). Kill 4 mutants.
+- `tests/unit/test_escalation.py` : nouvelle classe `TestContinueSemantics` (3 tests pour `continue` -> `break` + 1 test pour `users_online.get(uid, True)` defaut). Kill 4 mutants.
+- `tests/unit/test_oncall.py` : 2 nouvelles classes (`TestEscalatedStatusInExistingAlarms` pour les strings 'escalated' et `TestAssignmentDistinguishesChainFromFallback` pour _find_next_online_in_chain vs online_users[0]). Kill 10 mutants.
+- INV-020 (user_id unique dans la chaine) : implemente sur `POST /api/config/escalation` single insert (409 Conflict). Etait deja sur `/bulk` (422). + integration test dans `tests/integration/test_escalation_config_contract.py`. + 4 `# pragma: no mutate` documentes dans `backend/app/logic/escalation.py` (lignes 95, 99, 103, 104) — equivalents prouves sous INV-020. INVARIANTS.md mis a jour ❌ -> ✅.
+- `.github/workflows/pr.yml` : nouveau job `mutation_logic` (Tier 1.5) path-filtre sur logic/, tests/unit/ et pyproject.toml. Bloquant a 100% strict. Tourne en parallele de tier2_integration (~5-8 min en CI cloud).
+- `requirements-dev.txt` : commentaire mis a jour pour signaler que mutmut est utilisable localement (~3 min) en plus du nightly.
+- `.claude/CLAUDE.md` : section "Mutation testing local" ajoutee dans `## Commandes courantes` avec les 5 commandes mutmut + note PYTHONIOENCODING=utf-8 pour Windows.
+
+### 21. [TODO] Rendre le failover bloquant en CI
+Actuellement `tests/test_failback.py` (multi-node failover) tourne en tier 4 nightly seulement. Une regression sur le failover peut shipper plusieurs heures sans etre detectee, alors que c'est le coeur de la resilience du systeme.
+- **Step 1 — optimiser** : mesurer le temps wall-clock actuel du test, identifier les goulots (boot Patroni, attente election leader, sync replica) et reduire les delais (fixtures preconfigurees, `synchronous_commit=remote_apply` au lieu de polling, etc.). Trop long pour tier 2/3 a l'etat actuel.
+- **Step 2 — paralleliser le restant** : decouper la suite failover en sous-suites independantes (basic, split-brain, replica-promotion, etc.) sur N workers E2E concurrents
+- **Step 3 — promouvoir** : 1 happy-path multi-node en tier 3 bloquant des que la partie failover < 5 min wall-clock
+- Cf workflow pr.yml — ajouter la suite optimisee dans le matrix tier3
+
+### 22. [TODO] Creer RUNBOOK_OPS.md (procedures d'exploitation)
+La doc actuelle couvre l'archi (README, SITE_SECURITY_NOTES), la spec metier (tests/INVARIANTS) et le contexte IA (.claude/CLAUDE.md), mais pas les procedures operationnelles. Resultat : la connaissance op est dans la tete des devs en place, l'onboarding est long, l'astreinte est fragile, et un incident a 3h du matin oblige a relire l'archi.
+- **Day-to-day** : ajouter/retirer un utilisateur, modifier la chaine d'escalade, forcer un ack manuel via curl quand l'app est HS, lire les logs d'un noeud specifique
+- **Etat cluster** : verifier le leader Patroni (`patronictl list`), lag de replication, quel noeud sert les requetes Android, comment basculer volontairement le leader
+- **Incidents** (le plus precieux) : alarme remontee mais non sonnee (arbre de diagnostic DB/backend/FCM/polling), Patroni split-brain (procedure de recuperation), gateway SMS muet (verif serie pyserial + credit SIM), heartbeat astreinte > 15 min sans alarme (vrai probleme ou fausse alerte)
+- **Maintenance** : rotation SIM Free (date expiration + procedure remplacement), deploiement d'un hotfix sans casser le failover, bascule volontaire leader Patroni pour MAJ d'un noeud
+- **Onboarding nouveau dev** : setup dev local en < 30 min (commande par commande), comptes de test, ou sont les secrets, qui ping pour quoi
+- **Format pour chaque entree** : symptome -> diagnostic (commandes a executer) -> action (commandes exactes) -> validation
+- **Source initiale** : commandes courantes deja dans `.claude/CLAUDE.md`, scenarios de SITE_SECURITY_NOTES.md, INVARIANTS pour les flux
+- **Maintenance vivante** : a chaque incident reel rencontre, post-mortem -> nouvelle entree dans le runbook

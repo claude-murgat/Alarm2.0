@@ -66,6 +66,115 @@ jobs:
           path: reports/
           retention-days: 14
 
+  mutation_logic:
+    # Tier 1.5 — Mutation testing sur la logique pure backend/app/logic/.
+    # Path-filtre : ne tourne que si logic/, tests/unit/ ou pyproject.toml ont change
+    # (~90% des PRs ne payent pas le cout). Bloquant a 100% : tout survivant != mutation
+    # deja marquee `# pragma: no mutate` (cf INV-020) = vraie regression.
+    # Local : ~3 min ; CI : ~5-8 min selon runner. Nightly mutation-testing.yml reste actif
+    # comme filet de securite (path filter peut rater des cas indirects).
+    name: Tier 1.5 — Mutation testing (logic pure, blocking)
+    needs: tier1_unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # requis par paths-filter sur les push events
+
+      - name: Detect logic changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            logic:
+              - 'backend/app/logic/**'
+              - 'tests/unit/**'
+              - 'pyproject.toml'
+
+      - name: Skip notice (no logic changes)
+        if: steps.changes.outputs.logic != 'true'
+        run: |
+          echo "::notice::Pas de changement dans backend/app/logic/, tests/unit/ ou pyproject.toml — mutation testing skip. Le nightly couvre quand meme."
+
+      - name: Setup Python 3.12
+        if: steps.changes.outputs.logic == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        if: steps.changes.outputs.logic == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Sanity check — tier 1 baseline must be green
+        # Prerequis mutmut : sans baseline verte, tous les mutants sont "killed" pour
+        # la mauvaise raison (le mauvais fail). On le verifie explicitement avant.
+        if: steps.changes.outputs.logic == 'true'
+        run: pytest tests/unit -m unit -p no:randomly -q --no-cov
+
+      - name: Run mutmut
+        id: mutmut_run
+        if: steps.changes.outputs.logic == 'true'
+        run: |
+          set +e
+          mutmut run \
+            --paths-to-mutate backend/app/logic/ \
+            --tests-dir tests/unit/ \
+            --runner "python -m pytest -x --assert=plain -m unit -p no:randomly tests/unit/" \
+            2>&1 | tee /tmp/mutmut-run.log
+          EXIT=${PIPESTATUS[0]}
+          # Bit 0 = fatal (infra). Bits 2/4/8 = survivants/timeouts/suspicieux,
+          # geres par le score gate ci-dessous.
+          if (( EXIT & 1 )); then
+            echo "::error::mutmut fatal error (exit=$EXIT). Voir /tmp/mutmut-run.log."
+            exit 1
+          fi
+          echo "mutmut_exit=${EXIT}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate reports (results + html + junit)
+        if: always() && steps.changes.outputs.logic == 'true'
+        run: |
+          mkdir -p reports/mutation
+          mutmut junitxml > reports/mutation/junit.xml 2>&1 || true
+          mutmut results > reports/mutation/results.txt 2>&1 || true
+          mutmut html 2>&1 || echo "::warning::mutmut html failed"
+          [[ -d html ]] && mv html reports/mutation/html
+
+      - name: Gate on score (100% strict blocking)
+        if: steps.changes.outputs.logic == 'true'
+        run: |
+          python .github/scripts/mutation_score.py \
+            reports/mutation/junit.xml \
+            --threshold 100 \
+            --summary-file "${GITHUB_STEP_SUMMARY:-/tmp/step-summary.md}" \
+            --output-file "$GITHUB_OUTPUT"
+          # Le script emet ::warning:: en dessous du seuil mais ne fail pas
+          # (G1 nightly = non-bloquant by design). Ici on ENFORCE 100% strict :
+          # tout mutant survivant qui n'est pas deja pragma-ise == regression.
+          score=$(grep -E '^score=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2)
+          if [ "$score" != "100.0" ]; then
+            echo "::error::Mutation score $score% < 100% strict. Voir reports/mutation/results.txt pour la liste des survivants. Pour ajouter une mutation equivalente prouvee : pragma + ref INV (voir INV-020 pour exemple)."
+            exit 1
+          fi
+          echo "::notice::Mutation score : $score% — gate OK."
+
+      - name: Upload reports
+        if: always() && steps.changes.outputs.logic == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-pr-reports-${{ github.run_id }}
+          path: reports/mutation/
+          retention-days: 14
+
   tier2_integration:
     name: Tier 2 — Integration (FastAPI TestClient + SQLite)
     needs: tier1_unit
