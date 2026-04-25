@@ -227,10 +227,16 @@ jobs:
     # Le serialize global a travers les PRs (CI-BUG-10 fix v1, 2026-04-20)
     # bridait l'usage des 4 runners self-hosted : 2 runs en // = 2 jobs en
     # attente meme si 2 runners libres.
-    # Maintenant : namespaces docker uniques par run (ci-w${worker}-${run_id})
+    # Maintenant : namespaces docker uniques par run (cidyn${worker}-${run_id})
     # + offset ports unique par run, donc 2 runs paralleles n'entrent plus en
     # collision sur le host docker. Le step "Compute namespace + ports" ci-dessous
-    # est l'implementation. Cf docs/AI_STRATEGY.md#CI-BUG-10 (statut : v2 2026-04-25).
+    # est l'implementation.
+    #
+    # Note prefixe `cidyn` (pas `ci-w`) : le ci-cleanup.sh utilise un filtre
+    # `name=^${PROJECT}-` qui matche en substring. Avec PROJECT=ci-w1, le filtre
+    # `^ci-w1-` matchait aussi `ci-w1-{run_id}-etcd-1` -> les pre-cleanup d'un run
+    # master concurrent tuaient nos containers ! Le prefixe `cidyn` est disjoint.
+    # Cf docs/AI_STRATEGY.md#CI-BUG-10 (statut : v2 2026-04-25).
     strategy:
       fail-fast: false
       matrix:
@@ -277,7 +283,7 @@ jobs:
           ETCD_CLIENT_PORT=$(( BEC + OFFSET ))
           ETCD_PEER_PORT=$(( BEP + OFFSET ))
           {
-            echo "PROJECT=ci-w${{ matrix.worker }}-${{ github.run_id }}"
+            echo "PROJECT=cidyn${{ matrix.worker }}-${{ github.run_id }}"
             echo "BACKEND_PORT=${BACKEND_PORT}"
             echo "PG_PORT=$(( BP + OFFSET ))"
             echo "PATRONI_PORT=$(( BPA + OFFSET ))"
