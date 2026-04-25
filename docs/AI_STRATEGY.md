@@ -481,31 +481,44 @@ Checklist pour un Claude (ou autre) qui rouvre ce projet demain :
 
 ### CI-BUG-10 — Race condition tier 3 entre runs parallèles (PROJECT partagé)
 
-**Statut** : fix appliqué (concurrency job-level par worker, 2026-04-20, session 4 suite CI-BUG-09).
-**Symptôme** : 2+ runs CI tournant en parallèle (2 PRs différentes, ou push master + PR) fail aléatoirement sur `tier3_e2e worker N` avec `patroni is missing dependency etcd` ou `Cluster boot failed after 2 attempts (worker N)`, alors qu'un run solo sur la même branche passe. Des PRs individuellement testées vertes ne passent plus quand elles tournent ensemble.
-**Cause** : dans `pr.yml`, `env: PROJECT: ci-w${{ matrix.worker }}` est fixe par numéro de worker — identique à travers toutes les PRs. Deux jobs worker 2 de 2 runs différents essaient simultanément de :
+**Statut** : fix v2 appliqué (namespaces uniques par run, 2026-04-25). Précédent fix v1 (concurrency job-level, 2026-04-20) levé car bridait les 4 runners self-hosted.
+
+**Symptôme original** : 2+ runs CI tournant en parallèle (2 PRs différentes, ou push master + PR) fail aléatoirement sur `tier3_e2e worker N` avec `patroni is missing dependency etcd` ou `Cluster boot failed after 2 attempts (worker N)`, alors qu'un run solo sur la même branche passe.
+
+**Cause** : dans `pr.yml`, `env: PROJECT: ci-w${{ matrix.worker }}` était fixe par numéro de worker — identique à travers toutes les PRs. Deux jobs worker 2 de 2 runs différents essayaient simultanément de :
 - créer les mêmes containers (`ci-w2-etcd-1`, `ci-w2-patroni-1`, `ci-w2-backend-1`)
-- binder les mêmes ports host (28000, 22379, 22380, etc. — définis en dur dans `.env.ci-w2`)
+- binder les mêmes ports host (28000, 22379, 22380, etc.)
 - utiliser les mêmes volumes (`ci-w2_etcd_data`, `ci-w2_pg_data`)
 
-Résultat : l'un des deux fail sur conflit de ressource, généralement avec message docker compose cryptique ("missing dependency etcd" alors que etcd est défini mais ne peut pas bind son port).
-**Fix appliqué** : concurrency **job-level** par worker ID dans `pr.yml` :
+#### Fix v1 (2026-04-20, levé 2026-04-25) — concurrency job-level
+
 ```yaml
 tier3_e2e:
   concurrency:
     group: ci-tier3-worker-${{ matrix.worker }}
     cancel-in-progress: false
 ```
-Effet : les jobs `tier3_e2e` avec `matrix.worker=N` sont sérialisés à travers **toutes** les PRs. Si 2 runs sont déclenchés, leurs tiers 3 w1 s'exécutent l'un après l'autre, idem pour w2. Tier 1+2 (cloud, pas de namespace partagé) restent parallèles.
-**Pourquoi pas cancel-in-progress=true** : on veut queue les jobs, pas cancel — chaque PR mérite son run CI.
-**Coût** : si 2 PRs poussent en même temps, la 2e attend ~7 min supp (durée tier 3 d'un run). Acceptable (volume normal = 1-3 PRs/jour, pas 10/h).
+Sérialisait les jobs `tier3_e2e` à travers **toutes** les PRs. Évitait la collision mais rendait les runs séquentiels : avec 4 runners self-hosted, 2 runs en parallèle = max 2 jobs tier 3 simultanés (1 par worker), 2 runners restaient inutilisés. Observation 2026-04-25 (run #93 push + #94 pull_request sur même branche) : #94 attendait #93 alors que 2 runners étaient libres.
 
-**À réévaluer si** :
-- Le volume PR monte (>5/h) → mettre en place 4 runners self-hosted ou ports dynamiques par run_id
-- On passe en OVH/VPS multi-host → 1 cluster par host, plus de partage, concurrency inutile
-- Solution durable : suffixer PROJECT par `$GITHUB_RUN_ID` (ex: `ci-w2-${RUN_ID}`) + ports dynamiques via `.env` généré à la volée. Beaucoup plus complexe, pas phase actuelle.
+#### Fix v2 (2026-04-25, actif) — namespaces uniques par run
 
-**Principe à retenir** : un test d'infra **parallèle** exige soit des **namespaces uniques par run**, soit une **sérialisation explicite**. Le premier cas est le plus robuste mais le plus cher à mettre en place. Le deuxième est une dette acceptable si le volume reste faible.
+`PROJECT` et tous les ports host sont calculés au début du job depuis `github.run_id` :
+
+```bash
+SLOT=$(( github.run_id % 50 ))
+OFFSET=$(( SLOT * 200 ))
+PROJECT=ci-w${worker}-${run_id}
+BACKEND_PORT=$(( BASE_PORT + OFFSET ))
+# ... PG_PORT, ETCD_*, MAILHOG_*, etc.
+```
+
+Variables exportées via `$GITHUB_ENV` → prennent précédence sur `--env-file .env.ci-w*` lors de l'interpolation `docker-compose.yml`. Pas de modification des `.env.ci-w*` (qui restent les valeurs par défaut single-run / dev).
+
+**Tradeoff** : 50 buckets de 200 ports d'écart, plage 0-9800. Probabilité collision 2 runs ≈ 2%, 4 runs ≈ 12% (paradoxe anniversaire). En cas de collision, le cleanup robuste (CI-BUG-09 fix) absorbe le résiduel sur retry. À monitorer ; si flake > 1% sur 100 runs, augmenter à `% 100` (10000 ports de plage, prob ≈ 1.5% à 4 runs).
+
+**Effet observable** : avec 4 runners et 2 runs en parallèle, les 4 jobs tier 3 (2 workers × 2 runs) tournent simultanément. Avant v2 : 2 jobs en série. Gain wall-clock pour le 2ᵉ run : ~9 min (durée d'un tier 3 worker 2).
+
+**Principe à retenir** : un test d'infra **parallèle** exige soit des **namespaces uniques par run**, soit une **sérialisation explicite**. La sérialisation est une dette acceptable si le volume reste faible — quand on dispose de la capacité runner pour faire mieux, mieux vaut briser la dette.
 
 ### CI-BUG-11 — `cancel-in-progress: true` annule des runs utiles sur events synchronize
 

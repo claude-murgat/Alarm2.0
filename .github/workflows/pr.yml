@@ -18,9 +18,10 @@ on:
 # "cancelled" dans les checks, PR non-mergeable malgre tier 1+2 verts.
 #
 # Choix `false` : les runs queue. Cout additionnel reel = quasi nul car
-# (a) volume PR bas (2-5/semaine), (b) tier 3 self-hosted deja serialize
-# par worker (job-level, cf CI-BUG-10), donc empilement naturellement
-# borne. Gain : plus aucun cancel fantome.
+# (a) volume PR bas (2-5/semaine), (b) tier 3 self-hosted utilise des
+# namespaces docker uniques par run (CI-BUG-10 v2, 2026-04-25), donc
+# 2+ runs paralleles peuvent tourner simultanement sur les 4 runners
+# sans collision. Gain : plus aucun cancel fantome.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: false
@@ -222,25 +223,18 @@ jobs:
     needs: tier2_integration
     runs-on: [self-hosted, linux, docker, alarm-ci]
     timeout-minutes: 15
-    # Sérialise tier 3 à travers TOUTES les PRs par worker ID.
-    # Raison (observé 2026-04-20) : PROJECT=ci-w${worker} est fixe par matrix.
-    # Si 2 runs CI tournent en parallèle (2 PRs, ou push master + PR), leurs
-    # jobs worker 1 se battent pour `ci-w1` (containers, volumes, ports 18xxx)
-    # et idem worker 2 pour `ci-w2` (ports 28xxx). Résultat : "patroni is
-    # missing dependency etcd" ou "Cluster boot failed after 2 attempts" —
-    # une PR bloque toutes les autres.
-    # Fix : concurrency job-level par worker. Tier 1+2 restent parallèles
-    # (cloud, pas de namespace partagé). Seul tier 3 self-hosted est queued.
-    # cancel-in-progress:false → on attend son tour, on ne perd pas de run.
-    concurrency:
-      group: ci-tier3-worker-${{ matrix.worker }}
-      cancel-in-progress: false
+    # Plus de concurrency job-level (avant : ci-tier3-worker-${worker}).
+    # Le serialize global a travers les PRs (CI-BUG-10 fix v1, 2026-04-20)
+    # bridait l'usage des 4 runners self-hosted : 2 runs en // = 2 jobs en
+    # attente meme si 2 runners libres.
+    # Maintenant : namespaces docker uniques par run (ci-w${worker}-${run_id})
+    # + offset ports unique par run, donc 2 runs paralleles n'entrent plus en
+    # collision sur le host docker. Le step "Compute namespace + ports" ci-dessous
+    # est l'implementation. Cf docs/AI_STRATEGY.md#CI-BUG-10 (statut : v2 2026-04-25).
     strategy:
       fail-fast: false
       matrix:
         worker: [1, 2]
-    env:
-      PROJECT: ci-w${{ matrix.worker }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -259,15 +253,44 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt requests pyjwt
 
-      - name: Compute backend URL
+      - name: Compute namespace + ports (CI-BUG-10 v2 — namespaces uniques par run)
+        # Fix CI-BUG-10 v2 : avant, PROJECT=ci-w${worker} fixe + ports 1xxxx/2xxxx fixes
+        # → collisions inter-runs (containers, volumes, ports host). Le fix v1 etait
+        # une serialisation concurrency job-level, qui bridait les 4 runners.
+        #
+        # Maintenant : SLOT = run_id mod 50 → 50 buckets de 200 ports d'ecart, soit
+        # une plage 0-9800. Worker 1 base 18xxx, worker 2 base 28xxx → pas d'overlap
+        # entre workers (10000 d'ecart). Probabilite de collision 2 runs simultanes
+        # sur 50 buckets ≈ 2% ; avec 4 runs ≈ 12% (anniversaire). En pratique : la
+        # cleanup robuste (CI-BUG-09) absorbe le residuel si collision.
+        #
+        # Variables exportees via GITHUB_ENV : prennent precedence sur les valeurs
+        # de --env-file .env.ci-w* lors de l'interpolation docker-compose.yml.
         run: |
-          # host.docker.internal : depuis le runner conteneurise, les conteneurs des
-          # tests tournent sur le host (DooD), pas sur le runner lui-meme.
+          SLOT=$(( ${{ github.run_id }} % 50 ))
+          OFFSET=$(( SLOT * 200 ))
           case "${{ matrix.worker }}" in
-            1) PORT=18000 ;;
-            2) PORT=28000 ;;
+            1) BB=18000; BP=15432; BPA=18008; BEC=12379; BEP=12380; BMS=11025; BMW=18025 ;;
+            2) BB=28000; BP=25432; BPA=28008; BEC=22379; BEP=22380; BMS=21025; BMW=28025 ;;
           esac
-          echo "BACKEND_URL=http://host.docker.internal:$PORT" >> $GITHUB_ENV
+          BACKEND_PORT=$(( BB + OFFSET ))
+          ETCD_CLIENT_PORT=$(( BEC + OFFSET ))
+          ETCD_PEER_PORT=$(( BEP + OFFSET ))
+          {
+            echo "PROJECT=ci-w${{ matrix.worker }}-${{ github.run_id }}"
+            echo "BACKEND_PORT=${BACKEND_PORT}"
+            echo "PG_PORT=$(( BP + OFFSET ))"
+            echo "PATRONI_PORT=$(( BPA + OFFSET ))"
+            echo "ETCD_CLIENT_PORT=${ETCD_CLIENT_PORT}"
+            echo "ETCD_PEER_PORT=${ETCD_PEER_PORT}"
+            echo "MAILHOG_SMTP_PORT=$(( BMS + OFFSET ))"
+            echo "MAILHOG_WEB_PORT=$(( BMW + OFFSET ))"
+            echo "ETCD_HOSTS=host.docker.internal:${ETCD_CLIENT_PORT}"
+            echo "ETCD_INITIAL_CLUSTER=ci-w${{ matrix.worker }}=http://host.docker.internal:${ETCD_PEER_PORT}"
+            echo "ALLOWED_ORIGINS=http://localhost:${BACKEND_PORT},http://host.docker.internal:${BACKEND_PORT}"
+            echo "BACKEND_URL=http://host.docker.internal:${BACKEND_PORT}"
+          } >> $GITHUB_ENV
+          echo "[ci] worker=${{ matrix.worker }} run_id=${{ github.run_id }} slot=${SLOT} offset=${OFFSET} backend_port=${BACKEND_PORT}"
 
       - name: Pre-cleanup (au cas ou un run precedent a echoue)
         # Le script ci-cleanup.sh est idempotent : rien a nettoyer = exit 0.
