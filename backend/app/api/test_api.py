@@ -337,6 +337,49 @@ def get_status(db: Session = Depends(get_db)):
     }
 
 
+@router.get("/connected-users-detailed")
+def get_connected_users_detailed(
+    user_id: int | None = Query(None, description="Filtre sur un seul user_id (optionnel)"),
+    db: Session = Depends(get_db),
+):
+    """Vue detaillee des users pour les tests E2E : id, name, is_online,
+    last_heartbeat (ISO + age en secondes vs horloge serveur).
+
+    Sert principalement au chantier #21 (failover bloquant) pour substituer
+    `time.sleep(N)` aveugle par un polling sur condition observable du genre
+    "user X a heartbeate depuis < Y secondes". Le compteur global
+    /api/test/status renvoie connected_users mais sans timestamps -> impossible
+    de distinguer "fresh heartbeat post-failback" de "etat stale post-reset".
+
+    Sans filtre user_id : retourne tous les users.
+    Avec user_id inconnu : retourne une liste vide (pas 404).
+    """
+    _require_test_endpoints()
+    now = clock_now()
+    q = db.query(User)
+    if user_id is not None:
+        q = q.filter(User.id == user_id)
+    users = q.all()
+
+    items = []
+    for u in users:
+        age = None
+        if u.last_heartbeat is not None:
+            age = (now - u.last_heartbeat).total_seconds()
+        items.append({
+            "id": u.id,
+            "name": u.name,
+            "is_online": u.is_online,
+            "last_heartbeat": u.last_heartbeat.isoformat() if u.last_heartbeat else None,
+            "age_seconds": age,
+        })
+
+    return {
+        "users": items,
+        "now": now.isoformat(),
+    }
+
+
 @router.post("/advance-clock")
 def advance_clock(seconds: float = 0, minutes: float = 0,
                   peer: bool = Query(True)):
