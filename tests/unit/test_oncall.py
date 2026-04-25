@@ -262,3 +262,89 @@ class TestPurity:
         r1 = evaluate_oncall_heartbeat(_chain(1, 2), [user1, user2], [], DELAY, NOW)
         r2 = evaluate_oncall_heartbeat(_chain(1, 2), [user1, user2], [], DELAY, NOW)
         assert r1 == r2
+
+
+class TestEscalatedStatusInExistingAlarms:
+    """Tue les mutations sur les strings 'escalated' (mutmut 9 et 24).
+    Sans ces tests, `"escalated"` peut etre remplace par n'importe quoi (ex:
+    `"XXescalatedXX"`) sans qu'aucun test ne le detecte — alors qu'une alarme
+    en status='escalated' est un cas REAL."""
+
+    def test_existing_escalated_oncall_alarm_is_resolved_when_user_returns(self):
+        """INV-051 + mutmut 9 : alarme oncall en status='escalated' doit etre
+        detectee comme 'active' au sens fonctionnel (= a resoudre quand l'oncall
+        revient online)."""
+        chain = _chain(1, 2)
+        users = [_user(1, "u1", is_online=True), _user(2, "u2")]
+        existing = _alarm(
+            alarm_id=99, status="escalated", is_oncall_alarm=True, assigned_user_id=2,
+        )
+        result = evaluate_oncall_heartbeat(chain, users, [existing], DELAY, NOW)
+        assert result.resolutions == (OncallAlarmResolution(alarm_id=99),)
+
+    def test_existing_escalated_non_oncall_alarm_blocks_creation(self):
+        """INV-001 + mutmut 24 : une alarme NON-oncall en status='escalated'
+        doit aussi bloquer la creation d'une alarme oncall (contrainte unicite,
+        pas seulement les status='active')."""
+        chain = _chain(1, 2)
+        users = [
+            _user(1, "u1", is_online=False, last_heartbeat=NOW - timedelta(minutes=20)),
+            _user(2, "u2", is_online=True),
+        ]
+        existing = _alarm(
+            alarm_id=99, status="escalated", is_oncall_alarm=False, assigned_user_id=2,
+        )
+        result = evaluate_oncall_heartbeat(chain, users, [existing], DELAY, NOW)
+        assert result.creations == ()
+
+
+class TestAssignmentDistinguishesChainFromFallback:
+    """Tue les mutations 26, 27, 28, 29, 31, 32, 33, 34 — toutes liees au choix
+    entre _find_next_online_in_chain (priorite) et le fallback online_users[0].
+
+    Les tests existants (TestInv052) ne distinguent pas les deux car online_users[0]
+    coincidait souvent avec le user de la chaine — il faut un setup ou les deux
+    branches donnent des resultats DIFFERENTS pour les attraper."""
+
+    def test_chain_online_user_preferred_over_non_chain_online(self):
+        """Mutmut 26, 27, 31, 32, 33, 34 : si un user de la CHAINE est online,
+        on l'assigne — meme si un user HORS chaine est aussi online (et listed
+        avant lui dans `users`).
+
+        Setup critique : online_users[0] doit etre un user HORS chaine pour que
+        le fallback donne un resultat different de _find_next_online_in_chain.
+        """
+        chain = _chain(1, 2, 3)
+        users = [
+            # oncall offline
+            _user(1, "oncall", is_online=False,
+                  last_heartbeat=NOW - timedelta(minutes=20)),
+            # online HORS chaine — listed FIRST, donc serait online_users[0] si fallback
+            _user(99, "outsider", is_online=True),
+            # in chain mais offline
+            _user(2, "u2", is_online=False),
+            # in chain ET online — c'est CE user qui doit etre choisi par INV-052
+            _user(3, "u3", is_online=True),
+        ]
+        result = evaluate_oncall_heartbeat(chain, users, [], DELAY, NOW)
+        assert len(result.creations) == 1
+        # Avec n'importe laquelle des mutations 26/27/31-34, _find_next_online_in_chain
+        # retourne None ou la fonction tombe dans le fallback → assigned = user 99.
+        assert result.creations[0].assigned_user_id == 3, (
+            "INV-052 doit choisir un user de la chaine en priorite, jamais "
+            "online_users[0] tant qu'un user de la chaine est online."
+        )
+
+    def test_falls_back_to_online_users_first_when_no_chain_online(self):
+        """Mutmut 28, 29 : si aucun user de la chaine (sauf l'oncall) n'est online,
+        fallback a online_users[0]. Test calibre avec UN SEUL user online pour
+        attraper [0]→[1] (IndexError) ou [0]→None (no creation)."""
+        chain = _chain(1)  # uniquement l'oncall, pas de "next" dans la chaine
+        users = [
+            _user(1, "oncall", is_online=False,
+                  last_heartbeat=NOW - timedelta(minutes=20)),
+            _user(99, "outsider", is_online=True),  # exactement 1 online, hors chaine
+        ]
+        result = evaluate_oncall_heartbeat(chain, users, [], DELAY, NOW)
+        assert len(result.creations) == 1
+        assert result.creations[0].assigned_user_id == 99
