@@ -28,8 +28,28 @@
 #                         alors gated en CI.
 #
 # Trigger : schedule (nightly) + workflow_dispatch (manuel pour debug + audit).
-# Pas de pull_request trigger : le test prend ~25-55 min wall-clock selon presence
-# KVM, trop cher pour chaque PR. Sera ajoute lors de la promotion en tier 3.
+# Pas de pull_request trigger : le test prend ~15-25 min wall-clock sur runner
+# Linux avec KVM. Sera ajoute lors de la promotion en tier 3.
+#
+# Cible runner : option gamma-VM retenue (cf discussion 2026-04-26).
+#   Runner self-hosted Linux natif, label `alarm-android`, distinct des 4 runners
+#   Docker existants (label `alarm-ci`). Raison : les runners Docker actuels
+#   (myoung34/github-runner conteneurises sur WSL2) n'ont pas /dev/kvm expose,
+#   et le DooD pattern complique le routage emulateur->backend. Une VM Linux
+#   dediee, avec nested virt active au niveau hyperviseur de la VM, expose KVM
+#   nativement et l'emulateur tourne sur le meme host que les `docker compose`
+#   du test (10.0.2.2 = localhost VM = backends bindes sur la VM, direct hit).
+#
+# Provisioning runner : voir `infra/runner-android/` qui contient :
+#   - README.md            : procedure complete (VM + nested virt + bootstrap)
+#   - enable-hyperv-nested-virt.ps1 : helper Windows host (si VM sous Hyper-V)
+#   - install-runner.sh    : install JDK + Android SDK + Docker + actions/runner natif
+#   - setup-avds.sh        : creation des 3 AVDs + snapshot warm-boot
+#   - verify.sh            : smoke-test pre-flight
+#
+# Tant qu'aucun runner avec le label `alarm-android` n'est enregistre, ce
+# workflow restera en queue (sans erreur, sans cout). Provisionne la VM
+# quand pret, lance l'install, et le 1er nightly se declenchera tout seul.
 
 name: Tier 4 — Failback E2E (nightly)
 
@@ -60,13 +80,13 @@ permissions:
 jobs:
   failback_e2e:
     name: Tier 4 — Failback E2E (3 emulateurs + 2 backends)
-    runs-on: [self-hosted, linux, docker, alarm-ci]
+    runs-on: [self-hosted, linux, alarm-android]
     # Marge confortable :
-    #   audit ~30s + Python ~30s + JDK ~30s + SDK ~3min cache hit / 10min cold
-    #   + AVD cache hit / create ~2min + APK ~3min + boot 3 emulateurs ~5min
-    #   KVM / 25min sw + cluster ~2min + test ~10min + teardown ~2min.
-    #   = ~25-30 min KVM, ~50-60 min sans KVM.
-    timeout-minutes: 75
+    #   audit ~30s + Python ~30s + JDK ~30s + SDK ~10s cache hit (idem AVD)
+    #   + APK ~30s warm gradle / ~3min cold + boot 3 emulateurs (snapshot
+    #   warm-boot ~30-60s chacun) + cluster ~2min + test ~10min + teardown ~1min.
+    #   = ~15-25 min en regime etabli (snapshots + caches presents).
+    timeout-minutes: 60
 
     env:
       ANDROID_API_LEVEL: "30"
