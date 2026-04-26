@@ -1,0 +1,420 @@
+# Tier 4 — Failback E2E (chantier #21 step 4).
+#
+# Pourquoi ce workflow existe :
+#   tests/test_failback.py est le SEUL test qui exerce l'integralite du chemin
+#   reseau Android <-> backend en conditions de coupure : il orchestre 3 emulateurs
+#   Android via ADB, monte un cluster 2-noeuds (VPS1:8000 + VPS2:8001), puis
+#   coupe successivement chaque noeud pour verifier que la rotation circulaire
+#   d'ApiClient.kt (BACKEND_URLS, switchToNextUrl apres consecutiveFailures>=3)
+#   bascule effectivement les apps sur le noeud survivant. C'est le maillon qui
+#   garantit que les apps survivent a un failover backend en prod (site industriel
+#   non garde la nuit). Tous les autres tests Android sont Espresso isoles avec
+#   FakeApiService — ils ne testent PAS la couche reseau reelle d'ApiClient.
+#
+#   Hors tier 3 jusqu'a present (cf pr.yml --ignore=tests/test_failback.py)
+#   parce que les runners self-hosted [self-hosted, linux, docker, alarm-ci]
+#   n'avaient pas d'emulateurs Android. Ce workflow installe le SDK + 3 AVDs
+#   en cold-boot a chaque run (cache AVD warm-boot pour gagner ~2 min sur les
+#   subsequents) et fait tourner test_failback.py contre eux.
+#
+# Strategie de promotion (cf docs/AI_STRATEGY.md tiers de validation) :
+#   Etape 1 (cette PR) : tier 4 nightly **non-bloquant**. Schedule cron 02:30 UTC,
+#                         workflow_dispatch pour debug. Observe stabilite.
+#   Etape 2 (PR future) : apres ~10 runs nightly verts consecutifs sans flake,
+#                         retirer `--ignore=tests/test_failback.py` de pr.yml,
+#                         ajouter le job a la branch protection master via
+#                         `gh api ... required_status_checks/contexts`. La
+#                         couverture E2E reelle de la rotation ApiClient devient
+#                         alors gated en CI.
+#
+# Trigger : schedule (nightly) + workflow_dispatch (manuel pour debug + audit).
+# Pas de pull_request trigger : le test prend ~15-25 min wall-clock sur runner
+# Linux avec KVM. Sera ajoute lors de la promotion en tier 3.
+#
+# Cible runner : option gamma-VM retenue (cf discussion 2026-04-26).
+#   Runner self-hosted Linux natif, label `alarm-android`, distinct des 4 runners
+#   Docker existants (label `alarm-ci`). Raison : les runners Docker actuels
+#   (myoung34/github-runner conteneurises sur WSL2) n'ont pas /dev/kvm expose,
+#   et le DooD pattern complique le routage emulateur->backend. Une VM Linux
+#   dediee, avec nested virt active au niveau hyperviseur de la VM, expose KVM
+#   nativement et l'emulateur tourne sur le meme host que les `docker compose`
+#   du test (10.0.2.2 = localhost VM = backends bindes sur la VM, direct hit).
+#
+# Provisioning runner : voir `infra/runner-android/` qui contient :
+#   - README.md            : procedure complete (VM + nested virt + bootstrap)
+#   - enable-hyperv-nested-virt.ps1 : helper Windows host (si VM sous Hyper-V)
+#   - install-runner.sh    : install JDK + Android SDK + Docker + actions/runner natif
+#   - setup-avds.sh        : creation des 3 AVDs + snapshot warm-boot
+#   - verify.sh            : smoke-test pre-flight
+#
+# Tant qu'aucun runner avec le label `alarm-android` n'est enregistre, ce
+# workflow restera en queue (sans erreur, sans cout). Provisionne la VM
+# quand pret, lance l'install, et le 1er nightly se declenchera tout seul.
+
+name: Tier 4 — Failback E2E (nightly)
+
+on:
+  schedule:
+    # 02:30 UTC = ~03:30/04:30 Europe/Paris selon DST. Decale de 30 min apres
+    # mutation-testing.yml (02:00 UTC) pour eviter les contentions docker /
+    # cache pip sur le meme runner self-hosted.
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+    inputs:
+      verbose:
+        description: "Run avec -vv et logcat verbose"
+        required: false
+        type: boolean
+        default: false
+
+# Un seul run a la fois. Le test dure 25-55 min : si un workflow_dispatch
+# manuel tombe pendant un nightly en cours, on queue plutot que cancel —
+# perdre un run deja a 80% de boot AVD serait du gaspillage.
+concurrency:
+  group: tier4-failback
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  failback_e2e:
+    name: Tier 4 — Failback E2E (3 emulateurs + 2 backends)
+    runs-on: [self-hosted, linux, alarm-android]
+    # Marge confortable :
+    #   audit ~30s + Python ~30s + JDK ~30s + SDK ~10s cache hit (idem AVD)
+    #   + APK ~30s warm gradle / ~3min cold + boot 3 emulateurs (snapshot
+    #   warm-boot ~30-60s chacun) + cluster ~2min + test ~10min + teardown ~1min.
+    #   = ~15-25 min en regime etabli (snapshots + caches presents).
+    timeout-minutes: 60
+
+    env:
+      ANDROID_API_LEVEL: "30"
+      ANDROID_TARGET: "google_apis"
+      ANDROID_ARCH: "x86_64"
+      EMULATOR_PORTS: "5552 5554 5556"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Audit runner capacity (telemetry)
+        # Premier step : on capture les caracteristiques du runner pour savoir
+        # post-hoc si on tourne avec KVM (5-10x plus rapide) ou en pure
+        # software emulation. Egalement utile si un nightly fail OOM ou disk
+        # full : la trace est dans les logs.
+        # Ce step ne peut JAMAIS faire echouer le job (`true` final).
+        run: |
+          set +e
+          echo "=== CPU ==="
+          nproc
+          lscpu | grep -E "Model name|^CPU\(s\)|Virtualization|Hypervisor" || true
+          echo "=== RAM ==="
+          free -h
+          echo "=== Disk (workspace + tmp + docker) ==="
+          df -h "$GITHUB_WORKSPACE" /tmp 2>/dev/null || df -h
+          df -h /var/lib/docker 2>/dev/null || true
+          echo "=== KVM (critique pour perfs emulateur) ==="
+          if [ -e /dev/kvm ]; then
+            ls -l /dev/kvm
+            if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+              echo "::notice::KVM disponible et accessible — boot AVD ~3-5min"
+            else
+              echo "::warning::/dev/kvm present mais pas R/W pour le user runner — perms a fix"
+            fi
+          else
+            echo "::warning::/dev/kvm absent — emulation pure logicielle, boot AVD ~15-25min"
+          fi
+          echo "=== Docker ==="
+          docker version --format '{{.Server.Version}}' 2>&1 || echo "docker absent"
+          docker info --format 'Containers={{.Containers}} Running={{.ContainersRunning}}' 2>&1 || true
+          true
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            requirements-dev.txt
+
+      - name: Install pytest deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt requests
+
+      - name: Setup JDK 17
+        # Android Gradle Plugin 8.2.0 (cf android/build.gradle.kts) requiert JDK 17.
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        # Installe cmdline-tools, accept licenses, ajoute platform-tools + emulator
+        # au PATH, exporte ANDROID_HOME / ANDROID_SDK_ROOT.
+        uses: android-actions/setup-android@v3
+        with:
+          packages: >-
+            platform-tools
+            platforms;android-${{ env.ANDROID_API_LEVEL }}
+            build-tools;34.0.0
+            emulator
+            system-images;android-${{ env.ANDROID_API_LEVEL }};${{ env.ANDROID_TARGET }};${{ env.ANDROID_ARCH }}
+
+      - name: Cache AVD images
+        # Le `avdmanager create` + premier cold-boot ecrivent les userdata, snapshots
+        # warm-boot eventuels, et les 600+ Mio de system-image. Cache pour gagner
+        # ~2-3 min sur les runs subsequents (les system-images sont lourds).
+        # La cle inclut device + API + target + arch : tout changement invalide.
+        uses: actions/cache@v4
+        id: avd_cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-android${{ env.ANDROID_API_LEVEL }}-${{ env.ANDROID_TARGET }}-${{ env.ANDROID_ARCH }}-pixel5-3x
+
+      - name: Create AVDs (3 instances pour ports 5552/5554/5556)
+        if: steps.avd_cache.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          IMG="system-images;android-${ANDROID_API_LEVEL};${ANDROID_TARGET};${ANDROID_ARCH}"
+          for port in $EMULATOR_PORTS; do
+            avd_name="alarm_${port}"
+            echo "no" | avdmanager create avd \
+              --force \
+              --name "$avd_name" \
+              --package "$IMG" \
+              --device "pixel_5"
+            cfg="$HOME/.android/avd/${avd_name}.avd/config.ini"
+            # 2 Gio par AVD : ~6 Gio total pour 3 instances. Marge sur 8 Gio runner.
+            # heap 1 Gio : suffit pour app Alarm (Retrofit + OkHttp + Compose-less UI).
+            grep -q "^hw.ramSize=" "$cfg" \
+              && sed -i 's/^hw.ramSize=.*/hw.ramSize=2048/' "$cfg" \
+              || echo "hw.ramSize=2048" >> "$cfg"
+            grep -q "^vm.heapSize=" "$cfg" \
+              && sed -i 's/^vm.heapSize=.*/vm.heapSize=1024/' "$cfg" \
+              || echo "vm.heapSize=1024" >> "$cfg"
+            grep -q "^disk.dataPartition.size=" "$cfg" \
+              && sed -i 's/^disk.dataPartition.size=.*/disk.dataPartition.size=4G/' "$cfg" \
+              || echo "disk.dataPartition.size=4G" >> "$cfg"
+          done
+          ls -la "$HOME/.android/avd/"
+
+      - name: Build debug APK
+        # `gradlew assembleDebug` produit android/app/build/outputs/apk/debug/app-debug.apk.
+        # Le test l'install sur les 3 emulateurs via `adb install -r`. APK debug
+        # = signe debug + permet `run-as com.alarm.critical` (utilise par les
+        # fixtures pour injecter alarm_prefs.xml directement dans /data/data/...).
+        #
+        # google-services.json : l'app utilise Firebase (firebase-bom 33). En CI on
+        # n'a pas de vraies creds FCM — un stub minimal suffit pour que le build
+        # passe ; au runtime, l'init Firebase echouera silencieusement et l'app
+        # fonctionnera sans push (notre test n'utilise pas FCM, juste polling).
+        run: |
+          set -eux
+          if [ ! -f android/app/google-services.json ]; then
+            cat > android/app/google-services.json <<'JSON'
+          {"project_info":{"project_number":"1","project_id":"alarm-tier4-stub","storage_bucket":""},"client":[{"client_info":{"mobilesdk_app_id":"1:1:android:1","android_client_info":{"package_name":"com.alarm.critical"}},"oauth_client":[],"api_key":[{"current_key":"stub"}],"services":{"appinvite_service":{"other_platform_oauth_client":[]}}}],"configuration_version":"1"}
+          JSON
+          fi
+          cd android
+          ./gradlew assembleDebug --no-daemon --console=plain
+          ls -la app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Boot 3 emulators (background, headless)
+        # Stagger 5s entre les boots pour ne pas saturer l'I/O de creation de
+        # la copie userdata. -no-snapshot-save evite d'ecrire un snapshot a
+        # chaque run (le cache AVD du step precedent suffit).
+        # -gpu swiftshader_indirect : rendu logiciel cote host, fonctionne meme
+        # sans GPU expose au runner Docker.
+        # -accel auto : utilise KVM si dispo, fallback software sinon.
+        # -read-only : evite les modifications du userdata cumulees entre runs
+        # qui pourraient causer du flake (state pollution).
+        run: |
+          set -eu
+          mkdir -p reports
+          for port in $EMULATOR_PORTS; do
+            avd_name="alarm_${port}"
+            echo "Booting ${avd_name} on port ${port}..."
+            nohup emulator -avd "$avd_name" -port "$port" \
+              -no-window -no-audio -no-boot-anim \
+              -no-snapshot-save \
+              -gpu swiftshader_indirect \
+              -accel auto \
+              -read-only \
+              > "reports/emulator-${port}.log" 2>&1 &
+            echo "  PID=$!"
+            sleep 5
+          done
+
+      - name: Wait for emulators to fully boot
+        # 2 conditions : (a) `adb wait-for-device` = le device est visible
+        # (b) `getprop sys.boot_completed = 1` = Android est entierement up.
+        # Plus `pm path android` = le PackageManager est ready (sinon `adb install`
+        # peut fail avec "INSTALL_FAILED_INSUFFICIENT_STORAGE" qui est en fait
+        # "PM pas encore pret"). Cf https://stackoverflow.com/q/3634041
+        timeout-minutes: 20
+        run: |
+          set -eu
+          adb start-server
+          for port in $EMULATOR_PORTS; do
+            serial="emulator-${port}"
+            echo "Waiting for ${serial}..."
+            adb -s "$serial" wait-for-device
+            for i in $(seq 1 180); do
+              bc=$(adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || echo "")
+              if [ "$bc" = "1" ]; then
+                echo "  ${serial} boot_completed"
+                # PackageManager ready (peut prendre 10-30s apres boot_completed)
+                until adb -s "$serial" shell pm path android > /dev/null 2>&1; do
+                  sleep 2
+                done
+                echo "  ${serial} pm ready"
+                break
+              fi
+              if [ "$i" = "180" ]; then
+                echo "::error::${serial} pas boote apres 900s"
+                exit 1
+              fi
+              sleep 5
+            done
+            # Disable animations : rend uiautomator (utilise par get_ui_text)
+            # plus deterministe et reduit le risque de flake sur les transitions.
+            adb -s "$serial" shell settings put global window_animation_scale 0 || true
+            adb -s "$serial" shell settings put global transition_animation_scale 0 || true
+            adb -s "$serial" shell settings put global animator_duration_scale 0 || true
+          done
+          adb devices -l
+
+      - name: Install APK on all emulators
+        run: |
+          set -eu
+          APK="android/app/build/outputs/apk/debug/app-debug.apk"
+          for port in $EMULATOR_PORTS; do
+            serial="emulator-${port}"
+            echo "Installing APK on ${serial}..."
+            adb -s "$serial" install -r "$APK"
+          done
+
+      - name: Provide dummy firebase service account
+        # Reprise de la convention tier 3 (cf pr.yml step "Provide dummy firebase
+        # service account") : le compose mount backend/firebase-service-account.json,
+        # un fichier vide suffit pour que le mount ne fail pas.
+        run: |
+          [[ -f backend/firebase-service-account.json ]] || echo '{}' > backend/firebase-service-account.json
+
+      - name: Boot cluster (VPS1 + VPS2)
+        # ATTENTION (premiere implementation) : la fixture cluster_running du test
+        # appelle `docker compose start backend` SANS --env-file ni -p, plus
+        # `docker compose -f docker-compose.vps2.yml -p alarm-vps2 start backend`.
+        # Cela suppose que les deux projets ont DEJA ete cree par un `up`. On les
+        # cree ici. La compatibilite entre docker-compose.yml (Patroni-based) et
+        # docker-compose.vps2.yml (db-standby qui s'attend a un service `db` sur
+        # le reseau alarm_shared_net) n'est pas garantie out-of-the-box pour CI ;
+        # si ce step fail au 1er run nightly, examiner reports/compose-*.log et
+        # ajuster (probablement adapter docker-compose.vps2.yml a Patroni, ou
+        # introduire un docker-compose.tier4.yml dedie). Pour l'instant on tente
+        # la voie naive et on observe.
+        run: |
+          set -eux
+          docker network create alarm_shared_net 2>/dev/null || true
+          # .env requis par les `compose start` sans --env-file dans la fixture.
+          # On reutilise .env.node1 qui pose les ports/etcd/patroni de base.
+          cp .env.node1 .env
+          docker compose up -d --build
+          docker compose -f docker-compose.vps2.yml -p alarm-vps2 up -d --build
+
+          # Attendre healthy sur :8000 et :8001 (ne pas se contenter du
+          # `compose up -d` qui retourne avant que les apps soient ready).
+          for url in http://localhost:8000/health http://localhost:8001/health; do
+            echo "Waiting for ${url}..."
+            for i in $(seq 1 90); do
+              if curl -sf -m 2 "$url" > /dev/null 2>&1; then
+                echo "  ${url} ready"
+                break
+              fi
+              if [ "$i" = "90" ]; then
+                echo "::error::${url} pas pret apres 180s"
+                exit 1
+              fi
+              sleep 2
+            done
+          done
+
+      - name: Run tier 4 — pytest tests/test_failback.py
+        # Pas de --skip-failover ! C'est le contraire du tier 3 qui exclut le
+        # marker failover. Ici on VEUT exercer le marker. Le test est marque
+        # @pytest.mark.failover + @pytest.mark.chaos (cf pyproject + conftest).
+        # `-p no:randomly` : ordre deterministe (utile pour comparer les nightly
+        # entre eux quand on chasse du flake).
+        env:
+          ADB_PATH: adb
+          ALARM_REPO_ROOT: ${{ github.workspace }}
+          ALARM_VPS1_URL: http://localhost:8000
+          ALARM_VPS2_URL: http://localhost:8001
+          PYTHONUNBUFFERED: "1"
+        run: |
+          mkdir -p reports
+          VERBOSE=""
+          if [ "${{ github.event.inputs.verbose }}" = "true" ]; then
+            VERBOSE="-vv"
+          fi
+          pytest tests/test_failback.py -v -s $VERBOSE \
+            --junitxml=reports/tier4-failback.xml \
+            -p no:randomly \
+            2>&1 | tee reports/tier4-pytest.log
+
+      - name: Collect logcat per emulator (always)
+        if: always()
+        run: |
+          mkdir -p reports
+          for port in $EMULATOR_PORTS; do
+            serial="emulator-${port}"
+            adb -s "$serial" logcat -d -t 5000 \
+              -s ApiClient:* AlarmPollingService:* AndroidRuntime:E '*:F' \
+              > "reports/logcat-${port}.txt" 2>&1 || true
+          done
+
+      - name: Collect docker compose logs (always)
+        if: always()
+        run: |
+          mkdir -p reports
+          docker compose logs --no-color > reports/compose-vps1.log 2>&1 || true
+          docker compose -f docker-compose.vps2.yml -p alarm-vps2 logs --no-color \
+            > reports/compose-vps2.log 2>&1 || true
+          adb devices -l > reports/adb-devices.txt 2>&1 || true
+          docker ps -a > reports/docker-ps.txt 2>&1 || true
+
+      - name: Teardown emulators (always)
+        if: always()
+        run: |
+          for port in $EMULATOR_PORTS; do
+            serial="emulator-${port}"
+            adb -s "$serial" emu kill 2>/dev/null || true
+          done
+          # Laisse 3s a `emu kill` pour propre ; sinon adb kill-server force.
+          sleep 3
+          adb kill-server 2>/dev/null || true
+          # Belt-and-braces : si un emulateur ne respecte pas `emu kill`, on
+          # tue le processus. Pas de `pkill -9` agressif, on filtre par nom.
+          pkill -f "qemu-system-x86_64" 2>/dev/null || true
+
+      - name: Teardown cluster (always)
+        if: always()
+        run: |
+          docker compose -f docker-compose.vps2.yml -p alarm-vps2 down -v --remove-orphans 2>/dev/null || true
+          docker compose down -v --remove-orphans 2>/dev/null || true
+          docker network rm alarm_shared_net 2>/dev/null || true
+          rm -f .env  # le .env temporairement copie depuis .env.node1
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier4-failback-reports-${{ github.run_id }}
+          path: reports/
+          retention-days: 30
+          if-no-files-found: warn
