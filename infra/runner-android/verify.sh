@@ -10,6 +10,17 @@ set +e
 ANDROID_HOME="${ANDROID_HOME:-/opt/android-sdk}"
 RUNNER_USER="ghrunner"
 
+# Source /etc/profile.d/android.sh si dispo (sinon on hardcode le PATH).
+# Necessaire car ce script peut etre lance via `sudo -u ghrunner -H bash` qui
+# n'est PAS un login shell donc /etc/profile.d/* n'est pas sourcé. Sans ca les
+# checks SDK echouent en faux-positif.
+if [[ -f /etc/profile.d/android.sh ]]; then
+    # shellcheck disable=SC1091
+    source /etc/profile.d/android.sh
+else
+    export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+fi
+
 declare -i PASS=0
 declare -i FAIL=0
 RESULTS=()

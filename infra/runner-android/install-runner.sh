@@ -2,7 +2,7 @@
 # Bootstrap runner self-hosted Linux dedie emulateurs Android.
 #
 # A executer EN ROOT sur la VM Linux fraichement provisionnee
-# (Ubuntu 22.04+ recommande). Idempotent : re-executable.
+# (Debian 12 bookworm sur VM Proxmox dans notre setup). Idempotent : re-executable.
 #
 # Usage :
 #   sudo bash install-runner.sh --token <REGISTRATION_TOKEN>
@@ -76,11 +76,11 @@ apt-get install -y -q \
 step "Install Docker CE (skip si present)..."
 if ! command -v docker >/dev/null 2>&1; then
     install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+    curl -fsSL https://download.docker.com/linux/debian/gpg \
         | gpg --dearmor --batch --yes -o /etc/apt/keyrings/docker.gpg
     chmod a+r /etc/apt/keyrings/docker.gpg
-    UBUNTU_CODENAME=$(. /etc/os-release && echo "$UBUNTU_CODENAME")
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $UBUNTU_CODENAME stable" \
+    DEBIAN_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $DEBIAN_CODENAME stable" \
         > /etc/apt/sources.list.d/docker.list
     apt-get update -q
     apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
