@@ -163,6 +163,18 @@ jobs:
             emulator
             system-images;android-${{ env.ANDROID_API_LEVEL }};${{ env.ANDROID_TARGET }};${{ env.ANDROID_ARCH }}
 
+      - name: Add Android emulator + platform-tools to PATH
+        # android-actions/setup-android@v3 ajoute uniquement cmdline-tools/latest/bin
+        # au PATH, pas $ANDROID_SDK_ROOT/emulator ni .../platform-tools. Sur runner
+        # managed Ubuntu, ces dirs sont souvent deja dans le PATH via un autre
+        # setup ; sur notre runner self-hosted Debian ils ne le sont pas, et les
+        # steps suivants qui appellent `emulator` / `adb` directement plantent
+        # ("nohup: impossible d'executer la commande 'emulator'" -> emulateurs
+        # jamais lances -> Wait for emulators to fully boot timeout 20 min).
+        run: |
+          echo "$ANDROID_SDK_ROOT/emulator" >> "$GITHUB_PATH"
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+
       - name: Cache AVD images
         # Le `avdmanager create` + premier cold-boot ecrivent les userdata, snapshots
         # warm-boot eventuels, et les 600+ Mio de system-image. Cache pour gagner
@@ -373,7 +385,13 @@ jobs:
           mkdir -p reports
           for port in $EMULATOR_PORTS; do
             serial="emulator-${port}"
-            adb -s "$serial" logcat -d -t 5000 \
+            # `timeout 10` essentiel : si l'emulateur n'a pas demarre (ex. fail
+            # au step Boot), `adb -s emulator-XXXX logcat` hang infiniment a
+            # attendre le device. Le `|| true` ne sauve pas : il n'est jamais
+            # atteint. Resultat: process zombie qui maintient le runner busy
+            # apres la fin du job (vu lors du smoke-test #4 attempt 2 : 19h de
+            # zombie adb apres un job cancelled).
+            timeout 10 adb -s "$serial" logcat -d -t 5000 \
               -s ApiClient:* AlarmPollingService:* AndroidRuntime:E '*:F' \
               > "reports/logcat-${port}.txt" 2>&1 || true
           done
