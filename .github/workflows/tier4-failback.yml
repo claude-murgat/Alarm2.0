@@ -334,8 +334,11 @@ jobs:
           set -eux
           docker network create alarm_shared_net 2>/dev/null || true
           # .env requis par les `compose start` sans --env-file dans la fixture.
-          # On reutilise .env.node1 qui pose les ports/etcd/patroni de base.
-          cp .env.node1 .env
+          # On utilise .env.tier4 (mono-node etcd) au lieu de .env.node1 (qui
+          # est concu pour un cluster 3-node etcd dont le quorum ne serait
+          # jamais atteint avec un seul etcd lance, bloquant Patroni puis
+          # backend). Cf header de .env.tier4 pour le detail.
+          cp .env.tier4 .env
           docker compose up -d --build
           docker compose -f docker-compose.vps2.yml -p alarm-vps2 up -d --build
 
