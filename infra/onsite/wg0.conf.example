@@ -1,0 +1,33 @@
+# /etc/wireguard/wg0.conf — Alarme Murgat onsite mesh
+# Cf. docs/PROVISIONING_ONSITE.md §13
+#
+# Adresses internes Wireguard (privées, hardcodées) :
+#   10.99.0.1  = NODE3 cloud (hors-site)
+#   10.99.0.2  = NODE1 onsite-1
+#   10.99.0.3  = NODE2 onsite-2 (cette machine)
+#
+# Pour cloner sur onsite-1 : changer Address en 10.99.0.2/24, regenerer privatekey/publickey.
+
+[Interface]
+# À remplacer par le contenu de /etc/wireguard/privatekey (mode 600, jamais commit)
+PrivateKey = <PRIVATE_KEY_TO_FILL>
+Address = 10.99.0.3/24
+ListenPort = 51820
+# Sauvegarde la config quand on ajoute un peer dynamiquement
+SaveConfig = false
+
+# === Peers (à activer au fur et à mesure du provisioning des autres nœuds) ===
+
+# [Peer]
+# # NODE3 cloud (hors-site)
+# PublicKey = <NODE3_PUBLIC_KEY>
+# AllowedIPs = 10.99.0.1/32
+# Endpoint = <NODE3_PUBLIC_ENDPOINT>:51820
+# PersistentKeepalive = 25
+
+# [Peer]
+# # NODE1 onsite-1 (autre baie du même site)
+# PublicKey = <NODE1_PUBLIC_KEY>
+# AllowedIPs = 10.99.0.2/32
+# Endpoint = <NODE1_LAN_IP>:51820
+# # PersistentKeepalive non nécessaire en LAN

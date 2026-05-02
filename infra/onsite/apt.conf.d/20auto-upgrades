@@ -1,0 +1,6 @@
+// /etc/apt/apt.conf.d/20auto-upgrades — Alarme Murgat onsite
+// Active les MAJ automatiques (le timer apt-daily-upgrade.timer s'occupe du reste)
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::Download-Upgradeable-Packages "1";
+APT::Periodic::AutocleanInterval "7";
