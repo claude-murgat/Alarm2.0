@@ -258,3 +258,65 @@ class TestPurity:
         r2 = evaluate_escalation([alarm], chain, users, DELAY, NOW)
         r3 = evaluate_escalation([alarm], chain, users, DELAY, NOW)
         assert r1 == r2 == r3
+
+
+class TestContinueSemantics:
+    """Tue les mutations `continue` -> `break` dans la boucle principale (mutmut
+    105, 111, 116) ainsi que le default de `users_online.get()` (mutmut 119).
+
+    Pourquoi : une seule alarme skippee ne doit jamais empecher l'evaluation des
+    autres. Le `break` mute interromprait la boucle, donc une alarme acknowledged
+    en debut de liste empecherait toute escalade subsequente — silence total
+    alors que d'autres alarmes critiques sont en attente.
+    """
+
+    def test_skip_acked_alarm_continues_with_next(self):
+        """Mutmut 105 : if status not in (active, escalated): continue (vs break)."""
+        alarms = [
+            _alarm(alarm_id=1, status="acknowledged",
+                   created_at=NOW - timedelta(hours=1)),  # acked → skip
+            _alarm(alarm_id=2, assigned_user_id=1),       # eligible
+        ]
+        result = evaluate_escalation(alarms, _chain(1, 2),
+                                     {1: True, 2: True}, DELAY, NOW)
+        assert len(result.escalations) == 1
+        assert result.escalations[0].alarm_id == 2
+
+    def test_skip_too_fresh_alarm_continues_with_next(self):
+        """Mutmut 111 : if elapsed < delay: continue (vs break)."""
+        alarms = [
+            _alarm(alarm_id=1, created_at=NOW - timedelta(minutes=5)),  # 5 < 15 → skip
+            _alarm(alarm_id=2, assigned_user_id=1),                     # eligible (default 16 min)
+        ]
+        result = evaluate_escalation(alarms, _chain(1, 2),
+                                     {1: True, 2: True}, DELAY, NOW)
+        assert len(result.escalations) == 1
+        assert result.escalations[0].alarm_id == 2
+
+    def test_skip_no_next_user_continues_with_next(self):
+        """Mutmut 116 : if next_user_id is None or == self: continue (vs break).
+        Cas : chaine a 1 seul user → pas de next pour cet user, mais doit traiter
+        les autres alarmes assignees a un user pas dans la chaine."""
+        chain = _chain(1)  # un seul user
+        alarms = [
+            _alarm(alarm_id=1, assigned_user_id=1),  # next = self → no escalation
+            _alarm(alarm_id=2, assigned_user_id=2),  # next = user 1 (premier de la chaine)
+        ]
+        result = evaluate_escalation(alarms, chain,
+                                     {1: True, 2: True}, DELAY, NOW)
+        assert len(result.escalations) == 1
+        assert result.escalations[0].alarm_id == 2
+
+    def test_user_absent_from_online_dict_treated_as_online(self):
+        """Mutmut 119 : users_online.get(uid, True) — un user absent du dict
+        est traite comme ONLINE par defaut (pas de wake-up FCM).
+
+        Ce defaut est important : il rend la fonction robuste a un users_online
+        partiel (ex: dict construit a partir de heartbeats recents seulement).
+        """
+        chain = _chain(1, 2)
+        alarm = _alarm(assigned_user_id=1)
+        # User 1 absent du dict → default True → traite comme online
+        result = evaluate_escalation([alarm], chain, {}, DELAY, NOW)
+        assert len(result.escalations) == 1
+        assert len(result.wake_ups) == 0  # pas de wake-up car traite comme online

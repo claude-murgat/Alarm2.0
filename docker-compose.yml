@@ -53,10 +53,13 @@ services:
       etcd:
         condition: service_healthy
     healthcheck:
+      # Tuning chantier #21 step 1 : interval 10s -> 5s, retries 5 -> 3.
+      # Gain : detection "patroni up" 2x plus rapide (5-10s wall-clock sur boot).
+      # Risque : LOW (observe stable sur dev, le `/health` endpoint est leger).
       test: ["CMD", "curl", "-sf", "http://localhost:8008/health"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 3
 
   backend:
     build: ./backend

@@ -68,6 +68,8 @@
 
 ## Améliorations recommandées (priorisées)
 
+> **Évolution 2026-04-25 (équipe dev)** : la topologie cible passe de **1 on-site + 2 cloud** à **2 on-site (en 2 baies physiquement distinctes) + 1 hors-site**. Motivation : redonder le matériel critique on-site (gateway SMS/voix Waveshare SIM7600) pour éliminer le SPOF physique de NODE1, au prix d'un quorum cloud-side réduit (1/3) en cas de perte connectivité site. Détails à formaliser. La P1 ci-dessous reste la documentation historique de la décision initiale.
+
 ### P1 — Backend cloud redondant (2 VPS + réplication PostgreSQL)
 - **Pourquoi** : maintenir la pleine fonctionnalité même en cas de panne hardware d'un backend
   - SMS/dead man's switch seuls = mode dégradé (perte des fonctionnalités app)

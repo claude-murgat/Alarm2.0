@@ -130,6 +130,26 @@ python -m pytest tests/test_e2e.py -v
 python -m pytest tests/test_user_modes.py -v
 python -m pytest tests/test_frontend.py -v  # necessite playwright
 
+# Regenerer .test_durations pour pytest-split (tier 3 load-balancing)
+# A faire apres ajout/refactor de tests substantiels (cf audit CI parallelisation).
+# Sans ce fichier, asymetrie worker1=7min vs worker2=14min sur tier 3.
+# Prerequis : cluster up (docker compose --env-file .env.dev -p dev up -d).
+./scripts/regenerate-test-durations.sh
+# puis : git add .test_durations && commit + PR
+
+# Mutation testing local (logique pure backend/app/logic/, ~3 min sur ce poste)
+# Permet de boucler sans attendre le nightly. Workflow CI nightly = identique.
+# Windows : PYTHONIOENCODING=utf-8 obligatoire (mutmut crashe sur l'emoji 🎉
+# affiche pour chaque kill car cp1252 ne sait pas l'encoder).
+PYTHONIOENCODING=utf-8 python -m mutmut run \
+  --paths-to-mutate backend/app/logic/ \
+  --tests-dir tests/unit/ \
+  --runner "python -m pytest -x --assert=plain -m unit -p no:randomly tests/unit/"
+PYTHONIOENCODING=utf-8 python -m mutmut results       # liste survivants par module
+PYTHONIOENCODING=utf-8 python -m mutmut html          # rapport navigable (./html/)
+PYTHONIOENCODING=utf-8 python -m mutmut show <id>     # diff d'un mutant precis
+PYTHONIOENCODING=utf-8 python -m mutmut junitxml      # XML pour scoring (cf .github/scripts/mutation_score.py)
+
 # Build + install Android sur emulateur
 cd android && ./gradlew assembleDebug
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk

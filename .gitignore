@@ -61,3 +61,9 @@ reports/
 
 # act (GitHub Actions runner local)
 .actrc.local
+
+# Mutation testing (cache + backup files, cf workflow mutation-testing.yml)
+# .mutmut-cache : sqlite local, regenere a chaque run. Volumineux (~MB).
+# *.py.bak      : backup files que mutmut peut laisser sur interruption.
+.mutmut-cache
+*.py.bak

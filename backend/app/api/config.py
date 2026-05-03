@@ -36,6 +36,22 @@ def add_escalation_config(
             ),
         )
 
+    # INV-020 : user_id unique dans la chaine. Si l'user est deja a une autre position,
+    # rejeter pour eviter de sonner deux fois le meme user (et garder la semantique
+    # "1 user = 1 position" sur laquelle s'appuie la logique d'escalade).
+    # Endpoint /bulk fait deja ce check sur sa liste user_ids ; on l'enforce aussi
+    # ici pour fermer le single-insert.
+    existing_user = db.query(EscalationConfig).filter(EscalationConfig.user_id == config.user_id).first()
+    if existing_user:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"L'utilisateur {config.user_id} est deja dans la chaine a la position "
+                f"{existing_user.position}. Supprimez-la d'abord (DELETE /api/config/escalation/"
+                "{id}) ou utilisez POST /api/config/escalation/bulk pour remplacer toute la chaine."
+            ),
+        )
+
     ec = EscalationConfig(
         position=config.position,
         user_id=config.user_id,

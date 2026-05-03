@@ -175,9 +175,14 @@ Dans `EscalationConfig`, `position` est unique. POST /config/escalation avec pos
   - `test_post_existing_position_returns_409_and_does_not_overwrite`
   - `test_post_new_position_still_succeeds` (garde-fou sur-fix)
 
-### INV-020 [M] ❌ Chaîne d'escalade : user_id uniques
+### INV-020 [M] ✅ Chaîne d'escalade : user_id uniques
 Un même user ne peut pas être à 2 positions.
-- **Pourquoi** : éviter de sonner 2 fois le même user.
+- **Pourquoi** : éviter de sonner 2 fois le même user. La logique pure `_find_next_user_id` (`backend/app/logic/escalation.py`) s'appuie sur cette unicité — sans elle, certaines mutations équivalentes deviennent observables (cf pragmas dans le code).
+- **Fix** : enforced sur les 2 endpoints d'écriture :
+  - `POST /api/config/escalation/bulk` : check `len(user_ids) != len(set(user_ids))` → 422 (pré-existant).
+  - `POST /api/config/escalation` (single insert) : check user_id déjà dans la chaîne → 409 (ajouté 2026-04-25).
+- **Couverture** : `tests/integration/test_escalation_config_contract.py` :
+  - `test_post_existing_user_id_returns_409_and_does_not_overwrite` (INV-020)
 
 ---
 

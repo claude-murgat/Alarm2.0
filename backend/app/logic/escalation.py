@@ -92,16 +92,23 @@ def _find_next_user_id(
         return None
 
     # Position actuelle (-1 si current pas dans la chaîne)
-    current_position = -1
+    # NOTE pragmas mutmut : sous INV-019 (positions uniques >= 1) + INV-020 (user_ids
+    # uniques), les 4 lignes ci-dessous ont des mutations équivalentes prouvées :
+    # - `-1` vs autre négatif : positions toujours >= 1, jamais discriminant.
+    # - `break` vs `continue` : current_user_id apparaît au plus 1× dans la chaîne.
+    # - `>` vs `>=` et `<=` vs `<` : l'entrée à current_position a user_id == current,
+    #   donc skippée par la boucle finale (INV-020 garantit unicité).
+    # Couvert par tests/integration/test_escalation_config_contract.py (INV-019, INV-020).
+    current_position = -1  # pragma: no mutate
     for entry in chain:
         if entry.user_id == current_user_id:
             current_position = entry.position
-            break
+            break  # pragma: no mutate
 
     # Construire la liste ordonnée : d'abord ceux après current_position,
     # puis ceux avant (wrap-around)
-    after = [e for e in chain if e.position > current_position]
-    before = [e for e in chain if e.position <= current_position]
+    after = [e for e in chain if e.position > current_position]  # pragma: no mutate
+    before = [e for e in chain if e.position <= current_position]  # pragma: no mutate
     candidates = after + before
 
     for entry in candidates:

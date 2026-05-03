@@ -228,10 +228,16 @@ NE JAMAIS : interpréter le comportement voulu depuis le code.
 Le problème : au fil des fix, les tests s'accumulent. Beaucoup deviennent obsolètes, tautologiques, ou verrouillent des bugs qu'on a fixés autrement. **Sans garde-fou, la suite devient un poids mort**.
 
 ### G1. Mutation testing comme gate qualité
-- **Outil** : `mutmut run` en nightly.
+- **Outil** : `mutmut run` en nightly. ✅ **Installé** (2026-04-21) :
+  - Workflow : [.github/workflows/mutation-testing.yml](../.github/workflows/mutation-testing.yml)
+  - Trigger : `schedule: '0 2 * * *'` (2h UTC) + `workflow_dispatch`
+  - Cible : `backend/app/logic/` uniquement (6 modules fonctions pures)
+  - Config : [`[tool.mutmut]` dans pyproject.toml](../pyproject.toml) (paths, tests_dir, runner `pytest -x --assert=plain tests/unit/`)
+  - Helper : [.github/scripts/mutation_score.py](../.github/scripts/mutation_score.py) calcule le score depuis junit XML
 - **Règle** : score mutation > 80% sur les fonctions pures (tier 1).
-- **Si < 80%** : identifier les mutations survivantes, renforcer ou supprimer les tests correspondants.
-- **Quand l'utiliser** : chaque fois que l'IA ajoute un test, mesurer le delta de mutation score.
+- **Si < 80%** : workflow emet `::warning::` visible dans le run summary (pas `::error::`). G1 **n'est PAS un required check** de branch protection — objectif = tracker la qualité des tests sur la durée, pas bloquer les PRs sur un scan nightly. L'humain regarde le rapport HTML uploadé en artifact (`mutation-reports-<run_id>`) pour identifier les mutations survivantes.
+- **Quand l'utiliser** : automatique chaque nuit. Manuel via `gh workflow run mutation-testing.yml` pour checker un delta après ajout de tests. Chaque fois que l'IA ajoute un test, un reviewer humain peut demander un run manuel avant merge.
+- **Durée** : ~15-30 min (chaque mutation = un full run du tier 1 unit tests). Tolérable pour nightly. Pas tolérable pour PR CI → d'où le choix nightly séparé.
 
 ### G2. Audit trimestriel des tests
 Script `tests/audit_tests.py` (déjà présent) tourne chaque trimestre et produit un rapport :
@@ -284,7 +290,7 @@ Les utilitaires (`_reset_clock_all_nodes`, `_login_user`, `FakeApiService`) ne s
 | `pytest-split` 0.9.0 | Répartition tests entre matrix workers | ✅ Installé | Activable en tier 3 (J8 itération 2) |
 | `hypothesis` 6.122.3 | Property-based testing | ⚠️ Installé, 0 usage | À utiliser pour invariants combinatoires |
 | `FastAPI TestClient` (via fastapi) | Test endpoints sans serveur live | ✅ Installé | Tier 2 |
-| `mutmut` | Mutation testing | ❌ Non installé | À ajouter quand on attaquera G1 (nightly) |
+| `mutmut` 2.5.0 | Mutation testing | ✅ Installé | Workflow nightly `.github/workflows/mutation-testing.yml`. Cible `backend/app/logic/`. Non-bloquant (warning si score < 80 %). |
 | `pytest-testmon` | Re-run tests impactés par un diff | ❌ Non installé | Optionnel, accélération IA |
 | `pytest-asyncio` | Tests async natifs | ❌ Non installé | Pas nécessaire avec TestClient |
 | `schemathesis` | Contract tests OpenAPI | ❌ Non installé | À évaluer quand le tier 2 grandit |
@@ -336,13 +342,14 @@ Checklist pour un Claude (ou autre) qui rouvre ce projet demain :
 - ✅ GitHub App `alarm-murgat-bot` + 2 runners self-hosted
 - ⚠️ Tier 3 : 88/119 verts sur premier run, 12 fails à fixer (cf prompt session annexe)
 - ❌ Tier 4 chaos : non implémenté
-- ❌ Mutation testing (mutmut) : non installé
+- ✅ Mutation testing (mutmut) : **installé** (2026-04-21, workflow nightly non-bloquant, cf §5 G1)
 - ✅ **Bot IA contributeur autonome : phases 1-4 + 5 pilotes validés bout-en-bout 2026-04-21** :
   - ✅ Phase 1 — identité GH App → token → commit → push → PR (PR #2)
   - ✅ Phase 2 — spawn Claude Code CLI headless Opus 4.7 (PR #5)
   - ✅ Phase 3A — live log via `tee` + denylist CI enforcement + label `ai:denied` (PR #10)
   - ✅ Phase 3B — triggers auto `issues.labeled`, `check_run.completed`, `issue_comment` (filtre `/ai-retry` + `@mention`, anti-loop bot) + mode retry (new/retry-ci/retry-comment/retry-manual) (PR #8)
   - ✅ Phase 3C — compteur N/3 + labels `ai:abandoned` / `ai:needs-human` auto (PR #17)
+  - ✅ Phase 3D — détection précoce de boucle sur junit XML (même tests fail 3× consécutifs → abandon avec reject_reason=`loop-detected` + message diagnostique au lieu du générique iteration-limit). Helper scripts [`parse_junit_failures.py`](../.github/ai-bot/scripts/parse_junit_failures.py) et [`compute_fail_streak.py`](../.github/ai-bot/scripts/compute_fail_streak.py). Metadata PR étendu avec `fail-streak:` et `last-fail-tests:` (rétrocompatible : insertion à la volée pour les PR pré-3D).
   - ✅ Phase 4 — merge auto sur `ai:approved` via `.github/workflows/ai-merge.yml` (PR #16 + 3 fixes #21/22/23)
   - ✅ **5 pilotes bot IA 2026-04-21** : #6 INV-031 abandon propre (catalogue stale), #13 INV-082 test de verrouillage (PR #14), #19 INV-019 fix 409 Conflict (PR #20), #24 INV-084 migration SystemConfig (PR #25), #26 INV-005 property-based `hypothesis` (PR #27 — **premier usage hypothesis** du projet). Tous via le cycle complet `ai:fix` → agent → `ai:approved` → merge auto.
 
@@ -474,31 +481,44 @@ Checklist pour un Claude (ou autre) qui rouvre ce projet demain :
 
 ### CI-BUG-10 — Race condition tier 3 entre runs parallèles (PROJECT partagé)
 
-**Statut** : fix appliqué (concurrency job-level par worker, 2026-04-20, session 4 suite CI-BUG-09).
-**Symptôme** : 2+ runs CI tournant en parallèle (2 PRs différentes, ou push master + PR) fail aléatoirement sur `tier3_e2e worker N` avec `patroni is missing dependency etcd` ou `Cluster boot failed after 2 attempts (worker N)`, alors qu'un run solo sur la même branche passe. Des PRs individuellement testées vertes ne passent plus quand elles tournent ensemble.
-**Cause** : dans `pr.yml`, `env: PROJECT: ci-w${{ matrix.worker }}` est fixe par numéro de worker — identique à travers toutes les PRs. Deux jobs worker 2 de 2 runs différents essaient simultanément de :
+**Statut** : fix v2 appliqué (namespaces uniques par run, 2026-04-25). Précédent fix v1 (concurrency job-level, 2026-04-20) levé car bridait les 4 runners self-hosted.
+
+**Symptôme original** : 2+ runs CI tournant en parallèle (2 PRs différentes, ou push master + PR) fail aléatoirement sur `tier3_e2e worker N` avec `patroni is missing dependency etcd` ou `Cluster boot failed after 2 attempts (worker N)`, alors qu'un run solo sur la même branche passe.
+
+**Cause** : dans `pr.yml`, `env: PROJECT: ci-w${{ matrix.worker }}` était fixe par numéro de worker — identique à travers toutes les PRs. Deux jobs worker 2 de 2 runs différents essayaient simultanément de :
 - créer les mêmes containers (`ci-w2-etcd-1`, `ci-w2-patroni-1`, `ci-w2-backend-1`)
-- binder les mêmes ports host (28000, 22379, 22380, etc. — définis en dur dans `.env.ci-w2`)
+- binder les mêmes ports host (28000, 22379, 22380, etc.)
 - utiliser les mêmes volumes (`ci-w2_etcd_data`, `ci-w2_pg_data`)
 
-Résultat : l'un des deux fail sur conflit de ressource, généralement avec message docker compose cryptique ("missing dependency etcd" alors que etcd est défini mais ne peut pas bind son port).
-**Fix appliqué** : concurrency **job-level** par worker ID dans `pr.yml` :
+#### Fix v1 (2026-04-20, levé 2026-04-25) — concurrency job-level
+
 ```yaml
 tier3_e2e:
   concurrency:
     group: ci-tier3-worker-${{ matrix.worker }}
     cancel-in-progress: false
 ```
-Effet : les jobs `tier3_e2e` avec `matrix.worker=N` sont sérialisés à travers **toutes** les PRs. Si 2 runs sont déclenchés, leurs tiers 3 w1 s'exécutent l'un après l'autre, idem pour w2. Tier 1+2 (cloud, pas de namespace partagé) restent parallèles.
-**Pourquoi pas cancel-in-progress=true** : on veut queue les jobs, pas cancel — chaque PR mérite son run CI.
-**Coût** : si 2 PRs poussent en même temps, la 2e attend ~7 min supp (durée tier 3 d'un run). Acceptable (volume normal = 1-3 PRs/jour, pas 10/h).
+Sérialisait les jobs `tier3_e2e` à travers **toutes** les PRs. Évitait la collision mais rendait les runs séquentiels : avec 4 runners self-hosted, 2 runs en parallèle = max 2 jobs tier 3 simultanés (1 par worker), 2 runners restaient inutilisés. Observation 2026-04-25 (run #93 push + #94 pull_request sur même branche) : #94 attendait #93 alors que 2 runners étaient libres.
 
-**À réévaluer si** :
-- Le volume PR monte (>5/h) → mettre en place 4 runners self-hosted ou ports dynamiques par run_id
-- On passe en OVH/VPS multi-host → 1 cluster par host, plus de partage, concurrency inutile
-- Solution durable : suffixer PROJECT par `$GITHUB_RUN_ID` (ex: `ci-w2-${RUN_ID}`) + ports dynamiques via `.env` généré à la volée. Beaucoup plus complexe, pas phase actuelle.
+#### Fix v2 (2026-04-25, actif) — namespaces uniques par run
 
-**Principe à retenir** : un test d'infra **parallèle** exige soit des **namespaces uniques par run**, soit une **sérialisation explicite**. Le premier cas est le plus robuste mais le plus cher à mettre en place. Le deuxième est une dette acceptable si le volume reste faible.
+`PROJECT` et tous les ports host sont calculés au début du job depuis `github.run_id` :
+
+```bash
+SLOT=$(( github.run_id % 50 ))
+OFFSET=$(( SLOT * 200 ))
+PROJECT=ci-w${worker}-${run_id}
+BACKEND_PORT=$(( BASE_PORT + OFFSET ))
+# ... PG_PORT, ETCD_*, MAILHOG_*, etc.
+```
+
+Variables exportées via `$GITHUB_ENV` → prennent précédence sur `--env-file .env.ci-w*` lors de l'interpolation `docker-compose.yml`. Pas de modification des `.env.ci-w*` (qui restent les valeurs par défaut single-run / dev).
+
+**Tradeoff** : 50 buckets de 200 ports d'écart, plage 0-9800. Probabilité collision 2 runs ≈ 2%, 4 runs ≈ 12% (paradoxe anniversaire). En cas de collision, le cleanup robuste (CI-BUG-09 fix) absorbe le résiduel sur retry. À monitorer ; si flake > 1% sur 100 runs, augmenter à `% 100` (10000 ports de plage, prob ≈ 1.5% à 4 runs).
+
+**Effet observable** : avec 4 runners et 2 runs en parallèle, les 4 jobs tier 3 (2 workers × 2 runs) tournent simultanément. Avant v2 : 2 jobs en série. Gain wall-clock pour le 2ᵉ run : ~9 min (durée d'un tier 3 worker 2).
+
+**Principe à retenir** : un test d'infra **parallèle** exige soit des **namespaces uniques par run**, soit une **sérialisation explicite**. La sérialisation est une dette acceptable si le volume reste faible — quand on dispose de la capacité runner pour faire mieux, mieux vaut briser la dette.
 
 ### CI-BUG-11 — `cancel-in-progress: true` annule des runs utiles sur events synchronize
 

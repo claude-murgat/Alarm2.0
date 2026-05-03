@@ -18,9 +18,10 @@ on:
 # "cancelled" dans les checks, PR non-mergeable malgre tier 1+2 verts.
 #
 # Choix `false` : les runs queue. Cout additionnel reel = quasi nul car
-# (a) volume PR bas (2-5/semaine), (b) tier 3 self-hosted deja serialize
-# par worker (job-level, cf CI-BUG-10), donc empilement naturellement
-# borne. Gain : plus aucun cancel fantome.
+# (a) volume PR bas (2-5/semaine), (b) tier 3 self-hosted utilise des
+# namespaces docker uniques par run (CI-BUG-10 v2, 2026-04-25), donc
+# 2+ runs paralleles peuvent tourner simultanement sur les 4 runners
+# sans collision. Gain : plus aucun cancel fantome.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: false
@@ -66,6 +67,115 @@ jobs:
           path: reports/
           retention-days: 14
 
+  mutation_logic:
+    # Tier 1.5 — Mutation testing sur la logique pure backend/app/logic/.
+    # Path-filtre : ne tourne que si logic/, tests/unit/ ou pyproject.toml ont change
+    # (~90% des PRs ne payent pas le cout). Bloquant a 100% : tout survivant != mutation
+    # deja marquee `# pragma: no mutate` (cf INV-020) = vraie regression.
+    # Local : ~3 min ; CI : ~5-8 min selon runner. Nightly mutation-testing.yml reste actif
+    # comme filet de securite (path filter peut rater des cas indirects).
+    name: Tier 1.5 — Mutation testing (logic pure, blocking)
+    needs: tier1_unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # requis par paths-filter sur les push events
+
+      - name: Detect logic changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            logic:
+              - 'backend/app/logic/**'
+              - 'tests/unit/**'
+              - 'pyproject.toml'
+
+      - name: Skip notice (no logic changes)
+        if: steps.changes.outputs.logic != 'true'
+        run: |
+          echo "::notice::Pas de changement dans backend/app/logic/, tests/unit/ ou pyproject.toml — mutation testing skip. Le nightly couvre quand meme."
+
+      - name: Setup Python 3.12
+        if: steps.changes.outputs.logic == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        if: steps.changes.outputs.logic == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Sanity check — tier 1 baseline must be green
+        # Prerequis mutmut : sans baseline verte, tous les mutants sont "killed" pour
+        # la mauvaise raison (le mauvais fail). On le verifie explicitement avant.
+        if: steps.changes.outputs.logic == 'true'
+        run: pytest tests/unit -m unit -p no:randomly -q --no-cov
+
+      - name: Run mutmut
+        id: mutmut_run
+        if: steps.changes.outputs.logic == 'true'
+        run: |
+          set +e
+          mutmut run \
+            --paths-to-mutate backend/app/logic/ \
+            --tests-dir tests/unit/ \
+            --runner "python -m pytest -x --assert=plain -m unit -p no:randomly tests/unit/" \
+            2>&1 | tee /tmp/mutmut-run.log
+          EXIT=${PIPESTATUS[0]}
+          # Bit 0 = fatal (infra). Bits 2/4/8 = survivants/timeouts/suspicieux,
+          # geres par le score gate ci-dessous.
+          if (( EXIT & 1 )); then
+            echo "::error::mutmut fatal error (exit=$EXIT). Voir /tmp/mutmut-run.log."
+            exit 1
+          fi
+          echo "mutmut_exit=${EXIT}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate reports (results + html + junit)
+        if: always() && steps.changes.outputs.logic == 'true'
+        run: |
+          mkdir -p reports/mutation
+          mutmut junitxml > reports/mutation/junit.xml 2>&1 || true
+          mutmut results > reports/mutation/results.txt 2>&1 || true
+          mutmut html 2>&1 || echo "::warning::mutmut html failed"
+          [[ -d html ]] && mv html reports/mutation/html
+
+      - name: Gate on score (100% strict blocking)
+        if: steps.changes.outputs.logic == 'true'
+        run: |
+          python .github/scripts/mutation_score.py \
+            reports/mutation/junit.xml \
+            --threshold 100 \
+            --summary-file "${GITHUB_STEP_SUMMARY:-/tmp/step-summary.md}" \
+            --output-file "$GITHUB_OUTPUT"
+          # Le script emet ::warning:: en dessous du seuil mais ne fail pas
+          # (G1 nightly = non-bloquant by design). Ici on ENFORCE 100% strict :
+          # tout mutant survivant qui n'est pas deja pragma-ise == regression.
+          score=$(grep -E '^score=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2)
+          if [ "$score" != "100.0" ]; then
+            echo "::error::Mutation score $score% < 100% strict. Voir reports/mutation/results.txt pour la liste des survivants. Pour ajouter une mutation equivalente prouvee : pragma + ref INV (voir INV-020 pour exemple)."
+            exit 1
+          fi
+          echo "::notice::Mutation score : $score% — gate OK."
+
+      - name: Upload reports
+        if: always() && steps.changes.outputs.logic == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-pr-reports-${{ github.run_id }}
+          path: reports/mutation/
+          retention-days: 14
+
   tier2_integration:
     name: Tier 2 — Integration (FastAPI TestClient + SQLite)
     needs: tier1_unit
@@ -109,29 +219,34 @@ jobs:
           retention-days: 14
 
   tier3_e2e:
+    # Audit CI parallelization (2026-04-25) : decouple de tier2_integration.
+    # Tier 3 est hermetique (boot son propre cluster Patroni avec PROJECT/ports
+    # dedies, pas de dependance produit avec tier2). Le `needs: tier1_unit`
+    # suffit a eviter de gaspiller du runner si la baseline pure-logic est rouge.
+    # Tier 2 reste bloquant via branch protection — ne change pas la garantie merge.
+    # Gain : ~27s wall-clock en supprimant la serialisation tier1 -> tier2 -> tier3.
     name: Tier 3 — E2E cluster (worker ${{ matrix.worker }}/2)
-    needs: tier2_integration
+    needs: tier1_unit
     runs-on: [self-hosted, linux, docker, alarm-ci]
     timeout-minutes: 15
-    # Sérialise tier 3 à travers TOUTES les PRs par worker ID.
-    # Raison (observé 2026-04-20) : PROJECT=ci-w${worker} est fixe par matrix.
-    # Si 2 runs CI tournent en parallèle (2 PRs, ou push master + PR), leurs
-    # jobs worker 1 se battent pour `ci-w1` (containers, volumes, ports 18xxx)
-    # et idem worker 2 pour `ci-w2` (ports 28xxx). Résultat : "patroni is
-    # missing dependency etcd" ou "Cluster boot failed after 2 attempts" —
-    # une PR bloque toutes les autres.
-    # Fix : concurrency job-level par worker. Tier 1+2 restent parallèles
-    # (cloud, pas de namespace partagé). Seul tier 3 self-hosted est queued.
-    # cancel-in-progress:false → on attend son tour, on ne perd pas de run.
-    concurrency:
-      group: ci-tier3-worker-${{ matrix.worker }}
-      cancel-in-progress: false
+    # Plus de concurrency job-level (avant : ci-tier3-worker-${worker}).
+    # Le serialize global a travers les PRs (CI-BUG-10 fix v1, 2026-04-20)
+    # bridait l'usage des 4 runners self-hosted : 2 runs en // = 2 jobs en
+    # attente meme si 2 runners libres.
+    # Maintenant : namespaces docker uniques par run (cidyn${worker}-${run_id})
+    # + offset ports unique par run, donc 2 runs paralleles n'entrent plus en
+    # collision sur le host docker. Le step "Compute namespace + ports" ci-dessous
+    # est l'implementation.
+    #
+    # Note prefixe `cidyn` (pas `ci-w`) : le ci-cleanup.sh utilise un filtre
+    # `name=^${PROJECT}-` qui matche en substring. Avec PROJECT=ci-w1, le filtre
+    # `^ci-w1-` matchait aussi `ci-w1-{run_id}-etcd-1` -> les pre-cleanup d'un run
+    # master concurrent tuaient nos containers ! Le prefixe `cidyn` est disjoint.
+    # Cf docs/AI_STRATEGY.md#CI-BUG-10 (statut : v2 2026-04-25).
     strategy:
       fail-fast: false
       matrix:
         worker: [1, 2]
-    env:
-      PROJECT: ci-w${{ matrix.worker }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -150,15 +265,44 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt requests pyjwt
 
-      - name: Compute backend URL
+      - name: Compute namespace + ports (CI-BUG-10 v2 — namespaces uniques par run)
+        # Fix CI-BUG-10 v2 : avant, PROJECT=ci-w${worker} fixe + ports 1xxxx/2xxxx fixes
+        # → collisions inter-runs (containers, volumes, ports host). Le fix v1 etait
+        # une serialisation concurrency job-level, qui bridait les 4 runners.
+        #
+        # Maintenant : SLOT = run_id mod 50 → 50 buckets de 200 ports d'ecart, soit
+        # une plage 0-9800. Worker 1 base 18xxx, worker 2 base 28xxx → pas d'overlap
+        # entre workers (10000 d'ecart). Probabilite de collision 2 runs simultanes
+        # sur 50 buckets ≈ 2% ; avec 4 runs ≈ 12% (anniversaire). En pratique : la
+        # cleanup robuste (CI-BUG-09) absorbe le residuel si collision.
+        #
+        # Variables exportees via GITHUB_ENV : prennent precedence sur les valeurs
+        # de --env-file .env.ci-w* lors de l'interpolation docker-compose.yml.
         run: |
-          # host.docker.internal : depuis le runner conteneurise, les conteneurs des
-          # tests tournent sur le host (DooD), pas sur le runner lui-meme.
+          SLOT=$(( ${{ github.run_id }} % 50 ))
+          OFFSET=$(( SLOT * 200 ))
           case "${{ matrix.worker }}" in
-            1) PORT=18000 ;;
-            2) PORT=28000 ;;
+            1) BB=18000; BP=15432; BPA=18008; BEC=12379; BEP=12380; BMS=11025; BMW=18025 ;;
+            2) BB=28000; BP=25432; BPA=28008; BEC=22379; BEP=22380; BMS=21025; BMW=28025 ;;
           esac
-          echo "BACKEND_URL=http://host.docker.internal:$PORT" >> $GITHUB_ENV
+          BACKEND_PORT=$(( BB + OFFSET ))
+          ETCD_CLIENT_PORT=$(( BEC + OFFSET ))
+          ETCD_PEER_PORT=$(( BEP + OFFSET ))
+          {
+            echo "PROJECT=cidyn${{ matrix.worker }}-${{ github.run_id }}"
+            echo "BACKEND_PORT=${BACKEND_PORT}"
+            echo "PG_PORT=$(( BP + OFFSET ))"
+            echo "PATRONI_PORT=$(( BPA + OFFSET ))"
+            echo "ETCD_CLIENT_PORT=${ETCD_CLIENT_PORT}"
+            echo "ETCD_PEER_PORT=${ETCD_PEER_PORT}"
+            echo "MAILHOG_SMTP_PORT=$(( BMS + OFFSET ))"
+            echo "MAILHOG_WEB_PORT=$(( BMW + OFFSET ))"
+            echo "ETCD_HOSTS=host.docker.internal:${ETCD_CLIENT_PORT}"
+            echo "ETCD_INITIAL_CLUSTER=ci-w${{ matrix.worker }}=http://host.docker.internal:${ETCD_PEER_PORT}"
+            echo "ALLOWED_ORIGINS=http://localhost:${BACKEND_PORT},http://host.docker.internal:${BACKEND_PORT}"
+            echo "BACKEND_URL=http://host.docker.internal:${BACKEND_PORT}"
+          } >> $GITHUB_ENV
+          echo "[ci] worker=${{ matrix.worker }} run_id=${{ github.run_id }} slot=${SLOT} offset=${OFFSET} backend_port=${BACKEND_PORT}"
 
       - name: Pre-cleanup (au cas ou un run precedent a echoue)
         # Le script ci-cleanup.sh est idempotent : rien a nettoyer = exit 0.

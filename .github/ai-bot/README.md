@@ -87,10 +87,45 @@ Dans ce cas :
 - Un commentaire détaillé est posté sur l'issue avec le résumé de l'agent et la raison
 - Le workflow se termine en `failure` (signal : « pas de diff = abandon »)
 
-### (c) Violation denylist (phase 3 à venir)
+### (c) Violation denylist (phase 3A)
 
 Si l'agent essaie quand même de modifier un fichier interdit, un step CI
-post-run détecte la violation et fail le run sans créer de PR.
+post-run détecte la violation et fail le run sans créer de PR. Label `ai:denied`
+posé sur l'issue source.
+
+### (d) Limite d'itérations atteinte (phase 3C)
+
+Après 3 itérations sans succès (chaque itération = 1 run agent + CI qui fail),
+le bot s'arrête. Label `ai:abandoned` posé sur la PR et l'issue source.
+Reject reason : `iteration-limit-3-exceeded`. Message générique (pas de
+diagnostic sur la cause du plateau).
+
+### (e) Boucle détectée (phase 3D)
+
+Quand le bot échoue **3 fois de suite avec les mêmes tests en failure**
+(identiques ou sous-ensemble strict de l'itération précédente), le dispatch
+rejette **avant** de lancer la 4ᵉ itération. Reject reason : `loop-detected`.
+
+Le message d'abandon liste les tests en boucle et suggère des hypothèses
+(invariant mal décrit, test RED qui attaque un symptôme, fix dans le mauvais
+module). Label `ai:abandoned` aussi.
+
+Algorithme (cf [`workflows/ai-bot.yml`](../workflows/ai-bot.yml) dispatch, step `loop_detect`) :
+1. Sur event `check_run.completed` avec `conclusion=failure` (mode retry-ci) :
+   télécharge les artifacts `tier*-reports` du run CI qui vient de fail
+2. Parse les `<testcase>` en failure/error via [`scripts/parse_junit_failures.py`](./scripts/parse_junit_failures.py)
+   → set de `classname::name`
+3. Compare avec `last-fail-tests` stocké dans le body PR (itération N-1)
+4. Si `current ⊆ last` → `fail-streak++`, sinon `fail-streak = 1`
+5. Si `fail-streak >= 3` → abandon avec reason `loop-detected`
+
+Fallback gracieux : si l'artifact junit est inaccessible ou vide, la détection
+est skip (warning), l'iter-limit standard reprend le relais.
+
+**Pourquoi** : avant phase 3D, le bot consommait les 3 itérations avant
+d'abandonner sans diagnostic. Phase 3D remonte un signal clair quand le
+pattern d'échec est stable → l'humain gagne du temps pour identifier la
+cause racine (souvent un invariant ambigu ou un fix dans le mauvais module).
 
 ---
 
@@ -122,9 +157,23 @@ Zone autorisée : `backend/**`, `tests/unit/**`, `tests/integration/**`,
 |---|---|---|
 | `ai:fix` | humain | « Dis au bot de traiter cette issue » (trigger auto phase 3) |
 | `ai:approved` | humain | « Mergez auto cette PR » (phase 4) |
-| `ai:abandoned` | bot | « J'ai renoncé, reprise humaine requise » |
+| `ai:abandoned` | bot | « J'ai renoncé, reprise humaine requise » (iteration-limit OU loop-detected) |
 | `ai:needs-human` | bot | « Fix nécessite un fichier denylist ou ambiguïté » |
 | `ai:denied` | bot | « J'ai tenté une violation denylist, CI m'a stoppé » (phase 3) |
+
+## Raisons d'abandon (`reject_reason`)
+
+| Reason | Phase | Signification | Action humaine typique |
+|---|---|---|---|
+| `iteration-limit-3-exceeded` | 3C | 3 itérations épuisées sans convergence | Lire les résumés d'itérations dans le body PR, commenter `/ai-retry <hint>` |
+| `loop-detected` | 3D | 3 CI échecs consécutifs sur les **mêmes** tests | Examiner les tests listés : invariant ambigu ? Fix dans le mauvais module ? |
+| `comment-from-bot` | 3B | Anti-boucle : commentaire écrit par le bot lui-même | Aucune (event ignoré silencieusement) |
+| `pr-not-from-bot` | 3B | Event déclenché sur une PR humaine | Aucune |
+| `label-not-ai:fix` | 3B | Label posé n'est pas `ai:fix` | Aucune |
+
+Autres reasons (moins fréquents) : `check-conclusion-not-failure`,
+`comment-no-trigger-keyword`, `comment-on-non-pr-issue`,
+`check-run-has-no-pr`, `unsupported-event`, `pr-missing-metadata-issue`.
 
 ---
 

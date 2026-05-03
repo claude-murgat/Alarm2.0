@@ -22,6 +22,10 @@ if not _TEST_DB_FILE:
 
 os.environ.setdefault("DATABASE_URL", f"sqlite:///{_TEST_DB_FILE}")
 os.environ.setdefault("SECRET_KEY", "integration-test-secret-not-for-prod")
+# /api/test/* endpoints disponibles en tier 2 (utilises par les tests E2E,
+# notamment connected-users-detailed pour le chantier #21 failover bloquant).
+# En prod, ENABLE_TEST_ENDPOINTS=false => 404 (cf INV-076).
+os.environ.setdefault("ENABLE_TEST_ENDPOINTS", "true")
 # Empeche les background tasks (escalation/watchdog) de spammer pendant les tests :
 # elles tournent quand meme via lifespan mais leur tick est de l'ordre de la minute.
 
