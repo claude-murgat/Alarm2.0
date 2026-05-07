@@ -3,13 +3,22 @@
 # Pourquoi ce workflow existe :
 #   tests/test_failback.py est le SEUL test qui exerce l'integralite du chemin
 #   reseau Android <-> backend en conditions de coupure : il orchestre 3 emulateurs
-#   Android via ADB, monte un cluster 2-noeuds (VPS1:8000 + VPS2:8001), puis
-#   coupe successivement chaque noeud pour verifier que la rotation circulaire
-#   d'ApiClient.kt (BACKEND_URLS, switchToNextUrl apres consecutiveFailures>=3)
-#   bascule effectivement les apps sur le noeud survivant. C'est le maillon qui
-#   garantit que les apps survivent a un failover backend en prod (site industriel
-#   non garde la nuit). Tous les autres tests Android sont Espresso isoles avec
-#   FakeApiService — ils ne testent PAS la couche reseau reelle d'ApiClient.
+#   Android via ADB, monte un cluster 3 noeuds Patroni (la stack de prod —
+#   docs/architecture_option_B_3vps_patroni.md — node1:8000 + node2:8001 + node3:8002),
+#   stoppe le projet du leader Patroni courant, puis verifie via INV-043 que
+#   l'ApiClient (BACKEND_URLS, switchToNextUrl apres consecutiveFailures>=3)
+#   rotate jusqu'au nouveau leader elu par Patroni parmi les 2 noeuds restants.
+#   C'est le maillon qui garantit que les apps survivent a un failover backend
+#   en prod (site industriel non garde la nuit, 3 sites distincts repliques).
+#   Tous les autres tests Android sont Espresso isoles avec FakeApiService —
+#   ils ne testent PAS la couche reseau reelle d'ApiClient.
+#
+# Refonte 2026-05-06 : la version anterieure tentait un cluster 2-VPS via
+# `docker-compose.vps2.yml` (heritage des commits bacd4ed/a25a680, ere
+# "two independent compose instances + streaming replication"), legacy non
+# mis a jour apres la migration Patroni 3-node (2733643). db-standby-init
+# cherchait un service `db` que Patroni n'expose plus -> nightly rouge depuis
+# le 2026-05-03. Le test et le workflow ont ete realignes sur la stack prod.
 #
 #   Hors tier 3 jusqu'a present (cf pr.yml --ignore=tests/test_failback.py)
 #   parce que les runners self-hosted [self-hosted, linux, docker, alarm-ci]
@@ -338,41 +347,100 @@ jobs:
             docker pull "$img" || echo "::warning::pre-pull $img failed (will retry via buildx)"
           done
 
-      - name: Boot cluster (VPS1 + VPS2)
-        # ATTENTION (premiere implementation) : la fixture cluster_running du test
-        # appelle `docker compose start backend` SANS --env-file ni -p, plus
-        # `docker compose -f docker-compose.vps2.yml -p alarm-vps2 start backend`.
-        # Cela suppose que les deux projets ont DEJA ete cree par un `up`. On les
-        # cree ici. La compatibilite entre docker-compose.yml (Patroni-based) et
-        # docker-compose.vps2.yml (db-standby qui s'attend a un service `db` sur
-        # le reseau alarm_shared_net) n'est pas garantie out-of-the-box pour CI ;
-        # si ce step fail au 1er run nightly, examiner reports/compose-*.log et
-        # ajuster (probablement adapter docker-compose.vps2.yml a Patroni, ou
-        # introduire un docker-compose.tier4.yml dedie). Pour l'instant on tente
-        # la voie naive et on observe.
+      - name: Boot cluster (3 noeuds Patroni)
+        # Stack de prod : 3 projets docker compose (node1/node2/node3), chacun
+        # avec son .env.node{1,2,3}, montant etcd + Patroni + backend. Les 3
+        # etcd forment un consensus a 3 (cf ETCD_INITIAL_CLUSTER dans les .env).
+        #
+        # Strategie de boot (smoke-testee 2026-05-06 jusqu'a stabilite) :
+        #
+        #   Phase 1: BUILD parallele des 3 images patroni+backend.
+        #
+        #   Phase 2: etcd PARALLELE (besoin quorum a 3 pour bootstrap).
+        #
+        #   Phase 3: Patroni + backend SEQUENTIEL (node1 leader -> node2 ->
+        #            node3) en `up -d` SANS `--wait`. Pourquoi pas --wait :
+        #            les replicas font pg_basebackup (~10-30s) pendant lequel
+        #            /health patroni peut etre lent (curl timeout 5s) ou 503,
+        #            le compose marque transitoirement unhealthy, le
+        #            `depends_on` du backend abort avec "dependency failed".
+        #            Le start_period:60s du healthcheck patroni n'aide pas
+        #            ici (compose --wait s'appuie sur un timeout interne plus
+        #            court). Sequentiel evite la contention au moins entre
+        #            projets, mais l'observabilite reelle vient de :
+        #
+        #   Phase 4: POLLING OBSERVABLE inline sur les 3 backends. On poll
+        #            /health host sur 8000/8001/8002 jusqu'a ce que tous
+        #            renvoient 200. /health backend : 200 si DB ok ET
+        #            escalation_loop tickante (cf backend/app/main.py).
+        #            Sur replica, db_ok=True (PG accepte SELECT 1) et la
+        #            loop_ok depend du fait que la boucle tique meme en
+        #            secondary. Si un replica reste 503, on echoue avec
+        #            diagnostic complet (compose ps + logs).
+        #
+        # Aucun sleep aveugle : la phase 4 est l'archetype du polling
+        # observable (mini-regle chantier #21 step 2). Le sleep 2 dans la
+        # boucle while est l'intervalle de polling, pas une attente fixe.
         run: |
           set -eux
-          docker network create alarm_shared_net 2>/dev/null || true
-          # .env requis par les `compose start` sans --env-file dans la fixture.
-          # On utilise .env.tier4 (mono-node etcd) au lieu de .env.node1 (qui
-          # est concu pour un cluster 3-node etcd dont le quorum ne serait
-          # jamais atteint avec un seul etcd lance, bloquant Patroni puis
-          # backend). Cf header de .env.tier4 pour le detail.
-          cp .env.tier4 .env
-          docker compose up -d --build
-          docker compose -f docker-compose.vps2.yml -p alarm-vps2 up -d --build
 
-          # Attendre healthy sur :8000 et :8001 (ne pas se contenter du
-          # `compose up -d` qui retourne avant que les apps soient ready).
-          for url in http://localhost:8000/health http://localhost:8001/health; do
-            echo "Waiting for ${url}..."
-            for i in $(seq 1 90); do
-              if curl -sf -m 2 "$url" > /dev/null 2>&1; then
-                echo "  ${url} ready"
+          wait_all() {
+            local pid rc=0
+            for pid in "$@"; do
+              if ! wait "$pid"; then rc=1; fi
+            done
+            return $rc
+          }
+
+          # Phase 1: build parallele
+          pids=()
+          docker compose --env-file .env.node1 -p node1 build & pids+=($!)
+          docker compose --env-file .env.node2 -p node2 build & pids+=($!)
+          docker compose --env-file .env.node3 -p node3 build & pids+=($!)
+          wait_all "${pids[@]}"
+
+          # Phase 2: etcd parallele (sans --wait, on a besoin que les 3 soient
+          # lances pour former quorum)
+          pids=()
+          docker compose --env-file .env.node1 -p node1 up -d etcd & pids+=($!)
+          docker compose --env-file .env.node2 -p node2 up -d etcd & pids+=($!)
+          docker compose --env-file .env.node3 -p node3 up -d etcd & pids+=($!)
+          wait_all "${pids[@]}"
+
+          # Phase 3: Patroni + backend sequentiel, sans --wait (cf bloc doc).
+          # Si le `depends_on: service_healthy` du backend echoue transitoirement
+          # pendant le pg_basebackup d'un replica, on le rattrape en phase 4.
+          # CRITIQUE : toujours passer --env-file pour CHAQUE invocation `compose
+          # up`. Sans, ${NODE_NAME}, ${PATRONI_PORT}, ${ETCD_*} resoudent en
+          # vide, et compose recree les containers existants avec des env
+          # vars vides -> patroni crash KeyError 'name'. Decouverte smoke
+          # test #5 (2026-05-06).
+          COMPOSE_PROFILES=mailhog docker compose --env-file .env.node1 -p node1 up -d
+          docker compose --env-file .env.node2 -p node2 up -d
+          docker compose --env-file .env.node3 -p node3 up -d
+          # Defense : si un backend est reste en `Created` (depends_on a fail
+          # transitoire), le `up -d backend` AVEC --env-file le force a
+          # demarrer sans recreer les autres containers.
+          COMPOSE_PROFILES=mailhog docker compose --env-file .env.node1 -p node1 up -d backend
+          docker compose --env-file .env.node2 -p node2 up -d backend
+          docker compose --env-file .env.node3 -p node3 up -d backend
+
+          # Phase 4: Polling observable des 3 backends sur le host.
+          # Critere : HTTP 200 sur /health pour les 3. Timeout 240s
+          # (boot froid : etcd quorum + 3 patroni init + pg_basebackup x2 +
+          # backend uvicorn + escalation_loop premier tick).
+          for url in http://localhost:8000/health http://localhost:8001/health http://localhost:8002/health; do
+            echo "[wait] $url ..."
+            for i in $(seq 1 120); do
+              if curl -sf -m 5 "$url" > /dev/null 2>&1; then
+                echo "  $url ready (apres ${i}x2s = $((i*2))s)"
                 break
               fi
-              if [ "$i" = "90" ]; then
-                echo "::error::${url} pas pret apres 180s"
+              if [ "$i" = "120" ]; then
+                echo "::error::$url pas pret apres 240s"
+                docker compose -p node1 ps
+                docker compose -p node2 ps
+                docker compose -p node3 ps
                 exit 1
               fi
               sleep 2
@@ -390,6 +458,7 @@ jobs:
           ALARM_REPO_ROOT: ${{ github.workspace }}
           ALARM_VPS1_URL: http://localhost:8000
           ALARM_VPS2_URL: http://localhost:8001
+          ALARM_VPS3_URL: http://localhost:8002
           PYTHONUNBUFFERED: "1"
         run: |
           mkdir -p reports
@@ -423,9 +492,10 @@ jobs:
         if: always()
         run: |
           mkdir -p reports
-          docker compose logs --no-color > reports/compose-vps1.log 2>&1 || true
-          docker compose -f docker-compose.vps2.yml -p alarm-vps2 logs --no-color \
-            > reports/compose-vps2.log 2>&1 || true
+          for proj in node1 node2 node3; do
+            docker compose -p "$proj" logs --no-color \
+              > "reports/compose-${proj}.log" 2>&1 || true
+          done
           adb devices -l > reports/adb-devices.txt 2>&1 || true
           docker ps -a > reports/docker-ps.txt 2>&1 || true
 
@@ -446,10 +516,17 @@ jobs:
       - name: Teardown cluster (always)
         if: always()
         run: |
-          docker compose -f docker-compose.vps2.yml -p alarm-vps2 down -v --remove-orphans 2>/dev/null || true
-          docker compose down -v --remove-orphans 2>/dev/null || true
-          docker network rm alarm_shared_net 2>/dev/null || true
-          rm -f .env  # le .env temporairement copie depuis .env.node1
+          # 3 projets en parallele : down -v vire aussi les volumes (etcd_data,
+          # pg_data) pour que le prochain run reparte d'un cluster fraichement
+          # initialise (pas de leftover patroni leader_lock dans etcd, pas de
+          # PG_VERSION orphelin sur un volume mort).
+          for proj in node1 node2 node3; do
+            docker compose -p "$proj" down -v --remove-orphans 2>/dev/null || true
+          done
+          # Pas de docker network a virer : en 3-node-per-project, chaque
+          # projet utilise son propre default network (auto-cree, auto-detruit
+          # au down). Les projets communiquent via host.docker.internal sur
+          # les ports publies, pas via un reseau partage.
 
       - name: Upload reports
         if: always()

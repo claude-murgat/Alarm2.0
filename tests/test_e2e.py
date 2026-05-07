@@ -1772,15 +1772,18 @@ class TestSmsAndHealth:
         assert sms_id not in ids, "SMS avec retries=3 ne doit plus apparaître dans /pending"
 
 
-# ── Redondance : 2 instances docker compose indépendantes, 1 base partagée ──
+# ── Redondance : 3 noeuds Patroni indépendants (la stack de prod) ──
 #
-# Architecture locale représentative :
-#   docker compose up --build -d                              → VPS1 (port 8000)
-#   docker compose -f docker-compose.vps2.yml -p alarm-vps2 up -d → VPS2 (port 8001)
+# Architecture locale représentative (cf CLAUDE.md "Lancer le cluster complet"
+# et docs/architecture_option_B_3vps_patroni.md) :
+#   docker compose --env-file .env.node1 -p node1 up -d --build → backend node1 (port 8000)
+#   docker compose --env-file .env.node2 -p node2 up -d --build → backend node2 (port 8001)
+#   docker compose --env-file .env.node3 -p node3 up -d --build → backend node3 (port 8002)
 #
-# Les deux backends concourent pour le lock advisory PostgreSQL.
-# Le premier qui démarre devient primaire, l'autre est secondaire.
-# Si le primaire tombe, le secondaire acquiert le lock en <20s.
+# Patroni elit un leader parmi les 3 (consensus etcd). Le backend du leader
+# accepte les heartbeats (200) ; les replicas renvoient 503 (cf INV-043),
+# l'ApiClient rotate jusqu'au leader. Failover automatique si le leader tombe :
+# Patroni elit un nouveau leader parmi les 2 restants en <30s, l'app rotate.
 
 BASE_URL_2 = os.getenv("BACKEND_URL_2", "http://localhost:8001")
 BASE_URL_3 = os.getenv("BACKEND_URL_3", "http://localhost:8002")
