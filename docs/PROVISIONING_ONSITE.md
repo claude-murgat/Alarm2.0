@@ -647,9 +647,82 @@ Voir §20 "Améliorations à venir".
 
 ---
 
+## 22bis. Résultat de la session de provisioning onsite-1 (2026-05-06 + audit 2026-05-08)
+
+### Specs constatées (machine onsite-1, 172.16.1.121)
+
+| Élément | Valeur | Note |
+|---|---|---|
+| Hardware | Intel Core i5-7400T 4c/4t @ 2.4 GHz | Plus puissant que onsite-2 (Celeron 2c) |
+| OS | Debian 13 (trixie) 13.4 | Identique onsite-2 |
+| Kernel | 6.12.85+deb13-amd64 | OK |
+| RAM | **8 Gio** (cible ≥ 8 Gio atteinte) | ✅ vs 4 Gio onsite-2 |
+| Disque | NVMe 240 Go (210 Go libres), ext4 root + swap 7,9 Gio | ✅ vs SATA 28 Go onsite-2 |
+| Réseau | `enp0s31f6 172.16.1.121/16`, `wlp2s0` (down), Bluetooth Intel | OK |
+| Hostname | `onsite-1.alarm.local` (static + pretty) | ✅ |
+
+### Vérification end-to-end (audit 2026-05-08)
+
+| # | Test | Résultat |
+|---|---|---|
+| 1 | SSH par clé `alarm_onsite_1` | ✅ |
+| 2 | Password auth refusé | ✅ `passwordauthentication no` effectif |
+| 3 | Root SSH refusé | ✅ `permitrootlogin no` effectif |
+| 4 | UFW active | ✅ 4 règles (SSH/22 LAN, WG/51820, Backend/8000 LAN, +IPv6 WG) |
+| 5 | Time sync (chrony) | ✅ Stratum 2, offset **304 µs**, source `^*` 109.190.177.205 |
+| 6 | Logs persistants | ✅ 11,5 Mo dans `/var/log/journal` (< 2 Go) |
+| 7 | Hardware watchdog | ✅ iTCO_wdt actif, timeout 30s |
+| 8 | Systemd watchdog | ✅ Runtime 30s, Reboot 10min |
+| 9 | SMART NVMe | ✅ PASSED sur `/dev/nvme0n1` |
+| 10 | Wireguard interface | ✅ wg0 up sur `10.99.0.2/24`, port 51820 |
+| 11 | **Wireguard mesh fonctionnel** | ✅ ping `10.99.0.3` (onsite-2) = **0,7 ms** RTT |
+| 12 | Docker hello-world | ✅ |
+| 13 | ModemManager | ✅ inactive + masked |
+| 14 | unattended-upgrade dry-run | ✅ rien à upgrader, security only |
+
+### Pubkey Wireguard onsite-1
+
+```
+onsite-1 (10.99.0.2) : iO0HHo7Lbuvqs4rV6C456dSm8d+T3ef96CHA9m32CHE=
+```
+
+Ajoutée à `infra/onsite/peers.md`. Le peer `onsite-2` connaissait déjà `onsite-1` dans
+sa config wg0.conf (handshake mutuel observé le 6 mai et confirmé le 8 mai par ping ICMP
+sur le tunnel).
+
+### Cluster Patroni
+
+**Bring-up non tenté dans cette session.** Le mesh Wireguard à 2/3 nœuds permet désormais
+théoriquement le quorum etcd (majorité de 3 = 2), donc l'**option B** de §15 devient
+praticable sans modification de conf — à valider lors d'une session dédiée. Le 3e nœud
+(NODE3 cloud) reste à provisionner pour atteindre la HA cible.
+
+### Points en attente avant prod
+
+Voir §20 "Améliorations à venir" — applicable identiquement à onsite-1.
+
+### Sécurité du provisioning
+
+- Le mdp initial du user `alarm` n'a **pas** été changé après le provisioning du 6 mai.
+  Il a fait surface pendant la session d'audit du 8 mai. **À changer avant prod**
+  (`passwd alarm`) avec un mdp fort (≥ 12 caractères aléatoires) stocké dans Bitwarden.
+- Aucun NOPASSWD sudo n'est créé : `sudo` demande toujours le mdp.
+- `/opt/alarm` est cloné (commit master du 6 mai) — `git pull` à faire avant
+  toute activation des services.
+
+---
+
 ## 23. Historique des changements
 
 - **2026-05-01** : création initiale + provisioning machine onsite-2 à 172.16.1.120
   - Phase 1 OS/réseau/Docker complète
   - Cluster bring-up tenté → blocage etcd attendu (3 membres déclarés en mono-nœud)
   - Reboot test passé
+- **2026-05-06** : provisioning machine onsite-1 à 172.16.1.121
+  - Phase 1 OS/réseau/Docker complète, identique au standard
+  - Wireguard configuré côté onsite-1 (10.99.0.2) avec peer onsite-2 (10.99.0.3)
+- **2026-05-08** : audit end-to-end onsite-1 + MAJ peers.md
+  - 14 tests §18 passants
+  - Mesh Wireguard fonctionnel onsite-1 ↔ onsite-2 (RTT < 1 ms LAN)
+  - Pubkey onsite-1 ajoutée à `peers.md`
+  - Cluster bring-up reporté à session dédiée (option B désormais praticable)

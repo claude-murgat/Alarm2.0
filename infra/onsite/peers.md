@@ -8,14 +8,21 @@ restent sur leurs machines respectives uniquement (`/etc/wireguard/privatekey` m
 | IP Wireguard | Rôle | Hostname | Endpoint réseau |
 |---|---|---|---|
 | `10.99.0.1` | NODE3 cloud (hors-site) | _à définir_ | _à définir_ (IP publique cloud) |
-| `10.99.0.2` | NODE1 onsite-1 (1ère baie) | _à définir_ | LAN site (à fixer) |
-| `10.99.0.3` | NODE2 onsite-2 (cette machine) | onsite-2.alarm.local | `172.16.1.120:51820` |
+| `10.99.0.2` | NODE1 onsite-1 (1ère baie) | onsite-1.alarm.local | `172.16.1.121:51820` |
+| `10.99.0.3` | NODE2 onsite-2 (2ème baie) | onsite-2.alarm.local | `172.16.1.120:51820` |
 
 ## Public keys
 
 | IP | Public key | Date génération |
 |---|---|---|
+| `10.99.0.2` (onsite-1) | `iO0HHo7Lbuvqs4rV6C456dSm8d+T3ef96CHA9m32CHE=` | 2026-05-06 |
 | `10.99.0.3` (onsite-2) | `IdbW+fqdOhFPSIO6XRp5oego+U/shypsOllOjYHQhi8=` | 2026-05-01 |
+
+## Mesh handshakes vérifiés
+
+| Date | De | Vers | RTT | Source |
+|---|---|---|---|---|
+| 2026-05-08 | onsite-1 (10.99.0.2) | onsite-2 (10.99.0.3) | < 1 ms | session audit déploiement |
 
 ## Procédure d'ajout d'un peer
 
