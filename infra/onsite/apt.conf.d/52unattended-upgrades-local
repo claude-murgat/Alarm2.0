@@ -1,0 +1,23 @@
+// /etc/apt/apt.conf.d/52unattended-upgrades-local — Alarme Murgat onsite
+// Cf. docs/PROVISIONING_ONSITE.md §6
+//
+// Security uniquement (pas de bumps de version arbitraires)
+// Pas de reboot auto (les 2 on-site doivent être rebootés en alternance manuelle
+// pour ne pas perdre le quorum cluster simultanément)
+
+Unattended-Upgrade::Origins-Pattern {
+    "origin=Debian,codename=${distro_codename},label=Debian-Security";
+    "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+};
+
+Unattended-Upgrade::Package-Blacklist {};
+
+Unattended-Upgrade::Automatic-Reboot "false";
+Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
+
+Unattended-Upgrade::Mail "direction_technique@charlesmurgat.com";
+Unattended-Upgrade::MailReport "on-change";
+
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "false";

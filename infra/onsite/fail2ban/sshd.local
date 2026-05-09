@@ -1,0 +1,10 @@
+# /etc/fail2ban/jail.d/sshd.local — Alarme Murgat onsite
+# Phase d'install : permissif (maxretry=100) pour ne pas se locker dehors.
+# AVANT mise en prod réelle : durcir maxretry=3, bantime=24h, activer jail recidive.
+# Cf. docs/PROVISIONING_ONSITE.md §5 et §20 (Améliorations).
+[sshd]
+enabled = true
+mode = aggressive
+maxretry = 100
+findtime = 10m
+bantime = 1h
