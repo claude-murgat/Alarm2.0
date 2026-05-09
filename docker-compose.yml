@@ -1,7 +1,22 @@
 # Docker Compose unifie — instancier avec des .env differents :
+#
+# DEV / CI mono-host (3 nœuds sur la meme machine, ports differencies) :
 #   docker compose --env-file .env.node1 -p node1 up --build -d
 #   docker compose --env-file .env.node2 -p node2 up --build -d
 #   docker compose --env-file .env.node3 -p node3 up --build -d
+#
+# PROD cross-machine (1 nœud par machine, peers via Wireguard 10.99.0.x) :
+#   sur onsite-1 : docker compose --env-file .env.prod.node1 -p node1 up -d
+#   sur onsite-2 : docker compose --env-file .env.prod.node2 -p node2 up -d
+#   sur NODE3    : docker compose --env-file .env.prod.node3 -p node3 up -d
+#
+# Bascule controlee par la variable ADVERTISE_HOST :
+# - non definie (CI/dev) : les services s'annoncent sur "host.docker.internal"
+#   resolu localement vers la gateway Docker -> tous les containers d'1 host
+#   se voient via les ports differencies (2380/2382/2384).
+# - definie (prod, ex: "10.99.0.2") : les services s'annoncent sur l'IP
+#   Wireguard du nœud -> les peers etcd des autres machines reachent via
+#   le mesh WG vers <wg-ip>:2380. Cf docs/PROVISIONING_ONSITE.md §22bis.
 
 services:
   etcd:
@@ -20,8 +35,8 @@ services:
       ETCD_DATA_DIR: /etcd-data
       ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
       ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
-      ETCD_ADVERTISE_CLIENT_URLS: http://host.docker.internal:${ETCD_CLIENT_PORT}
-      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://host.docker.internal:${ETCD_PEER_PORT}
+      ETCD_ADVERTISE_CLIENT_URLS: http://${ADVERTISE_HOST:-host.docker.internal}:${ETCD_CLIENT_PORT}
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://${ADVERTISE_HOST:-host.docker.internal}:${ETCD_PEER_PORT}
       ETCD_INITIAL_CLUSTER: ${ETCD_INITIAL_CLUSTER}
       ETCD_INITIAL_CLUSTER_STATE: new
       ETCD_INITIAL_CLUSTER_TOKEN: alarm-ha-cluster
@@ -45,8 +60,8 @@ services:
     environment:
       PATRONI_NAME: ${NODE_NAME}
       PATRONI_ETCD3_HOSTS: ${ETCD_HOSTS}
-      PATRONI_POSTGRESQL_CONNECT_ADDRESS: host.docker.internal:${PG_PORT}
-      PATRONI_RESTAPI_CONNECT_ADDRESS: host.docker.internal:${PATRONI_PORT}
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: ${ADVERTISE_HOST:-host.docker.internal}:${PG_PORT}
+      PATRONI_RESTAPI_CONNECT_ADDRESS: ${ADVERTISE_HOST:-host.docker.internal}:${PATRONI_PORT}
     volumes:
       - pg_data:/var/lib/postgresql/data
     depends_on:
