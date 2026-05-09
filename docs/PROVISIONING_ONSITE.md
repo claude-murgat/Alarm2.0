@@ -690,12 +690,34 @@ Ajoutée à `infra/onsite/peers.md`. Le peer `onsite-2` connaissait déjà `onsi
 sa config wg0.conf (handshake mutuel observé le 6 mai et confirmé le 8 mai par ping ICMP
 sur le tunnel).
 
+### Mesh Wireguard 3-way (complété le 2026-05-09)
+
+NODE3 cloud (10.99.0.1, `51.210.105.102:50922`, provisionné le 2026-05-02) avait dans
+sa config les peers onsite-1 et onsite-2 mais **les onsite n'avaient pas NODE3** dans
+leur `wg0.conf`. Asymétrie corrigée le 2026-05-09 :
+
+- Peer NODE3 (`PublicKey GDN64aY60tBSWKN4qA6GBd/JhistmDP2oF1qN0Xj9gw=`,
+  `Endpoint 51.210.105.102:51820`, `PersistentKeepalive 25`) ajouté dans `wg0.conf`
+  de `onsite-1` et `onsite-2`.
+- `systemctl restart wg-quick@wg0` sur les 2 onsite, handshake établi en < 1 s.
+- Mesh 3-way bidirectionnel confirmé par 5 ping ICMP croisés (RTT < 1 ms en LAN,
+  16,6 ms vers cloud OVH).
+- NAT site : les onsite sortent via `31.204.85.180` (router site), mappings ports
+  dynamiques. NODE3 apprend les endpoints via PersistentKeepalive — pas d'`Endpoint =`
+  déclaré côté NODE3 pour les onsite (correct).
+- Tableau complet des handshakes dans `infra/onsite/peers.md`.
+
 ### Cluster Patroni
 
-**Bring-up non tenté dans cette session.** Le mesh Wireguard à 2/3 nœuds permet désormais
-théoriquement le quorum etcd (majorité de 3 = 2), donc l'**option B** de §15 devient
-praticable sans modification de conf — à valider lors d'une session dédiée. Le 3e nœud
-(NODE3 cloud) reste à provisionner pour atteindre la HA cible.
+**Bring-up non tenté.** Mesh WG 3-way OK, mais nouveau blocage identifié le 2026-05-09 :
+le `docker-compose.yml` actuel est conçu **mono-host** (les 3 instances etcd se voient
+sur `host.docker.internal:238x` du même Docker daemon). Inutilisable tel quel pour un
+cluster cross-machine via Wireguard.
+
+Les options A/B/C de §15 reposaient toutes implicitement sur cette conf mono-host.
+**Option D à introduire** : overlay `docker-compose.prod.yml` qui surcharge les
+endpoints etcd avec les IPs Wireguard `10.99.0.{1,2,3}:2380`, sans toucher au fichier
+de base utilisé par les tests CI mono-host. Sera fait dans une session/PR dédiée.
 
 ### Points en attente avant prod
 
@@ -725,4 +747,11 @@ Voir §20 "Améliorations à venir" — applicable identiquement à onsite-1.
   - 14 tests §18 passants
   - Mesh Wireguard fonctionnel onsite-1 ↔ onsite-2 (RTT < 1 ms LAN)
   - Pubkey onsite-1 ajoutée à `peers.md`
-  - Cluster bring-up reporté à session dédiée (option B désormais praticable)
+- **2026-05-09** : complétion mesh Wireguard 3-way + blocage docker-compose identifié
+  - Peer NODE3 (cloud OVH 51.210.105.102:51820, pubkey
+    `GDN64aY60tBSWKN4qA6GBd/JhistmDP2oF1qN0Xj9gw=`) ajouté dans wg0.conf de
+    onsite-1 et onsite-2 avec `PersistentKeepalive=25`
+  - 5 handshakes mesh confirmés bidirectionnels (LAN < 1 ms, cloud 16,6 ms)
+  - `peers.md` : NODE3 endpoint, table handshakes complète, note NAT site
+  - Cluster bring-up reporté : `docker-compose.yml` mono-host, option D
+    (overlay `docker-compose.prod.yml`) à faire en session dédiée
