@@ -53,13 +53,36 @@ services:
       etcd:
         condition: service_healthy
     healthcheck:
-      # Tuning chantier #21 step 1 : interval 10s -> 5s, retries 5 -> 3.
-      # Gain : detection "patroni up" 2x plus rapide (5-10s wall-clock sur boot).
-      # Risque : LOW (observe stable sur dev, le `/health` endpoint est leger).
+      # Tuning chantier #21 step 1 : interval 10s -> 5s.
+      #
+      # start_period: 60s + retries: 18 (chantier #21 step 4, smoke-tested
+      # 2026-05-06 contre boot 3-noeuds reel).
+      #
+      # Rationale : un noeud replica patroni fait pg_basebackup au boot
+      # (clone le primaire, ~10-30s selon le volume + I/O). Pendant ce
+      # temps, le `/health` patroni renvoie 503 ("creating replica" /
+      # "starting"). Le boot d'un cluster 3-noeuds (tier4 nightly,
+      # cf .github/workflows/tier4-failback.yml) a 2 replicas a faire
+      # basebackup en sequence -> on a besoin d'une fenetre tolerant
+      # le 503 pendant tout pg_basebackup + post_bootstrap + premier tick
+      # patroni.
+      #
+      # start_period 60s : pendant les 60 premieres secondes, les checks
+      # qui echouent ne sont PAS comptes contre retries (semantique
+      # Docker). Premier check qui passe -> end of start_period.
+      # retries 18 (× interval 5s = 90s) : apres start_period ou apres
+      # premier check OK, on tolere 90s consecutifs de 503 avant de
+      # marquer unhealthy. En regime etabli, chaque check est < 1s, donc
+      # 18 retries n'a aucun cout perceptible — c'est juste une marge.
+      #
+      # Sans cette marge, `docker compose up -d` (tier4) fait abort le
+      # `depends_on: condition: service_healthy` du backend pendant le
+      # pg_basebackup d'un replica -> "dependency failed".
+      start_period: 60s
       test: ["CMD", "curl", "-sf", "http://localhost:8008/health"]
       interval: 5s
       timeout: 5s
-      retries: 3
+      retries: 18
 
   backend:
     build: ./backend

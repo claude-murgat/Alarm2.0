@@ -1,23 +1,43 @@
 """
-Test E2E failback : coupe VPS2, verifie que les apps basculent sur VPS1.
+Test E2E failback sur cluster 3 noeuds Patroni (la stack de prod).
 
-Refactor pytest avec fixtures (chantier #21 step 0b — REDO apres le merge
-de PR #34 dans une branche stackee qui n'a pas ete propagee a master via
-le squash merge de #33).
+Refonte chantier #21 step 4 (post-decouverte 2026-05-06) : la version
+2-node primary/standby de ce test ciblait `docker-compose.vps2.yml`,
+un compose legacy de l'ere "two independent compose instances + streaming
+replication" (commits bacd4ed + a25a680) qui n'a JAMAIS ete mis a jour
+apres la migration vers Patroni 3-node (commit 2733643). En consequence
+le tier4 nightly etait rouge depuis le 2026-05-03 (db-standby-init
+cherchait un service `db` que Patroni n'expose plus).
+
+Prod = 3 noeuds Patroni, cf docs/architecture_option_B_3vps_patroni.md.
+Topologie : 1 baie serveur (NODE1) + 2 VPS cloud (NODE2, NODE3), chacun
+avec etcd + Patroni + backend, formant un consensus a 3 et exposant
+3 backends sur 8000/8001/8002. L'app Android (ApiClient.kt) rotate
+sur ces 3 URLs (PRIMARY/FALLBACK/FALLBACK_2) en cas d'echec consecutif.
+
+Ce que le test valide (INV-043 : "heartbeat sur replica -> 503, l'app
+doit failover sur le primary") :
+- Stop le projet du leader Patroni courant
+- Patroni elit un nouveau leader parmi les 2 noeuds restants
+- Les backends sur replica continuent de renvoyer 503 (heartbeat)
+- L'ApiClient rotate jusqu'a trouver le nouveau leader (200 OK)
+- Les heartbeats reprennent sur le nouveau backend
 
 Hors scope tier 3 actuellement : `--ignore=tests/test_failback.py` dans
 pr.yml. Le test orchestre 3 emulateurs Android via ADB, or les runners CI
-self-hosted n'ont pas d'emulateurs. Garde manuel / tier 4 nightly tant
-que l'infra emulateurs n'est pas mise en place sur les runners.
+self-hosted Docker n'ont pas d'emulateurs. Le tier 4 nightly (workflow
+tier4-failback.yml) tourne sur un runner Linux dedie avec emulateurs.
 
 Prerequis (run manuel) :
-- Docker Compose 2-node setup (VPS1 sur :8000, VPS2 sur :8001)
+- Docker Compose 3-node Patroni up (cf CLAUDE.md "Lancer le cluster complet")
+  Project names node1/node2/node3, ports 8000/8001/8002.
 - Au moins 2 emulateurs Android sur 3 (5552/5554/5556) avec l'app installee
 - Variables env (toutes optionnelles, defaults sensibles) :
     ADB_PATH (defaut: 'adb' dans le PATH)
     ALARM_REPO_ROOT (defaut: cwd, racine repo Alarm2.0)
-    ALARM_VPS1_URL (defaut: http://localhost:8000)
-    ALARM_VPS2_URL (defaut: http://localhost:8001)
+    ALARM_VPS1_URL (defaut: http://localhost:8000) — backend node1
+    ALARM_VPS2_URL (defaut: http://localhost:8001) — backend node2
+    ALARM_VPS3_URL (defaut: http://localhost:8002) — backend node3
 
 Run manuel :
     pytest tests/test_failback.py -v -s
@@ -37,6 +57,16 @@ ADB = os.environ.get("ADB_PATH", "adb")
 CWD = os.environ.get("ALARM_REPO_ROOT", os.getcwd())
 VPS1 = os.environ.get("ALARM_VPS1_URL", "http://localhost:8000")
 VPS2 = os.environ.get("ALARM_VPS2_URL", "http://localhost:8001")
+VPS3 = os.environ.get("ALARM_VPS3_URL", "http://localhost:8002")
+
+# Mapping URL -> docker compose project name (pour stop/start le bon noeud).
+# Les .env.node{1,2,3} sont les fichiers de config par noeud, et le project
+# name docker compose porte le meme nom (cf CLAUDE.md commandes cluster).
+NODES = [
+    {"url": VPS1, "project": "node1", "label": "NODE1"},
+    {"url": VPS2, "project": "node2", "label": "NODE2"},
+    {"url": VPS3, "project": "node3", "label": "NODE3"},
+]
 
 ALL_EMUS = ["emulator-5552", "emulator-5554", "emulator-5556"]
 USERS_CREDS = {
@@ -150,10 +180,72 @@ def wait_users_heartbeating(base, expected_count, max_age_seconds=5.0, timeout=2
 def check_emu_network(serial):
     """Verifie que l'emulateur peut joindre 10.0.2.2 (host)."""
     adb(serial, "reverse", "--remove-all")
+    # 3 ports backend exposes par les 3 projets node1/node2/node3 (cf NODES).
     adb(serial, "reverse", "tcp:8000", "tcp:8000")
     adb(serial, "reverse", "tcp:8001", "tcp:8001")
+    adb(serial, "reverse", "tcp:8002", "tcp:8002")
     out = adb(serial, "shell", "ping -c 1 -W 2 10.0.2.2")
     return "1 received" in out or "1 packets received" in out
+
+
+def get_role(url):
+    """Renvoie le role Patroni du backend (primary, replica, ?). None si injoignable."""
+    try:
+        return requests.get(f"{url}/health", timeout=2).json().get("role")
+    except Exception:
+        return None
+
+
+def find_leader(urls=None, timeout=60.0):
+    """Polling : attend qu'UN des `urls` ait role=primary. Renvoie l'URL ou None.
+
+    Conforme a la mini-regle "blind sleeps to observable polling" (chantier #21
+    step 2) : on observe l'etat Patroni reel via /health, pas un timer fixe.
+    """
+    urls = urls if urls is not None else [n["url"] for n in NODES]
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for url in urls:
+            if get_role(url) == "primary":
+                return url
+        time.sleep(0.5)
+    return None
+
+
+def node_for(url):
+    """Renvoie le dict NODES correspondant a l'URL, ou None."""
+    for n in NODES:
+        if n["url"] == url:
+            return n
+    return None
+
+
+def wait_users_heartbeating_any(urls, expected_count, max_age_seconds=10.0, timeout=60.0):
+    """Polling sur N URLs en parallele : retourne (url, count) des qu'UN backend
+    voit `expected_count` users heartbeating. Utile post-failover quand on ne sait
+    pas encore quel noeud Patroni a elu leader.
+
+    Aucun sleep aveugle : on poll a 0.5Hz les endpoints observables, sortie
+    immediate des que la condition est remplie."""
+    deadline = time.time() + timeout
+    last = (None, 0)
+    while time.time() < deadline:
+        for url in urls:
+            try:
+                r = requests.get(f"{url}/api/test/connected-users-detailed", timeout=3)
+                users = r.json().get("users", [])
+                recent = [
+                    u for u in users
+                    if u.get("age_seconds") is not None and u["age_seconds"] < max_age_seconds
+                ]
+                if len(recent) >= expected_count:
+                    return (url, len(recent))
+                if len(recent) > last[1]:
+                    last = (url, len(recent))
+            except Exception:
+                pass
+        time.sleep(0.5)
+    return last
 
 
 def app_connected(serial):
@@ -187,144 +279,183 @@ def working_emulators():
 
 @pytest.fixture(scope="module")
 def cluster_running():
-    """Setup : VPS1 + VPS2 UP et reset. Teardown : VPS2 remis UP si laisse DOWN.
+    """Setup : 3 noeuds Patroni UP et reset. Teardown : remonte tout noeud
+    laisse DOWN par un test (succes OU echec).
 
-    Idempotent : peut etre lance sur un cluster deja UP ou DOWN. Le `compose
-    start` est sans effet si deja running. Garantit le restore de l'etat
-    baseline meme si le test fail au milieu (vs script lineaire qui laissait
-    VPS2 DOWN au moindre fail)."""
-    print("\n[fixture] Ensure both VPS UP...")
-    docker("docker", "compose", "start", "backend")
-    docker("docker", "compose", "-f", "docker-compose.vps2.yml", "-p", "alarm-vps2", "start", "backend")
+    Le cluster est CENSE etre deja boote en amont (workflow tier4-failback.yml
+    step "Boot cluster" en CI ; cf CLAUDE.md "Lancer le cluster complet" en
+    local). La fixture se contente de :
+      1. Reveiller (`compose start`) chaque project node1/node2/node3 — sans
+         effet si deja running, idempotent.
+      2. Verifier que les 3 backends sont healthy (200 sur /health).
+      3. Identifier le leader Patroni courant via /health (role=primary).
+      4. Reset l'etat applicatif (alarmes, horloge) via le leader.
 
-    assert wait_healthy(VPS1, 30), "VPS1 must be healthy at setup"
-    assert wait_healthy(VPS2, 30), "VPS2 must be healthy at setup"
+    Le teardown reveille chaque project si stoppe par un test, pour rendre
+    le cluster a son etat baseline avant le prochain test du module.
+    """
+    print("\n[fixture] Ensure 3 nodes UP...")
+    # `compose -p X start` (sans service) reveille TOUS les services du projet
+    # (etcd + patroni + backend). Si un test precedent a stoppe le project
+    # entier (kill leader scenario), les 3 services doivent etre relances —
+    # sinon backend depend de patroni depend de etcd, et un seul service
+    # demarre rentre en boucle de retry.
+    for n in NODES:
+        docker("docker", "compose", "-p", n["project"], "start")
 
-    requests.post(f"{VPS1}/api/test/reset", timeout=5)
-    print(f"  VPS1: {requests.get(f'{VPS1}/health', timeout=2).json().get('role', '?')}")
-    print(f"  VPS2: {requests.get(f'{VPS2}/health', timeout=2).json().get('role', '?')}")
+    for n in NODES:
+        assert wait_healthy(n["url"], 60), f"{n['label']} ({n['url']}) must be healthy at setup"
 
-    yield {"vps1": VPS1, "vps2": VPS2}
+    leader = find_leader(timeout=30.0)
+    assert leader is not None, "Aucun leader Patroni trouve apres 30s — cluster KO"
+    print(f"  Leader Patroni courant : {node_for(leader)['label']} ({leader})")
+    for n in NODES:
+        role = get_role(n["url"])
+        print(f"  {n['label']}: {role}")
 
-    # Teardown : ramener VPS2 si le test l'a laisse DOWN (succes OU echec).
+    requests.post(f"{leader}/api/test/reset", timeout=5)
+
+    yield {"nodes": NODES, "leader_initial": leader}
+
+    # Teardown : reveille TOUS les services de chaque project stoppe par un
+    # test (`start` sans service = etcd + patroni + backend). Voir commentaire
+    # symetrique du setup.
     print("\n[fixture cleanup] Restore cluster baseline state...")
-    try:
-        requests.post(f"{VPS1}/api/test/reset", timeout=5)
-    except Exception:
-        pass
-    docker("docker", "compose", "-f", "docker-compose.vps2.yml", "-p", "alarm-vps2", "start", "backend")
-    wait_healthy(VPS2, 30)
+    for n in NODES:
+        docker("docker", "compose", "-p", n["project"], "start")
+    for n in NODES:
+        wait_healthy(n["url"], 60)
+    # Reset applicatif sur le leader courant (peut avoir change apres un test
+    # qui a kill l'ancien leader).
+    new_leader = find_leader(timeout=30.0)
+    if new_leader is not None:
+        try:
+            requests.post(f"{new_leader}/api/test/reset", timeout=5)
+        except Exception:
+            pass
 
 
 @pytest.fixture
 def emulators_connected(working_emulators, cluster_running):
-    """Apps Android logged in et confirmees heartbeating sur VPS1.
+    """Apps Android logged in et confirmees heartbeating sur LE LEADER courant.
 
-    Utilise wait_users_heartbeating (polling observable sur l'endpoint
-    /api/test/connected-users-detailed) pour verifier la connexion
-    plutot qu'un sleep(10) aveugle (mini-regle team failover-blocking)."""
-    print("\n[fixture] Setup apps...")
+    En 3-node Patroni, le leader peut etre node1/node2/node3 selon l'ordre
+    d'election au boot (souvent node1 mais pas garanti). L'ApiClient demarre
+    sur PRIMARY_BACKEND_URL=8000 ; si node1 est replica, il rotate jusqu'au
+    leader (cf INV-043, 503 sur replica). On observe l'arrivee des heartbeats
+    sur N'IMPORTE QUEL des 3 backends via wait_users_heartbeating_any.
+
+    Le `time.sleep(1)` apres `am force-stop` est un settling delay OS (plus
+    de delais SQLite WAL pendant que Android nettoie le process), pas un
+    sleep aveugle de test — il doit rester court. Helpers polling utilises
+    pour les attentes liees au backend (mini-regle "blind sleeps to
+    observable polling", chantier #21 step 2).
+    """
+    leader_url = cluster_running["leader_initial"]
+    print(f"\n[fixture] Setup apps (leader Patroni : {node_for(leader_url)['label']})...")
     for serial in working_emulators:
         name, pwd = USERS_CREDS[serial]
         adb(serial, "shell", "am force-stop com.alarm.critical")
         time.sleep(1)
-        tok, uid, _uname = login(name, pwd)
+        # On login sur le leader, peu importe lequel — login va a la base
+        # via le primaire de Patroni.
+        tok, uid, _uname = login(name, pwd, base=leader_url)
         inject_prefs(serial, tok, name, uid)
         adb(serial, "shell", "am start -n com.alarm.critical/.MainActivity")
         print(f"  {name} sur {serial}")
 
-    print("  Attente heartbeats (polling observable)...")
-    n = wait_users_heartbeating(
-        VPS1, expected_count=len(working_emulators),
-        max_age_seconds=5.0, timeout=20.0,
+    print("  Attente heartbeats (polling observable, n'importe quel noeud)...")
+    all_urls = [n["url"] for n in NODES]
+    url, n_hb = wait_users_heartbeating_any(
+        all_urls, expected_count=len(working_emulators),
+        max_age_seconds=5.0, timeout=30.0,
     )
-    assert n >= len(working_emulators), (
-        f"Seulement {n}/{len(working_emulators)} apps heartbeating apres 20s. "
-        f"Les apps ne se sont pas connectees au backend."
+    assert n_hb >= len(working_emulators), (
+        f"Seulement {n_hb}/{len(working_emulators)} apps heartbeating apres 30s "
+        f"(meilleur observe sur {url}). Les apps ne se sont pas connectees au cluster."
     )
+    print(f"  → {n_hb}/{len(working_emulators)} apps heartbeatent sur {node_for(url)['label']} ({url})")
 
     return working_emulators
 
 
-# --- Test ---
+# --- Tests ---
 
-def test_failback_vps2_to_vps1(working_emulators, cluster_running, emulators_connected):
-    """Couper VPS2 -> les apps doivent failback vers VPS1.
+def test_failback_kill_leader(working_emulators, cluster_running, emulators_connected):
+    """Stop le projet du leader Patroni courant -> les apps doivent rotater
+    vers le nouveau leader elu parmi les 2 noeuds restants.
 
-    Scenario complet :
-    1. Forcer apps sur VPS2 (couper VPS1 momentanement) -> verif elles tiennent
-    2. Remonter VPS1
-    3. Couper VPS2 -> verif les apps reviennent sur VPS1 (heartbeats observables)
+    Materialise INV-043 ("heartbeat sur replica -> 503, l'app doit failover")
+    en condition Patroni 3-node reelle :
+    1. Identifier le leader courant via /health (role=primary).
+    2. `docker compose -p <leader_project> down` (project entier — sinon Patroni
+       reste leader et les replicas continuent de renvoyer 503 a l'app, qui
+       boucle sans jamais trouver de noeud OK).
+    3. Patroni sur les 2 noeuds restants forme quorum a 2 (a partir de 3 etcd
+       initiaux, perdre 1 garde majorite) et elit un nouveau leader.
+    4. Le backend du nouveau leader passe role=primary -> 200 sur /health
+       et /heartbeat.
+    5. L'ApiClient rotate (consecutiveFailures>=3 sur l'ancien leader) jusqu'a
+       atteindre le nouveau leader, observable via les heartbeats qui reprennent.
     """
-    # --- [3] Forcer les apps sur VPS2 (couper VPS1) ---
-    print("\n[3] Forcer les apps sur VPS2 (couper VPS1)...")
-    docker("docker", "compose", "stop", "backend")
-    print("  VPS1 stoppe. Attente que les apps basculent sur VPS2 (polling observable)...")
-    # On attend que les apps soient detectees heartbeating sur VPS2 (rotation
-    # circulaire ApiClient apres N echecs). Plus fiable que sleep(15) aveugle.
-    n_hb_vps2 = wait_users_heartbeating(VPS2, expected_count=len(working_emulators),
-                                         max_age_seconds=10.0, timeout=25.0)
-    print(f"  {n_hb_vps2}/{len(working_emulators)} apps heartbeating sur VPS2")
-
-    for serial in working_emulators:
-        ok = app_connected(serial)
-        print(f"  {serial} sur VPS2: {'CONNECTE' if ok else 'PAS CONNECTE'}")
-
-    # --- [4] Remonter VPS1 ---
-    print("\n[4] Remonter VPS1...")
-    docker("docker", "compose", "start", "backend")
-    assert wait_healthy(VPS1, 30), "VPS1 must come back"
-    print("  VPS1 healthy: OK")
-    time.sleep(5)
-
-    # --- [5] LE VRAI TEST : couper VPS2, apps doivent failback vers VPS1 ---
-    print("\n[5] === COUPER VPS2 : apps doivent failback vers VPS1 ===")
-
-    requests.post(f"{VPS1}/api/test/send-alarm", timeout=5)
-    time.sleep(3)
-    print("  Alarme creee")
-
-    # Couper VPS2 avec retry observable (vs sleep aveugle)
-    docker("docker", "compose", "-f", "docker-compose.vps2.yml", "-p", "alarm-vps2", "stop", "backend")
-    vps2_down = wait_unhealthy(VPS2, timeout=10)
-    print(f"  VPS2 stoppe: {'OK' if vps2_down else 'ECHEC - ENCORE UP'}")
-    if not vps2_down:
-        print("  [docker] Retry compose stop (premier essai n'a pas eteint le conteneur)...")
-        subprocess.run(
-            ["docker", "compose", "-f", "docker-compose.vps2.yml", "-p", "alarm-vps2",
-             "stop", "backend"],
-            timeout=30, cwd=CWD,
-        )
-        vps2_down = wait_unhealthy(VPS2, timeout=10)
-        print(f"  Retry: {'OK' if vps2_down else 'VPS2 REFUSE DE MOURIR'}")
-    assert vps2_down, "VPS2 doit etre down pour declencher le failback"
-
-    # Monitoring : on attend que les users soient online sur VPS1 (heartbeat recus).
-    # C'est la preuve irrefutable que les apps se sont reconnectees a VPS1.
-    print("  Monitoring failback (critere: users online sur VPS1 via API)...")
     expected = len(working_emulators)
-    failback_ok = False
-    online = 0
-    for t in range(0, 60, 5):
-        time.sleep(5)
-        try:
-            status = requests.get(f"{VPS1}/api/test/status", timeout=3).json()
-            online = status["connected_users"]
-        except Exception:
-            online = 0
-        vps2_still_down = not healthy(VPS2)
-        print(f"  t+{t+5}s: {online} users online sur VPS1 | "
-              f"vps2={'DOWN' if vps2_still_down else 'UP!!'}")
+    initial_leader = cluster_running["leader_initial"]
+    leader_node = node_for(initial_leader)
+    print(f"\n[1] Leader Patroni initial : {leader_node['label']} ({initial_leader})")
 
-        if online >= expected:
-            print(f"\n  FAILBACK OK en {t+5}s ! ({online} users reconnectes)")
-            failback_ok = True
-            break
+    # --- Stop le project du leader courant (down -v pour aussi virer etcd
+    #     et patroni, sinon patroni reste actif comme leader avec son etcd
+    #     et les replicas continuent de proxy-503 jusqu'a son retour).
+    other_nodes = [n for n in NODES if n["url"] != initial_leader]
+    print(f"\n[2] Stop projet {leader_node['project']} entier (force election Patroni)...")
+    docker("docker", "compose", "-p", leader_node["project"], "stop")
 
-    if not failback_ok:
-        print("\n  ECHEC: failback pas complet apres 60s\n  LOGCAT:")
+    # Backend du leader doit etre injoignable rapidement
+    assert wait_unhealthy(initial_leader, timeout=20), \
+        f"{leader_node['label']} backend doit etre down apres compose stop"
+
+    # --- Attendre l'election d'un nouveau leader parmi les 2 restants
+    print(f"\n[3] Attente election nouveau leader parmi {[n['label'] for n in other_nodes]}...")
+    new_leader = find_leader(urls=[n["url"] for n in other_nodes], timeout=60.0)
+    assert new_leader is not None, (
+        "Aucun nouveau leader Patroni elu apres 60s. "
+        "Verifier : etcd quorum (2/3 minimum), patroni health check."
+    )
+    new_leader_node = node_for(new_leader)
+    print(f"  → Nouveau leader : {new_leader_node['label']} ({new_leader})")
+
+    # --- Verifier que les apps rotatent vers le nouveau leader
+    # Note : selon que le nouveau leader est URL[1] (VPS2) ou URL[2] (VPS3),
+    # l'ApiClient passera par 1 ou 2 rotations. Les deux cas valident
+    # l'invariant : le test reste en succes des que les heartbeats sont
+    # observes sur le nouveau leader.
+    print(f"\n[4] Polling heartbeats sur {new_leader_node['label']} (apps doivent rotater)...")
+    all_urls = [n["url"] for n in NODES]
+    landed_url, n_hb = wait_users_heartbeating_any(
+        all_urls, expected_count=expected,
+        max_age_seconds=10.0, timeout=120.0,  # 120s : marge pour rotations multiples
+    )
+
+    if n_hb < expected:
+        # Diagnostic detaille avant fail.
+        print("\n  ECHEC: failover pas complet apres 120s")
+        print(f"  Meilleur observe : {n_hb}/{expected} sur {landed_url}")
+        for n in NODES:
+            print(f"  {n['label']} role: {get_role(n['url'])}")
+        print("  LOGCAT (extrait ApiClient + AlarmPollingService) :")
         for serial in working_emulators:
             print(f"\n  === {serial} ===")
             print(adb(serial, "logcat", "-d", "-t", "50",
                       "-s", "ApiClient:*", "AlarmPollingService:*"))
-        pytest.fail(f"Failback incomplet : {online}/{expected} users seulement apres 60s")
+        pytest.fail(
+            f"Failover incomplet : {n_hb}/{expected} apps seulement sur "
+            f"{landed_url} apres 120s. Nouveau leader Patroni : {new_leader}."
+        )
+
+    print(f"\n  FAILOVER OK : {n_hb}/{expected} apps sur {landed_url} "
+          f"(leader Patroni : {new_leader})")
+    # Le landing doit etre le nouveau leader (les replicas renvoient 503).
+    assert landed_url == new_leader, (
+        f"Apps heartbeatent sur {landed_url} mais leader Patroni est {new_leader} : "
+        "incoherence INV-043 (heartbeat sur replica devrait renvoyer 503)."
+    )

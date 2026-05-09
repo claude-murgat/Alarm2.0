@@ -20,7 +20,9 @@ object ApiClient {
         BuildConfig.FALLBACK_BACKEND_URL_2
     )
 
-    // Index de l'URL courante (0 = primaire, 1 = secondaire)
+    // Index de l'URL courante (0 = primary, 1 = fallback, 2 = fallback_2).
+    // Rotation circulaire sur switchToNextUrl() : 0 -> 1 -> 2 -> 0 -> ...
+    // Cf docs/architecture_option_B_3vps_patroni.md (3 sites distincts).
     @Volatile
     var currentUrlIndex: Int = 0
 

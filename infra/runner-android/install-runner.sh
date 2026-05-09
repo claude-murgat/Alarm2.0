@@ -26,6 +26,8 @@ REPO_URL="https://github.com/claude-murgat/Alarm2.0"
 RUNNER_NAME="alarm-android-1"
 RUNNER_LABELS="self-hosted,linux,alarm-android"
 ANDROID_HOME="/opt/android-sdk"
+TOOL_CACHE="/opt/hostedtoolcache"
+PYTHON_TOOLCACHE_VERSION="3.12"
 ANDROID_API_LEVEL="30"
 ANDROID_TARGET="google_apis"
 ANDROID_ARCH="x86_64"
@@ -89,6 +91,31 @@ else
     echo "  docker deja installe : $(docker --version)"
 fi
 
+# --- 2.5. Docker daemon DNS (force 8.8.8.8 prio) ---
+step "Configure Docker daemon DNS (8.8.8.8 priority)..."
+# BuildKit (utilise par `docker compose build`) propage les nameservers du
+# /etc/resolv.conf de l'host aux containers de build. Empiriquement sur cette
+# VM Debian/Proxmox : 1.1.1.1 (declare 2e nameserver de l'host) timeout
+# systematiquement depuis les containers buildx (resolution UDP echoue, cause
+# probable firewall ou MTU cote Proxmox). 8.8.8.8 marche. On force 8.8.8.8 en
+# 1ere position via daemon.json. Sans ca, `Boot cluster` du tier4-failback
+# fail au pull de python:3.12-slim ou postgres:16-alpine.
+DAEMON_JSON="/etc/docker/daemon.json"
+DESIRED_DNS_JSON='{"dns": ["8.8.8.8", "1.1.1.1"]}'
+if [[ ! -f "$DAEMON_JSON" ]] || ! grep -qF '"dns"' "$DAEMON_JSON"; then
+    echo "  ecriture $DAEMON_JSON..."
+    echo "$DESIRED_DNS_JSON" > "$DAEMON_JSON"
+    systemctl restart docker
+    sleep 3
+elif ! grep -qF '"8.8.8.8"' "$DAEMON_JSON"; then
+    echo "  WARNING: $DAEMON_JSON existe avec une cle 'dns' mais sans 8.8.8.8."
+    echo "  Inspection manuelle requise (ne pas overrider une config tierce)."
+    echo "  Contenu actuel:"
+    cat "$DAEMON_JSON"
+else
+    echo "  $DAEMON_JSON deja configure avec 8.8.8.8, skip"
+fi
+
 # --- 3. KVM check (info, le script continue meme si KO pour debug) ---
 step "Verification KVM (/dev/kvm)..."
 if [[ -e /dev/kvm ]]; then
@@ -144,6 +171,47 @@ export PATH="\$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platfor
 EOF
 chmod +x /etc/profile.d/android.sh
 
+# --- 5.5. Hosted toolcache (Python 3.12 standalone) ---
+step "Pre-install Python ${PYTHON_TOOLCACHE_VERSION} dans $TOOL_CACHE..."
+# actions/setup-python@v5 ne fournit pas de build Python 3.12 pour Debian 12
+# (uniquement Ubuntu/macOS/Windows dans actions/python-versions). Sans
+# pre-install, le step `Setup Python 3.12` du tier4-failback fail en 1s avec :
+#   "The version '3.12' with architecture 'x64' was not found for Debian 12"
+#
+# Fix : telecharger un Python standalone (statique, sans deps systeme) depuis
+# astral-sh/python-build-standalone et l'extraire dans le path standard ou
+# setup-python cherche en premier : $RUNNER_TOOL_CACHE/Python/X.Y.Z/x64/.
+# Le marker x64.complete signale a setup-python que l'install est valide.
+#
+# Le toolcache doit etre owned par RUNNER_USER pour que d'autres setup-* (ex:
+# setup-java) puissent y ecrire (Java_Temurin-Hotspot_jdk/...). Cree par
+# defaut en root par mkdir -> EACCES.
+mkdir -p "$TOOL_CACHE"
+chown -R "$RUNNER_USER:$RUNNER_USER" "$TOOL_CACHE"
+
+if ls -d "$TOOL_CACHE/Python/${PYTHON_TOOLCACHE_VERSION}."* >/dev/null 2>&1; then
+    echo "  Python ${PYTHON_TOOLCACHE_VERSION}.x deja present dans toolcache, skip"
+else
+    PY_ASSET=$(curl -fsSL https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest \
+        | grep -oE "https://github.com[^\"]*cpython-${PYTHON_TOOLCACHE_VERSION}\.[0-9.]+%2B[0-9]+-x86_64-unknown-linux-gnu-install_only\.tar\.gz" \
+        | head -1)
+    if [[ -z "$PY_ASSET" ]]; then
+        echo "ERREUR: pas trouve d'asset Python ${PYTHON_TOOLCACHE_VERSION} standalone." >&2
+        exit 1
+    fi
+    PY_FULL=$(echo "$PY_ASSET" | grep -oE "cpython-[0-9]+\.[0-9]+\.[0-9]+" | sed 's/cpython-//')
+    PY_DIR="$TOOL_CACHE/Python/$PY_FULL/x64"
+    echo "  download Python $PY_FULL ($PY_ASSET)..."
+    mkdir -p "$PY_DIR"
+    wget -qO /tmp/python-standalone.tar.gz "$PY_ASSET"
+    tar -xzf /tmp/python-standalone.tar.gz -C /tmp/
+    cp -a /tmp/python/. "$PY_DIR/"
+    touch "$TOOL_CACHE/Python/$PY_FULL/x64.complete"
+    rm -rf /tmp/python /tmp/python-standalone.tar.gz
+    chown -R "$RUNNER_USER:$RUNNER_USER" "$TOOL_CACHE/Python"
+    echo "  Python $PY_FULL installe : $($PY_DIR/bin/python3 --version)"
+fi
+
 # --- 6. actions/runner ---
 step "Install actions/runner v$RUNNER_VERSION dans $RUNNER_HOME..."
 
@@ -186,6 +254,26 @@ sudo -u "$RUNNER_USER" ./config.sh \
     --work "_work" \
     --unattended \
     --replace
+
+# --- 7.5. RUNNER_TOOL_CACHE env var ---
+step "Configure RUNNER_TOOL_CACHE=$TOOL_CACHE dans $RUNNER_HOME/.env..."
+# Sur self-hosted runner, RUNNER_TOOL_CACHE par defaut est
+# <runner_dir>/_work/_tool/, divergent du standard managed
+# /opt/hostedtoolcache/ ou nos pre-installs (Python 3.12) vivent. Sans cette
+# variable, setup-python cherche dans _work/_tool/ et ne trouve rien -> fail
+# meme apres notre pre-install. Le fichier .env est lu au demarrage du
+# service runner.
+RUNNER_ENV="$RUNNER_HOME/.env"
+DESIRED_LINE="RUNNER_TOOL_CACHE=$TOOL_CACHE"
+touch "$RUNNER_ENV"
+chown "$RUNNER_USER:$RUNNER_USER" "$RUNNER_ENV"
+if grep -q "^RUNNER_TOOL_CACHE=" "$RUNNER_ENV"; then
+    sed -i "s|^RUNNER_TOOL_CACHE=.*|$DESIRED_LINE|" "$RUNNER_ENV"
+    echo "  RUNNER_TOOL_CACHE deja present, valeur mise a jour"
+else
+    echo "$DESIRED_LINE" >> "$RUNNER_ENV"
+    echo "  RUNNER_TOOL_CACHE ajoute"
+fi
 
 # --- 8. Install + start systemd service ---
 step "Install service systemd..."
