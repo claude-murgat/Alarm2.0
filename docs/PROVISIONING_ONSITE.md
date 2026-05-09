@@ -734,6 +734,122 @@ Voir §20 "Améliorations à venir" — applicable identiquement à onsite-1.
 
 ---
 
+## 22ter. Résultat de la session de provisioning NODE3 cloud (2026-05-09)
+
+> **Cible** : NODE3 cloud OVH `51.210.105.102:50922` (port SSH custom OVH KB),
+> WG `10.99.0.1`. **Différent des onsite** : VPS hébergé OVH, exposé Internet,
+> rôle hors-site dans la topologie 2 onsite + 1 cloud (cf §0).
+>
+> Cette section documente le provisioning applicatif (Docker + clone repo) qui
+> manquait, **les divergences observées vs procédure §3-§14 onsite, et les
+> adaptations à conserver pour les futurs cloud nodes.**
+
+### Specs constatées (machine NODE3, 51.210.105.102)
+
+| Élément | Valeur | Note |
+|---|---|---|
+| Hardware | Intel Core (Haswell, no TSX) — VPS OVH, 4 vCPU | Pas d'accès au modèle physique |
+| OS | Debian 13 (trixie) 13.x | Identique aux onsite |
+| RAM | **7,6 Gio** | Cible ≥ 8 Gio quasi atteinte |
+| Disque | **75 Go** ext4 single partition + EFI + biosboot | Pas de LVM (default OVH) |
+| Réseau | IP publique fixe, pas de NAT côté serveur | Différent des onsite |
+| Hostname | `vps-1560caaa` (default OVH) | **Pas changé** en `node3.alarm.local` (cf adaptations) |
+
+### État avant cette session
+
+Phase 1 OS/sécurité **déjà complète** (provisionnée hors-PR avant 2026-05-09) :
+- ✅ §3 sshd hardening (`99-hardening.conf` présent, `port 50922`, `permitrootlogin no`)
+- ✅ §4 UFW active avec règles cloud-spécifiques (cf adaptations)
+- ✅ §5 fail2ban (jails `sshd` + `recidive`)
+- ✅ §6 unattended-upgrades configuré
+- ✅ §7 chrony (Stratum 2, offset < 100 µs)
+- ✅ §8 journald persistent (32 Mo)
+- ✅ §9 sysctl Postgres (swappiness=1, overcommit_memory=2, somaxconn=1024)
+- ✅ §11 watchdog actif (cf adaptations — softdog au lieu de iTCO_wdt)
+- ✅ §13 Wireguard up sur `10.99.0.1`, peers onsite-1 et onsite-2 dans `wg0.conf`
+
+**Manquant** :
+- ❌ §14 Docker + Compose
+- ❌ git non installé
+- ❌ `/opt/alarm` non cloné
+
+### Actions de provisioning effectuées (2026-05-09)
+
+1. `apt install git` (2.47.3-0+deb13u1)
+2. Install Docker via repo officiel (procédure §14) :
+   - `apt install ca-certificates curl`
+   - Clé GPG Docker dans `/etc/apt/keyrings/docker.asc`
+   - Repo `https://download.docker.com/linux/debian trixie stable`
+   - `apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin`
+   - Versions : Docker 29.4.3 + Compose v5.1.3
+3. `/etc/docker/daemon.json` : logging json-file 10m × 3 fichiers (conforme §14)
+4. `usermod -aG docker alarm` (alarm UID 1001, désormais dans `docker` GID 989)
+5. `mkdir /opt/alarm && chown alarm:alarm` puis
+   `sudo -u alarm git clone https://github.com/claude-murgat/Alarm2.0.git /opt/alarm`
+   (HEAD `5cec8a4` = master post PR #45 + PR #51)
+6. `firebase-service-account.json` placeholder `{"project_id":"placeholder-not-real"}`
+   déposé dans `/opt/alarm/backend/`
+7. Test `sudo -u alarm sg docker -c "docker run --rm hello-world"` ✅
+
+### Adaptations cloud (OVH VPS) vs procédure onsite
+
+> **À reproduire telles quelles pour tout futur nœud cloud OVH.** Ne sont PAS des
+> oublis ou des écarts à corriger : ce sont des choix volontaires liés à la
+> nature VPS-cloud-Internet de la machine.
+
+| § procédure | Adaptation cloud | Raison |
+|---|---|---|
+| §3 sshd | `Port 50922` au lieu de 22 | Recommandation OVH KB anti-bruteforce |
+| §3 sshd | `PasswordAuthentication yes` | **À confirmer** — probablement pour rescue OVH si toutes clés cassées. Si clé d'urgence stockée en Bitwarden suffit, durcir en `no` |
+| §4 UFW | `8000/tcp ALLOW IN Anywhere` | Backend exposé Internet pour les apps Android (vs LAN-only sur onsite). UFW reste deny-incoming par défaut, seuls 50922/51820/8000 ouverts |
+| §4 UFW | Pas de restriction `from 172.16.0.0/16` | Pas de LAN site, donc pas de subnet à whitelister |
+| §10 LVM | Layout simple sda1 sans LVM | Default partitioning OVH, pas de snapshot disque possible (mais snapshot OVH dispo via panel) |
+| §11 watchdog | `softdog` au lieu de `iTCO_wdt` | VPS sans accès au watchdog hardware ; l'hyperviseur OVH gère reboot auto si kernel bloqué |
+| §12 SMART | smartd inactif | Storage virtuel, pas de SSD physique à monitorer ; OVH monitore côté hyperviseur |
+| §2 SIM7600 | Non applicable | Pas de port USB ni rôle gateway SMS/voix sur le cloud |
+| §6 reboot coordination | Identique mais OVH peut rebooter pour maintenance | Souscrire aux notifications OVH ; risque de perte simultanée du quorum si onsite reboote en même temps |
+| Hostname | Default OVH `vps-XXXXXX` conservé | Changement non critique ; peut affecter reverse DNS si activé. Conservation sûre |
+| §15 cluster | Identique avec `.env.prod.node3` | Variabilisation docker-compose (PR #51) supporte le cross-machine via WG |
+
+### Vérification end-to-end (extrait des tests §18 applicables)
+
+| # | Test | Résultat |
+|---|---|---|
+| 1 | SSH par clé `alarm_node3` sur port 50922 | ✅ |
+| 2 | Password auth | ⚠️ `yes` (intentionnel cloud, cf adaptations §3 — à reconfirmer avec utilisateur) |
+| 3 | Root SSH refusé | ✅ `permitrootlogin no` |
+| 4 | UFW active | ✅ 4 règles cloud (50922/51820/8000 + wg0 mesh) |
+| 5 | chrony tracking | ✅ Stratum 2, offset 96 µs |
+| 6 | Logs persistants | ✅ 32 Mo dans `/var/log/journal` |
+| 7 | Watchdog | ✅ softdog actif (timeout 30s) — cloud-adapté |
+| 8 | Systemd watchdog | ✅ |
+| 9 | SMART | N/A (storage virtuel — cloud-adapté) |
+| 10 | Wireguard interface | ✅ wg0 up sur `10.99.0.1/24` |
+| 11 | **Mesh 3-way** | ✅ ping `10.99.0.2` et `10.99.0.3` = 16,6 ms |
+| 12 | **Docker hello-world** | ✅ (cette session) |
+| 13 | ModemManager | N/A (pas de modem sur cloud) |
+| 14 | unattended-upgrade dry-run | ✅ |
+
+### Points en attente avant prod
+
+- [ ] **Confirmer `PasswordAuthentication`** : reste à `yes` pour rescue, ou durcir à `no` ?
+  Décision à prendre avec utilisateur. Dépend de la stratégie de fallback (Bitwarden vs rescue OVH).
+- [ ] **Vrai `firebase-service-account.json`** à déposer sur les 3 machines avant
+  activation des services (le placeholder est suffisant pour le bring-up etcd/Patroni
+  mais le backend FCM échouera en runtime).
+- [ ] **SMTP relay** : `SMTP_HOST=host.docker.internal` côté backend pointe sur le host,
+  qui n'a pas de mailhog/postfix sur NODE3. Définir un relais SMTP réel (postfix → SES /
+  Sendgrid / SMTP perso) avant prod, sinon les emails escalade ne partent pas.
+
+### Sécurité du provisioning
+
+- Le mdp `alarm` sur NODE3 a été utilisé pendant cette session (sudo). Il **ne quitte pas
+  la VM provisioning** (jamais écrit en clair dans le repo).
+- Aucun NOPASSWD sudo configuré.
+- `/opt/alarm` cloné par `alarm` user, pas root → permissions correctes.
+
+---
+
 ## 23. Historique des changements
 
 - **2026-05-01** : création initiale + provisioning machine onsite-2 à 172.16.1.120
@@ -753,5 +869,17 @@ Voir §20 "Améliorations à venir" — applicable identiquement à onsite-1.
     onsite-1 et onsite-2 avec `PersistentKeepalive=25`
   - 5 handshakes mesh confirmés bidirectionnels (LAN < 1 ms, cloud 16,6 ms)
   - `peers.md` : NODE3 endpoint, table handshakes complète, note NAT site
-  - Cluster bring-up reporté : `docker-compose.yml` mono-host, option D
-    (overlay `docker-compose.prod.yml`) à faire en session dédiée
+  - Cluster bring-up reporté : `docker-compose.yml` mono-host, option D à faire
+- **2026-05-09 (suite)** : option D implémentée par variabilisation (PR #51 mergée)
+  - `docker-compose.yml` : 4 occurrences `host.docker.internal` → `${ADVERTISE_HOST:-host.docker.internal}`
+  - Création `.env.prod.node{1,2,3}` avec ports uniformes 2379/2380/5432/8008/8000
+    et endpoints en IPs Wireguard `10.99.0.{1,2,3}`
+  - Création `scripts/start-prod-node.sh` (wrapper avec checks pré-bring-up)
+  - Choix variabilisation vs overlay : single source of truth, rétrocompat par defaults
+- **2026-05-09 (suite 2)** : provisioning applicatif NODE3 cloud (cf §22ter)
+  - NODE3 avait Phase 1 OS/réseau/sécurité complète (sshd, ufw, fail2ban, chrony,
+    journald, sysctl, watchdog soft, wireguard) **mais pas Docker/git/clone**
+  - Action : `apt install git`, install Docker (repo officiel), `usermod -aG docker alarm`,
+    `git clone https://github.com/claude-murgat/Alarm2.0.git /opt/alarm`,
+    placeholder `firebase-service-account.json`, `daemon.json` logging conforme §14
+  - `docker run hello-world` ✅ — NODE3 prêt pour bring-up cluster 3-way
