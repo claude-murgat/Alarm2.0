@@ -850,6 +850,92 @@ Phase 1 OS/sécurité **déjà complète** (provisionnée hors-PR avant 2026-05-
 
 ---
 
+## 22quater. Gestion des secrets en prod (`.env.prod.secrets`)
+
+> **Pattern à appliquer pour TOUTE valeur secrète injectée dans la stack.**
+> Pas de hardcode dans `docker-compose.yml`, pas de commit dans `.env.prod.node*`
+> (qui sont publics dans le repo).
+
+### Principe
+
+Le repo `Alarm2.0` est **public sur GitHub**. Tout fichier committé est lisible
+de l'extérieur. Donc :
+
+- **`docker-compose.yml`** : utilise `${VARIABLE:?explication}` pour les secrets.
+  Le `:?` fait échouer compose si la variable n'est pas définie (fail-fast plutôt
+  qu'un crypto signé avec une chaîne vide).
+- **`.env.dev` / `.env.node{1,2,3}`** : valeurs **non-secrètes** uniquement
+  (configuration mono-host pour CI/dev). Les SECRET_KEY committées ici sont
+  marquées `ci-dev-key-public-not-secret-XXXX`.
+- **`.env.prod.node{1,2,3}`** : configuration prod par-machine (IPs WG, ports,
+  cluster bootstrap) **sans secrets**.
+- **`.env.prod.secrets`** : GITIGNORED. Déposé à la main sur chaque machine
+  dans `/opt/alarm/.env.prod.secrets` (mode `600`, owner `alarm`). Sourcé par
+  `scripts/start-prod-node.sh` au bring-up et exporté vers l'env shell pour
+  substitution dans le compose.
+
+### Procédure de déploiement initiale (par machine)
+
+```bash
+# Sur la machine prod (onsite-1, onsite-2, ou NODE3 cloud) :
+cd /opt/alarm
+cp .env.prod.secrets.example .env.prod.secrets
+# Editer pour remplacer les <PLACEHOLDER> par les vraies valeurs
+# (a recuperer dans Bitwarden, NE PAS regenerer une nouvelle valeur differente
+# entre les 3 machines — toutes les 3 doivent avoir la MEME SECRET_KEY).
+nano .env.prod.secrets   # ou vim, etc.
+chmod 600 .env.prod.secrets
+chown alarm:alarm .env.prod.secrets
+# Au bring-up suivant :
+./scripts/start-prod-node.sh <1|2|3>
+```
+
+> **CRITIQUE** : les 3 machines doivent partager la **même** SECRET_KEY pour
+> que les JWT signés par n'importe quel backend soient acceptés par les 2
+> autres (rotation circulaire des apps Android côté `ApiClient.kt`).
+
+### Procédure de rotation (sans downtime apparent)
+
+1. **Génération nouvelle valeur** :
+   ```bash
+   openssl rand -hex 32
+   ```
+2. **Stockage Bitwarden** : note sécurisée "Alarme Murgat — SECRET_KEY YYYY-MM-DD".
+3. **Déploiement coordonné sur les 3 machines** (idéalement <5 min entre elles
+   pour minimiser la fenêtre d'invalidité de tokens) :
+   ```bash
+   sed -i.bak 's/^SECRET_KEY=.*/SECRET_KEY=<nouvelle valeur>/' /opt/alarm/.env.prod.secrets
+   ./scripts/start-prod-node.sh <X>   # restart backend container avec nouveau env
+   ```
+4. **Conséquence** : tous les JWT existants (signés avec l'ancienne SECRET_KEY)
+   sont invalidés → tous les utilisateurs doivent se reconnecter.
+5. **Vérification** :
+   ```bash
+   curl http://10.99.0.1:8000/health   # secret_key_default doit rester false
+   ```
+
+### Liste des secrets actuellement gérés via `.env.prod.secrets`
+
+| Variable | Usage | Conséquence si compromis |
+|---|---|---|
+| `SECRET_KEY` | Signature JWT (auth.py) | **Forge admin tokens à distance** via /api/auth/login → CRITIQUE |
+
+### Liste des secrets **encore hardcodés** dans le repo (à migrer)
+
+> _Section vivante — chaque migration produit une PR + une rotation coordonnée
+> avec mise à jour de cette liste._
+
+- [ ] `alarm_secret` (PG user `alarm`) dans `docker-compose.yml:71`
+- [ ] `postgres_secret` (PG superuser) dans `patroni/patroni.yml:53`
+- [ ] `rep_secret` (PG replication) dans `patroni/patroni.yml:56`
+- [ ] Bootstrap users `admin`/`user1`/`user2` créés avec mdp hardcodés dans
+  `backend/app/main.py:42-46` (les comptes existent en DB ; mdp **rotated en
+  SQL le 2026-05-10**, mais le code crée encore `admin/admin123` etc. au prochain
+  bootstrap d'une DB vide. Mitigation à long terme : remplacer par un script
+  d'init `--first-boot` ou un endpoint admin gated)
+
+---
+
 ## 23. Historique des changements
 
 - **2026-05-01** : création initiale + provisioning machine onsite-2 à 172.16.1.120
