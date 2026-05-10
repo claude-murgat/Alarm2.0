@@ -56,6 +56,12 @@ infra/runner/.env
 infra/runner/*.pem
 infra/runner/*.private-key*
 
+# Prod secrets (deposes a la main sur chaque machine, jamais commit)
+# Le fichier .env.prod.secrets contient SECRET_KEY (JWT) et eventuellement
+# d'autres secrets a venir. Cf .env.prod.secrets.example pour le format et
+# docs/PROVISIONING_ONSITE.md pour la procedure de deploiement.
+.env.prod.secrets
+
 # Reports CI (artefacts locaux)
 reports/
 

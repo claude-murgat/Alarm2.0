@@ -108,7 +108,14 @@ services:
     environment:
       - DATABASE_URL=postgresql://alarm:alarm_secret@patroni:5432/alarm_db
       - PATRONI_URL=http://patroni:8008
-      - SECRET_KEY=alarm-secret-key
+      # SECRET_KEY : signe les JWT (auth.py). NE PLUS hardcoder ici (compromise = forgery
+      # à distance via /api/auth/login). Source par layers :
+      #   - PROD : .env.prod.secrets (gitignored, déposé à la main sur chaque machine,
+      #            cf docs/PROVISIONING_ONSITE.md), sourcé par scripts/start-prod-node.sh
+      #   - CI/dev : .env.node{1,2,3} et .env.dev (publics ; valeurs distinctes des
+      #              defaults de auth.py pour que secret_key_default=false en CI)
+      # Le `:?` fait échouer compose si SECRET_KEY n'est pas définie (fail-fast).
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY missing — set via .env.prod.secrets (PROD) or .env.{dev,node1,node2,node3} (CI)}
       - SMTP_HOST=host.docker.internal
       - SMTP_PORT=1025
       - SMTP_FROM=alarmes@alarm.local

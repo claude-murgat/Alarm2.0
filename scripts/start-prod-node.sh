@@ -53,8 +53,33 @@ if ! ip -br a show wg0 2>/dev/null | grep -qE '\b(UP|UNKNOWN)\b'; then
   exit 1
 fi
 
-echo "→ Bring-up cluster PROD node${NODE} avec $ENV_FILE"
+# Pre-requis 4 : .env.prod.secrets present (gitignored, depose a la main).
+# Contient SECRET_KEY (signe les JWT) et eventuellement d'autres secrets a
+# venir (PG passwords, FCM, SMTP). Cf .env.prod.secrets.example pour le format.
+SECRETS_FILE=".env.prod.secrets"
+if [[ ! -f "$SECRETS_FILE" ]]; then
+  echo "ERREUR : $SECRETS_FILE manquant."
+  echo "  Copie $SECRETS_FILE.example vers $SECRETS_FILE et remplis les valeurs."
+  echo "  Cf docs/PROVISIONING_ONSITE.md §22quater (secrets) pour la procedure."
+  exit 1
+fi
+# Source les secrets et les exporte vers l'env (pour la substitution \${VAR} dans
+# docker-compose.yml). `set -a` exporte automatiquement chaque assignation suivante.
+set -a
+# shellcheck disable=SC1090
+. "./$SECRETS_FILE"
+set +a
+
+# Verif anti-fail-fast : SECRET_KEY est obligatoire (sinon docker compose echouera
+# en disant ":?SECRET_KEY missing", autant le dire ici avec un message clair).
+if [[ -z "${SECRET_KEY:-}" ]]; then
+  echo "ERREUR : SECRET_KEY n'est pas definie dans $SECRETS_FILE."
+  exit 1
+fi
+
+echo "→ Bring-up cluster PROD node${NODE} avec $ENV_FILE + $SECRETS_FILE"
 echo "  ADVERTISE_HOST = $(grep "^ADVERTISE_HOST=" "$ENV_FILE" | cut -d= -f2)"
+echo "  SECRET_KEY     = ${SECRET_KEY:0:8}…${SECRET_KEY: -4} (longueur ${#SECRET_KEY})"
 echo "  Project        = $PROJECT"
 echo
 
