@@ -1,0 +1,235 @@
+# CD Promote Stable — promotion manuelle d'une image :sha-<short> vers :stable.
+#
+# Cf docs/CD_DESIGN.md §2 (Promotion). Trigger : workflow_dispatch uniquement
+# (manuel humain). Le bot IA est explicitement bloque (cf check `github.actor`).
+#
+# Sequence :
+#   1. Verifs prerequis (sha format, confirm, CI verte, sha sur master, pas de
+#      revert recent).
+#   2. Re-tag GHCR via `docker buildx imagetools create` (atomique cote registry,
+#      pas de rebuild, pas de pull/push de blobs).
+#   3. POST kind=manual_override dans deployment_events (via API + gateway key).
+#   4. Step summary lisible.
+#
+# Apres ce workflow, le timer pull sur les 3 noeuds (PR 3) detectera le nouveau
+# digest distant dans les 5 min et fera le pull. L'humain enchaine ensuite avec
+# alarm-cd-canary.sh sur chaque noeud (V1 manuel, cf §4 doc).
+
+name: CD Promote Stable
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit sha to promote (7+ chars, must exist as :sha-<short> on GHCR)"
+        required: true
+        type: string
+      confirm:
+        description: "Type 'PROMOTE' to confirm"
+        required: true
+        type: string
+      bypass_cooldown:
+        description: "Bypass 24h post-merge cooldown (use sparingly)"
+        required: false
+        type: boolean
+        default: false
+
+# Pas de concurrency : la promo est volontairement manuelle et rare. Permettre
+# deux promotions en parallele sur des sha differents est une erreur humaine ;
+# si ca arrive, le 2e workflow gagne et l'humain voit dans deployment_events.
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: claude-murgat
+
+jobs:
+  promote:
+    name: Promote ${{ github.event.inputs.sha }} to :stable
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+      actions: read   # pour lire les check-runs des tiers CI
+    steps:
+      - name: Verify confirm input
+        run: |
+          if [[ "${{ github.event.inputs.confirm }}" != "PROMOTE" ]]; then
+            echo "::error::Input 'confirm' must be exactly 'PROMOTE' (got: '${{ github.event.inputs.confirm }}')"
+            exit 1
+          fi
+
+      - name: Verify actor is not the bot
+        run: |
+          # §7 doc : le bot IA n'a JAMAIS le droit de promouvoir, meme apres
+          # 10 PRs propres. Frontiere de blast-radius. Verification dure ici
+          # en plus de l'absence de permission GitHub (ceinture+bretelles).
+          ACTOR='${{ github.actor }}'
+          if [[ "$ACTOR" == "alarm-murgat-bot[bot]" || "$ACTOR" == "alarm-murgat-bot" ]]; then
+            echo "::error::alarm-murgat-bot cannot promote :stable (cf docs/CD_DESIGN.md §7)"
+            exit 1
+          fi
+          echo "Actor : $ACTOR — OK"
+
+      - name: Normalize sha
+        id: sha
+        run: |
+          RAW='${{ github.event.inputs.sha }}'
+          # Accepter 7-40 chars hex, normaliser sur 7 (le format publie par cd-build.yml).
+          if [[ ! "$RAW" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+            echo "::error::sha must be 7-40 hex chars (got: '$RAW')"
+            exit 1
+          fi
+          SHORT="${RAW:0:7}"
+          echo "short=${SHORT}" >> "$GITHUB_OUTPUT"
+          echo "Short sha : $SHORT"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # besoin de l'historique pour verif revert/cooldown
+
+      - name: Verify sha is on master
+        run: |
+          SHORT='${{ steps.sha.outputs.short }}'
+          if ! git merge-base --is-ancestor "$SHORT" origin/master 2>/dev/null; then
+            echo "::error::sha $SHORT is not an ancestor of origin/master (cherry-pick ou rebase ?)"
+            exit 1
+          fi
+          echo "$SHORT is on master."
+
+      - name: Verify no revert of this sha
+        run: |
+          SHORT='${{ steps.sha.outputs.short }}'
+          # Cherche les commits qui mentionnent "Revert" + ce sha dans le message.
+          # Pas parfait mais attrape les git revert classiques.
+          REVERTS=$(git log --oneline origin/master --grep="Revert" --grep="$SHORT" --all-match || true)
+          if [[ -n "$REVERTS" ]]; then
+            echo "::error::sha $SHORT semble avoir ete reverte : $REVERTS"
+            exit 1
+          fi
+
+      - name: Verify cooldown (24h since merge)
+        if: github.event.inputs.bypass_cooldown != 'true'
+        run: |
+          SHORT='${{ steps.sha.outputs.short }}'
+          COMMIT_TS=$(git log -1 --format=%ct "$SHORT")
+          NOW=$(date +%s)
+          AGE_HOURS=$(( (NOW - COMMIT_TS) / 3600 ))
+          if (( AGE_HOURS < 24 )); then
+            echo "::error::Cooldown not satisfied : $SHORT est merge depuis $AGE_HOURS h (< 24 h)."
+            echo "::error::Pour bypasser, relancer avec bypass_cooldown=true (et accepter le risque)."
+            exit 1
+          fi
+          echo "Cooldown OK : $AGE_HOURS h ecoulees depuis le merge."
+
+      - name: Verify CI checks green on master @ sha
+        run: |
+          SHORT='${{ steps.sha.outputs.short }}'
+          # Liste les check-runs sur le commit. On veut tier1 + tier1.5 + tier2
+          # + tier3 (les 2 workers) verts. tier4 nightly est exempt (peut ne pas
+          # avoir tourne sur ce sha, cf §2 doc).
+          REQUIRED=(
+            "Tier 1 — Unit (logique pure)"
+            "Tier 1.5 — Mutation testing (logic pure, blocking)"
+            "Tier 2 — Integration (FastAPI TestClient + SQLite)"
+            "Tier 3 — E2E cluster (worker 1/2)"
+            "Tier 3 — E2E cluster (worker 2/2)"
+          )
+
+          CHECKS=$(gh api "/repos/${{ github.repository }}/commits/${SHORT}/check-runs?per_page=100" \
+            --jq '.check_runs[] | {name, conclusion}')
+
+          FAIL=0
+          for r in "${REQUIRED[@]}"; do
+            STATE=$(echo "$CHECKS" | jq -r --arg n "$r" 'select(.name==$n) | .conclusion' | head -1)
+            if [[ "$STATE" != "success" ]]; then
+              echo "::error::Required check '$r' is '${STATE:-MISSING}' on $SHORT"
+              FAIL=1
+            else
+              echo "  OK : $r"
+            fi
+          done
+          if (( FAIL )); then exit 1; fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify :sha-<short> images exist on GHCR
+        run: |
+          SHORT='${{ steps.sha.outputs.short }}'
+          for IMG in alarm-backend alarm-patroni; do
+            REF="${REGISTRY}/${IMAGE_OWNER}/${IMG}:sha-${SHORT}"
+            if ! docker buildx imagetools inspect "$REF" >/dev/null 2>&1; then
+              echo "::error::Image $REF n'existe pas sur GHCR. Le workflow cd-build doit avoir tourne sur ce sha."
+              exit 1
+            fi
+            echo "  OK : $REF existe"
+          done
+
+      - name: Re-tag :stable
+        id: retag
+        run: |
+          SHORT='${{ steps.sha.outputs.short }}'
+          for IMG in alarm-backend alarm-patroni; do
+            SRC="${REGISTRY}/${IMAGE_OWNER}/${IMG}:sha-${SHORT}"
+            DST="${REGISTRY}/${IMAGE_OWNER}/${IMG}:stable"
+            echo "Re-tag $SRC -> $DST"
+            docker buildx imagetools create -t "$DST" "$SRC"
+          done
+
+      - name: POST manual_override events to backend
+        # Notification l'orchestrateur que :stable a change -> les timers pull
+        # vont propager dans les 5 min. On ecrit 1 event par image (pas par
+        # noeud — c'est une action globale au registry, pas locale a 1 noeud).
+        # Le `node='registry'` est un alias special pour les events globaux.
+        if: vars.CD_API_BASE != ''
+        env:
+          CD_API_BASE: ${{ vars.CD_API_BASE }}
+          CD_GATEWAY_KEY: ${{ secrets.CD_GATEWAY_KEY }}
+        run: |
+          SHORT='${{ steps.sha.outputs.short }}'
+          if [[ -z "$CD_GATEWAY_KEY" ]]; then
+            echo "::warning::CD_GATEWAY_KEY secret manquant — pas de POST event (promo loggee uniquement dans GH run summary)"
+            exit 0
+          fi
+          for IMG in alarm-backend alarm-patroni; do
+            curl -fsS -X POST "$CD_API_BASE/api/deployments/events" \
+              -H "X-Gateway-Key: $CD_GATEWAY_KEY" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"node\": \"registry\",
+                \"image\": \"$IMG\",
+                \"kind\": \"manual_override\",
+                \"to_digest\": \"sha-$SHORT\",
+                \"status\": \"success\",
+                \"actor\": \"github-user:${{ github.actor }}\",
+                \"details\": {\"workflow_run_id\": \"${{ github.run_id }}\", \"bypass_cooldown\": ${{ github.event.inputs.bypass_cooldown }}}
+              }" || echo "::warning::POST event for $IMG failed"
+          done
+
+      - name: Summary
+        run: |
+          SHORT='${{ steps.sha.outputs.short }}'
+          {
+            echo "## Promoted to :stable"
+            echo ""
+            echo "- **Sha** : \`$SHORT\`"
+            echo "- **Actor** : ${{ github.actor }}"
+            echo "- **Bypass cooldown** : ${{ github.event.inputs.bypass_cooldown }}"
+            echo ""
+            echo "### Images re-taggees"
+            echo "- \`${REGISTRY}/${IMAGE_OWNER}/alarm-backend:stable\` -> \`sha-$SHORT\`"
+            echo "- \`${REGISTRY}/${IMAGE_OWNER}/alarm-patroni:stable\` -> \`sha-$SHORT\`"
+            echo ""
+            echo "### Etape suivante (humain)"
+            echo "1. Attendre 5 min : les timers pull (PR 3) detectent le nouveau digest."
+            echo "2. Sur NODE3 cloud, lancer \`./scripts/alarm-cd-canary.sh --node 3\`."
+            echo "3. Si OK, enchainer node 2 puis node 1 (cf §4 doc — ordre canary)."
+          } >> "$GITHUB_STEP_SUMMARY"
