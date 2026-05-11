@@ -131,6 +131,16 @@ fi
 
 log "Diff detecte alarm-backend : local=${LOCAL_DIGEST_BACKEND:-none} -> remote=$REMOTE_DIGEST_BACKEND"
 
+# --- 1b. Preserver :stable courant en :stable-prev AVANT le restart ---
+# Permet a alarm-cd-rollback.sh (PR 6) de revenir a cet etat en cas de fail.
+# Si LOCAL_DIGEST_BACKEND vide (premiere installation), on skip — pas de
+# rollback possible, c'est OK (cas cold start documente §5 Q5.2 du doc).
+if [[ -n "$LOCAL_DIGEST_BACKEND" ]]; then
+  log "Preservation :stable-prev sur la cible (pour rollback futur)"
+  run "ssh_target \"docker tag ${REGISTRY}/alarm-backend:${TAG} ${REGISTRY}/alarm-backend:stable-prev\"" \
+    || log "WARN : tag :stable-prev a echoue (rollback non disponible pour ce canary)"
+fi
+
 # --- 2. POST canary_start ---
 post_event() {
   local kind="$1"
@@ -191,12 +201,32 @@ while [[ $(date +%s) -lt $END_TS ]]; do
     log "Health check ${TOTAL_CHECKS} echec (fails consec: $FAILS / $FAILURE_THRESHOLD)"
 
     if (( FAILS >= FAILURE_THRESHOLD )); then
-      log "Seuil atteint : $FAILS polls 503 consecutifs. Halt + signal rollback."
-      post_event "rollback" "failure" \
-        "{\"trigger\": \"health_503\", \"consecutive_fails\": $FAILS, \"total_checks\": $TOTAL_CHECKS}"
-      # Le rollback effectif (re-tag + restart) est ajoute par PR 6.
-      # Ici on signale juste, on n'agit pas.
-      log "Rollback signal envoye. PR 6 prendra le relais (V1 : intervention humaine)."
+      log "Seuil atteint : $FAILS polls 503 consecutifs. Halt + auto-rollback."
+
+      # PR 6 : auto-rollback effectif. Le canary appelle le script de rollback
+      # qui re-tag :stable <- :stable-prev sur la cible puis restart.
+      # Note : alarm-cd-rollback.sh emet lui-meme le POST kind=rollback dans
+      # deployment_events — on n'en emet pas un en double ici.
+      SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+      if [[ -x "$SCRIPT_DIR/alarm-cd-rollback.sh" ]]; then
+        log "Appel alarm-cd-rollback.sh --node $NODE --trigger health_503"
+        if (( DRY_RUN )); then
+          echo "DRY-RUN > $SCRIPT_DIR/alarm-cd-rollback.sh --node $NODE --trigger health_503"
+        else
+          "$SCRIPT_DIR/alarm-cd-rollback.sh" \
+            --node "$NODE" \
+            --trigger "health_503" \
+            --api-base "$API_BASE" \
+            --gateway-key "$GATEWAY_KEY" \
+            || log "WARN : alarm-cd-rollback.sh a retourne une erreur (cf logs ci-dessus)"
+        fi
+      else
+        log "WARN : alarm-cd-rollback.sh introuvable -> signal seul (intervention humaine requise)"
+        post_event "rollback" "failure" \
+          "{\"trigger\": \"health_503\", \"consecutive_fails\": $FAILS, \"total_checks\": $TOTAL_CHECKS, \"note\": \"rollback script missing\"}"
+      fi
+
+      log "Canary halt. Les noeuds suivants ne sont PAS updates."
       exit 2
     fi
   fi
