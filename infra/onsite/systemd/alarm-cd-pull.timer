@@ -1,0 +1,21 @@
+# /etc/systemd/system/alarm-cd-pull.timer
+# Cf docs/CD_DESIGN.md §3 (5 min decide la, choix justifie).
+[Unit]
+Description=Timer du pull GHCR alarm-cd-pull
+Documentation=https://github.com/claude-murgat/Alarm2.0/blob/master/docs/CD_DESIGN.md
+
+[Timer]
+# 1er run : 5 min apres boot (laisser le temps a docker, wg0, etc. de monter).
+OnBootSec=5min
+# Ensuite : toutes les 5 min.
+OnUnitActiveSec=5min
+# Jitter +/- 30s : evite que les 3 noeuds frappent GHCR a la meme seconde
+# (charge etalee, et evite un faux "ddos sur soi-meme").
+RandomizedDelaySec=30s
+# Persistent=true : si la machine etait eteinte au moment du run prevu,
+# rattraper au boot suivant. Important pour les coupures courant.
+Persistent=true
+Unit=alarm-cd-pull.service
+
+[Install]
+WantedBy=timers.target
