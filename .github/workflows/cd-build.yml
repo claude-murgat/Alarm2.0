@@ -1,0 +1,115 @@
+# CD Build — Construit et publie les images Docker sur GHCR a chaque push master.
+# Voir docs/CD_DESIGN.md §1 (Build des images) — PR 1 du plan §8.
+#
+# Publie sous deux tags :
+#   ghcr.io/claude-murgat/alarm-backend:sha-<short>  (tracabilite 1:1 commit)
+#   ghcr.io/claude-murgat/alarm-patroni:sha-<short>
+#
+# Pas de tag `:stable` ici (gere separement par .github/workflows/cd-promote-stable.yml,
+# PR 7 du plan, qui re-tag une image existante).
+# Pas de tag `:latest` (decision §1 — ambigu, interdit dans le doc).
+#
+# Architecture : linux/amd64 only V1. Buildx utilise pour pouvoir ajouter
+# `linux/arm64` plus tard sans refactor (cf Q1 du doc — Raspberry Pi pas roadmap V1).
+#
+# Cache : type=gha (cache GitHub Actions), scope par image pour eviter pollution
+# croisee backend <-> patroni.
+#
+# Concurrency : 2 pushes successifs sur master annulent le precedent (seul le dernier
+# sha compte vraiment pour la promotion :stable future).
+
+name: CD Build
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit sha to build (default: HEAD of branch ref)"
+        required: false
+        type: string
+
+concurrency:
+  group: cd-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: claude-murgat
+
+jobs:
+  build:
+    name: Build & push ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: alarm-backend
+            context: ./backend
+            dockerfile: ./backend/Dockerfile
+          - image: alarm-patroni
+            context: .
+            dockerfile: ./Dockerfile.patroni
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.sha || github.sha }}
+
+      - name: Compute short sha
+        id: meta
+        run: |
+          SHA="${{ github.event.inputs.sha || github.sha }}"
+          SHORT="${SHA:0:7}"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "short=${SHORT}" >> "$GITHUB_OUTPUT"
+          echo "image_ref=${REGISTRY}/${IMAGE_OWNER}/${{ matrix.image }}:sha-${SHORT}" >> "$GITHUB_OUTPUT"
+          echo "Building ${{ matrix.image }} from sha ${SHORT}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.image_ref }}
+          # Cache GHA partage entre runs pour ne pas re-build les couches inchangees.
+          # Scope par image -> pas de pollution croisee (les Dockerfile partagent rien
+          # de pertinent : backend = python:3.12-slim ; patroni = postgres:16-alpine).
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,scope=${{ matrix.image }},mode=max
+          # Labels OCI standard : permet a un humain ou outil de retrouver le source
+          # et le commit a partir d'une image sur la registry. Utile pour audit
+          # quand on regarde `docker inspect` sur un noeud prod.
+          labels: |
+            org.opencontainers.image.source=https://github.com/claude-murgat/Alarm2.0
+            org.opencontainers.image.revision=${{ steps.meta.outputs.sha }}
+            org.opencontainers.image.title=${{ matrix.image }}
+
+      - name: Summary
+        run: |
+          {
+            echo "### Built & pushed"
+            echo ""
+            echo "- Image : \`${{ steps.meta.outputs.image_ref }}\`"
+            echo "- Source sha : \`${{ steps.meta.outputs.sha }}\`"
+            echo ""
+            echo "Promote to \`:stable\` later via the \`cd-promote-stable\` workflow (PR 7)."
+          } >> "$GITHUB_STEP_SUMMARY"

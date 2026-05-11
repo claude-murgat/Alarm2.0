@@ -17,6 +17,8 @@ pour la procédure complète et les explications.
 | `sysctl.d/99-alarm-postgres.conf` | `/etc/sysctl.d/99-alarm-postgres.conf` | swappiness=1, dirty ratios bas |
 | `wg0.conf.example` | `/etc/wireguard/wg0.conf` (avec privatekey injectée) | Mesh Wireguard |
 | `peers.md` | (doc seulement, pas de cible) | Index des public keys et plan d'adressage Wireguard |
+| `systemd/alarm-cd-pull.service` | `/etc/systemd/system/alarm-cd-pull.service` | Pull idempotent GHCR `:stable` (CD V1) |
+| `systemd/alarm-cd-pull.timer` | `/etc/systemd/system/alarm-cd-pull.timer` | Timer 5 min pour le pull (CD V1) |
 
 ## Maintenance
 

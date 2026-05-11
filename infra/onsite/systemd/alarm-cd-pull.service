@@ -1,0 +1,28 @@
+# /etc/systemd/system/alarm-cd-pull.service
+# Cf docs/CD_DESIGN.md §3 (Pull cote noeuds prod).
+# Tourne via alarm-cd-pull.timer toutes les 5 min.
+[Unit]
+Description=Pull images Docker GHCR :stable (idempotent)
+Documentation=https://github.com/claude-murgat/Alarm2.0/blob/master/docs/CD_DESIGN.md
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# L'user `alarm` est dans le groupe docker (cf docs/PROVISIONING_ONSITE.md §14),
+# donc peut parler au socket Docker sans sudo.
+User=alarm
+Group=alarm
+# Limite de temps : un pull qui prend > 5 min suggere un probleme reseau ou un
+# blob trop gros (~600 Mo backend). On laisse 10 min de marge avant kill.
+TimeoutStartSec=600
+ExecStart=/usr/local/bin/alarm-cd-pull
+# Pas de Restart= (Type=oneshot). Le timer relance toutes les 5 min de toute facon.
+# Pas de RemainAfterExit (on veut un nouveau run a chaque tick, pas un service
+# qui reste "active" entre les ticks).
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

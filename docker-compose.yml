@@ -49,6 +49,14 @@ services:
       retries: 5
 
   patroni:
+    # `image:` + `build:` cohabitent volontairement :
+    # - En DEV/CI (`docker compose up --build -d`) : `--build` force le build local et
+    #   tag avec `image:` -> on travaille sur le code courant du clone.
+    # - En PROD (`scripts/start-prod-node.sh --pull` + `docker compose up -d` sans
+    #   --build) : compose utilise l'image deja pullee localement par le timer
+    #   systemd (cf infra/onsite/systemd/alarm-cd-pull.*, PR 3 du plan §8).
+    # Cf docs/CD_DESIGN.md §1 (Build) et Q-X2 (coexistence build local vs registry).
+    image: ${REGISTRY:-ghcr.io/claude-murgat}/alarm-patroni:${IMAGE_TAG:-stable}
     build:
       context: .
       dockerfile: Dockerfile.patroni
@@ -100,6 +108,9 @@ services:
       retries: 18
 
   backend:
+    # Idem patroni : image: pour pull en prod, build: pour dev/CI. Cf bloc patroni
+    # ci-dessus pour le rationale complet.
+    image: ${REGISTRY:-ghcr.io/claude-murgat}/alarm-backend:${IMAGE_TAG:-stable}
     build: ./backend
     extra_hosts:
       - "host.docker.internal:host-gateway"
