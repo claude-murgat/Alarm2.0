@@ -18,12 +18,36 @@
 
 set -euo pipefail
 
-if [[ $# -ne 1 || ! "$1" =~ ^[1-3]$ ]]; then
-  echo "Usage : $0 <1|2|3>"
-  echo "  1 = onsite-1 (10.99.0.2), 2 = onsite-2 (10.99.0.3), 3 = NODE3 cloud (10.99.0.1)"
+# Defaults : mode "build local" pour compatibilite retro (avant PR CD V1).
+MODE="build"
+
+# Parse arguments. Ordre flexible : `--pull <N>` ou `<N> --pull`.
+for arg in "$@"; do
+  case "$arg" in
+    --pull)
+      MODE="pull"
+      ;;
+    --build)
+      MODE="build"  # explicite, meme si c'est le defaut
+      ;;
+    [1-3])
+      NODE="$arg"
+      ;;
+    *)
+      echo "Argument inconnu : $arg"
+      echo "Usage : $0 [--pull|--build] <1|2|3>"
+      echo "  1 = onsite-1 (10.99.0.2), 2 = onsite-2 (10.99.0.3), 3 = NODE3 cloud (10.99.0.1)"
+      echo "  --pull  : pull l'image depuis GHCR (PROD V1+, cf docs/CD_DESIGN.md §3)"
+      echo "  --build : build l'image localement (defaut, retro-compat avant CD V1)"
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "${NODE:-}" || ! "$NODE" =~ ^[1-3]$ ]]; then
+  echo "Usage : $0 [--pull|--build] <1|2|3>"
   exit 1
 fi
-NODE="$1"
 
 ENV_FILE=".env.prod.node${NODE}"
 PROJECT="node${NODE}"
@@ -81,6 +105,26 @@ echo "→ Bring-up cluster PROD node${NODE} avec $ENV_FILE + $SECRETS_FILE"
 echo "  ADVERTISE_HOST = $(grep "^ADVERTISE_HOST=" "$ENV_FILE" | cut -d= -f2)"
 echo "  SECRET_KEY     = ${SECRET_KEY:0:8}…${SECRET_KEY: -4} (longueur ${#SECRET_KEY})"
 echo "  Project        = $PROJECT"
+echo "  Mode           = $MODE"
 echo
 
-exec docker compose --env-file "$ENV_FILE" -p "$PROJECT" up --build -d
+if [[ "$MODE" == "pull" ]]; then
+  # Mode prod V1+ : pull avant up. Necessite PR 1 (workflow cd-build) mergee
+  # pour que les images existent sur GHCR. Verifier que REGISTRY et IMAGE_TAG
+  # sont definis dans .env.prod.nodeN (PR 2 du plan §8).
+  if ! grep -q "^REGISTRY=" "$ENV_FILE" || ! grep -q "^IMAGE_TAG=" "$ENV_FILE"; then
+    echo "ERREUR : $ENV_FILE n'a pas REGISTRY et IMAGE_TAG definis."
+    echo "  Ces variables sont requises en mode --pull (cf PR 2 du plan CD V1)."
+    echo "  Ajouter en fin de fichier :"
+    echo "    REGISTRY=ghcr.io/claude-murgat"
+    echo "    IMAGE_TAG=stable"
+    exit 1
+  fi
+  echo "→ docker compose pull..."
+  docker compose --env-file "$ENV_FILE" -p "$PROJECT" pull
+  echo "→ docker compose up -d (sans --build)..."
+  exec docker compose --env-file "$ENV_FILE" -p "$PROJECT" up -d
+else
+  # Mode dev/CI ou retro-compat : build local.
+  exec docker compose --env-file "$ENV_FILE" -p "$PROJECT" up --build -d
+fi
