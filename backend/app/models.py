@@ -130,3 +130,34 @@ class AuditEvent(Base):
     timestamp = Column(DateTime, nullable=False, default=datetime.utcnow)
     details = Column(String, nullable=True)  # JSON string
     correlation_id = Column(String, nullable=True)
+
+
+class DeploymentEvent(Base):
+    """Trace des actions CD (pull, canary, rollback, promote).
+
+    Cf docs/CD_DESIGN.md §6 (Observabilité du déploiement). Réplication native
+    Patroni (table dans la même DB `alarm_db`), cohérent avec INV-100 audit_events.
+
+    Inséré par :
+    - L'orchestrateur canary sur NODE3 (cf PR 5/6) via POST /api/deployments/events
+      avec X-Gateway-Key.
+    - Le workflow promote-stable (cf PR 7) après re-tag GHCR.
+
+    Lu par :
+    - Le dashboard admin (GET /api/deployments/events).
+    - L'orchestrateur lui-même pour décider du rollback (retrouve `:stable-prev`
+      via l'historique des digests).
+    """
+    __tablename__ = "deployment_events"
+    id = Column(Integer, primary_key=True, index=True)
+    ts = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    node = Column(String, nullable=False, index=True)
+    image = Column(String, nullable=False)
+    kind = Column(String, nullable=False, index=True)
+    # kind ∈ {'pull', 'canary_start', 'canary_promoted', 'rollback', 'abort',
+    #         'manual_override', 'emergency_promote', 'emergency_aborted_network'}
+    from_digest = Column(String, nullable=True)  # sha256:... avant
+    to_digest = Column(String, nullable=True)    # sha256:... après
+    status = Column(String, nullable=False)      # 'success' | 'failure' | 'in_progress'
+    actor = Column(String, nullable=True)
+    details = Column(String, nullable=True)      # JSON string
