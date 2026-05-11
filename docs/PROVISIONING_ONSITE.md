@@ -443,10 +443,18 @@ directive utilisateur "on ne modifie pas la conf"). À remonter à l'utilisateur
 | **B** — attendre qu'un 2e nœud existe (provisionner onsite-1 ou cloud node) avant de démarrer le cluster | Conf strictement identique partout, mais aucun service tourne entre temps |
 | **C** — utiliser `--force-new-cluster` au démarrage du 1er etcd, puis rejoindre les autres en `existing` | Délicat, peu documenté, risque de divergence |
 
-**Recommandation** : Option B (attendre). Pour cette machine, on s'arrête au cluster
-préparé mais désactivé. Les services `alarm-stack.service` et `alarm-healthcheck.service`
-sont créés mais **désactivés** (`systemctl disable`) tant que le quorum n'est pas
-atteignable.
+**Recommandation initiale (2026-05-01)** : Option B (attendre). Pour cette machine,
+on s'arrête au cluster préparé mais désactivé.
+
+> **Mise à jour 2026-05-09 — résolution effective : option D (cf §22bis).**
+> En arrivant à 3 nœuds (onsite-2 + onsite-1 + NODE3 cloud) avec mesh Wireguard
+> opérationnel, l'analyse a montré que les 3 options A/B/C supposaient implicitement
+> que le `docker-compose.yml` était cross-machine — ce qui n'était pas le cas (la
+> conf utilisait `host.docker.internal:238x`, donc mono-host). PR #51 a introduit
+> l'**option D = variabilisation de `docker-compose.yml`** avec `${ADVERTISE_HOST:?…}`
+> + fichiers `.env.prod.node{1,2,3}` qui injectent les IPs Wireguard `10.99.0.{1,2,3}`.
+> Bring-up cluster 3-way effectif le 2026-05-10 via `scripts/start-prod-node.sh`.
+> Détails et adaptations dans **§22bis** (résultat onsite-1) et **§22ter** (NODE3 cloud).
 
 ### Cleanup post-essai
 
@@ -969,3 +977,19 @@ chown alarm:alarm .env.prod.secrets
     `git clone https://github.com/claude-murgat/Alarm2.0.git /opt/alarm`,
     placeholder `firebase-service-account.json`, `daemon.json` logging conforme §14
   - `docker run hello-world` ✅ — NODE3 prêt pour bring-up cluster 3-way
+- **2026-05-10** : bring-up cluster 3-way effectif + introduction §22quater (secrets hygiene)
+  - `scripts/start-prod-node.sh {1,2,3}` lancés en parallèle sur les 3 machines :
+    9 containers up (3 × etcd + patroni + backend), etcd 3-membres en quorum
+    (leader RAFT = node1 onsite-1), Patroni `alarm-cluster` 1 leader + 2 replicas
+    en streaming, replication lag = 0, 3 backends répondent /health
+  - Note : self-loop Docker connu (chaque container etcd/patroni ne peut pas reach
+    son propre host:port via WG IP — NAT bridge boucle). Non bloquant car les
+    2 autres peers via WG suffisent au quorum. À résoudre dans une PR future via
+    `network_mode: host` ou en mettant `127.0.0.1` en premier dans `PATRONI_ETCD3_HOSTS`
+  - **PR #53 secrets hygiene** : `SECRET_KEY` sortie de `docker-compose.yml` (qui est
+    publiquement accessible — repo GitHub public). Désormais sourcée via
+    `.env.prod.secrets` gitignored, déposé à la main sur chaque machine
+    (`chmod 600`, `chown alarm:alarm`), sourcé par `start-prod-node.sh` au bring-up
+  - Introduction du pattern `.env.prod.secrets` (§22quater) à généraliser pour tous
+    les secrets futurs (PG passwords, FCM, SMTP — listés en §22quater "secrets
+    encore hardcodés à migrer")
