@@ -4,6 +4,9 @@ name: Slack test (jetable)
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/slack-test-jetable.yml'
 
 jobs:
   test:
