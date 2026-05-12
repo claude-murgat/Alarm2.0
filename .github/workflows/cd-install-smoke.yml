@@ -106,6 +106,30 @@ jobs:
             exit 1
           }
 
+      - name: Regression — get_local_digest tolere image absente (set -euo pipefail)
+        # Bug observe en prod NODE3 le 2026-05-12 : si :stable existe distant
+        # mais pas en cache local (cas du premier pull jamais sur un noeud),
+        # le script alarm-cd-pull exit 1 silencieux sur la pipe
+        # `docker image inspect ... | sed`, parce que :
+        #   - docker image inspect retourne rc=1 quand l'image n'existe pas localement
+        #   - set -o pipefail propage ce rc=1 sur la pipe entiere
+        #   - set -e tue le shell immediatement, AVANT meme le premier log()
+        # Fix : `|| echo ""` a la fin de la fonction (symetrique a get_remote_digest).
+        # Test : extraire la fonction du script et l'appeler sur une image fictive,
+        # doit renvoyer chaine vide sans crash.
+        run: |
+          set -euo pipefail
+          REGISTRY=ghcr.io/claude-murgat
+          TAG=does-not-exist-anywhere
+          # Sourcer juste la def de get_local_digest (entre 'get_local_digest()' et le '}' de fin).
+          eval "$(awk '/^get_local_digest\(\)/,/^}$/' /usr/local/bin/alarm-cd-pull)"
+          result=$(get_local_digest some-image-that-does-not-exist)
+          if [[ -n "$result" ]]; then
+            echo "::error::get_local_digest devrait renvoyer chaine vide, a renvoye : '$result'"
+            exit 1
+          fi
+          echo "OK : get_local_digest tolere image absente"
+
       - name: Resume CI
         if: always()
         run: |
