@@ -22,7 +22,8 @@ from sqlalchemy.orm import Session
 
 from ..auth import get_current_admin
 from ..database import get_db
-from ..models import DeploymentEvent, User
+from ..email_service import send_alert_email
+from ..models import DeploymentEvent, SystemConfig, User
 
 router = APIRouter(prefix="/api/deployments", tags=["deployments"])
 
@@ -122,7 +123,73 @@ def insert_event(
     db.add(row)
     db.commit()
     db.refresh(row)
+
+    # Hook notification email (cf §6 doc).
+    # Envoyes uniquement pour les events significatifs : rollback, abort,
+    # emergency_promote, et canary_promoted sur node1 (= deploiement complet
+    # termine, dernier noeud de l'ordre canary NODE3 -> onsite-2 -> onsite-1).
+    # Les pull/canary_start intermediaires sont silencieux pour eviter le bruit.
+    _maybe_send_email(row, db)
+
     return {"id": row.id, "ts": row.ts.isoformat()}
+
+
+_EMAIL_TRIGGER_KINDS = {
+    "rollback",
+    "abort",
+    "emergency_promote",
+    "emergency_aborted_network",
+    "manual_override",
+}
+
+
+def _maybe_send_email(event: DeploymentEvent, db: Session) -> None:
+    """Envoie un email pour les events CD significatifs.
+
+    Lit `alert_email` depuis SystemConfig (cle existante, cf INV-053/080/085).
+    Si la cle n'existe pas, on skip silencieusement (pas de fallback hardcode :
+    le proprietaire doit avoir configure son email de contact).
+    """
+    should_send = event.kind in _EMAIL_TRIGGER_KINDS
+    # canary_promoted UNIQUEMENT pour node1 = fin de la sequence canary 3 -> 2 -> 1
+    if event.kind == "canary_promoted" and event.node == "node1":
+        should_send = True
+
+    if not should_send:
+        return
+
+    cfg = db.query(SystemConfig).filter(SystemConfig.key == "alert_email").first()
+    if not cfg or not cfg.value:
+        return
+
+    subject_map = {
+        "rollback": f"[CD] Rollback declenche sur {event.node} ({event.image})",
+        "abort": f"[CD] Deploiement abandonne sur {event.node} ({event.image})",
+        "emergency_promote": f"[URGENCE] Auto-promote bot sur {event.image}",
+        "emergency_aborted_network": f"[CD] Detecteur urgence abandonne (reseau partiel)",
+        "manual_override": f"[CD] Promotion :stable -> {event.to_digest or '?'}",
+        "canary_promoted": f"[CD] Deploiement complet termine ({event.image})",
+    }
+    subject = subject_map.get(event.kind, f"[CD] Event {event.kind}")
+    body_lines = [
+        f"Event CD: {event.kind} / {event.status}",
+        f"Node: {event.node}",
+        f"Image: {event.image}",
+        f"From: {event.from_digest or 'none'}",
+        f"To: {event.to_digest or 'none'}",
+        f"Actor: {event.actor or 'unknown'}",
+        f"Time: {event.ts.isoformat()}",
+    ]
+    if event.details:
+        body_lines.append(f"Details: {event.details}")
+    body = "\n".join(body_lines)
+
+    try:
+        send_alert_email(subject=subject, body=body, to=cfg.value)
+    except Exception:
+        # On ne casse JAMAIS un POST d'event a cause d'un email rate.
+        # L'event reste en base, c'est l'essentiel pour le dashboard et l'audit.
+        pass
 
 
 def _row_to_out(row: DeploymentEvent) -> DeploymentEventOut:
