@@ -115,6 +115,28 @@ jobs:
             exit 1
           }
 
+      - name: Regression — pas de duplication des logs dans le journal
+        # Bug observe sur NODE3 le 2026-05-12 : chaque ligne `[alarm-cd-pull] ...`
+        # apparaissait 2 fois dans `journalctl -u alarm-cd-pull` parce que log()
+        # ecrivait sur stderr (-> StandardError=journal capture) ET appelait
+        # `logger -t alarm-cd-pull` (-> syslog -> journal avec le meme tag).
+        # Le smoke logue au moins 2 lignes WARN (1 par image, registry inaccessible
+        # car pas d'auth GHCR sur le runner). Si une meme ligne apparait > 1 fois,
+        # la duplication est revenue.
+        run: |
+          sudo journalctl -u alarm-cd-pull.service --no-pager --output=cat \
+            | grep '^\[alarm-cd-pull\]' \
+            | sort | uniq -c | sort -rn > /tmp/log-counts.txt
+          echo "Compte par ligne (avant pipe : count, apres : message) :"
+          cat /tmp/log-counts.txt
+          max_count=$(awk 'NR==1 {print $1}' /tmp/log-counts.txt)
+          if [[ -z "${max_count:-}" ]]; then
+            echo "::warning::Aucune ligne [alarm-cd-pull] dans le journal (anormal en smoke)"
+          elif [[ "$max_count" -gt 1 ]]; then
+            echo "::error::Duplication regression : une ligne apparait $max_count fois"
+            exit 1
+          fi
+
       - name: Regression — get_local_digest tolere image absente (set -euo pipefail)
         # Bug observe en prod NODE3 le 2026-05-12 : si :stable existe distant
         # mais pas en cache local (cas du premier pull jamais sur un noeud),
