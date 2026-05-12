@@ -160,8 +160,27 @@ groups alarm
 ```
 Si absent : `sudo usermod -aG sudo alarm` (et reconnexion).
 
-NOPASSWD limité à une whitelist dans `/etc/sudoers.d/alarm-ops` pour les commandes
-healthcheck/deploy uniquement (à définir au moment où on installera ces services).
+NOPASSWD limité à une whitelist dans `/etc/sudoers.d/alarm-cd` pour les commandes
+du flux Continuous Deployment V1 (cf docs/CD_DESIGN.md §3 et brief Phase 3) :
+`install` des fichiers `alarm-cd-pull.{sh,service,timer}`, `systemctl` sur les units
+correspondantes, `journalctl -u alarm-cd-pull*`. Voir
+[`infra/onsite/sudoers/alarm-cd`](../infra/onsite/sudoers/alarm-cd) pour la liste
+exacte.
+
+Déploiement (à faire **une fois par nœud onsite**, requiert sudo interactif) :
+```bash
+# Ouvrir d'abord une 2e session SSH en filet de securite (cf §3.2), puis :
+sudo install -m 440 -o root -g root \
+  /opt/alarm/infra/onsite/sudoers/alarm-cd \
+  /etc/sudoers.d/alarm-cd
+sudo visudo -c    # doit afficher "parsed OK"
+# Test non-interactif depuis poste d'admin :
+ssh alarm@<noeud> "sudo -n systemctl status alarm-cd-pull.timer"
+```
+
+> NODE3 cloud OVH a historiquement `(ALL) NOPASSWD: ALL` (heritage du provisioning
+> cloud, cf §22ter). À aligner sur la whitelist `alarm-cd` à terme — ouvert dans
+> les "Points en attente avant prod" du §22ter.
 
 ---
 

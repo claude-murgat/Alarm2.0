@@ -1,0 +1,70 @@
+# /etc/sudoers.d/alarm-cd
+# NOPASSWD scope aux SEULES commandes du flux CD V1 (cf docs/CD_DESIGN.md §3
+# et brief Phase 3). Permet l'install + le pilotage d'alarm-cd-pull par le user
+# `alarm` (donc via SSH non-interactif depuis un poste d'admin), sans accorder
+# `NOPASSWD: ALL` qui ouvrirait le passwordless sur tout le systeme.
+#
+# Pourquoi ce fichier existe :
+#   Le brief Phase 3 utilise `sudo install ...` et `sudo systemctl ...` pour
+#   deployer alarm-cd-pull.{sh,service,timer}. Sur NODE3 cloud OVH le user
+#   `alarm` a `(ALL) NOPASSWD: ALL` (heritage du provisioning cloud, cf
+#   §22ter), ce qui marche mais est trop large. Sur onsite-1 et onsite-2
+#   `alarm` est dans le groupe sudo SANS NOPASSWD, ce qui bloque les commandes
+#   non-interactives. Ce fichier comble le gap de maniere chirurgicale.
+#
+# Deploiement (premiere fois par noeud, requiert sudo interactif une fois) :
+#   1. Ouvrir DEUX sessions SSH sur le noeud (cf §3.2 de la doc — filet de
+#      securite si la conf sudoers est cassee, sudo refuse de tourner du tout).
+#   2. Dans la session 1 (test) :
+#        sudo install -m 440 -o root -g root \
+#          /opt/alarm/infra/onsite/sudoers/alarm-cd \
+#          /etc/sudoers.d/alarm-cd
+#        sudo visudo -c    # doit afficher "parsed OK"
+#   3. Si visudo -c echoue : `sudo rm /etc/sudoers.d/alarm-cd` IMMEDIATEMENT
+#      depuis la session 2 (admin) avant de fermer la session 1.
+#   4. Tester en non-interactif depuis un poste d'admin :
+#        ssh alarm@<noeud> "sudo -n systemctl status alarm-cd-pull.timer"
+#      doit marcher sans demander de mot de passe.
+#
+# Wildcards (`*`) :
+#   En sudo, `*` matche tout y compris `/` (different du glob shell). On
+#   l'utilise pour les modes d'install (444/644/755) et les options dynamiques
+#   de journalctl --since. Le risque residuel d'evasion est faible — `alarm`
+#   est deja un user privilegie (groupe sudo, groupe docker), une compromise
+#   de ce user contourne deja largement ce filet.
+
+Cmnd_Alias ALARM_CD_INSTALL = \
+    /usr/bin/install -m * /usr/local/bin/alarm-cd-pull, \
+    /usr/bin/install -m * /etc/systemd/system/alarm-cd-pull.service, \
+    /usr/bin/install -m * /etc/systemd/system/alarm-cd-pull.timer
+
+Cmnd_Alias ALARM_CD_SYSTEMCTL = \
+    /usr/bin/systemctl daemon-reload, \
+    /usr/bin/systemctl enable alarm-cd-pull.timer, \
+    /usr/bin/systemctl enable --now alarm-cd-pull.timer, \
+    /usr/bin/systemctl disable alarm-cd-pull.timer, \
+    /usr/bin/systemctl disable --now alarm-cd-pull.timer, \
+    /usr/bin/systemctl start alarm-cd-pull.service, \
+    /usr/bin/systemctl start alarm-cd-pull.timer, \
+    /usr/bin/systemctl stop alarm-cd-pull.service, \
+    /usr/bin/systemctl stop alarm-cd-pull.timer, \
+    /usr/bin/systemctl restart alarm-cd-pull.service, \
+    /usr/bin/systemctl restart alarm-cd-pull.timer, \
+    /usr/bin/systemctl status alarm-cd-pull.service, \
+    /usr/bin/systemctl status alarm-cd-pull.timer, \
+    /usr/bin/systemctl is-enabled alarm-cd-pull.timer, \
+    /usr/bin/systemctl is-active alarm-cd-pull.timer, \
+    /usr/bin/systemctl cat alarm-cd-pull.service, \
+    /usr/bin/systemctl cat alarm-cd-pull.timer, \
+    /usr/bin/systemctl reset-failed alarm-cd-pull.service, \
+    /usr/bin/systemctl reset-failed alarm-cd-pull.timer
+
+Cmnd_Alias ALARM_CD_JOURNAL = \
+    /usr/bin/journalctl -u alarm-cd-pull, \
+    /usr/bin/journalctl -u alarm-cd-pull *, \
+    /usr/bin/journalctl -u alarm-cd-pull.service, \
+    /usr/bin/journalctl -u alarm-cd-pull.service *, \
+    /usr/bin/journalctl -u alarm-cd-pull.timer, \
+    /usr/bin/journalctl -u alarm-cd-pull.timer *
+
+alarm ALL=(root) NOPASSWD: ALARM_CD_INSTALL, ALARM_CD_SYSTEMCTL, ALARM_CD_JOURNAL
