@@ -26,12 +26,12 @@ jobs:
           RESPONSE=$(curl -sS -X POST \
             -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
             -H "Content-Type: application/json; charset=utf-8" \
-            --data "$(python3 -c 'import json,os,sys; print(json.dumps({"channel":"D0B326EUZ51","text":os.environ["MSG"]}))' MSG="$MSG")" \
+            --data "$(jq -n --arg c "D0B326EUZ51" --arg t "$MSG" '{channel:$c, text:$t}')" \
             https://slack.com/api/chat.postMessage)
           echo "Slack API response: $RESPONSE"
-          OK=$(echo "$RESPONSE" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r.get('ok'))")
-          if [[ "$OK" != "True" ]]; then
-            ERROR=$(echo "$RESPONSE" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r.get('error','unknown'))")
+          OK=$(echo "$RESPONSE" | jq -r '.ok')
+          if [[ "$OK" != "true" ]]; then
+            ERROR=$(echo "$RESPONSE" | jq -r '.error // "unknown"')
             echo "::error::Slack notify failed: $ERROR"
             if [[ "$ERROR" == "channel_not_found" ]]; then
               echo "::warning::Le DM D0B326EUZ51 n'est pas accessible au bot. Solution : remplacer SLACK_DM_CHANNEL par U02U94G6LMP (user ID Mathieu) dans ai-bot.yml + ai-bot-cron.yml."
