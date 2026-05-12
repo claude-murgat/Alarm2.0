@@ -26,9 +26,11 @@ STATE_DIR="/var/lib/alarm/cd"
 DIGESTS_FILE="${STATE_DIR}/digests.tsv"
 
 log() {
-  # journald + stderr (pour systemctl status).
+  # stderr seul -> systemd capture via StandardError=journal (cf unit file).
+  # Visible via `systemctl status alarm-cd-pull` (sortie d'erreur) ET dans
+  # `journalctl -u alarm-cd-pull`. Le `logger -t alarm-cd-pull` precedemment
+  # ici creait une duplication 1:1 dans le journal (chaque ligne 2 fois).
   echo "[alarm-cd-pull] $*" >&2
-  logger -t alarm-cd-pull "$*" || true
 }
 
 # Lock exclusif : evite (a) deux pulls concurrents si timer triggerise deux fois,
