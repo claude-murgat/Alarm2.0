@@ -770,6 +770,10 @@ jobs:
           MODE: ${{ needs.dispatch.outputs.mode }}
           ITERATION: ${{ needs.dispatch.outputs.iteration }}
           RUN_ID: ${{ github.run_id }}
+          # Bloc B : anti-boucle cron + notif Slack DM
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_DM_CHANNEL: D0B326EUZ51
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           SUMMARY=$(cat /tmp/agent-summary.md 2>/dev/null || echo "(no summary)")
@@ -791,6 +795,22 @@ jobs:
           # est reserve au cas "iteration limit reached"). Ici l'agent n'a
           # juste pas trouve quoi faire -> humain doit clarifier/reformuler.
           gh issue edit "$ISSUE_NUMBER" --add-label "ai:needs-human" || true
+
+          # Bloc B (2026-05-12) : retire ai:queue pour que le cron 4h ne
+          # repioche pas cette issue. Le label revient si humain le repose.
+          gh issue edit "$ISSUE_NUMBER" --remove-label "ai:queue" 2>/dev/null || true
+
+          # Bloc B : notif Slack DM (skip silencieux si SLACK_BOT_TOKEN absent).
+          if [[ -n "${SLACK_BOT_TOKEN:-}" ]]; then
+            MSG="⚠️ Bot bloque sur issue #${ISSUE_NUMBER} — reason: \`ai:needs-human\` (no diff produit, iteration ${ITERATION}/3). Voir https://github.com/${REPO}/issues/${ISSUE_NUMBER}"
+            curl -sS -X POST -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+              -H "Content-Type: application/json; charset=utf-8" \
+              --data "$(jq -n --arg c "${SLACK_DM_CHANNEL}" --arg t "$MSG" '{channel:$c, text:$t}')" \
+              https://slack.com/api/chat.postMessage \
+              | jq -r 'if .ok then "Slack notified" else "::warning::Slack notify failed: \(.error // "unknown")" end'
+          else
+            echo "::notice::SLACK_BOT_TOKEN not configured, Slack notification skipped."
+          fi
 
           exit 1
 
@@ -839,6 +859,10 @@ jobs:
           ISSUE_NUMBER: ${{ needs.dispatch.outputs.issue_number }}
           PR_NUMBER: ${{ needs.dispatch.outputs.pr_number }}
           RUN_ID: ${{ github.run_id }}
+          # Bloc B : anti-boucle cron + notif Slack DM
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_DM_CHANNEL: D0B326EUZ51
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           VIOLATIONS=$(cat /tmp/denylist-violations.txt 2>/dev/null || echo "(details missing)")
@@ -866,6 +890,21 @@ jobs:
           TARGET="${PR_NUMBER:-$ISSUE_NUMBER}"
           gh issue comment "$TARGET" --body "$BODY"
           gh issue edit "$ISSUE_NUMBER" --add-label "ai:denied" || true
+
+          # Bloc B (2026-05-12) : retire ai:queue (anti-boucle cron 4h)
+          gh issue edit "$ISSUE_NUMBER" --remove-label "ai:queue" 2>/dev/null || true
+
+          # Bloc B : notif Slack DM (skip silencieux si SLACK_BOT_TOKEN absent)
+          if [[ -n "${SLACK_BOT_TOKEN:-}" ]]; then
+            MSG="🚨 Bot bloque sur issue #${ISSUE_NUMBER} — reason: \`ai:denied\` (violation denylist). Voir https://github.com/${REPO}/issues/${ISSUE_NUMBER}"
+            curl -sS -X POST -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+              -H "Content-Type: application/json; charset=utf-8" \
+              --data "$(jq -n --arg c "${SLACK_DM_CHANNEL}" --arg t "$MSG" '{channel:$c, text:$t}')" \
+              https://slack.com/api/chat.postMessage \
+              | jq -r 'if .ok then "Slack notified" else "::warning::Slack notify failed: \(.error // "unknown")" end'
+          else
+            echo "::notice::SLACK_BOT_TOKEN not configured, Slack notification skipped."
+          fi
       # === /Phase 3A ============================================================
 
       - name: Commit agent's changes
@@ -1093,6 +1132,10 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           REJECT_REASON: ${{ needs.dispatch.outputs.reject_reason }}
           LOOP_TESTS: ${{ needs.dispatch.outputs.loop_tests }}
+          # Bloc B : anti-boucle cron + notif Slack DM
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_DM_CHANNEL: D0B326EUZ51
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
@@ -1177,5 +1220,20 @@ jobs:
           # Idem sur l'issue source (pour retrouvabilite)
           gh issue comment "$ISSUE_NUMBER" --body-file /tmp/abandon-comment.md
           gh issue edit "$ISSUE_NUMBER" --add-label "ai:abandoned" || true
+
+          # Bloc B (2026-05-12) : retire ai:queue (anti-boucle cron 4h)
+          gh issue edit "$ISSUE_NUMBER" --remove-label "ai:queue" 2>/dev/null || true
+
+          # Bloc B : notif Slack DM (skip silencieux si SLACK_BOT_TOKEN absent)
+          if [[ -n "${SLACK_BOT_TOKEN:-}" ]]; then
+            MSG="🛑 Bot a abandonne issue #${ISSUE_NUMBER} — reason: \`${REJECT_REASON}\` (iteration ${ITERATION}/3). PR #${PR_NUMBER}. Voir https://github.com/${REPO}/issues/${ISSUE_NUMBER}"
+            curl -sS -X POST -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+              -H "Content-Type: application/json; charset=utf-8" \
+              --data "$(jq -n --arg c "${SLACK_DM_CHANNEL}" --arg t "$MSG" '{channel:$c, text:$t}')" \
+              https://slack.com/api/chat.postMessage \
+              | jq -r 'if .ok then "Slack notified" else "::warning::Slack notify failed: \(.error // "unknown")" end'
+          else
+            echo "::notice::SLACK_BOT_TOKEN not configured, Slack notification skipped."
+          fi
 
           echo "Abandonment notice posted on PR #${PR_NUMBER} and issue #${ISSUE_NUMBER} (reason=${REJECT_REASON})."
