@@ -1,0 +1,38 @@
+# Workflow jetable — vérifie que SLACK_BOT_TOKEN fonctionne avec D0B326EUZ51.
+# À supprimer immédiatement après le test (suppression au prochain commit).
+name: Slack test (jetable)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Test Slack chat.postMessage
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${SLACK_BOT_TOKEN:-}" ]]; then
+            echo "::error::SLACK_BOT_TOKEN secret manquant"
+            exit 1
+          fi
+          MSG="🧪 Test SLACK_BOT_TOKEN depuis GH Actions ($(date -u +%Y-%m-%dT%H:%M:%SZ)). Si tu lis ceci, le pipeline ai-bot pourra notifier abandons/backlog vide."
+          RESPONSE=$(curl -sS -X POST \
+            -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+            -H "Content-Type: application/json; charset=utf-8" \
+            --data "$(python3 -c 'import json,os,sys; print(json.dumps({"channel":"D0B326EUZ51","text":os.environ["MSG"]}))' MSG="$MSG")" \
+            https://slack.com/api/chat.postMessage)
+          echo "Slack API response: $RESPONSE"
+          OK=$(echo "$RESPONSE" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r.get('ok'))")
+          if [[ "$OK" != "True" ]]; then
+            ERROR=$(echo "$RESPONSE" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r.get('error','unknown'))")
+            echo "::error::Slack notify failed: $ERROR"
+            if [[ "$ERROR" == "channel_not_found" ]]; then
+              echo "::warning::Le DM D0B326EUZ51 n'est pas accessible au bot. Solution : remplacer SLACK_DM_CHANNEL par U02U94G6LMP (user ID Mathieu) dans ai-bot.yml + ai-bot-cron.yml."
+            fi
+            exit 1
+          fi
+          echo "✅ Slack OK — message envoyé."
