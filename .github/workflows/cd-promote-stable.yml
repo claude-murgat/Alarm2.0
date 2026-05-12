@@ -189,6 +189,19 @@ jobs:
         # vont propager dans les 5 min. On ecrit 1 event par image (pas par
         # noeud — c'est une action globale au registry, pas locale a 1 noeud).
         # Le `node='registry'` est un alias special pour les events globaux.
+        #
+        # V1 LIMITATION (cf bring-up Phase 3 du 2026-05-12) :
+        # Le runner ubuntu-latest GitHub-hosted n'est pas dans le mesh WG, donc
+        # `vars.CD_API_BASE=http://10.99.0.X:8000` (IP WG privee) est inatteignable
+        # -> curl timeout 5 min, le step finit en warning. La var est laissee VIDE
+        # par defaut -> ce step se skip proprement via la condition `if`.
+        # Workaround : l'orchestrateur alarm-cd-canary.sh (cf scripts/) ecrit
+        # deja les events depuis un noeud DANS le mesh, donc on ne perd rien
+        # d'essentiel — juste l'event `manual_override` au moment de la promo
+        # manuelle est manquant.
+        # V1.5 envisage : self-hosted runner sur NODE3 cloud (deja dans le mesh).
+        # Pour reactiver : `gh variable set CD_API_BASE --body http://...`
+        # avec une URL joignable depuis le runner (HTTPS public derriere gateway).
         if: vars.CD_API_BASE != ''
         env:
           CD_API_BASE: ${{ vars.CD_API_BASE }}
@@ -200,7 +213,9 @@ jobs:
             exit 0
           fi
           for IMG in alarm-backend alarm-patroni; do
-            curl -fsS -X POST "$CD_API_BASE/api/deployments/events" \
+            # --max-time pour ne pas hang sur une CD_API_BASE inatteignable
+            # (cf V1 LIMITATION ci-dessus).
+            curl -fsS --max-time 15 -X POST "$CD_API_BASE/api/deployments/events" \
               -H "X-Gateway-Key: $CD_GATEWAY_KEY" \
               -H "Content-Type: application/json" \
               -d "{
