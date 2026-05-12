@@ -25,12 +25,14 @@ on:
     paths:
       - 'scripts/alarm-cd-pull.sh'
       - 'infra/onsite/systemd/alarm-cd-pull.*'
+      - 'infra/onsite/sudoers/alarm-cd'
       - '.github/workflows/cd-install-smoke.yml'
   push:
     branches: [master]
     paths:
       - 'scripts/alarm-cd-pull.sh'
       - 'infra/onsite/systemd/alarm-cd-pull.*'
+      - 'infra/onsite/sudoers/alarm-cd'
       - '.github/workflows/cd-install-smoke.yml'
 
 jobs:
@@ -58,6 +60,13 @@ jobs:
       - name: Lint syntaxe unit systemd
         # systemd-analyze verify : refuse les directives inconnues, typos, etc.
         run: sudo systemd-analyze verify /etc/systemd/system/alarm-cd-pull.service /etc/systemd/system/alarm-cd-pull.timer
+
+      - name: Lint syntaxe sudoers infra/onsite/sudoers/alarm-cd
+        # `visudo -c -f` parse strict, refuse les typos sur Cmnd_Alias, alias inconnus,
+        # virgules manquantes, etc. Sans ce test, une sudoers cassee deployee en prod
+        # empeche TOUTES les commandes sudo de tourner (incl. l'humain qui doit reparer
+        # depuis sa 2e session SSH ouverte en filet de securite).
+        run: sudo visudo -c -f infra/onsite/sudoers/alarm-cd
 
       - name: Lancer le service (Type=oneshot blocking)
         # Tolere un exit non-0 cote downstream (registry GHCR pas auth dans CI,
