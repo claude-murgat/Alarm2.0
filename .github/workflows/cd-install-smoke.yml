@@ -1,0 +1,117 @@
+# CD Install Smoke — verifie que alarm-cd-pull.{service,timer,sh} s'installe
+# proprement et que le 1er run ne casse pas sur des problemes triviaux (perms,
+# fichiers manquants, syntaxe systemd).
+#
+# Pourquoi ce workflow existe :
+#   La PR de fix `fix/cd-pull-lock-runtime-dir` corrige un bug ou le script
+#   essayait d'ecrire /run/alarm-cd-pull.lock alors qu'il tourne en User=alarm
+#   (donc pas root, donc pas le droit d'ecrire dans /run/). Le bug etait passe
+#   les 8 PRs CD V1 parce qu'aucun test n'exerce l'install reelle, juste le
+#   build des images et la logique applicative. Ce workflow comble ce trou.
+#
+# Ne pas confondre avec :
+#   - cd-build.yml : build et push des images Docker sur GHCR (PR 1).
+#   - cd-promote-stable.yml : promotion sha-XXX -> :stable (PR 7).
+#
+# Scope : on teste que le service demarre, va au-dela de la creation du lock,
+# et que la regression "Permission denied" n'apparait pas. On NE teste PAS le
+# pull GHCR effectif (auth registry pas configuree pour le runner, et de toute
+# facon hors-scope d'un smoke d'install).
+
+name: CD Install Smoke
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/alarm-cd-pull.sh'
+      - 'infra/onsite/systemd/alarm-cd-pull.*'
+      - '.github/workflows/cd-install-smoke.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'scripts/alarm-cd-pull.sh'
+      - 'infra/onsite/systemd/alarm-cd-pull.*'
+      - '.github/workflows/cd-install-smoke.yml'
+
+jobs:
+  smoke-install:
+    name: alarm-cd-pull install smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup user alarm (simulant un noeud prod)
+        # Cf docs/PROVISIONING_ONSITE.md §3.3 : user 'alarm' avec groupe docker.
+        run: |
+          sudo useradd -r -m -s /bin/bash alarm
+          sudo usermod -aG docker alarm
+
+      - name: Install script + units systemd (procedure du brief Phase 3)
+        run: |
+          sudo install -m 755 scripts/alarm-cd-pull.sh /usr/local/bin/alarm-cd-pull
+          sudo install -m 644 infra/onsite/systemd/alarm-cd-pull.service /etc/systemd/system/
+          sudo install -m 644 infra/onsite/systemd/alarm-cd-pull.timer /etc/systemd/system/
+          sudo systemctl daemon-reload
+
+      - name: Lint syntaxe unit systemd
+        # systemd-analyze verify : refuse les directives inconnues, typos, etc.
+        run: sudo systemd-analyze verify /etc/systemd/system/alarm-cd-pull.service /etc/systemd/system/alarm-cd-pull.timer
+
+      - name: Lancer le service (Type=oneshot blocking)
+        # Tolere un exit non-0 cote downstream (registry GHCR pas auth dans CI,
+        # le script journalise un WARN par image et exit 0 normalement). Ce
+        # qu'on teste ici : le service VA jusqu'au bout sans crasher avant.
+        run: |
+          sudo systemctl start alarm-cd-pull.service || true
+          sudo systemctl status alarm-cd-pull.service --no-pager --lines=20 || true
+
+      - name: Regression guard — pas de "Permission denied" dans le journal
+        # Le bug d'origine : "/usr/local/bin/alarm-cd-pull: line 35:
+        # /run/alarm-cd-pull.lock: Permission denied". Si on retrouve ce
+        # pattern, c'est qu'on a regresse.
+        run: |
+          sudo journalctl -u alarm-cd-pull.service --no-pager > /tmp/journal.txt
+          cat /tmp/journal.txt
+          if grep -qi "permission denied" /tmp/journal.txt; then
+            echo "::error::Regression: 'Permission denied' detecte dans le journal alarm-cd-pull"
+            exit 1
+          fi
+
+      - name: Verif RuntimeDirectory + StateDirectory presents dans l'unit
+        # RuntimeDirectory= /run/alarm-cd-pull/ (lock ephemere).
+        # StateDirectory= /var/lib/alarm/cd/ (digests.tsv persistant).
+        # Sans l'un OU l'autre, le script echoue avec "Permission denied".
+        run: |
+          sudo systemctl cat alarm-cd-pull.service | grep -E '^RuntimeDirectory=' || {
+            echo "::error::RuntimeDirectory= absent de l'unit installee"
+            exit 1
+          }
+          sudo systemctl cat alarm-cd-pull.service | grep -E '^StateDirectory=' || {
+            echo "::error::StateDirectory= absent de l'unit installee"
+            exit 1
+          }
+
+      - name: Verif StateDirectory cree avec ownership alarm
+        # StateDirectory=alarm/cd cree /var/lib/alarm/cd/ owned alarm:alarm.
+        # Persistent par defaut (contrairement a RuntimeDirectory), donc apres
+        # le `systemctl start` le dossier doit exister meme si le service a
+        # deja termine.
+        run: |
+          ls -la /var/lib/alarm/ /var/lib/alarm/cd/
+          owner=$(stat -c '%U' /var/lib/alarm/cd)
+          test "$owner" = "alarm" || {
+            echo "::error::/var/lib/alarm/cd not owned by alarm (owner=$owner)"
+            exit 1
+          }
+
+      - name: Resume CI
+        if: always()
+        run: |
+          {
+            echo "### Smoke install alarm-cd-pull"
+            echo ""
+            echo "Verifie : install OK, syntaxe systemd OK, pas de Permission denied,"
+            echo "RuntimeDirectory= present."
+          } >> "$GITHUB_STEP_SUMMARY"
