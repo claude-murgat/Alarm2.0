@@ -1,0 +1,158 @@
+# AI Bot - cron pioche (Bloc B, 2026-05-12)
+#
+# Toutes les 4h, pioche la plus ancienne issue `ai:queue` qui n'est pas
+# deja en traitement et pose `ai:fix` dessus, ce qui declenche
+# `.github/workflows/ai-bot.yml` via l'event `issues.labeled`.
+#
+# Backlog : `docs/ai_backlog.md` + issues GH #68-#85 (cf project memory).
+#
+# Strategie :
+#   - 1 seul pick par run cron (le workflow ai-bot.yml a concurrency
+#     "ai-bot" global, donc 1 issue a la fois. Picker plus, ce serait
+#     juste pre-queuer du travail qui sera execute en serie quand meme).
+#   - Skip si `ai-bot.yml` est in_progress OU queued (eviter d'empiler
+#     pour rien).
+#   - Skip une issue qui a deja un des labels bloquants : `ai:fix`,
+#     `ai:abandoned`, `ai:needs-human`, `ai:denied`. L'anti-boucle dans
+#     ai-bot.yml retire automatiquement `ai:queue` quand un de ces labels
+#     est pose, donc en pratique le filtre est redondant (defensif).
+#
+# Notif Slack DM (channel D0B326EUZ51) si :
+#   - Backlog `ai:queue` epuise (plus rien a piocher)
+#   - 3 picks consecutifs ont fini en `ai:abandoned` (signal probleme
+#     structurel) — TODO sur run #N+1 si besoin, pas implemente ici
+#
+# Prerequis utilisateur :
+#   - Secret GH `SLACK_BOT_TOKEN` (Slack App > Install > Bot User OAuth
+#     Token xoxb-..., scope `chat:write` + `im:write`)
+#   Sans ce secret, la notif est skip silencieusement (log only).
+
+name: AI Bot - cron pioche (4h)
+
+on:
+  schedule:
+    # Toutes les 4h, a la minute 0 (00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC)
+    - cron: '0 */4 * * *'
+  workflow_dispatch:
+    # Permet de declencher manuellement depuis l'UI GH ou `gh workflow run`
+    # pour test ou pour avancer la file d'attente entre deux ticks cron.
+
+concurrency:
+  # Un seul cron a la fois — si le precedent tourne encore, on skip.
+  # cancel-in-progress: false car les operations sont rapides (<1 min) et
+  # idempotentes (poser ai:fix 2x = no-op).
+  group: ai-bot-cron
+  cancel-in-progress: false
+
+jobs:
+  pick:
+    name: Pick next ai:queue issue
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Generate installation token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.ALARM_BOT_APP_ID }}
+          private-key: ${{ secrets.ALARM_BOT_PRIVATE_KEY }}
+          # Lecture des runs (gh run list)
+          permission-actions: read
+          # Lecture/ecriture des labels issues (gh issue edit)
+          permission-issues: write
+          # Lecture des PRs (verifier qu'aucune PR bot n'est ouverte
+          # en etat instable — defensif, non bloquant)
+          permission-pull-requests: read
+
+      - name: Skip if ai-bot.yml already running
+        id: skip-check
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          IN_PROGRESS=$(gh run list \
+            --workflow ai-bot.yml \
+            --status in_progress \
+            --limit 5 \
+            --json databaseId \
+            | jq 'length')
+          QUEUED=$(gh run list \
+            --workflow ai-bot.yml \
+            --status queued \
+            --limit 5 \
+            --json databaseId \
+            | jq 'length')
+
+          if [[ "$IN_PROGRESS" -gt 0 || "$QUEUED" -gt 0 ]]; then
+            echo "::notice::ai-bot.yml deja occupe (in_progress=$IN_PROGRESS, queued=$QUEUED) — skip ce tick"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ai-bot.yml libre, on peut piocher."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Pick oldest ai:queue issue (or notify exhausted)
+        if: steps.skip-check.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_DM_CHANNEL: D0B326EUZ51
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # === Liste des issues ai:queue triees par creation asc ===
+          ISSUES_JSON=$(gh issue list \
+            --label "ai:queue" \
+            --state open \
+            --limit 100 \
+            --json number,title,labels,createdAt)
+
+          # Trie cote jq car gh n'accepte pas --sort sur "created asc"
+          # (gh trie par defaut par date desc — on inverse)
+          PICKABLE=$(echo "$ISSUES_JSON" | jq -c '
+            map(select(
+              ([.labels[].name] | contains(["ai:fix"]) | not) and
+              ([.labels[].name] | contains(["ai:abandoned"]) | not) and
+              ([.labels[].name] | contains(["ai:needs-human"]) | not) and
+              ([.labels[].name] | contains(["ai:denied"]) | not)
+            )) | sort_by(.createdAt)
+          ')
+
+          PICKABLE_COUNT=$(echo "$PICKABLE" | jq 'length')
+          TOTAL_COUNT=$(echo "$ISSUES_JSON" | jq 'length')
+
+          echo "Total ai:queue ouvertes: $TOTAL_COUNT — pickable: $PICKABLE_COUNT"
+
+          if [[ "$PICKABLE_COUNT" -eq 0 ]]; then
+            echo "::notice::Backlog ai:queue epuise (0 pickable, $TOTAL_COUNT avec labels bloquants)"
+
+            # Notif Slack si secret configure
+            if [[ -n "${SLACK_BOT_TOKEN:-}" ]]; then
+              MSG="📭 Cron ai-bot : backlog \`ai:queue\` epuise. Plus d'issue piochable a ce tick (4h). $TOTAL_COUNT issues avec labels bloquants (ai:fix/abandoned/needs-human/denied). Voir https://github.com/${REPO}/issues?q=is%3Aissue+is%3Aopen+label%3Aai%3Aqueue"
+              curl -sS -X POST -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+                -H "Content-Type: application/json; charset=utf-8" \
+                --data "$(jq -n --arg c "${SLACK_DM_CHANNEL}" --arg t "$MSG" '{channel:$c, text:$t}')" \
+                https://slack.com/api/chat.postMessage \
+                | jq -r 'if .ok then "Slack notified" else "::warning::Slack notify failed: \(.error // "unknown")" end'
+            else
+              echo "::notice::SLACK_BOT_TOKEN not configured, Slack notification skipped."
+            fi
+            exit 0
+          fi
+
+          # === Pick la plus ancienne ===
+          NEXT_NUMBER=$(echo "$PICKABLE" | jq -r '.[0].number')
+          NEXT_TITLE=$(echo "$PICKABLE" | jq -r '.[0].title')
+          NEXT_CREATED=$(echo "$PICKABLE" | jq -r '.[0].createdAt')
+
+          echo "::notice::Pioche issue #${NEXT_NUMBER} (cree ${NEXT_CREATED}) : ${NEXT_TITLE}"
+
+          # Pose ai:fix → declenche ai-bot.yml via event issues.labeled.
+          # Le label ai:queue reste pose pendant le traitement, retire
+          # automatiquement par ai-bot.yml en cas d'abandon (Bloc B).
+          gh issue edit "$NEXT_NUMBER" --add-label "ai:fix"
+
+          echo "Issue #${NEXT_NUMBER} marquee ai:fix — ai-bot.yml va prendre le relais."
