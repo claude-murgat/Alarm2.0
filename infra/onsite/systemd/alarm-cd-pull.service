@@ -14,6 +14,16 @@ Type=oneshot
 # donc peut parler au socket Docker sans sudo.
 User=alarm
 Group=alarm
+# Cree /run/alarm-cd-pull/ chmod 755 owned alarm:alarm avant ExecStart, nettoye
+# a l'arret. Sans ca, le lock /run/alarm-cd-pull/lock du script echoue avec
+# "Permission denied" (/run est root-only). Pattern systemd standard pour
+# services User=non-root qui ont besoin d'un repertoire ephemere sous /run.
+RuntimeDirectory=alarm-cd-pull
+# Cree /var/lib/alarm/cd/ owned alarm:alarm (et /var/lib/alarm/ parent si
+# absent), persistent entre runs. Sans ca, le `mkdir -p /var/lib/alarm/cd` du
+# script echoue avec "Permission denied" (/var/lib est root-only). Y stocke
+# digests.tsv (cf scripts/alarm-cd-pull.sh STATE_DIR).
+StateDirectory=alarm/cd
 # Limite de temps : un pull qui prend > 5 min suggere un probleme reseau ou un
 # blob trop gros (~600 Mo backend). On laisse 10 min de marge avant kill.
 TimeoutStartSec=600
