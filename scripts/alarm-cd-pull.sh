@@ -18,7 +18,10 @@ set -euo pipefail
 REGISTRY="${REGISTRY:-ghcr.io/claude-murgat}"
 TAG="${TAG:-stable}"
 IMAGES=("alarm-backend" "alarm-patroni")
-LOCK_FILE="/run/alarm-cd-pull.lock"
+# /run/alarm-cd-pull/ est cree par systemd (RuntimeDirectory= dans
+# alarm-cd-pull.service) avec owner alarm:alarm. Ne marche que si lance via
+# systemd ou si le repertoire est pre-cree manuellement.
+LOCK_FILE="/run/alarm-cd-pull/lock"
 STATE_DIR="/var/lib/alarm/cd"
 DIGESTS_FILE="${STATE_DIR}/digests.tsv"
 
