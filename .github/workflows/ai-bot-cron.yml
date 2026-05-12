@@ -70,15 +70,20 @@ jobs:
         id: skip-check
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # Le runner n'a pas de checkout du repo (gain de temps), donc gh
+          # ne peut pas inferer le base repo via .git. On passe --repo explicite.
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           IN_PROGRESS=$(gh run list \
+            --repo "$REPO" \
             --workflow ai-bot.yml \
             --status in_progress \
             --limit 5 \
             --json databaseId \
             | jq 'length')
           QUEUED=$(gh run list \
+            --repo "$REPO" \
             --workflow ai-bot.yml \
             --status queued \
             --limit 5 \
@@ -105,6 +110,7 @@ jobs:
 
           # === Liste des issues ai:queue triees par creation asc ===
           ISSUES_JSON=$(gh issue list \
+            --repo "$REPO" \
             --label "ai:queue" \
             --state open \
             --limit 100 \
@@ -153,6 +159,6 @@ jobs:
           # Pose ai:fix → declenche ai-bot.yml via event issues.labeled.
           # Le label ai:queue reste pose pendant le traitement, retire
           # automatiquement par ai-bot.yml en cas d'abandon (Bloc B).
-          gh issue edit "$NEXT_NUMBER" --add-label "ai:fix"
+          gh issue edit "$NEXT_NUMBER" --repo "$REPO" --add-label "ai:fix"
 
           echo "Issue #${NEXT_NUMBER} marquee ai:fix — ai-bot.yml va prendre le relais."
