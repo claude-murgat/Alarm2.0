@@ -161,6 +161,12 @@ app.include_router(audit_router)
 from .api.stats import router as stats_router
 app.include_router(stats_router)
 
+from .api.deployments import router as deployments_router
+app.include_router(deployments_router)
+
+from .api.system import router as system_router
+app.include_router(system_router)
+
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
