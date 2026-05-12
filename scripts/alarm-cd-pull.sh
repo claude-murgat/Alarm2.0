@@ -64,11 +64,18 @@ get_remote_digest() {
 
 # get_local_digest : digest de l'image deja pullee localement, ou chaine vide si
 # l'image n'a jamais ete pullee.
+#
+# Le `|| echo ""` final est CRITIQUE : `docker image inspect` exit 1 si l'image
+# n'existe pas localement (cas du premier pull jamais sur un noeud). Avec
+# `set -euo pipefail` au top du script, la pipe entiere retournerait rc=1
+# (pipefail) et le shell exit immediatement, sans aucun log applicatif.
+# Symetrique avec get_remote_digest() ci-dessus.
 get_local_digest() {
   local image="$1"
   docker image inspect "$REGISTRY/$image:$TAG" \
     -f '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' 2>/dev/null \
-    | sed 's/.*@//'
+    | sed 's/.*@//' \
+    || echo ""
 }
 
 # Boucle principale.
