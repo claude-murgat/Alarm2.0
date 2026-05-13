@@ -65,6 +65,9 @@ def seed_data():
             db.add(SystemConfig(key="escalation_delay_minutes", value="15"))
             db.add(SystemConfig(key="watchdog_timeout_seconds", value="60"))
             db.add(SystemConfig(key="sms_call_delay_minutes", value="2"))
+            # INV-084 (issue #75) : ticks paramétrables (2 clés séparées, défauts 10s / 30s).
+            db.add(SystemConfig(key="escalation_tick_seconds", value="10"))
+            db.add(SystemConfig(key="watchdog_tick_seconds", value="30"))
             db.commit()
             logger.info("Seed data created: 3 users, escalation chain configured")
     finally:
