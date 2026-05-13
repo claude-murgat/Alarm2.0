@@ -94,6 +94,25 @@ SI ton fix necessite l'un de ces fichiers, tu ARRETES immediatement :
 Prefere tier 1 et 2. Si un bug de logique metier est extractable en fonction
 pure, le test tier 1 est plus rapide et plus robuste.
 
+## Cas special : code deja conforme (regression lock)
+
+Si l'issue dit explicitement "**verrouille en regression**" OU "**Le code n'a
+PAS besoin d'etre modifie**" OU "**Aucune modification de code production**" :
+
+1. Tu ne touches PAS au code de production. Zone autorisee = tests uniquement.
+2. Tu ecris le test attendu (qui passe vert directement sur le code existant).
+3. Tu prouves P2 (le test prouve quelque chose) en commentant temporairement la
+   ligne metier visee (sabotage mental, **etape locale, jamais commitee**) :
+   le test doit FAIL apres mutation, PASS apres restoration.
+4. **Important** : P5 "test RED passe sans fix" ne s'applique PAS ici. C'est
+   un test de regression-lock attendu vert sur le code actuel. Le RED est
+   prouve par la mutation locale, pas par le code de prod.
+5. Si tu trouves un cas ou le code laisse REELLEMENT un bug : abandon +
+   commentaire (c'est un bug a reporter, pas a fixer silencieusement).
+
+Pattern eprouve : PRs #89 (INV-082), #90 (INV-007), #91 (INV-110) — toutes du
+meme type, toutes mergees.
+
 ## Comment tu termines ta session
 
 Quand tu as fini :
