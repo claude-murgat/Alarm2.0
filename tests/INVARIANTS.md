@@ -13,30 +13,31 @@ plutôt que d'interpréter à partir du code (le code peut être buggy).
 
 ---
 
-## État d'avancement global (mis à jour au 2026-04-20)
+## État d'avancement global (mis à jour au 2026-05-13)
 
 **Extraction logique pure** : PR 1-5 terminés (cc35b7d sur master).
 - 87 unit tests en 0.14s (logic/ entièrement couvert)
 - Suite E2E : 239 passed / 17 skipped / 0 fail en 1h09
 - 8 bugs catalogue corrigés : INV-011, INV-015b, INV-031, INV-066, INV-102, INV-073 (audit 2026-04-20) + **INV-019 (PR #20)**, **INV-005 (PR #27)**, **INV-084 oncall_offline (PR #25)** — pilotes bot IA 2026-04-21
+- **Session 2026-05-12/13** : Bloc A+B cron pioche 4h opérationnel (PR #87, #88) + 6 INV verrouillés par le bot via le pipeline cron : INV-082 (PR #89), INV-007 (PR #90), INV-110 (PR #91), INV-074 (PR #92), INV-077 (PR #93), INV-078 (PR #95). PR #94 prompt.md ajoute la section "regression-lock" pour éviter les faux-abandons sur invariants déjà respectés.
 
 **Statut par catégorie** :
 
 | Catégorie | ✅ | ⚠️ | ❌ | 🐛 |
 |---|---|---|---|---|
-| 1. Alarme lifecycle | 2 | 4 | 0 | 0 |
+| 1. Alarme lifecycle | 3 | 3 | 0 | 0 (INV-007 ✅ PR #90) |
 | 2. Escalade | 6 | 2 | 0 | 3 (INV-018, 018b, 019, 020) |
 | 3. Acquittement | 1 | 2 | 0 | 0 (INV-031 ✅ PR5) |
 | 4. Heartbeat | 0 | 3 | 0 | 0 |
 | 5. Astreinte | 6 | 0 | 0 | 0 (tout ✅ PR4) |
 | 6. SMS/Calls | 4 | 2 | 0 | 1 (INV-066 ✅ PR3) |
-| 7. Auth | 3 | 3 | 2 | 0 |
-| 8. Config/chaîne | 1 | 2 | 0 | 3 (INV-082, 084, 085) |
+| 7. Auth | 6 | 0 | 2 | 0 (INV-074/077/078 ✅ PRs #92/#93/#95) |
+| 8. Config/chaîne | 2 | 2 | 0 | 2 (INV-082 ✅ PR #89 ; reste INV-084 + 085) |
 | 9. Cluster HA | 0 | 3 | 2 | 0 |
 | 10. Observabilité | 1 | 2 | 0 | 0 (INV-102 ✅ PR0) |
-| 11. Stats | 0 | 2 | 0 | 0 |
+| 11. Stats | 1 | 1 | 0 | 0 (INV-110 ✅ PR #91) |
 
-**Restant prioritaire** : INV-018 (`original_created_at`), INV-084 (reste 2/3 sous-cas : `watchdog_timeout_seconds` + `escalation_tick_seconds` — sous-cas `oncall_offline_delay_minutes` fixé PR #25), INV-085 (quorum email). INV-082 déjà atomique côté code (il manque juste un test de race — audit 2026-04-20). INV-073 déjà testé (audit 2026-04-20). INV-019 et INV-005 fixés par pilotes bot 2026-04-21.
+**Restant prioritaire** : INV-018/018b (`original_created_at`), INV-084 (reste 2/3 sous-cas : `watchdog_timeout_seconds` + `escalation_tick_seconds`), INV-085 (quorum email). Issues backlog `ai:queue` ouvertes (8) : #74 (INV-084 watchdog), #75 (INV-084 escalation_tick), #76-#78 (INV-018/018b), #79-#81 (INV-085), #96 (INV-074 path négatif suite review PR #92). Cron 4h pioche automatiquement la plus ancienne.
 
 ---
 
@@ -84,9 +85,14 @@ Les seules transitions autorisées sont :
 - **Pourquoi** : évite les états zombies (ex: "resolved puis escalated").
 - **Test** : tenter chaque transition interdite → rejet ou no-op.
 
-### INV-007 [M] ⚠️ Alarme resolved n'apparaît plus dans /active ni /mine
+### INV-007 [M] ✅ Alarme resolved n'apparaît plus dans /active ni /mine
 `GET /api/alarms/active` et `GET /api/alarms/mine` excluent les `status = 'resolved'`.
 - **Pourquoi** : UX app mobile.
+- **Fix** : PR #90 (bot IA, 2026-05-12). Aucune modif prod (code déjà conforme) ; ajout de 2 tests de verrouillage en régression.
+- **Couverture** : `tests/integration/test_alarm_visibility_inv007.py` (tier 2, 2 tests) :
+  - `test_resolved_alarm_excluded_from_active`
+  - `test_resolved_alarm_excluded_from_mine`
+- **Limites connues** : ne couvre que la transition `active → resolved` directe. Transitions intermédiaires (`acknowledged → resolved`, `escalated → resolved`) et alarmes oncall non testées explicitement — à étoffer en issue follow-up si élargissement souhaité.
 
 ---
 
@@ -346,8 +352,17 @@ Plus de 10 tentatives échouées en 60s pour le même username → 429.
 - **Code** : `backend/app/api/users.py:18-32` (`_check_rate_limit`, `RATE_LIMIT_MAX_FAILURES = 10`, `RATE_LIMIT_WINDOW = 60`), appelé ligne 62. Raise 429 au 11e échec.
 - **Couverture** (audit 2026-04-20) : E2E `tests/test_improvements.py::TestRateLimiting` — `test_login_rate_limited_after_many_failures` + `test_legitimate_login_still_works_after_rate_limit`.
 
-### INV-074 [C] ⚠️ Refresh token produit un nouveau token
+### INV-074 [C] ✅ Refresh token produit un nouveau token
 POST /auth/refresh avec token valide → nouveau token différent.
+- **Pourquoi** : un refresh qui renverrait le token reçu en input ne sert à rien (pas de rotation TTL).
+- **Implémentation** : `create_access_token` (auth.py:28-37) inclut `"jti": str(uuid.uuid4())` dans le payload → chaque token a un UUID unique → tokens trivialement distincts à chaque appel, sans dépendre du timing `iat`.
+- **Fix** : PR #92 (bot IA, 2026-05-13). Aucune modif prod ; verrouillage en régression via 2 tests.
+- **Couverture** : `tests/integration/test_auth_refresh.py` (tier 2) :
+  - `test_new_refresh_returns_distinct_token` (token_after != token_before)
+  - `test_new_token_is_usable` (le nouveau token authentifie GET /api/auth/me)
+- **Limites identifiées (issues follow-up)** :
+  - #96 [H] : path négatif (`/auth/refresh` avec token expiré ou signature invalide → 401)
+  - #97 [human-required] : clarifier que l'ancien token reste valide jusqu'à `exp` naturelle (JWT stateless, pas de denylist — choix architectural assumé)
 
 ### INV-075 [C] ⚠️ Token cross-node
 Un token émis par un noeud est accepté par tous (même SECRET_KEY).
@@ -356,12 +371,22 @@ Un token émis par un noeud est accepté par tous (même SECRET_KEY).
 En production, tous les endpoints de test sont désactivés.
 - **🐛 Test manquant** : aucun test ne tourne avec cette variable false. En CI, ajouter un job dédié.
 
-### INV-077 [H] ⚠️ Admin-only endpoints protégés
+### INV-077 [H] ✅ Admin-only endpoints protégés
 DELETE /users/{id}, POST /alarms/reset, POST /config/* → requièrent `is_admin=True`.
 - **Test** : user non-admin → 403.
+- **Fix** : PR #93 (bot IA, 2026-05-13). Aucune modif prod (tous les handlers déclarent déjà `Depends(get_current_admin)`). Sensibilité prouvée par mutation manuelle (`get_current_admin` → `get_current_user` → test RED).
+- **Couverture** : `tests/integration/test_admin_only_endpoints.py` (tier 2, 1 test paramétré × 5 endpoints) :
+  - `DELETE /api/users/{id}`, `POST /api/alarms/reset`, `POST /api/config/escalation`, `POST /api/config/escalation/bulk`, `POST /api/config/system`
+  - Stratégie : body pydantiquement valide pour éviter faux positif 422 ; body non-destructif côté admin (id inexistant, payload conflit)
+  - Pour chaque endpoint : assert user1 → 403, assert admin → non-403
 
-### INV-078 [M] ⚠️ Logout supprime le token FCM
+### INV-078 [M] ✅ Logout supprime le token FCM
 POST /devices/fcm-token DELETE → retire de la base, plus de push reçu.
+- **Fix** : PR #95 (bot IA, 2026-05-13). Aucune modif prod (`delete_fcm_token` dans `devices.py:126-139` exécute déjà `db.query(DeviceToken).filter(...).delete() + commit`).
+- **Couverture** : `tests/integration/test_fcm_logout.py` (tier 2, 2 tests) :
+  - `test_delete_fcm_token_removes_db_row_inv078` (cœur : présence avant / absence après, vérification DB directe indépendante du chemin API)
+  - `test_delete_fcm_token_only_removes_target_device_inv078` (défense en profondeur : suppression scopée au `device_id`, pas de wipe massif)
+- **Note méthodo** : le 1er run bot avait abandonné (P5 strict sur cas ambigu — le body issue ne disait pas explicitement "verrouille en régression"). Issue #72 reformulée + PR #94 (`.github/ai-bot/prompt.md`) ajoute la section "Cas special : code deja conforme (regression lock)" pour éviter cette classe de faux-abandons sur le reste du backlog.
 
 ---
 
@@ -379,18 +404,19 @@ POST /alarms/send avec chaîne vide → email direction technique, alarme persis
 POST /config/escalation/bulk → DELETE + INSERT de la chaîne + FCM push à tous les users affectés.
 - **Couverture** : E2E `TestEscalationChainBulk::test_save_escalation_chain_replaces_all`.
 
-### INV-082 [H] ⚠️ /config/escalation/bulk est atomique (transaction unique)
+### INV-082 [H] ✅ /config/escalation/bulk est atomique (transaction unique)
 `POST /api/config/escalation/bulk` modifie la chaîne en supprimant TOUTES les règles existantes puis en insérant les nouvelles. Si cette opération n'était pas dans une seule transaction, il existerait une **fenêtre de temps (~ms)** pendant laquelle la chaîne serait VIDE en base.
 
 **Pourquoi c'est grave** : pendant cette fenêtre, si une alarme arrive (`POST /alarms/send`), le code verrait `chaîne vide` → déclencherait INV-080 (email direction technique + fallback user). L'alarme serait envoyée à la mauvaise personne, et un email inutile serait envoyé, juste parce qu'un admin modifiait la chaîne au mauvais moment.
 
 **Invariant** : DELETE + INSERT doivent être dans une transaction SQL unique. Une lecture (GET /config/escalation) concurrente ne doit jamais voir 0 lignes tant que la précédente chaîne était non-vide.
 
-**État du code (audit 2026-04-20)** : **l'invariant est déjà respecté**. `SessionLocal` est configurée `autocommit=False, autoflush=False` (`backend/app/database.py:15`). Le handler `save_escalation_chain_bulk` (`backend/app/api/config.py:120-144`) exécute DELETE puis INSERTs puis un seul `db.commit()` — donc une unique transaction. PostgreSQL READ COMMITTED garantit qu'aucune session concurrente ne voit la liste vide avant commit.
+**État du code** : **l'invariant est respecté**. `SessionLocal` est configurée `autocommit=False, autoflush=False` (`backend/app/database.py:15`). Le handler `save_escalation_chain_bulk` (`backend/app/api/config.py:120-144`) exécute DELETE puis INSERTs puis un seul `db.commit()` — donc une unique transaction. PostgreSQL READ COMMITTED garantit qu'aucune session concurrente ne voit la liste vide avant commit.
 
-**Ce qu'il reste à faire** : écrire le test de race ci-dessous pour **verrouiller** la propriété en régression (candidat pilote bot IA phase 5).
-
-**Test** : thread A fait POST /bulk dans une boucle, thread B fait GET /escalation dans une boucle. B ne doit JAMAIS voir une liste vide (si la chaîne précédente contenait au moins 1 user).
+**Fix** : PR #89 (bot IA, 2026-05-12). Aucune modif prod ; ajout d'un test de race qui **verrouille** la propriété en régression.
+- **Couverture** : `tests/integration/test_escalation_config_atomicity.py` (tier 2, 1 test) :
+  - `test_bulk_atomic_no_empty_chain_observed_under_concurrent_reads` : 1 writer × 3 readers en threads (30 writes × 200 reads chacun), assertion centrale `empty_observations == []`.
+- **Sensibilité prouvée empiriquement** : injection `db.commit()` + sleep 5ms après le DELETE → test fail avec 181 violations détectées ; mutation reverte → test pass.
 
 ### INV-083 [H] ⚠️ User supprimé → alarmes actives réassignées
 DELETE /users/{id} avec alarmes actives assignées → réassignation au premier de la chaîne (hors user supprimé) AVANT delete.
@@ -412,6 +438,8 @@ Aucun délai métier ne doit être hardcodé dans le code. Chaque valeur est lue
 | ~~`ack_suspension_minutes`~~ | — | **Non paramétrable** (décision IMPROVEMENTS #13) — 30 min hardcodé voulu | ✅ retiré du seed en PR0 |
 
 **Note audit 2026-04-20** : `watchdog.py:48` utilise `asyncio.sleep(30)` hors tableau ci-dessus. Quand on migrera `escalation_tick_seconds` en `SystemConfig`, décider si le watchdog partage la clé (probable : oui, simplifie) ou a la sienne (`watchdog_tick_seconds`). À trancher au moment du fix.
+
+**Décision 2026-05-12 (issue #75)** : **2 clés séparées** — `escalation_tick_seconds` (default 10) lue par `escalation.py`, `watchdog_tick_seconds` (default 30) lue par `watchdog.py`. Raisons : sémantique propre ("fréquence évaluation escalade" ≠ "fréquence check offline"), 2 leviers indépendants pour accélérer les tests, coût marginal négligeable.
 
 **Pourquoi paramétrer les ticks** (`escalation_tick_seconds`, `watchdog_timeout_seconds`) :
 - Non seulement pour la flexibilité admin, mais surtout pour **accélérer les tests**. En test, `escalation_tick_seconds=1` réduit le temps d'attente de 10s à 1s par tick. Gain énorme sur une suite de 66 min.
@@ -473,8 +501,15 @@ Si `last_tick_at < now - 120s` → `/health` renvoie 503 avec `escalation_loop: 
 
 ## 11. Stats et KPI
 
-### INV-110 [L] ⚠️ days param borné
+### INV-110 [L] ✅ days param borné
 `GET /alarms/?days=N` → N clampé à [1, 90].
+- **Implémentation** : `backend/app/api/alarms.py:123` (`days = max(1, min(days, 90))`).
+- **Fix** : PR #91 (bot IA, 2026-05-13). Aucune modif prod ; ajout d'un test paramétré de verrouillage en régression.
+- **Couverture** : `tests/integration/test_alarms_days_clamp.py` (tier 2, 1 test paramétré × 4 cases) :
+  - `days=0`, `days=-5` → clampé à 1, alarme fraîche visible
+  - `days=10` → in-range, alarme fraîche visible (contrôle)
+  - `days=10000` → clampé à 90, alarme âgée de 100j (via `advance-clock`) exclue
+- **Limites connues** : ne teste pas précisément la borne 90 exacte (un mutant `min(days, 30)` survivrait). Exploite l'asymétrie INV-066 (`datetime.utcnow` vs `clock_now()`) qui sera cassée au merge d'INV-018 — à revoir en lot avec INV-018.
 
 ### INV-111 [M] ❌ Filtre "hors heures France"
 Exclut weekday 8-12 et 14-17 (heure locale Europe/Paris). Inclut WE et fériés.
@@ -545,14 +580,19 @@ Ordre recommandé pour les prochains PRs :
 
 | INV | Criticité | Complexité | Note |
 |---|---|---|---|
-| INV-018 + INV-018b | C | ★★★ | Ajouter `original_created_at` immuable. Migration DB + 5 call sites (stats, schemas, frontend). Gros PR. |
-| INV-082 | H | ★ | Code déjà atomique (cf. audit 2026-04-20) — test concurrence `threading.Thread` à ajouter pour verrouiller la propriété. **Candidat pilote bot IA**. |
+| INV-018 + INV-018b | C | ★★★ | Ajouter `original_created_at` immuable. Migration DB + 5 call sites (stats, schemas, frontend). Gros PR. **Décomposé en backlog** : issues #76 (modèle), #77 (lectures), #78 (stats), #85 (frontend, `human-required`). |
+| ~~INV-082~~ | H | — | ✅ Fixé PR #89 (bot IA, 2026-05-12) — test concurrence threading. |
 | ~~INV-019~~ | M | — | ✅ Fixé PR #20 (pilote bot IA lvl 1, 2026-04-21). |
 | INV-020 | M | ★ | Rejeter user_id dupliqués dans `POST /config/escalation` single endpoint (bulk déjà OK). Distinct de INV-019 qui portait sur position. |
 | ~~INV-073~~ | H | — | ✅ déjà fixé et testé (audit 2026-04-20). |
-| INV-084 (reste 2/3) | C | ★★ | Migrer `WATCHDOG_TIMEOUT_SECONDS`, `escalation_tick_seconds` en SystemConfig. Sous-cas `ONCALL_OFFLINE_DELAY_MINUTES` fixé PR #25 (2026-04-21). |
-| INV-085 | C | ★★ | Quorum perdu → email. Nécessite un ping Patroni périodique + anti-spam (seuil 3 min + reminders 1h/3h/6h, tranché 2026-04-20). |
-| INV-076 | C | ★ | Job CI dédié avec `ENABLE_TEST_ENDPOINTS=false` vérifiant que `/api/test/*` renvoie 404. |
+| INV-084 (reste 2/3) | C | ★★ | Migrer `WATCHDOG_TIMEOUT_SECONDS` (issue #74) + `escalation_tick_seconds`+`watchdog_tick_seconds` (issue #75, 2 clés séparées tranché 2026-05-12) en SystemConfig. Sous-cas `ONCALL_OFFLINE_DELAY_MINUTES` fixé PR #25 (2026-04-21). |
+| INV-085 | C | ★★ | Quorum perdu → email. Nécessite un ping Patroni périodique + anti-spam (seuil 3 min + reminders 1h/3h/6h, tranché 2026-04-20). **Décomposé en backlog** : issues #79 (détection), #80 (email initial), #81 (reminders). |
+| INV-076 | C | ★ | Job CI dédié avec `ENABLE_TEST_ENDPOINTS=false` vérifiant que `/api/test/*` renvoie 404. Issue #82 (`human-required`). |
 | ~~INV-005~~ | H | — | ✅ Fixé PR #27 (pilote bot IA lvl 3, 2026-04-21) — property-based hypothesis. |
+| ~~INV-007~~ | M | — | ✅ Fixé PR #90 (bot IA, 2026-05-12) — verrouillage régression sur /active et /mine. |
+| ~~INV-110~~ | L | — | ✅ Fixé PR #91 (bot IA, 2026-05-13) — test paramétré clamp days. |
+| ~~INV-074~~ | C | — | ✅ Fixé PR #92 (bot IA, 2026-05-13). Follow-ups : issue #96 [H] path négatif, issue #97 clarif stateless JWT. |
+| ~~INV-077~~ | H | — | ✅ Fixé PR #93 (bot IA, 2026-05-13) — 5 endpoints admin-only. |
+| ~~INV-078~~ | M | — | ✅ Fixé PR #95 (bot IA, 2026-05-13). Cas pédagogique : 1er run abandonné, reformulation + PR #94 prompt.md ajoute section "regression-lock". |
 
 **Parallèles possibles** : PR6 (endpoint `/test/evaluate-now` qui élimine le flaky `trigger-escalation` incomplet) — désirable avant d'attaquer INV-018 car va simplifier les tests.

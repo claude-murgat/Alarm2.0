@@ -335,15 +335,15 @@ Checklist pour un Claude (ou autre) qui rouvre ce projet demain :
 - [ ] `git branch --show-current` puis `gh run list --branch <branche> --limit 5` pour voir l'état CI
 - [ ] Vérifier le statut des priorités dans audit_v2.json (section `priority_actions`)
 
-**État au 2026-04-20** :
+**État au 2026-05-13** :
 - ✅ Extraction logique pure : 95% complète (6 modules dans `backend/app/logic/`, 87 unit tests verts)
 - ✅ Pipeline CI 3 tiers : opérationnel (tier 1+2 verts en cloud, tier 3 sur self-hosted Docker local — voir section 3)
 - ✅ Branch protection master active (required tier 1+2+3w1+3w2)
-- ✅ GitHub App `alarm-murgat-bot` + 2 runners self-hosted
-- ⚠️ Tier 3 : 88/119 verts sur premier run, 12 fails à fixer (cf prompt session annexe)
+- ✅ GitHub App `alarm-murgat-bot` + 4 runners self-hosted
+- ✅ Tier 3 : 119/119 verts (stable depuis 2026-04-25)
 - ❌ Tier 4 chaos : non implémenté
 - ✅ Mutation testing (mutmut) : **installé** (2026-04-21, workflow nightly non-bloquant, cf §5 G1)
-- ✅ **Bot IA contributeur autonome : phases 1-4 + 5 pilotes validés bout-en-bout 2026-04-21** :
+- ✅ **Bot IA contributeur autonome : phases 1-4 validées + autopilote Bloc A+B 2026-05-12** :
   - ✅ Phase 1 — identité GH App → token → commit → push → PR (PR #2)
   - ✅ Phase 2 — spawn Claude Code CLI headless Opus 4.7 (PR #5)
   - ✅ Phase 3A — live log via `tee` + denylist CI enforcement + label `ai:denied` (PR #10)
@@ -351,11 +351,18 @@ Checklist pour un Claude (ou autre) qui rouvre ce projet demain :
   - ✅ Phase 3C — compteur N/3 + labels `ai:abandoned` / `ai:needs-human` auto (PR #17)
   - ✅ Phase 3D — détection précoce de boucle sur junit XML (même tests fail 3× consécutifs → abandon avec reject_reason=`loop-detected` + message diagnostique au lieu du générique iteration-limit). Helper scripts [`parse_junit_failures.py`](../.github/ai-bot/scripts/parse_junit_failures.py) et [`compute_fail_streak.py`](../.github/ai-bot/scripts/compute_fail_streak.py). Metadata PR étendu avec `fail-streak:` et `last-fail-tests:` (rétrocompatible : insertion à la volée pour les PR pré-3D).
   - ✅ Phase 4 — merge auto sur `ai:approved` via `.github/workflows/ai-merge.yml` (PR #16 + 3 fixes #21/22/23)
-  - ✅ **5 pilotes bot IA 2026-04-21** : #6 INV-031 abandon propre (catalogue stale), #13 INV-082 test de verrouillage (PR #14), #19 INV-019 fix 409 Conflict (PR #20), #24 INV-084 migration SystemConfig (PR #25), #26 INV-005 property-based `hypothesis` (PR #27 — **premier usage hypothesis** du projet). Tous via le cycle complet `ai:fix` → agent → `ai:approved` → merge auto.
+  - ✅ **5 pilotes bot IA 2026-04-21** : #6 INV-031 abandon propre (catalogue stale), #13 INV-082 (test pilote — réécrasé par PR #89 dans session 2026-05-12), #19 INV-019 fix 409 Conflict (PR #20), #24 INV-084 migration SystemConfig (PR #25), #26 INV-005 property-based `hypothesis` (PR #27).
+  - ✅ **Bloc A+B autopilote 2026-05-12** (PRs #87 + #88) :
+    - `docs/ai_backlog.md` + 18 issues GH créées (#68-#85) — backlog `ai:queue` rédigé depuis INVARIANTS.md
+    - `.github/workflows/ai-bot-cron.yml` cron `0 */4 * * *` pioche la plus ancienne `ai:queue` sans label bloquant
+    - Anti-boucle dans `ai-bot.yml` : 3 hooks d'arrêt (`ai:abandoned`/`ai:needs-human`/`ai:denied`) retirent automatiquement `ai:queue`
+    - Notif Slack DM (`SLACK_BOT_TOKEN` secret) sur abandon, denied, needs-human, ou backlog épuisé
+  - ✅ **6 PRs bot mergées en autopilote (2026-05-12/13)** : INV-082 (PR #89), INV-007 (PR #90), INV-110 (PR #91), INV-074 (PR #92, + 2 issues follow-up #96/#97), INV-077 (PR #93), INV-078 (PR #95). Tous via cycle complet cron → `ai:fix` → agent → `ai:approved` (review humaine, triplet review sur les [C]) → merge auto.
+  - ✅ **PR #94 prompt.md regression-lock** (2026-05-13) : nouvelle section "Cas special : code deja conforme (regression lock)" dans `.github/ai-bot/prompt.md` pour éviter la classe de faux-abandons P5 sur invariants déjà respectés (cas pédagogique INV-078 issue #72 — bot avait abandonné au 1er passage sur ambiguïté wording, reformulation + relance → PR #95).
 
   Voir `.github/ai-bot/README.md` pour historique détaillé des pilotes.
 
-**Problème révélé par pilote INV-031 et corrigé** : `tests/INVARIANTS.md` contenait plusieurs 🐛 déjà fixés dans le code. Audit complet réalisé (PR #9 + #11 mergées 2026-04-21) — catalogue maintenant à jour. Bugs résiduels : INV-018/018b (`original_created_at`), INV-084 reste 2/3 sous-cas (`watchdog_timeout_seconds`, `escalation_tick_seconds` — `oncall_offline_delay_minutes` fixé PR #25), INV-085 (quorum email).
+**Problème révélé par pilote INV-031 et corrigé** : `tests/INVARIANTS.md` contenait plusieurs 🐛 déjà fixés dans le code. Audit complet réalisé (PR #9 + #11 mergées 2026-04-21) — catalogue maintenant à jour. **Bugs résiduels (au 2026-05-13)** : INV-018/018b (`original_created_at`, issues #76-#78 en `ai:queue`), INV-084 reste 2/3 sous-cas (`watchdog_timeout_seconds` issue #74, `escalation_tick_seconds`+`watchdog_tick_seconds` issue #75 — 2 clés séparées tranchées 2026-05-12), INV-085 (quorum email, issues #79-#81 décomposées).
 
 **Bugs CI découverts et résolus pendant la stabilisation (§8bis)** : CI-BUG-09 (cleanup silencieusement partiel), CI-BUG-10 (race `PROJECT=ci-wN` entre runs parallèles), CI-BUG-11 (`cancel-in-progress: true` annulait des runs sur events `synchronize`). **Scale runners 2 → 4** (2026-04-21) pour parallélisme intra-run garanti.
 

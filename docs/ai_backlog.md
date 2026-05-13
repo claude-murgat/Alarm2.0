@@ -2,7 +2,20 @@
 
 > Source : `tests/INVARIANTS.md`. Stratégie : `docs/AI_STRATEGY.md`.
 > Workflow bot : `.github/workflows/ai-bot.yml`. Denylist : `.github/ai-bot/denylist.txt`.
-> Cron de pioche prévu : `0 */4 * * *` sur la plus ancienne issue `ai:queue`.
+> Cron de pioche : `0 */4 * * *` sur la plus ancienne issue `ai:queue` (opérationnel depuis 2026-05-12).
+
+## État au 2026-05-13
+
+Issues créées originellement : 18 (#68-#85). Avancement :
+
+| Statut | Compteur | Détail |
+|---|---|---|
+| ✅ **Mergées** | 6 | INV-082 (#68→PR #89), INV-007 (#69→PR #90), INV-110 (#70→PR #91), INV-074 (#71→PR #92), INV-077 (#73→PR #93), INV-078 (#72→PR #95) |
+| ⏳ **`ai:queue` en attente** | 8 | #74 (INV-084 watchdog_timeout), #75 (INV-084 escalation_tick+watchdog_tick), #76-#78 (INV-018/018b décomposé), #79-#81 (INV-085 décomposé) |
+| 🔧 **`human-required`** | 4 | #82 (INV-076 workflow CI), #83 (INV-093 split-brain), #84 (INV-095 atomicité failover), #85 (INV-018b frontend) |
+| 🆕 **Issues follow-up** | 2 | #96 (INV-074 path négatif [H]) ai:queue, #97 (INV-074 stateless JWT [human-required]) |
+
+Le cron pioche désormais automatiquement toutes les 4h. Pour accélérer : `gh workflow run ai-bot-cron.yml`.
 
 ## Comment ce fichier est utilisé
 
