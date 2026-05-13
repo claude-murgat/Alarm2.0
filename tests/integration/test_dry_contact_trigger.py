@@ -36,6 +36,28 @@ def _set_gateway_key(monkeypatch):
     monkeypatch.setenv("GATEWAY_KEY", GATEWAY_KEY)
 
 
+@pytest.fixture
+def chain_restored(client, admin_headers):
+    """Snapshot la chaine d'escalade au debut, la restaure via /bulk en fin
+    de test. Indispensable pour les tests qui suppriment des entrees, sinon
+    pytest-randomly peut faire qu'un test posterieur tombe sur une chaine
+    vide qu'il n'attendait pas (cf seed_data = user1 pos1, user2 pos2, admin
+    pos3)."""
+    snapshot = client.get("/api/config/escalation", headers=admin_headers).json()
+    user_ids_in_order = [
+        e["user_id"] for e in sorted(snapshot, key=lambda x: x["position"])
+    ]
+    yield
+    if not user_ids_in_order:
+        return
+    r = client.post(
+        "/api/config/escalation/bulk",
+        headers=admin_headers,
+        json={"user_ids": user_ids_in_order},
+    )
+    assert r.status_code == 200, f"chain restore failed: {r.status_code} {r.text}"
+
+
 def _reset_alarms(client, admin_headers):
     r = client.post("/api/alarms/reset", headers=admin_headers)
     assert r.status_code == 200, r.text
@@ -104,10 +126,16 @@ def test_trigger_returns_409_if_alarm_already_active(client, admin_headers):
     )
 
 
-def test_trigger_with_empty_chain_creates_alarm_and_sends_email(client, admin_headers):
+def test_trigger_with_empty_chain_creates_alarm_and_sends_email(
+    client, admin_headers, chain_restored
+):
     """INV-120 + INV-080 : chaîne vide → alarme créée (sans assignment) + email
     direction technique envoyé. Strictement identique à l'effet de
-    POST /api/alarms/send sur chaîne vide."""
+    POST /api/alarms/send sur chaîne vide.
+
+    Note isolation : ce test SUPPRIME les entrees de la chaine pendant son
+    execution. Le fixture `chain_restored` snapshot + restore via /bulk
+    pour ne pas polluer les tests suivants (pytest-randomly compatible)."""
     _reset_alarms(client, admin_headers)
 
     # Vider la chaîne d'escalade
