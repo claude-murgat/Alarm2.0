@@ -24,6 +24,10 @@ from config import (
     ALL_NODE_URLS, GATEWAY_KEY, MODEM_AT_PORT, MODEM_BAUD_RATE,
     POLL_INTERVAL_SECONDS, HEALTH_CHECK_INTERVAL_SECONDS,
     ALERT_COOLDOWN_SECONDS, HTTP_TIMEOUT_SECONDS, ALERT_RECIPIENTS,
+    DRY_CONTACT_ENABLED, DRY_CONTACT_MODE, DRY_CONTACT_GPIO_PIN,
+    DRY_CONTACT_ADC_CHANNEL, DRY_CONTACT_ADC_THRESHOLD_MV,
+    DRY_CONTACT_NORMAL_VALUE, DRY_CONTACT_DEBOUNCE_MS, DRY_CONTACT_POLL_MS,
+    DRY_CONTACT_TITLE, DRY_CONTACT_MESSAGE,
 )
 from modem_detect import detect_modem_port, send_at_command
 from dtmf_decoder import DtmfDecoder
@@ -452,6 +456,225 @@ class HealthMonitorThread(threading.Thread):
                 logger.error(f"Erreur alerte SMS → {recipient} : {e}")
 
 
+# ── Dry Contact Monitor Thread (INV-120) ─────────────────────────────────────
+
+class DryContactMonitorThread(threading.Thread):
+    """INV-120 — surveille un contact sec NC câblé sur une entrée du SIM7600.
+
+    Deux modes :
+      - mode="gpio" : polling AT+CGGETV=<pin>, 0/1 lu directement.
+                      Nécessite AT+CGDRT=<pin>,0 au démarrage.
+      - mode="adc"  : polling AT+CADC=<channel>, lecture mV, seuil binaire.
+                      Pas de setup AT préalable. Default sur HAT Waveshare
+                      SIM7600X (vérifié 2026-05-13 : channel 2 = pin ADC1
+                      du HAT, sature à ~1800 mV pour 3V3 appliqué).
+
+    Logique commune : debounce N ms (lecture brute stable pendant
+    debounce_ms avant validation), edge detection sur la valeur
+    normalisée 0/1, front montant depuis normal_value → POST trigger.
+
+    Edge detection (pas niveau) : tant que le contact reste ouvert, pas de
+    nouveau POST. Pour redéclencher, le contact doit physiquement repasser
+    fermé puis se rouvrir. C'est l'anti-spam naturel pendant la boucle
+    d'escalade (le 409 backend complète si jamais un front partait quand
+    même).
+
+    Si le setup AT échoue (mode/canal/pin non supporté par le firmware),
+    le thread se termine en logguant — la gateway continue sans le trigger.
+    """
+
+    def __init__(
+        self,
+        ser: serial.Serial,
+        mode: str,
+        gpio_pin: int,
+        adc_channel: int,
+        adc_threshold_mv: int,
+        normal_value: int,
+        debounce_ms: int,
+        poll_ms: int,
+        title: str = "",
+        message: str = "",
+    ):
+        super().__init__(daemon=True, name="DryContactMonitor")
+        self.ser = ser
+        self.mode = mode
+        self.gpio_pin = gpio_pin
+        self.adc_channel = adc_channel
+        self.adc_threshold_mv = adc_threshold_mv
+        self.normal_value = normal_value
+        self.debounce_ms = debounce_ms
+        self.poll_interval = max(0.02, poll_ms / 1000.0)
+        self.title = title
+        self.message = message
+        self.running = True
+
+        # État machine debounce
+        self._last_raw: int | None = None
+        self._raw_changed_at: float = 0.0
+        self._stable_value: int | None = None
+
+    def _source_label(self) -> str:
+        if self.mode == "adc":
+            return f"ADC ch{self.adc_channel} (seuil {self.adc_threshold_mv}mV)"
+        return f"GPIO pin {self.gpio_pin}"
+
+    def run(self):
+        logger.info(
+            f"DryContactMonitorThread demarre (mode={self.mode}, "
+            f"{self._source_label()}, debounce={self.debounce_ms}ms, "
+            f"poll={self.poll_interval*1000:.0f}ms, normal_value={self.normal_value})"
+        )
+
+        # Setup spécifique au mode
+        if self.mode == "gpio":
+            try:
+                with at_lock:
+                    resp = send_at_command(self.ser, f"AT+CGDRT={self.gpio_pin},0", timeout=2.0)
+                if "OK" not in resp:
+                    logger.error(
+                        f"DryContact GPIO : pin {self.gpio_pin} non addressable "
+                        f"(AT+CGDRT refusé) — reponse : {resp.strip()}. Thread arrete."
+                    )
+                    return
+                logger.info(f"DryContact GPIO : pin {self.gpio_pin} configuree en entree")
+            except Exception as e:
+                logger.error(f"DryContact GPIO : init pin {self.gpio_pin} echec : {e}. Thread arrete.")
+                return
+        elif self.mode == "adc":
+            # Sanity check : le canal ADC répond ?
+            try:
+                with at_lock:
+                    resp = send_at_command(self.ser, f"AT+CADC={self.adc_channel}", timeout=2.0)
+                if "+CADC:" not in resp or "ERROR" in resp:
+                    logger.error(
+                        f"DryContact ADC : channel {self.adc_channel} ne repond pas "
+                        f"(AT+CADC refusé) — reponse : {resp.strip()}. Thread arrete."
+                    )
+                    return
+                logger.info(f"DryContact ADC : channel {self.adc_channel} OK")
+            except Exception as e:
+                logger.error(f"DryContact ADC : init channel {self.adc_channel} echec : {e}. Thread arrete.")
+                return
+        else:
+            logger.error(f"DryContact : mode '{self.mode}' inconnu (attendu : gpio|adc). Thread arrete.")
+            return
+
+        while self.running:
+            try:
+                val = self._read_signal()
+                if val is None:
+                    time.sleep(self.poll_interval)
+                    continue
+
+                now = time.monotonic()
+
+                # Initialisation : premier sample
+                if self._last_raw is None:
+                    self._last_raw = val
+                    self._raw_changed_at = now
+                    self._stable_value = val
+                    logger.info(f"DryContact ({self._source_label()}) : etat initial normalise = {val}")
+                    time.sleep(self.poll_interval)
+                    continue
+
+                # Tracker les changements de la lecture brute
+                if val != self._last_raw:
+                    self._last_raw = val
+                    self._raw_changed_at = now
+                    time.sleep(self.poll_interval)
+                    continue
+
+                # Lecture brute stable depuis _raw_changed_at
+                stable_for_ms = (now - self._raw_changed_at) * 1000
+                if val != self._stable_value and stable_for_ms >= self.debounce_ms:
+                    prev_stable = self._stable_value
+                    self._stable_value = val
+                    logger.info(
+                        f"DryContact ({self._source_label()}) : transition stable "
+                        f"{prev_stable} → {val} (stable {stable_for_ms:.0f}ms ≥ debounce {self.debounce_ms}ms)"
+                    )
+
+                    # Front sortant = transition depuis normal_value → alarme
+                    if prev_stable == self.normal_value and val != self.normal_value:
+                        logger.warning(
+                            f"DryContact ({self._source_label()}) : FRONT D'ALARME detecte → trigger backend"
+                        )
+                        self._fire_trigger()
+
+                time.sleep(self.poll_interval)
+            except Exception as e:
+                logger.error(f"DryContactMonitor boucle erreur : {e}")
+                time.sleep(1.0)
+
+    def _read_signal(self) -> int | None:
+        """Lit la valeur normalisée 0/1. Dispatch GPIO ou ADC + seuil."""
+        if self.mode == "gpio":
+            return self._read_gpio()
+        return self._read_adc_thresholded()
+
+    def _read_gpio(self) -> int | None:
+        """AT+CGGETV=<pin> → +CGGETV: <pin>,<val>."""
+        try:
+            with at_lock:
+                resp = send_at_command(self.ser, f"AT+CGGETV={self.gpio_pin}", timeout=1.0)
+        except Exception as e:
+            logger.debug(f"DryContact read_gpio erreur : {e}")
+            return None
+        for line in resp.split("\n"):
+            line = line.strip()
+            if line.startswith("+CGGETV:"):
+                try:
+                    return int(line.split(":", 1)[1].strip().split(",")[1].strip())
+                except (ValueError, IndexError):
+                    return None
+        return None
+
+    def _read_adc_thresholded(self) -> int | None:
+        """AT+CADC=<channel> → +CADC: <voltage_mV>. Applique seuil → 0/1."""
+        try:
+            with at_lock:
+                resp = send_at_command(self.ser, f"AT+CADC={self.adc_channel}", timeout=1.5)
+        except Exception as e:
+            logger.debug(f"DryContact read_adc erreur : {e}")
+            return None
+        for line in resp.split("\n"):
+            line = line.strip()
+            if line.startswith("+CADC:"):
+                try:
+                    mv = int(line.split(":", 1)[1].strip())
+                    return 1 if mv >= self.adc_threshold_mv else 0
+                except (ValueError, IndexError):
+                    return None
+        return None
+
+    def _fire_trigger(self):
+        """POST /internal/alarms/trigger. 409 traité comme non-erreur (alarme deja active)."""
+        body: dict = {}
+        if self.title:
+            body["title"] = self.title
+        if self.message:
+            body["message"] = self.message
+
+        try:
+            result = _post_to_backend("/internal/alarms/trigger", json_data=body)
+            if result is None:
+                # _post_to_backend logue deja le HTTP code en warning.
+                # Le 409 (alarme deja active, INV-001) tombe ici — c'est normal et
+                # explicitement non-erreur cote gateway (cf INV-120 idempotence).
+                logger.info(
+                    "DryContact trigger : backend a refuse (probablement 409 alarme deja active) "
+                    "ou injoignable. Pas de retry — front consume."
+                )
+            else:
+                logger.info(
+                    f"DryContact trigger : alarme #{result.get('id')} cree "
+                    f"(assigned={result.get('assigned_user_id')})"
+                )
+        except Exception as e:
+            logger.error(f"DryContact trigger erreur : {e}")
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -504,6 +727,36 @@ def main():
         SmsReceiverThread(ser),
         HealthMonitorThread(ser),
     ]
+
+    # INV-120 — Trigger par contact sec NC local (opt-in via DRY_CONTACT_ENABLED)
+    if DRY_CONTACT_ENABLED:
+        threads.append(
+            DryContactMonitorThread(
+                ser=ser,
+                mode=DRY_CONTACT_MODE,
+                gpio_pin=DRY_CONTACT_GPIO_PIN,
+                adc_channel=DRY_CONTACT_ADC_CHANNEL,
+                adc_threshold_mv=DRY_CONTACT_ADC_THRESHOLD_MV,
+                normal_value=DRY_CONTACT_NORMAL_VALUE,
+                debounce_ms=DRY_CONTACT_DEBOUNCE_MS,
+                poll_ms=DRY_CONTACT_POLL_MS,
+                title=DRY_CONTACT_TITLE,
+                message=DRY_CONTACT_MESSAGE,
+            )
+        )
+        if DRY_CONTACT_MODE == "adc":
+            logger.info(
+                f"Contact sec active : mode=ADC ch{DRY_CONTACT_ADC_CHANNEL}, "
+                f"seuil={DRY_CONTACT_ADC_THRESHOLD_MV}mV, "
+                f"debounce={DRY_CONTACT_DEBOUNCE_MS}ms, normal_value={DRY_CONTACT_NORMAL_VALUE}"
+            )
+        else:
+            logger.info(
+                f"Contact sec active : mode=GPIO pin{DRY_CONTACT_GPIO_PIN}, "
+                f"debounce={DRY_CONTACT_DEBOUNCE_MS}ms, normal_value={DRY_CONTACT_NORMAL_VALUE}"
+            )
+    else:
+        logger.info("Contact sec desactive (DRY_CONTACT_ENABLED=false)")
 
     for t in threads:
         t.start()
