@@ -68,6 +68,14 @@ def evaluate_quorum_loss(
     history : mesures précédentes (ordre quelconque, recalculé ici). Doit
               couvrir >= 3 min pour que la détection puisse se déclencher.
 
+    L'agrégation du `snapshot` depuis l'ensemble des nœuds du cluster
+    (`has_quorum`, `patroni_reachable`) est la **responsabilité de
+    l'appelant** (cf issues #80 / #81). Cette fonction pure suppose que
+    `snapshot` reflète déjà l'état consolidé : par exemple, pour
+    `patroni_reachable`, l'appelant doit avoir vérifié que Patroni est
+    injoignable depuis TOUS les nœuds (pas juste un), conformément à la
+    spec INV-085 "Patroni injoignable depuis tous les noeuds pendant > 3 min".
+
     Retour : QuorumState. Voir QuorumState pour la sémantique de lost_since.
     """
     # Cluster sain maintenant → aucune perte en cours, reset complet.
