@@ -26,26 +26,38 @@ def send_alert_email(subject: str, body: str, to: str):
     }
     logger.info(f"Alert email stored: to={to}, subject={subject}")
 
-    # In production with SMTP configured, actually send
-    smtp_host = os.getenv("SMTP_HOST")
-    if smtp_host:
-        try:
-            msg = MIMEText(body)
-            msg["Subject"] = subject
-            msg["From"] = os.getenv("SMTP_FROM", "alarms@system.local")
-            msg["To"] = to
-            # Bug #105 : sans timeout explicite, smtplib hérite du socket
-            # default (~110s sur Linux) si SMTP_HOST est inaccessible. Borné ici
-            # à 10s pour que même appelé dans un thread, l'opération ne traîne
-            # pas indéfiniment.
-            timeout = float(os.getenv("SMTP_TIMEOUT", "10"))
-            with smtplib.SMTP(
-                smtp_host, int(os.getenv("SMTP_PORT", "587")), timeout=timeout
-            ) as server:
-                server.send_message(msg)
-            logger.info(f"Email actually sent to {to}")
-        except Exception as e:
-            logger.error(f"Failed to send email: {e}")
+    # In production with SMTP configured, actually send.
+    # SMTP_HOST vide ou absent → on skip (le _last_email reste en mémoire pour
+    # /api/test/last-email-sent + les logs INFO).
+    smtp_host = (os.getenv("SMTP_HOST") or "").strip()
+    if not smtp_host:
+        return
+
+    # Bug #105 : sans timeout explicite, smtplib hérite du socket default
+    # (~110s sur Linux) si SMTP_HOST est inaccessible. Borné ici à 10s pour
+    # que même appelé dans un thread (cf asyncio.to_thread des callers post
+    # PR #106), l'opération ne traîne pas indéfiniment.
+    timeout = float(os.getenv("SMTP_TIMEOUT", "10"))
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user = (os.getenv("SMTP_USER") or "").strip()
+    smtp_pass = (os.getenv("SMTP_PASS") or "").strip()
+
+    try:
+        msg = MIMEText(body)
+        msg["Subject"] = subject
+        msg["From"] = os.getenv("SMTP_FROM", "alarms@system.local")
+        msg["To"] = to
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=timeout) as server:
+            # Mode authentifié (Gmail, OVH, etc.) : STARTTLS + login si
+            # SMTP_USER+SMTP_PASS présents. Sinon mode anonyme rétro-compatible
+            # (MailHog dev sans auth, MTA local non-authentifié).
+            if smtp_user and smtp_pass:
+                server.starttls()
+                server.login(smtp_user, smtp_pass)
+            server.send_message(msg)
+        logger.info(f"Email actually sent to {to}")
+    except Exception as e:
+        logger.error(f"Failed to send email: {e}")
 
 
 def get_last_email():
