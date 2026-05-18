@@ -176,9 +176,9 @@ class OncallActions:
     `email_marker_set` / `email_marker_clear` : INV-053 one-shot per episode.
     Mutuellement exclusifs. L'appelant écrit ou efface
     `SystemConfig.nobody_online_email_sent_at` selon le flag. Voir issue #116."""
-    resolutions: tuple["OncallAlarmResolution", ...] = ()
-    creations: tuple["OncallAlarmCreation", ...] = ()
-    emails: tuple["DirectionTechniqueEmail", ...] = ()
+    resolutions: tuple["OncallAlarmResolution", ...] = ()  # pragma: no mutate (INV-053 — string forward ref dans annotation, no runtime impact ; Python lazy eval + aucun test ne reflechit sur __annotations__)
+    creations: tuple["OncallAlarmCreation", ...] = ()  # pragma: no mutate (INV-053 — string forward ref dans annotation, no runtime impact ; Python lazy eval + aucun test ne reflechit sur __annotations__)
+    emails: tuple["DirectionTechniqueEmail", ...] = ()  # pragma: no mutate (INV-053 — string forward ref dans annotation, no runtime impact ; Python lazy eval + aucun test ne reflechit sur __annotations__)
     email_marker_set: bool = False
     email_marker_clear: bool = False
 
