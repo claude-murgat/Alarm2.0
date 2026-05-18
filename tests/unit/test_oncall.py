@@ -192,6 +192,107 @@ class TestInv053EmailIfNobodyOnline:
         assert 15.9 <= result.emails[0].offline_duration_minutes <= 16.1
 
 
+class TestInv053EmailMarkerOneShotPerEpisode:
+    """INV-053 (issue #116) : email "personne online" envoye AU PLUS UNE FOIS
+    par episode. Sans cette regle, escalation_loop (tick ~10s) spam la direction
+    technique tant que personne ne revient online (80 mails en 13 min observes
+    en prod 2026-05-18).
+
+    Un episode = condition INV-053 vraie sans interruption. Il se termine des
+    qu'au moins un user redevient online (marker clear), puis se rouvre quand
+    tous retombent offline (marker set re-autorise).
+    """
+
+    def test_inv053_first_episode_sends_email_and_sets_marker(self):
+        """Premier tick d'un nouvel episode : email envoye + marker_set demande.
+
+        Attrape : regression si l'email cesse d'etre envoye sur le tout premier
+        tick (regression vs INV-053) OU si le marker_set n'est pas demande
+        (alors le 2eme tick re-enverrait → bug initial)."""
+        user1 = _user(1, "user1", is_online=False,
+                      last_heartbeat=NOW - timedelta(minutes=16))
+        user2 = _user(2, "user2", is_online=False)
+        result = evaluate_oncall_heartbeat(
+            _chain(1, 2), [user1, user2], [], DELAY, NOW,
+            email_already_sent=False,
+        )
+        assert len(result.emails) == 1, (
+            "premier tick d'un episode INV-053 : 1 email exactement"
+        )
+        assert result.email_marker_set is True, (
+            "le marker doit etre pose pour bloquer les ticks suivants"
+        )
+        assert result.email_marker_clear is False, (
+            "rien a clear sur un premier tick (marker etait deja vide)"
+        )
+
+    def test_inv053_second_tick_same_episode_does_not_resend(self):
+        """RED PROOF du bug #116 : 2eme tick du meme episode → ZERO email.
+
+        Avant le fix, evaluate_oncall_heartbeat renvoyait toujours un email
+        des que `not online_users`, sans regarder le marker. Resultat : 80 mails
+        en 13 min en prod (1 par tick de 10s).
+
+        Apres le fix : email_already_sent=True coupe l'emission tant que le
+        marker n'est pas clear (au moins un user qui revient online)."""
+        user1 = _user(1, "user1", is_online=False,
+                      last_heartbeat=NOW - timedelta(minutes=20))
+        user2 = _user(2, "user2", is_online=False)
+        result = evaluate_oncall_heartbeat(
+            _chain(1, 2), [user1, user2], [], DELAY, NOW,
+            email_already_sent=True,
+        )
+        assert len(result.emails) == 0, (
+            "marker deja pose → AUCUN email tant que personne n'est revenu "
+            "online (sinon spam comme issue #116)"
+        )
+        assert result.email_marker_set is False, (
+            "ne pas re-set un marker deja pose (no-op)"
+        )
+
+    def test_inv053_episode_ends_when_user_returns_online_clears_marker(self):
+        """Fin d'episode : au moins un user revient online → marker_clear demande.
+
+        Setup : oncall (pos 1) reste offline > delay, user2 revient online,
+        marker etait pose (email_already_sent=True). On veut le clear pour
+        re-autoriser un email lors d'un FUTUR episode (si tout le monde
+        retombe offline). Note : user2 online → INV-052 cree une alarme,
+        le marker_clear coexiste avec creations."""
+        user1 = _user(1, "user1", is_online=False,
+                      last_heartbeat=NOW - timedelta(minutes=20))
+        user2 = _user(2, "user2", is_online=True)
+        result = evaluate_oncall_heartbeat(
+            _chain(1, 2), [user1, user2], [], DELAY, NOW,
+            email_already_sent=True,
+        )
+        assert result.email_marker_clear is True, (
+            "au moins un user online + marker pose → demander le clear pour "
+            "fermer l'episode et reautoriser un futur email"
+        )
+        assert result.email_marker_set is False, (
+            "flags mutuellement exclusifs : on ne set pas et clear en meme temps"
+        )
+
+    def test_inv053_no_marker_change_when_already_clear_and_online(self):
+        """No-op : marker deja vide + user online → ni set ni clear.
+
+        Cas nominal entre deux episodes. Evite des ecritures DB inutiles a
+        chaque tick (le bug initial venait justement d'ecrire/envoyer un email
+        a chaque tick — meme principe applique au marker)."""
+        user1 = _user(1, "user1", is_online=False,
+                      last_heartbeat=NOW - timedelta(minutes=20))
+        user2 = _user(2, "user2", is_online=True)
+        result = evaluate_oncall_heartbeat(
+            _chain(1, 2), [user1, user2], [], DELAY, NOW,
+            email_already_sent=False,
+        )
+        assert result.email_marker_set is False
+        assert result.email_marker_clear is False, (
+            "marker deja vide → rien a clear (no-op pour eviter ecritures "
+            "DB a chaque tick)"
+        )
+
+
 class TestInv054NoDuplicateOncallAlarm:
     """INV-054 : pas de doublon d'alarme oncall."""
 

@@ -68,6 +68,18 @@ def test_apply_oncall_heartbeat_routes_email_via_asyncio_to_thread_inv053(
     )
     assert r.status_code == 200, r.text
 
+    # Issue #116 : reset marker one-shot INV-053 pour garantir qu'on est au
+    # "1er tick d'episode". Sans ca, si un test precedent de la suite (ou
+    # l'escalation_loop background entre runs) a deja pose le marker,
+    # email_already_sent=True -> la branche INV-053 skippe l'envoi ->
+    # to_thread jamais appele -> ce test fail.
+    r = client.post(
+        "/api/config/system",
+        json={"key": "nobody_online_email_sent_at", "value": ""},
+        headers=admin_headers,
+    )
+    assert r.status_code == 200, r.text
+
     db = SessionLocal()
     saved_states: list[tuple[int, bool, object]] = []
     try:
