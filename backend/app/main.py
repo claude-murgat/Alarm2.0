@@ -19,6 +19,7 @@ from .api.devices import router as devices_router
 from .api.config import router as config_router
 from .api.test_api import router as test_router
 from .api.sms import router as sms_router
+from .api.alarms_internal import router as alarms_internal_router
 from .api.audit import router as audit_router
 from .escalation import escalation_loop
 from .watchdog import watchdog_loop
@@ -157,6 +158,7 @@ app.include_router(devices_router)
 app.include_router(config_router)
 app.include_router(test_router)
 app.include_router(sms_router)
+app.include_router(alarms_internal_router)
 from .api.calls import router as calls_router
 app.include_router(calls_router)
 app.include_router(audit_router)

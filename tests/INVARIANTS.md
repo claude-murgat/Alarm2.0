@@ -36,6 +36,7 @@ plutôt que d'interpréter à partir du code (le code peut être buggy).
 | 9. Cluster HA | 0 | 3 | 2 | 0 |
 | 10. Observabilité | 1 | 2 | 0 | 0 (INV-102 ✅ PR0) |
 | 11. Stats | 1 | 1 | 0 | 0 (INV-110 ✅ PR #91) |
+| 13. Hardware trigger | 0 | 0 | 1 | 0 (INV-120 nouveau 2026-05-13) |
 
 **Restant prioritaire** : INV-018/018b (`original_created_at`), INV-084 (reste 2/3 sous-cas : `watchdog_timeout_seconds` + `escalation_tick_seconds`), INV-085 (quorum email). Issues backlog `ai:queue` ouvertes (8) : #74 (INV-084 watchdog), #75 (INV-084 escalation_tick), #76-#78 (INV-018/018b), #79-#81 (INV-085), #96 (INV-074 path négatif suite review PR #92). Cron 4h pioche automatiquement la plus ancienne.
 
@@ -521,6 +522,79 @@ Exclut weekday 8-12 et 14-17 (heure locale Europe/Paris). Inclut WE et fériés.
 
 ---
 
+## 13. Déclenchement hardware (contact sec on-site)
+
+### INV-120 [H] ⚠️ Trigger par contact sec NC local sur gateway
+Un front sortant (depuis l'état au repos vers son opposé, validé par un
+debounce ≥ 200 ms) sur un contact sec NC câblé sur une entrée du module
+SIM7600 doit déclencher l'appel `POST /internal/alarms/trigger`
+(authentification `X-Gateway-Key`), créant une alarme dont l'effet métier
+est **strictement identique** à un `POST /api/alarms/send` : respect de
+INV-001 (unicité), INV-080 (fallback chaîne vide), INV-066 (clock_now),
+FCM envoyé aux notifiés.
+- **Pourquoi** : canal de déclenchement physique indépendant du backend
+  des capteurs IT amont. Un capteur externe (fuite, fumée, intrusion,
+  sortie GTC) câblé en contact sec sur NODE1 doit pouvoir déclencher
+  l'alarme même si tout le reste du SI est indisponible.
+- **Edge detection (pas niveau)** : déclenchement uniquement sur la
+  transition repos→alarme. Tant que le contact reste en état alarme,
+  aucun nouveau POST n'est émis — la résolution physique exige que le
+  contact se referme puis se rouvre pour redéclencher. C'est ce qui
+  empêche le spam pendant la boucle d'escalade.
+- **Debounce minimum** : 200 ms (valeur retenue 2026-05-13). À ajuster
+  empiriquement via `gateway/probe_dry_contact.py` si rebond mécanique
+  observé sur le contact réel.
+- **Détection — deux stratégies** (`DRY_CONTACT_MODE` côté gateway) :
+  - `gpio` (**défaut, mode retenu**) : polling `AT+CGGETV=<pin>` (lecture
+    0/1 directe). Nécessite `AT+CGDRT=<pin>,0` au démarrage. Sur firmware
+    SIM7600M22_V2.0.1 du HAT Waveshare SIM7600X, les pins AT-addressables
+    sont **3, 6, 41, 43, 44, 77** (40 réservé STATUS). Le label silkscreen
+    **"IO43"** du header droit du HAT = **GPIO 43 du module** (mapping
+    validé empiriquement 2026-05-13 sur node2 : touch 3V3 → CGGETV=43
+    lit 1, lâché → 0). GPIO 43 supporte le maintien 3V3 sans freeze
+    (30 s testé, 4818/4818 stable, AT health 5/5 OK) ET reste stable à
+    0 quand floating (30 s, 4977/4977, 0 fluctuation).
+  - `adc` (fallback historique) : polling `AT+CADC=<channel>` (lecture mV
+    brute, seuil binaire appliqué côté gateway). Sur le HAT Waveshare
+    SIM7600X, **canal 2 = pin ADC1 du HAT** (vérifié 2026-05-13).
+    Saturation à ~1800 mV pour 3V3 appliqué. Seuil par défaut 900 mV.
+    Câblage moins propre que GPIO 43 — voir ⚠ ci-dessous.
+- **Câblage retenu mode GPIO sur HAT Waveshare SIM7600X** (validé
+  2026-05-13 sur node2) :
+  `3V3 ─── [contact NC] ─── IO43`  (un seul fil, **zéro composant
+  externe**)
+  - Repos NC fermé → IO43 = 3V3 → `CGGETV=43` lit **1**.
+  - Alarme NC ouvert → IO43 flottant, default-low module → `CGGETV=43`
+    lit **0**.
+  - Front d'alarme = descendant 1 → 0. `DRY_CONTACT_NORMAL_VALUE=1`.
+  - Test transitions empiriques (toggle manuel 30 s, debounce 200 ms) :
+    4 alarmes confirmées sur 7 raw_flips, 3 retours-stables, modem AT
+    OK final → pattern propre, aucun rebond non géré.
+- **⚠ Contrainte hardware constatée mode ADC** : sur ce HAT, **maintenir
+  ADC1 à GND fait freezer le firmware du modem** (constat empirique
+  2026-05-13 : court ADC1↔GND maintenu >5 s → AT plus aucune réponse
+  sur les 5 ttyUSB, USB toujours présent côté kernel, recovery
+  uniquement via switch PWRKEY). C'est la raison pour laquelle GPIO 43
+  est retenu plutôt qu'ADC1 — GPIO 43 supporte les deux états (3V3
+  maintenu ET floating à 0) sans corruption.
+- **Idempotence backend** : si une alarme est déjà active
+  (`status IN ('active','escalated')`, cf INV-001), l'endpoint renvoie
+  HTTP 409. Le gateway logue l'événement mais n'en fait pas une erreur
+  (pas de retry).
+- **Auth** : `X-Gateway-Key` obligatoire (cf INV-065). Sans la clé →
+  401, pas de création d'alarme.
+- **Couverture** :
+  - E2E backend (tier 2) : `tests/integration/test_dry_contact_trigger.py`
+    — 5 tests (401, 200+pos1, 409, 080 chaîne vide, custom title/message)
+    tous GREEN au 2026-05-13.
+  - Smoke test SSH hardware : `gateway/probe_dry_contact.py` (manuel,
+    hors CI — le hardware n'est pas en CI). Validé sur node2 onsite.
+- **Manque** : test E2E réel avec câblage NC + pull-up + résistance sur
+  ADC1 du HAT (à faire après que le hardware soit câblé physiquement).
+
+
+---
+
 ## 12. Invariants meta (pour les tests)
 
 ### INV-900 [C] Isolation des tests
@@ -594,5 +668,6 @@ Ordre recommandé pour les prochains PRs :
 | ~~INV-074~~ | C | — | ✅ Fixé PR #92 (bot IA, 2026-05-13). Follow-ups : issue #96 [H] path négatif, issue #97 clarif stateless JWT. |
 | ~~INV-077~~ | H | — | ✅ Fixé PR #93 (bot IA, 2026-05-13) — 5 endpoints admin-only. |
 | ~~INV-078~~ | M | — | ✅ Fixé PR #95 (bot IA, 2026-05-13). Cas pédagogique : 1er run abandonné, reformulation + PR #94 prompt.md ajoute section "regression-lock". |
+| INV-120 | H | ★★ | Endpoint `POST /internal/alarms/trigger` (auth `X-Gateway-Key`) + `DryContactMonitorThread` côté gateway (polling AT+CGGETV + debounce 200ms + edge-detection). Smoke test SSH disponible : `gateway/probe_dry_contact.py`. Pin GPIO module à confirmer empiriquement avant le PR. |
 
 **Parallèles possibles** : PR6 (endpoint `/test/evaluate-now` qui élimine le flaky `trigger-escalation` incomplet) — désirable avant d'attaquer INV-018 car va simplifier les tests.
