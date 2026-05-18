@@ -48,6 +48,15 @@ def run_migrations(engine):
         # ── Migration : colonnes sms_sent/call_sent sur alarm_notifications
         _migrate_alarm_notifications_sms_call(conn, is_sqlite)
 
+        # ── INV-120 V2 : table gateway_states ─────────────────────────────
+        _migrate_gateway_states(conn, is_sqlite)
+
+        # ── INV-120 V2 : colonne alarms.source (+ backfill oncall/api) ────
+        _migrate_alarm_source(conn, is_sqlite)
+
+        # ── INV-123 : colonnes alarms.sensor_dissensus_since/_email_sent_at
+        _migrate_alarm_sensor_dissensus(conn, is_sqlite)
+
 
 def _migrate_alarm_notifications(conn, is_sqlite: bool):
     """Crée la table alarm_notifications et migre les données CSV si nécessaire."""
@@ -240,6 +249,79 @@ def _migrate_alarm_notifications_sms_call(conn, is_sqlite: bool):
         conn.execute(text("ALTER TABLE alarm_notifications ADD COLUMN IF NOT EXISTS call_sent BOOLEAN DEFAULT FALSE"))
         conn.commit()
         logger.info("Migration: alarm_notifications.sms_sent/call_sent verifiees/ajoutees")
+
+
+def _migrate_gateway_states(conn, is_sqlite: bool):
+    """INV-120 V2 : crée la table gateway_states (état rapporté par chaque
+    gateway, source de vérité pour la reconciliation level-based)."""
+    if is_sqlite:
+        exists = conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name='gateway_states'")
+        ).fetchone()
+    else:
+        exists = conn.execute(
+            text("SELECT to_regclass('public.gateway_states')")
+        ).fetchone()
+        exists = exists[0] if exists else None
+
+    if not exists:
+        conn.execute(text("""
+            CREATE TABLE gateway_states (
+                gateway_id VARCHAR PRIMARY KEY,
+                state VARCHAR NOT NULL,
+                last_seen TIMESTAMP NOT NULL
+            )
+        """))
+        conn.commit()
+        logger.info("Migration: table gateway_states creee (INV-120 V2)")
+
+
+def _migrate_alarm_source(conn, is_sqlite: bool):
+    """INV-120 V2 : ajoute alarms.source + backfill rows existantes.
+
+    Backfill : is_oncall_alarm=TRUE → 'oncall', sinon 'api'. Aucune alarme
+    historique 'gateway_dry_contact' (V1 n'écrivait pas le champ)."""
+    if is_sqlite:
+        cols = [row[1] for row in conn.execute(text("PRAGMA table_info(alarms)")).fetchall()]
+        if "source" not in cols:
+            conn.execute(text("ALTER TABLE alarms ADD COLUMN source VARCHAR NOT NULL DEFAULT 'api'"))
+            conn.commit()
+            logger.info("Migration: alarms.source ajoutee (INV-120 V2)")
+    else:
+        conn.execute(text(
+            "ALTER TABLE alarms ADD COLUMN IF NOT EXISTS source VARCHAR NOT NULL DEFAULT 'api'"
+        ))
+        conn.commit()
+        logger.info("Migration: alarms.source verifiee/ajoutee (INV-120 V2)")
+
+    conn.execute(text(
+        "UPDATE alarms SET source = 'oncall' WHERE is_oncall_alarm = TRUE AND source = 'api'"
+    ))
+    conn.commit()
+
+
+def _migrate_alarm_sensor_dissensus(conn, is_sqlite: bool):
+    """INV-123 : ajoute alarms.sensor_dissensus_since + _email_sent_at
+    (toutes NULL au backfill — V1 ne savait pas détecter)."""
+    if is_sqlite:
+        cols = [row[1] for row in conn.execute(text("PRAGMA table_info(alarms)")).fetchall()]
+        if "sensor_dissensus_since" not in cols:
+            conn.execute(text("ALTER TABLE alarms ADD COLUMN sensor_dissensus_since TIMESTAMP"))
+            conn.commit()
+            logger.info("Migration: alarms.sensor_dissensus_since ajoutee (INV-123)")
+        if "sensor_dissensus_email_sent_at" not in cols:
+            conn.execute(text("ALTER TABLE alarms ADD COLUMN sensor_dissensus_email_sent_at TIMESTAMP"))
+            conn.commit()
+            logger.info("Migration: alarms.sensor_dissensus_email_sent_at ajoutee (INV-123)")
+    else:
+        conn.execute(text(
+            "ALTER TABLE alarms ADD COLUMN IF NOT EXISTS sensor_dissensus_since TIMESTAMP"
+        ))
+        conn.execute(text(
+            "ALTER TABLE alarms ADD COLUMN IF NOT EXISTS sensor_dissensus_email_sent_at TIMESTAMP"
+        ))
+        conn.commit()
+        logger.info("Migration: alarms.sensor_dissensus_* verifiees/ajoutees (INV-123)")
 
 
 def get_db():
