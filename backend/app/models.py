@@ -40,6 +40,15 @@ class Alarm(Base):
     # created_at reste le "timer" remis a zero a chaque palier, original_created_at fige t0.
     original_created_at = Column(DateTime, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # INV-120 V2 : origine de l'alarme. Permet à la reconcile (cf alarms_internal.py)
+    # de ne RESOLVE automatiquement QUE les alarmes gateway (les alarmes "api"/"oncall"
+    # restent intactes même si le contact se referme).
+    source = Column(String, nullable=False, default="api")  # api | oncall | gateway_dry_contact
+    # INV-123 : timestamp du premier instant où des gateways alive ont reporté
+    # des états divergents. Reset à NULL quand la cohérence est retrouvée.
+    sensor_dissensus_since = Column(DateTime, nullable=True)
+    # INV-123 anti-spam : un seul email sysadmin par épisode de dissensus.
+    sensor_dissensus_email_sent_at = Column(DateTime, nullable=True)
 
     assigned_user = relationship("User", back_populates="alarms", foreign_keys=[assigned_user_id])
     notifications = relationship("AlarmNotification", back_populates="alarm",
@@ -133,6 +142,19 @@ class AuditEvent(Base):
     timestamp = Column(DateTime, nullable=False, default=datetime.utcnow)
     details = Column(String, nullable=True)  # JSON string
     correlation_id = Column(String, nullable=True)
+
+
+class GatewayState(Base):
+    """INV-120 V2 : état courant rapporté par chaque gateway on-site.
+
+    Une row par gateway. Upsert à chaque POST /internal/alarms/report-state.
+    Source de vérité pour la reconciliation level-based + politique OR
+    fail-to-alarm multi-gateway (INV-122) + détection dissensus (INV-123).
+    """
+    __tablename__ = "gateway_states"
+    gateway_id = Column(String, primary_key=True)
+    state = Column(String, nullable=False)  # "open" | "closed"
+    last_seen = Column(DateTime, nullable=False)
 
 
 class DeploymentEvent(Base):

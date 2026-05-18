@@ -127,12 +127,16 @@ def reset_all(db: Session = Depends(get_db),
               peer: bool = Query(True)):
     """Reset all alarms, user states, and restore default escalation chain."""
     _require_test_endpoints()
-    from ..models import AuditEvent
+    from ..models import AuditEvent, GatewayState
     db.query(AuditEvent).delete()
     db.query(CallQueue).delete()
     db.query(SmsQueue).delete()
     db.query(AlarmNotification).delete()
     db.query(Alarm).delete()
+    # INV-120 V2 : reset état rapporté par les gateways (sinon une row d'un
+    # test précédent peut faire passer un report-state suivant en "should be
+    # active" / divergent immédiat).
+    db.query(GatewayState).delete()
 
     # Reset heartbeat pause et connection loss simulation
     from . import devices as devices_module
