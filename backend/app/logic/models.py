@@ -171,10 +171,16 @@ class DirectionTechniqueEmail:
 @dataclass(frozen=True)
 class OncallActions:
     """Retour de evaluate_oncall_heartbeat. Au plus UN élément dans chaque tuple
-    (la logique actuelle ne produit pas plusieurs actions du même type par tick)."""
-    resolutions: tuple["OncallAlarmResolution", ...]
-    creations: tuple["OncallAlarmCreation", ...]
-    emails: tuple["DirectionTechniqueEmail", ...]
+    (la logique actuelle ne produit pas plusieurs actions du même type par tick).
+
+    `email_marker_set` / `email_marker_clear` : INV-053 one-shot per episode.
+    Mutuellement exclusifs. L'appelant écrit ou efface
+    `SystemConfig.nobody_online_email_sent_at` selon le flag. Voir issue #116."""
+    resolutions: tuple["OncallAlarmResolution", ...] = ()
+    creations: tuple["OncallAlarmCreation", ...] = ()
+    emails: tuple["DirectionTechniqueEmail", ...] = ()
+    email_marker_set: bool = False
+    email_marker_clear: bool = False
 
 
 @dataclass(frozen=True)

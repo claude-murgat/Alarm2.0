@@ -30,24 +30,30 @@ def evaluate_oncall_heartbeat(
     existing_alarms: list[AlarmSnapshot],
     oncall_offline_delay_minutes: float,
     now: datetime,
+    email_already_sent: bool = False,
 ) -> OncallActions:
     """Retourne les Actions oncall à appliquer pour ce tick.
 
     La logique actuelle produit au plus UN élément dans chaque tuple par tick :
     - Soit une resolution (oncall revient online + alarme oncall existe)
     - Soit une creation (oncall offline >= delay + au moins 1 user online + pas de doublon)
-    - Soit un email (oncall offline >= delay + personne online)
+    - Soit un email (oncall offline >= delay + personne online, AU PLUS UNE FOIS par épisode)
     - Soit rien (conditions non remplies ou cas dégénérés)
+
+    `email_already_sent` (issue #116) : True si l'email "personne online" a déjà
+    été envoyé pour l'épisode courant (marker persistant côté caller). Dans ce cas
+    on n'envoie PAS un nouvel email tant qu'au moins un user n'est pas revenu
+    online (qui clear le marker via `email_marker_clear`).
     """
     if not chain:
-        return OncallActions(resolutions=(), creations=(), emails=())
+        return OncallActions()
 
     oncall_entry = chain[0]  # position 1
     users_by_id = {u.id: u for u in users}
     oncall_user = users_by_id.get(oncall_entry.user_id)
     if oncall_user is None:
         # Cas dégénéré : chain pointe vers un user supprimé
-        return OncallActions(resolutions=(), creations=(), emails=())
+        return OncallActions()
 
     # Alarmes oncall actives (active ou escalated)
     existing_oncall_active = next(
@@ -58,49 +64,52 @@ def evaluate_oncall_heartbeat(
         None,
     )
 
+    online_users = [u for u in users if u.is_online]
+    # Marker clear dès qu'au moins un user est online (fin d'épisode INV-053).
+    # Aucun no-op gratuit : on n'émet le flag clear que si le marker est posé.
+    should_clear_marker = email_already_sent and bool(online_users)
+
     # INV-051 : oncall online → résoudre l'alarme oncall si elle existe
     if oncall_user.is_online:
         if existing_oncall_active is not None:
             return OncallActions(
                 resolutions=(OncallAlarmResolution(alarm_id=existing_oncall_active.id),),
-                creations=(),
-                emails=(),
+                email_marker_clear=should_clear_marker,
             )
-        return OncallActions(resolutions=(), creations=(), emails=())
+        return OncallActions(email_marker_clear=should_clear_marker)
 
     # Oncall offline — vérifier depuis combien de temps
     if oncall_user.last_heartbeat is None:
         # Cas dégénéré : jamais de heartbeat, on ne sait pas
-        return OncallActions(resolutions=(), creations=(), emails=())
+        return OncallActions()
 
     offline_duration_minutes = (now - oncall_user.last_heartbeat).total_seconds() / 60.0
     if offline_duration_minutes < oncall_offline_delay_minutes:
-        return OncallActions(resolutions=(), creations=(), emails=())
+        return OncallActions()
 
-    # Offline >= delay
-    online_users = [u for u in users if u.is_online]
-
-    # INV-053 : personne online → email direction technique (pas d'alarme)
+    # INV-053 : personne online → email direction technique (pas d'alarme).
+    # Issue #116 : AU PLUS UNE FOIS par épisode. Si déjà envoyé, on n'envoie plus.
     if not online_users:
+        if email_already_sent:
+            return OncallActions()
         return OncallActions(
-            resolutions=(),
-            creations=(),
             emails=(DirectionTechniqueEmail(
                 oncall_user_name=oncall_user.name,
                 offline_duration_minutes=offline_duration_minutes,
             ),),
+            email_marker_set=True,
         )
 
     # INV-054 : alarme oncall déjà existante → skip
     if existing_oncall_active is not None:
-        return OncallActions(resolutions=(), creations=(), emails=())
+        return OncallActions(email_marker_clear=should_clear_marker)
 
     # INV-001 : une autre alarme active (non-oncall) → skip (contrainte unicité)
     any_active = any(
         a.status in ("active", "escalated") for a in existing_alarms
     )
     if any_active:
-        return OncallActions(resolutions=(), creations=(), emails=())
+        return OncallActions(email_marker_clear=should_clear_marker)
 
     # INV-052 : trouver le prochain user online dans la chaîne (pas le #1)
     assigned_user_id = _find_next_online_in_chain(chain, users_by_id, oncall_user.id)
@@ -109,16 +118,15 @@ def evaluate_oncall_heartbeat(
         assigned_user_id = online_users[0].id if online_users else None
 
     if assigned_user_id is None:
-        return OncallActions(resolutions=(), creations=(), emails=())
+        return OncallActions(email_marker_clear=should_clear_marker)
 
     return OncallActions(
-        resolutions=(),
         creations=(OncallAlarmCreation(
             oncall_user_name=oncall_user.name,
             offline_duration_minutes=offline_duration_minutes,
             assigned_user_id=assigned_user_id,
         ),),
-        emails=(),
+        email_marker_clear=should_clear_marker,
     )
 
 

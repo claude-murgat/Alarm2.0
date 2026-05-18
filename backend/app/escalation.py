@@ -400,12 +400,20 @@ async def _apply_oncall_heartbeat(db: Session, now, escalation_chain):
         float(delay_cfg.value) if delay_cfg else ONCALL_OFFLINE_DELAY_MINUTES_DEFAULT
     )
 
+    # Issue #116 : marker "personne online — email déjà envoyé pour cet épisode".
+    # Vide/absent = autorisé à envoyer. Non-vide = déjà envoyé, skip.
+    marker_cfg = db.query(SystemConfig).filter(
+        SystemConfig.key == "nobody_online_email_sent_at"
+    ).first()
+    email_already_sent = bool(marker_cfg and marker_cfg.value)
+
     actions = evaluate_oncall_heartbeat(
         chain_snapshot,
         user_snapshots,
         alarm_snapshots,
         oncall_delay_minutes,
         now,
+        email_already_sent=email_already_sent,
     )
 
     alarm_by_id = {a.id: a for a in alarms_orm}
@@ -434,6 +442,21 @@ async def _apply_oncall_heartbeat(db: Session, now, escalation_chain):
             ),
             to=recipient,
         )
+
+    # Issue #116 : poser / effacer le marker after l'envoi (ou non-envoi).
+    if actions.email_marker_set:
+        if marker_cfg is None:
+            db.add(SystemConfig(
+                key="nobody_online_email_sent_at",
+                value=now.isoformat(),
+            ))
+        else:
+            marker_cfg.value = now.isoformat()
+        db.commit()
+    elif actions.email_marker_clear:
+        if marker_cfg is not None and marker_cfg.value:
+            marker_cfg.value = ""
+            db.commit()
 
     # INV-050 : creer l'alarme oncall
     for creation in actions.creations:
