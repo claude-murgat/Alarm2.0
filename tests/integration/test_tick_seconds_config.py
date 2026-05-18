@@ -16,7 +16,7 @@ des leviers independants ("frequence escalade" != "frequence check offline").
 Invariant vise : INV-084 — « Aucun delai metier ne doit etre hardcode.
 Chaque valeur est lue depuis SystemConfig a chaque usage. »
 
-Budget P4 : 3 tests cibles (un par cle + un seed/default).
+Budget P4 : 4 tests cibles (un par cle + un seed/default + un fallback invalide).
 
 Approche : appelle directement les helpers `_get_escalation_tick_seconds` et
 `_get_watchdog_tick_seconds` qui sont consommes par les boucles asyncio. Les
@@ -191,3 +191,81 @@ def test_tick_seconds_fallback_to_default_when_key_absent(client, admin_headers)
             db.add(SystemConfig(key="watchdog_tick_seconds", value=saved_wd))
         db.commit()
         db.close()
+
+
+def test_tick_seconds_fallback_when_value_is_invalid(client, admin_headers):
+    """INV-084 : si SystemConfig contient une valeur non-numerique (saisie admin
+    invalide ou data corrompue), les helpers doivent retourner le default plutot
+    que de lever ValueError et faire crasher la boucle.
+
+    L'endpoint POST /api/config/system n'a aucune validation (proxy brut,
+    cf backend/app/api/config.py:181-195 : `existing.value = config.value`),
+    donc la garde try/except dans les helpers est la SEULE defense. Ce test
+    verrouille cette garde contre un mutant qui la supprimerait — sinon la
+    boucle escalade/watchdog crasherait en silence et INV-050 (continuite
+    oncall) serait compromis par effet de bord.
+    """
+    from backend.app.escalation import (
+        _get_escalation_tick_seconds,
+        ESCALATION_TICK_SECONDS_DEFAULT,
+    )
+    from backend.app.watchdog import (
+        _get_watchdog_tick_seconds,
+        WATCHDOG_TICK_SECONDS_DEFAULT,
+    )
+    from backend.app.database import SessionLocal
+    from backend.app.models import SystemConfig
+
+    # Pousser une valeur invalide via l'endpoint admin (pas via DB directe :
+    # on veut prouver que le chemin admin reel ne crashe pas la boucle).
+    try:
+        for key in ("escalation_tick_seconds", "watchdog_tick_seconds"):
+            r = client.post(
+                "/api/config/system",
+                json={"key": key, "value": "abc"},
+                headers=admin_headers,
+            )
+            # L'endpoint est un proxy brut, il accepte n'importe quoi (200 OK).
+            # C'est precisement le scenario que cette garde protege.
+            assert r.status_code == 200, (
+                f"POST /api/config/system {key}=abc devrait reussir "
+                f"(endpoint sans validation), got {r.status_code}: {r.text}"
+            )
+
+        db = SessionLocal()
+        try:
+            # La garde try/except (TypeError, ValueError) DOIT renvoyer le default
+            # plutot que de propager l'exception et tuer la boucle.
+            observed_esc = _get_escalation_tick_seconds(db)
+            assert observed_esc == ESCALATION_TICK_SECONDS_DEFAULT, (
+                "INV-084 : avec escalation_tick_seconds='abc' en DB, le helper "
+                f"doit fallback sur le default ({ESCALATION_TICK_SECONDS_DEFAULT}), "
+                f"got {observed_esc}. Si ce test echoue avec une ValueError, "
+                "la garde try/except a ete supprimee — la boucle d'escalade "
+                "crasherait en prod sur une saisie admin invalide."
+            )
+
+            observed_wd = _get_watchdog_tick_seconds(db)
+            assert observed_wd == WATCHDOG_TICK_SECONDS_DEFAULT, (
+                "INV-084 : avec watchdog_tick_seconds='abc' en DB, le helper "
+                f"doit fallback sur le default ({WATCHDOG_TICK_SECONDS_DEFAULT}), "
+                f"got {observed_wd}. Idem : sans la garde, la boucle watchdog "
+                "crasherait en silence (-> INV-050 viole par effet de bord)."
+            )
+        finally:
+            db.close()
+    finally:
+        # Restaure les defaults proprement, quel que soit l'issue du test
+        # (INV-902 : independance d'ordre).
+        db = SessionLocal()
+        try:
+            for key, default_value in (
+                ("escalation_tick_seconds", "10"),
+                ("watchdog_tick_seconds", "30"),
+            ):
+                cfg = db.query(SystemConfig).filter(SystemConfig.key == key).first()
+                if cfg is not None:
+                    cfg.value = default_value
+            db.commit()
+        finally:
+            db.close()
