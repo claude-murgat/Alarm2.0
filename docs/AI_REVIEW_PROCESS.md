@@ -10,21 +10,50 @@ Ce document décrit le **process** de review et de décision. Il ne reproduit pa
 
 ## 1. Quand l'utiliser
 
-Une PR ouverte par `alarm-murgat-bot[bot]` arrive sur le repo (déclenchée par cron `0 */4 * * *` ou trigger manuel `gh workflow run ai-bot.yml`). La PR attend un label `ai:approved` (humain) pour déclencher l'auto-merge phase 4.
+Ce process couvre **3 types de PRs** à reviewer. Adapter selon le type :
+
+### 1.1 PR du bot `alarm-murgat-bot[bot]` (cas principal)
+- Déclenchée par cron `0 */4 * * *` ou trigger manuel `gh workflow run ai-bot.yml`
+- Attend label `ai:approved` (humain) pour déclencher l'auto-merge phase 4
+- Cleanup post-merge requis : `gh issue edit <N> --remove-label "ai:queue" --remove-label "ai:fix"` + close issue
+- `/ai-retry` disponible si retouche nécessaire
+
+### 1.2 PR humaine co-signée Claude (worktree spawn ou session interactive)
+- Auteur GH = `claude-murgat` (l'utilisateur), avec `Co-Authored-By: Claude` dans le commit
+- Applique le même process (calibration C/H/M/L, triplet sur [C], anti-patterns à signaler)
+- **Adaptations** :
+  - **Pas de `/ai-retry`** — les templates §5 ne s'appliquent pas, l'auteur push un commit directement après ton retour
+  - **Pas de cleanup labels `ai:queue`/`ai:fix`** — ces labels n'existent pas sur ces PRs
+  - Si retouche : poste ton retour en commentaire normal sur la PR (le destinataire est humain ou Claude, pas le bot)
+
+### 1.3 PR humaine pure (autre contributeur)
+- Process applicable si demandé. Mêmes adaptations que 1.2.
+
+---
 
 Tu (humain ou Claude) es le **goulot review** : sans ton verdict, la PR reste ouverte.
 
 ## 2. Cadre général
 
-### 2.1 Pull avant chaque review
+### 2.1 Pull + checklist préflight (30s, obligatoire)
 
 ```bash
 git fetch origin
-gh pr view <N> --json body,files,additions,deletions,headRefName,statusCheckRollup
+gh pr view <N> --json body,files,additions,deletions,headRefName,statusCheckRollup,mergeStateStatus
 gh pr diff <N>
+git diff origin/master..origin/<headRefName> --stat
 ```
 
 Lis le **body PR** (résumé de l'agent), les **fichiers touchés**, le **diff complet**. Identifie l'**invariant ciblé** (INV-XXX) et sa **criticité** dans `tests/INVARIANTS.md`.
+
+#### ✅ Checklist préflight (à exécuter AVANT de commencer la review)
+
+- [ ] **`mergeStateStatus`** — valeur ? `CLEAN`, `BEHIND`, `DIRTY`, `BLOCKED` ? Si `BEHIND` ou `DIRTY` → traiter cf §7.1 AVANT de continuer la review (pas après l'approve).
+- [ ] **Diff vs master** — `git diff origin/master..origin/<branch> --stat` : aucun fichier récemment mergé (ces derniers jours) n'est-il **supprimé** par cette PR ? Si oui → 🔴 cf §7.1 cas dangereux (BEHIND avec collision = bloquant immédiat).
+- [ ] **Scope vs body** — les `files` annoncés dans le body PR correspondent aux fichiers réellement touchés dans le diff ? Si écart → scope creep silencieux à investiguer.
+- [ ] **Denylist** (PRs bot uniquement) — intersection entre les fichiers du diff et `.github/ai-bot/denylist.txt` ? Si oui → `ai:denied` aurait dû être posé, vérifier pourquoi la PR existe.
+
+Sans cette checklist, on rate les cas où une branche fraîche écrase plusieurs centaines de lignes mergées entre temps — invisible si on ne fait pas le `git diff` vs master AVANT la review.
 
 ### 2.2 Calibration par criticité (règle d'or)
 
@@ -43,7 +72,7 @@ La rigueur de review s'adapte à la criticité de l'invariant. Appliquer une gri
 
 ### 3.1 Quand l'utiliser
 
-- **Toujours** sur [C]
+- **OBLIGATOIRE sur [C]** — pas d'exception. Pas de mode "review consultative" (où on te demande juste un avis pour comparer ou pour décision humaine, sans pouvoir d'action) qui contournerait. Même dans ce cas, fais le triplet et présente les 3 phases dans le rapport. Le shortcut "j'ai juste à analyser, pas à agir → je peux skipper Phase 2/3" n'est **pas autorisé** pour [C]. Si tu te surprends à raisonner "l'utilisateur veut juste comparer / ce n'est qu'une éval" et donc à shortcuter — c'est un post-hoc de fatigue ou de pression, fais le triplet.
 - **Optionnel** sur [H] si tu as un doute légitime (sécurité, edge case complexe)
 - **Pas la peine** sur [M] ou [L] sauf cas exceptionnel — review simple suffit
 
@@ -201,11 +230,33 @@ Note dans la mémoire `project_invariants_to_update.md` que l'INV principal pass
 
 ### 7.1 PR BEHIND (master avance pendant la review)
 
+**Cas A — BEHIND simple (routine)**
+
+La branche a été créée à un commit master plus ancien, mais aucune collision de suppressions. Cas typique : 1-2 commits master mergés pendant la review.
+
 ```bash
 gh pr update-branch <N>
 # Si succès : nouvelle CI démarre, attendre, re-pose le label
 # Si conflit : passer à 7.2
 ```
+
+**Cas B — 🔴 BEHIND avec suppressions de code récemment mergé (BLOQUANT)**
+
+Symptôme : `git diff origin/master..origin/<branch> --stat` montre des **`-` (suppressions) sur des fichiers ajoutés ou modifiés via des PRs mergées récemment**.
+
+Cause typique : la branche a été créée AVANT plusieurs merges critiques, et son commit de merge interne (rebase ou merge master old) a écrasé les modifs récentes en silence.
+
+**Action immédiate** :
+1. **NE PAS approuver** la PR. Même si la CI est verte, le merge effacerait du code mergé entre temps.
+2. Pour CHAQUE fichier en suppression nette, vérifier si c'est intentionnel (refactor légitime) ou collision (oubli) :
+   - `git log origin/master -- <file>` pour voir si le fichier a été touché récemment par d'autres PRs
+   - Si oui → collision, à traiter via §7.2
+3. Suivre §7.2 (résolution conflit manuelle) — JAMAIS de `gh pr update-branch` sans inspection (le merge peut "réussir" silencieusement en gardant les suppressions).
+4. Si la PR auteur est un humain : signaler immédiatement dans un commentaire ce qui serait perdu, demander rebase de leur côté.
+
+**Symptôme typique** : une branche créée il y a plusieurs jours, pendant lesquels d'autres PRs ont mergé sur master en touchant ou ajoutant des fichiers que la branche n'a pas vus. Le `mergeStateStatus: BEHIND` est souvent le seul indice visible avant le `git diff` détaillé.
+
+**Règle d'or** : un `BEHIND` détecté à la checklist préflight §2.1 doit toujours déclencher `git diff origin/master..origin/<branch> --stat` AVANT de continuer la review. Pas après l'approve.
 
 ### 7.2 Conflit de merge
 

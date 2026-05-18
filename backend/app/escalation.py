@@ -350,7 +350,9 @@ async def escalation_loop():
 
                 # --- 4. On-call monitoring: user #1 heartbeat ---
                 # Logique de decision extraite dans logic/oncall.py (testee unit).
-                _apply_oncall_heartbeat(db, now, escalation_chain)
+                # Bug #105 : await car _apply_oncall_heartbeat envoie un email
+                # via asyncio.to_thread (sinon smtplib synchrone gèle l'event loop).
+                await _apply_oncall_heartbeat(db, now, escalation_chain)
 
             finally:
                 db.close()
@@ -360,10 +362,12 @@ async def escalation_loop():
         await asyncio.sleep(tick_seconds)
 
 
-def _apply_oncall_heartbeat(db: Session, now, escalation_chain):
+async def _apply_oncall_heartbeat(db: Session, now, escalation_chain):
     """Applique les actions retournees par evaluate_oncall_heartbeat (logique pure).
 
     Charge les snapshots, appelle la fonction pure, applique les Actions en DB + SMTP.
+    Bug #105 : async car l'envoi SMTP est délégué à un thread worker
+    (asyncio.to_thread) pour ne pas geler l'event loop si SMTP_HOST timeout.
     """
     if not escalation_chain:
         return
@@ -417,10 +421,12 @@ def _apply_oncall_heartbeat(db: Session, now, escalation_chain):
             db.commit()
 
     # INV-053 : email direction technique (personne online)
+    # Bug #105 : asyncio.to_thread pour ne pas bloquer l'event loop si SMTP timeout.
     for email in actions.emails:
         config = db.query(SystemConfig).filter(SystemConfig.key == "alert_email").first()
         recipient = config.value if config else "direction_technique@charlesmurgat.com"
-        send_alert_email(
+        await asyncio.to_thread(
+            send_alert_email,
             subject="Alerte: aucun utilisateur connecte - astreinte perdue",
             body=(
                 f"L'utilisateur d'astreinte '{email.oncall_user_name}' est hors ligne depuis "

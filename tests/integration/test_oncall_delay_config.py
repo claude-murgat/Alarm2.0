@@ -38,6 +38,7 @@ def test_oncall_delay_read_from_system_config_not_hardcoded(client, admin_header
     Attendu : une alarme is_oncall_alarm=True est creee, car 3 > 2 (config).
     Buggy : aucune alarme car le code compare 3 < 15 (constante ignorant la config).
     """
+    import asyncio
     from backend.app.database import SessionLocal
     from backend.app.models import Alarm, EscalationConfig, User
     from backend.app.escalation import _apply_oncall_heartbeat
@@ -91,7 +92,10 @@ def test_oncall_delay_read_from_system_config_not_hardcoded(client, admin_header
         db.commit()
 
         # 3) Cycle de surveillance oncall (cf escalation_loop section 4)
-        _apply_oncall_heartbeat(db, now_ref, chain)
+        # Bug #105 : _apply_oncall_heartbeat est devenu async (envoi SMTP via
+        # asyncio.to_thread pour ne pas geler l'event loop). On le pilote ici
+        # via asyncio.run depuis un contexte de test sync.
+        asyncio.run(_apply_oncall_heartbeat(db, now_ref, chain))
         db.expire_all()  # relire l'etat apres commit interne
 
         # 4) Verification : l'alarme oncall doit exister car 3 min > 2 min configures

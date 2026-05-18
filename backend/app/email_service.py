@@ -33,10 +33,11 @@ def send_alert_email(subject: str, body: str, to: str):
     if not smtp_host:
         return
 
-    # Timeout court (issue #105) : sans ça, smtplib.SMTP hérite du default
-    # kernel TCP timeout (~110s) et bloque l'event loop asyncio pendant tout
-    # ce temps si le host est injoignable. Configurable via env pour la prod.
-    timeout = int(os.getenv("SMTP_TIMEOUT", "10"))
+    # Bug #105 : sans timeout explicite, smtplib hérite du socket default
+    # (~110s sur Linux) si SMTP_HOST est inaccessible. Borné ici à 10s pour
+    # que même appelé dans un thread (cf asyncio.to_thread des callers post
+    # PR #106), l'opération ne traîne pas indéfiniment.
+    timeout = float(os.getenv("SMTP_TIMEOUT", "10"))
     smtp_port = int(os.getenv("SMTP_PORT", "587"))
     smtp_user = (os.getenv("SMTP_USER") or "").strip()
     smtp_pass = (os.getenv("SMTP_PASS") or "").strip()
