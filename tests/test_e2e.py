@@ -1442,6 +1442,118 @@ class TestOnCallDisconnectionAlarm:
             f"Sujet inattendu : {subject}"
 
 
+# ── Bug #105 : SMTP synchrone ne doit pas bloquer l'event loop ───────────────
+
+
+class TestSmtpAsyncDoesNotBlockEventLoop:
+    """Bug #105 : send_alert_email était synchrone et appelé directement dans la
+    coroutine `escalation_loop` (via `_apply_oncall_heartbeat`). Un timeout SMTP
+    (MTA down, DNS KO, firewall) bloquait tout l'event loop pendant ~110s à
+    chaque tick — /health KO, watchdog figé, plus aucune alarme servable.
+
+    Ce test détourne SMTP_HOST vers une IP TEST-NET-1 (192.0.2.1, RFC 5737 —
+    garantie non-routable) avec un socket timeout court (5s), déclenche le code
+    path natif (oncall offline 16min → email "personne online" via
+    escalation_loop), puis échantillonne /health pendant un tick complet.
+
+    Avant fix : `/health` met >3s à répondre pendant que l'event loop attend le
+    timeout SMTP. Après fix (asyncio.to_thread + smtplib timeout) : `/health`
+    reste < 1s même pendant l'envoi bloquant.
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        _reset_clock_all_nodes()
+        requests.post(f"{API}/test/reset")
+        admin_h = _admin_headers()
+        requests.post(f"{API}/alarms/reset", headers=admin_h)
+        # Laisser un tick passer avec l'état propre
+        time.sleep(12)
+        requests.post(f"{API}/alarms/reset", headers=admin_h)
+        yield
+        # Cleanup : restaurer SMTP normal et l'horloge AVANT de relâcher
+        requests.post(f"{API}/test/restore-smtp")
+        _reset_clock_all_nodes()
+        requests.post(f"{API}/test/reset")
+        requests.post(f"{API}/alarms/reset", headers=admin_h)
+
+    def test_event_loop_responsive_during_blocking_smtp_send(self):
+        """/health reste responsive pendant qu'escalation_loop tente un envoi SMTP qui timeout.
+
+        Reproduit la cascade prod (cf issue #105) : SMTP_HOST inaccessible,
+        l'envoi via escalation_loop ne doit pas geler l'event loop pour les
+        autres requêtes (health, escalade, watchdog).
+        """
+        admin_h = _admin_headers()
+
+        # 1. Pointer SMTP vers une IP blackhole (192.0.2.1 = TEST-NET-1 RFC 5737,
+        #    garantie non-routable → packets droppés sur le wire, donc TCP SYN
+        #    timeout plein côté kernel ~110s). socket_timeout=5 borne ce timeout
+        #    côté backend pour que le test ne traîne pas — c'est ce qui rend le
+        #    bug observable en 5s au lieu de 110s.
+        r = requests.post(
+            f"{API}/test/configure-smtp",
+            params={"host": "192.0.2.1", "port": 25, "socket_timeout": 5},
+        )
+        assert r.status_code == 200, f"configure-smtp failed: {r.text}"
+
+        # 2. Déclencher le scénario qui fait envoyer un email depuis
+        #    escalation_loop : tout le monde offline + 16min → INV-053
+        #    ("personne online → email direction technique").
+        requests.post(f"{API}/test/simulate-connection-loss")
+        _advance_clock_all_nodes(16)
+
+        # 3. Échantillonner /health en parallèle pendant ~13s (> 1 tick de 10s)
+        #    pour catcher le moment où escalation_loop tente l'envoi bloquant.
+        import threading
+        samples: list[tuple[float, object]] = []
+        stop_event = threading.Event()
+
+        def sample_health():
+            while not stop_event.is_set():
+                start = time.time()
+                try:
+                    r = requests.get(f"{BASE_URL}/health", timeout=8)
+                    samples.append((time.time() - start, r.status_code))
+                except requests.exceptions.Timeout:
+                    samples.append((8.0, "TIMEOUT"))
+                except Exception as e:
+                    samples.append((time.time() - start, repr(e)))
+                time.sleep(0.25)
+
+        sampler = threading.Thread(target=sample_health, daemon=True)
+        sampler.start()
+        time.sleep(13)
+        stop_event.set()
+        sampler.join(timeout=10)
+
+        # 4. La pire latence /health doit rester sous 1.5s : l'event loop ne
+        #    doit JAMAIS rester bloqué par l'envoi SMTP.
+        assert len(samples) > 10, f"Trop peu d'échantillons /health: {samples}"
+        max_latency = max(s[0] for s in samples)
+        worst = max(samples, key=lambda s: s[0])
+        assert max_latency < 1.5, (
+            f"Event loop bloqué par SMTP (bug #105) — "
+            f"pire latence /health = {max_latency:.2f}s, statut={worst[1]}, "
+            f"échantillons triés desc: {sorted(samples, reverse=True)[:5]}"
+        )
+
+        # 5. La boucle d'escalade doit rattraper l'avance horloge : la queue
+        #    du sample doit contenir une majorité de 200. Sinon last_tick_at
+        #    n'avance plus → la loop est figée (vrai symptôme du bug #105).
+        #
+        #    Note : un 503 transitoire est attendu pendant les ~10s suivant
+        #    l'advance-clock+16min, le temps qu'un tick mette à jour
+        #    last_tick_at à la nouvelle horloge (avant ce tick,
+        #    `clock_now() - last_tick_at` > 120s par construction).
+        tail = samples[-8:]
+        tail_ok = sum(1 for s in tail if s[1] == 200)
+        assert tail_ok >= 4, (
+            f"escalation_loop ne rattrape pas après advance-clock — "
+            f"queue {tail_ok}/8 OK, derniers samples: {tail}"
+        )
+
+
 # ── Visibilité des utilisateurs notifiés depuis l'app ─────────────────────────
 
 class TestNotifiedUsersVisibility:

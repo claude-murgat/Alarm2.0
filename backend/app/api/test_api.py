@@ -480,3 +480,70 @@ def clear_loop_stall():
     esc_module._simulate_stall = False
     # Laisse last_tick_at tel quel : le prochain tick (dans <10s) le remettra à now.
     return {"status": "ok"}
+
+
+# Snapshot des valeurs SMTP initiales (env + socket default timeout) au premier
+# configure-smtp. Permet à restore-smtp de revenir à l'état boot — utilisé pour
+# tester le bug #105 (SMTP synchrone qui bloque l'event loop).
+_smtp_snapshot: dict | None = None
+
+
+@router.post("/configure-smtp")
+def configure_smtp(
+    host: str | None = Query(None),
+    port: int | None = Query(None),
+    socket_timeout: float | None = Query(
+        None,
+        description="socket.setdefaulttimeout (s). 0 = reset to None.",
+    ),
+):
+    """Override SMTP_HOST / SMTP_PORT et socket default timeout au runtime.
+
+    Sert au test bug #105 — pointer le backend vers un blackhole avec un
+    timeout court pour vérifier que l'event loop reste responsive pendant
+    un envoi email bloquant.
+    """
+    _require_test_endpoints()
+    import socket as _socket
+    global _smtp_snapshot
+    if _smtp_snapshot is None:
+        _smtp_snapshot = {
+            "SMTP_HOST": os.environ.get("SMTP_HOST"),
+            "SMTP_PORT": os.environ.get("SMTP_PORT"),
+            "socket_timeout": _socket.getdefaulttimeout(),
+        }
+    if host is not None:
+        os.environ["SMTP_HOST"] = host
+    if port is not None:
+        os.environ["SMTP_PORT"] = str(port)
+    if socket_timeout is not None:
+        _socket.setdefaulttimeout(socket_timeout if socket_timeout > 0 else None)
+    return {
+        "smtp_host": os.environ.get("SMTP_HOST"),
+        "smtp_port": os.environ.get("SMTP_PORT"),
+        "socket_timeout": _socket.getdefaulttimeout(),
+    }
+
+
+@router.post("/restore-smtp")
+def restore_smtp():
+    """Restaure SMTP_HOST/PORT et socket default timeout aux valeurs au boot."""
+    _require_test_endpoints()
+    import socket as _socket
+    global _smtp_snapshot
+    if _smtp_snapshot is None:
+        return {"status": "noop"}
+    for key in ("SMTP_HOST", "SMTP_PORT"):
+        original = _smtp_snapshot.get(key)
+        if original is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = original
+    _socket.setdefaulttimeout(_smtp_snapshot.get("socket_timeout"))
+    _smtp_snapshot = None
+    return {
+        "status": "restored",
+        "smtp_host": os.environ.get("SMTP_HOST"),
+        "smtp_port": os.environ.get("SMTP_PORT"),
+        "socket_timeout": _socket.getdefaulttimeout(),
+    }

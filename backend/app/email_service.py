@@ -34,7 +34,14 @@ def send_alert_email(subject: str, body: str, to: str):
             msg["Subject"] = subject
             msg["From"] = os.getenv("SMTP_FROM", "alarms@system.local")
             msg["To"] = to
-            with smtplib.SMTP(smtp_host, int(os.getenv("SMTP_PORT", "587"))) as server:
+            # Bug #105 : sans timeout explicite, smtplib hérite du socket
+            # default (~110s sur Linux) si SMTP_HOST est inaccessible. Borné ici
+            # à 10s pour que même appelé dans un thread, l'opération ne traîne
+            # pas indéfiniment.
+            timeout = float(os.getenv("SMTP_TIMEOUT", "10"))
+            with smtplib.SMTP(
+                smtp_host, int(os.getenv("SMTP_PORT", "587")), timeout=timeout
+            ) as server:
                 server.send_message(msg)
             logger.info(f"Email actually sent to {to}")
         except Exception as e:
