@@ -127,9 +127,16 @@ services:
       #              defaults de auth.py pour que secret_key_default=false en CI)
       # Le `:?` fait échouer compose si SECRET_KEY n'est pas définie (fail-fast).
       - SECRET_KEY=${SECRET_KEY:?SECRET_KEY missing — set via .env.prod.secrets (PROD) or .env.{dev,node1,node2,node3} (CI)}
-      - SMTP_HOST=host.docker.internal
-      - SMTP_PORT=1025
-      - SMTP_FROM=alarmes@alarm.local
+      # SMTP : overridable via env files (cf issue #105). En dev/CI les defaults
+      # pointent vers MailHog local (profile mailhog). En PROD, les valeurs viennent
+      # de .env.prod.node{1,2,3} (HOST/PORT/FROM) + .env.prod.secrets (USER/PASS).
+      # Si SMTP_HOST vide → email_service skip silencieusement, pas de blocage event loop.
+      - SMTP_HOST=${SMTP_HOST-host.docker.internal}
+      - SMTP_PORT=${SMTP_PORT:-1025}
+      - SMTP_FROM=${SMTP_FROM:-alarmes@alarm.local}
+      - SMTP_USER=${SMTP_USER-}
+      - SMTP_PASS=${SMTP_PASS-}
+      - SMTP_TIMEOUT=${SMTP_TIMEOUT:-10}
       - PEER_TEST_URLS=${PEER_TEST_URLS}
       - NODE_NAME=${NODE_NAME}
       - GATEWAY_KEY=${GATEWAY_KEY:-changeme-in-prod}
