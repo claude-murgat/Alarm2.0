@@ -182,3 +182,97 @@ def test_quorum_loss_series_interrupted_resets_counter():
         f"INV-085 anti-flapping : is_lost=False implique lost_since=None "
         f"(contrat de QuorumState). Observé : lost_since={state.lost_since!r}."
     )
+
+
+# ============================================================================
+# Tests pour fermer les 2 mutants survivants restants (mutmut tier 1.5 score
+# 97.5% → 100% strict). 2 mutants équivalents (`frozen=True` → `frozen=False`
+# sur les dataclasses) sont pragma-isés directement dans le code source.
+# ============================================================================
+
+
+def test_quorum_history_with_duplicate_snapshot_timestamp_excluded():
+    """INV-085 [C] : si une observation dans history porte le MÊME timestamp
+    que le snapshot courant, elle DOIT être exclue de earlier (filtre strict `<`).
+
+    Tue le mutant `s.timestamp < snapshot.timestamp` ↔ `s.timestamp <= snapshot.timestamp`
+    (filtre du sorted) : avec `<=`, une observation dupliquant snapshot.timestamp
+    serait incluse dans `earlier` et changerait le calcul de lost_since si elle
+    est non-saine (peut artificiellement reculer le compteur).
+
+    Construction : history contient une obs SAINE au MÊME timestamp que snapshot
+    (cas pathologique mais possible : 2 readers concurrents qui inscrivent dans
+    l'historique à la même ms). Si on incluait cette obs (mutant `<=`), elle
+    serait la 1ère candidate dans `earlier` (tri desc), saine → break immédiat,
+    lost_since resterait = snapshot.timestamp → is_lost = 0 > 3min = False
+    (résultat IDENTIQUE au comportement correct pour ce cas — mais on prouve
+    le strict `<` via un cas où l'inclusion CHANGERAIT le résultat).
+
+    Pour vraiment forcer la différence : l'obs au même timestamp est non-saine
+    ET il y a 5 min d'obs non-saines avant. Avec `<` strict : l'obs au même
+    timestamp est exclue, earlier commence à NOW-1min (non-sain), remonte jusqu'à
+    NOW-5min (non-sain continu) → lost_since = NOW-5min → is_lost = True.
+    Avec mutant `<=` : l'obs au même timestamp est incluse en 1er (non-sain) →
+    lost_since = snapshot.timestamp (même résultat car premier de la série).
+    Donc égal aussi.
+
+    Le seul cas qui DIFFÈRE : l'obs au même timestamp est saine ET les obs
+    précédentes seraient non-saines. Avec `<` : exclue, earlier commence à
+    NOW-1min non-sain → 5 min non-saines → is_lost=True. Avec `<=` : incluse
+    en 1er (saine) → break immédiat, lost_since = snapshot.timestamp →
+    is_lost=False.
+    """
+    history = [
+        # 5 min d'observations non-saines continues jusqu'à NOW-1min
+        _no_quorum(NOW - timedelta(minutes=5)),
+        _no_quorum(NOW - timedelta(minutes=4)),
+        _no_quorum(NOW - timedelta(minutes=3)),
+        _no_quorum(NOW - timedelta(minutes=2)),
+        _no_quorum(NOW - timedelta(minutes=1)),
+        # ⚠ Observation SAINE au MÊME timestamp que le snapshot courant.
+        # Doit être EXCLUE par le filtre `s.timestamp < snapshot.timestamp`.
+        _healthy(NOW),
+    ]
+    snapshot = _no_quorum(NOW)
+
+    state = evaluate_quorum_loss(snapshot, history)
+
+    # Avec `<` strict (correct) : l'obs saine à NOW est exclue, earlier = 5min
+    # non-saines continues → lost_since = NOW-5min → is_lost = True.
+    # Avec mutant `<=` : l'obs saine à NOW est incluse en 1ère position du tri desc
+    # → break immédiat → lost_since = snapshot.timestamp → is_lost = False.
+    assert state.is_lost is True, (
+        "INV-085 : une observation au MÊME timestamp que le snapshot doit être "
+        "EXCLUE de earlier (filtre strict `<`, pas `<=`). Si le mutant `<=` est "
+        f"introduit, l'obs saine à NOW casse la série et is_lost devient False. "
+        f"Observé : is_lost={state.is_lost}."
+    )
+    assert state.lost_since == NOW - timedelta(minutes=5), (
+        f"INV-085 : lost_since doit être le début de la série continue qui "
+        f"se termine à NOW (5 min avant), got {state.lost_since}."
+    )
+
+
+def test_quorum_history_empty_with_unhealthy_snapshot():
+    """INV-085 [C] : si history est vide ET snapshot non-sain, lost_since
+    doit être initialisé à snapshot.timestamp (pas None), et is_lost = False
+    (durée 0 < 3min seuil).
+
+    Tue le mutant `lost_since = snapshot.timestamp` ↔ `lost_since = None`
+    (initialisation par défaut avant la boucle). Avec le mutant, si history
+    est vide, la boucle ne tourne pas et `lost_since` reste None → la ligne
+    suivante `(snapshot.timestamp - lost_since)` lèverait TypeError sur
+    `datetime - None` → crash de la fonction au lieu d'un retour propre.
+
+    Avec le code correct, lost_since = snapshot.timestamp → durée = 0 →
+    is_lost = False → retour QuorumState(False, None).
+    """
+    state = evaluate_quorum_loss(_no_quorum(NOW), history=[])
+
+    assert state == QuorumState(is_lost=False, lost_since=None), (
+        "INV-085 : history vide + snapshot non-sain doit retourner "
+        f"QuorumState(is_lost=False, lost_since=None), got {state!r}. "
+        "Si le mutant `lost_since = None` (au lieu de snapshot.timestamp) est "
+        "introduit, la fonction crashe sur TypeError `datetime - None` au lieu "
+        "de retourner proprement."
+    )

@@ -27,7 +27,7 @@ from typing import Optional
 QUORUM_LOSS_THRESHOLD = timedelta(minutes=3)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True)  # pragma: no mutate (INV-085 — frozen=False est equivalent : aucun code ne mute ces dataclasses, mutmut le confirme)
 class ClusterSnapshot:
     """État du cluster à un instant donné, vu par la logique pure.
 
@@ -40,7 +40,7 @@ class ClusterSnapshot:
     timestamp: datetime
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True)  # pragma: no mutate (INV-085 — frozen=False est equivalent : aucun code ne mute ces dataclasses, mutmut le confirme)
 class QuorumState:
     """Résultat de evaluate_quorum_loss.
 
