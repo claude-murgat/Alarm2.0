@@ -36,6 +36,33 @@ class HeartbeatAccessLogFilter(logging.Filter):
         return "/api/devices/heartbeat" not in record.getMessage()
 
 
+def _migrate_alarm_original_created_at(engine):
+    """INV-018 : ajoute alarms.original_created_at + backfill rows existants.
+
+    Idempotent (SQLite + PostgreSQL). create_all() ne touche pas les tables existantes,
+    on doit donc ALTER explicitement puis remplir les rows historiques avec created_at
+    pour respecter NOT NULL au niveau ORM.
+    """
+    is_sqlite = engine.dialect.name == "sqlite"
+    with engine.connect() as conn:
+        if is_sqlite:
+            cols = [row[1] for row in conn.execute(text("PRAGMA table_info(alarms)")).fetchall()]
+            if "original_created_at" not in cols:
+                conn.execute(text("ALTER TABLE alarms ADD COLUMN original_created_at TIMESTAMP"))
+                conn.commit()
+                logger.info("Migration: alarms.original_created_at ajoutee")
+        else:
+            conn.execute(text(
+                "ALTER TABLE alarms ADD COLUMN IF NOT EXISTS original_created_at TIMESTAMP"
+            ))
+            conn.commit()
+            logger.info("Migration: alarms.original_created_at verifiee/ajoutee")
+        conn.execute(text(
+            "UPDATE alarms SET original_created_at = created_at WHERE original_created_at IS NULL"
+        ))
+        conn.commit()
+
+
 def seed_data():
     """Create default users and escalation config if DB is empty."""
     db = SessionLocal()
@@ -94,6 +121,7 @@ async def lifespan(app: FastAPI):
         logger.info("Ce noeud est PRIMARY — init DB + seed")
         Base.metadata.create_all(bind=engine)
         run_migrations(engine)
+        _migrate_alarm_original_created_at(engine)
         seed_data()
     else:
         # Replica : attendre que la DB soit accessible en lecture

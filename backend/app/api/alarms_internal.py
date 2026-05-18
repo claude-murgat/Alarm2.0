@@ -119,11 +119,15 @@ def trigger_alarm(
             to=recipient,
         )
 
+    # INV-018 : original_created_at fige t0 (jamais modifie ensuite)
+    _now = clock_now()
     alarm = Alarm(
         title=title,
         message=message,
         severity="critical",  # CLAUDE.md : toujours critical
         assigned_user_id=plan.assigned_user_id,
+        original_created_at=_now,
+        created_at=_now,
     )
     db.add(alarm)
     db.flush()
