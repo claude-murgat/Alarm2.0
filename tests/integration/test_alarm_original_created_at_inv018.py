@@ -297,6 +297,7 @@ def test_inv018_oncall_heartbeat_sets_original_created_at(client, admin_headers)
     """
     from backend.app.clock import now as clock_now
     from backend.app.database import SessionLocal
+    import asyncio
     from backend.app.escalation import _apply_oncall_heartbeat
     from backend.app.models import Alarm, EscalationConfig, User
 
@@ -340,7 +341,10 @@ def test_inv018_oncall_heartbeat_sets_original_created_at(client, admin_headers)
         db.commit()
 
         before = clock_now()
-        _apply_oncall_heartbeat(db, now_ref, chain)
+        # Bug #105 : _apply_oncall_heartbeat est devenu async (envoi SMTP via
+        # asyncio.to_thread pour ne pas geler l'event loop). On le pilote ici
+        # via asyncio.run depuis un contexte de test sync.
+        asyncio.run(_apply_oncall_heartbeat(db, now_ref, chain))
         after = clock_now()
         db.expire_all()
 
