@@ -402,6 +402,8 @@ def _apply_oncall_heartbeat(db: Session, now, escalation_chain):
 
     # INV-050 : creer l'alarme oncall
     for creation in actions.creations:
+        # INV-018 : original_created_at fige t0 (jamais modifie ensuite)
+        _now = clock_now()
         alarm = Alarm(
             title=f"Utilisateur d'astreinte hors connexion ({creation.oncall_user_name})",
             message=(
@@ -411,6 +413,8 @@ def _apply_oncall_heartbeat(db: Session, now, escalation_chain):
             severity="critical",
             assigned_user_id=creation.assigned_user_id,
             is_oncall_alarm=True,
+            original_created_at=_now,
+            created_at=_now,
         )
         db.add(alarm)
         db.flush()  # Obtenir l'ID avant d'ajouter la notification

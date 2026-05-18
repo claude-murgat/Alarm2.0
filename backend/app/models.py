@@ -36,6 +36,9 @@ class Alarm(Base):
     is_oncall_alarm = Column(Boolean, default=False)  # True if auto-generated for on-call disconnection
     escalation_count = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # INV-018 : timestamp original immuable (jamais reset par l'escalade ni l'ack expiry).
+    # created_at reste le "timer" remis a zero a chaque palier, original_created_at fige t0.
+    original_created_at = Column(DateTime, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     assigned_user = relationship("User", back_populates="alarms", foreign_keys=[assigned_user_id])

@@ -65,11 +65,15 @@ def send_test_alarm(db: Session = Depends(get_db)):
         first_user = db.query(User).first()
         user_id = first_user.id if first_user else None
 
+    # INV-018 : original_created_at fige t0 (jamais modifie ensuite)
+    _now = clock_now()
     alarm = Alarm(
         title="TEST ALARM",
         message="This is a test alarm triggered from the admin panel.",
         severity="critical",
         assigned_user_id=user_id,
+        original_created_at=_now,
+        created_at=_now,
     )
     db.add(alarm)
     db.flush()

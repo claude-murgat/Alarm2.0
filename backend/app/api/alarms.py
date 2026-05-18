@@ -81,11 +81,15 @@ def send_alarm(
             to=recipient,
         )
 
+    # INV-018 : original_created_at fige t0 (jamais modifie ensuite)
+    _now = clock_now()
     alarm = Alarm(
         title=alarm_data.title,
         message=alarm_data.message,
         severity=alarm_data.severity,
         assigned_user_id=plan.assigned_user_id,
+        original_created_at=_now,
+        created_at=_now,
     )
     db.add(alarm)
     db.flush()  # Obtenir l'ID avant d'ajouter la notification
