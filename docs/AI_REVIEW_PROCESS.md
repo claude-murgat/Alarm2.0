@@ -53,7 +53,7 @@ Lis le **body PR** (résumé de l'agent), les **fichiers touchés**, le **diff c
 - [ ] **Scope vs body** — les `files` annoncés dans le body PR correspondent aux fichiers réellement touchés dans le diff ? Si écart → scope creep silencieux à investiguer.
 - [ ] **Denylist** (PRs bot uniquement) — intersection entre les fichiers du diff et `.github/ai-bot/denylist.txt` ? Si oui → `ai:denied` aurait dû être posé, vérifier pourquoi la PR existe.
 
-Sans cette checklist, on rate les cas où une branche fraîche écrase 600+ lignes mergées entre temps (vécu sur PR #106, où la branche supprimait `docs/AI_REVIEW_PROCESS.md` + tests INV-084 mergés via PR #101 — invisible si on ne fait pas le `git diff` vs master).
+Sans cette checklist, on rate les cas où une branche fraîche écrase plusieurs centaines de lignes mergées entre temps — invisible si on ne fait pas le `git diff` vs master AVANT la review.
 
 ### 2.2 Calibration par criticité (règle d'or)
 
@@ -254,7 +254,7 @@ Cause typique : la branche a été créée AVANT plusieurs merges critiques, et 
 3. Suivre §7.2 (résolution conflit manuelle) — JAMAIS de `gh pr update-branch` sans inspection (le merge peut "réussir" silencieusement en gardant les suppressions).
 4. Si la PR auteur est un humain : signaler immédiatement dans un commentaire ce qui serait perdu, demander rebase de leur côté.
 
-**Cas vécu — PR #106** : branche fix SMTP créée avant les merges PRs #99/#101/#102/#103/#107. Diff vs master montrait `-662 lignes` dont `docs/AI_REVIEW_PROCESS.md` (mergé via #107) et `tests/integration/test_tick_seconds_config.py` (mergé via #101) en suppression nette. Merge brut aurait silencieusement réverté ces 2 PRs. Le `mergeStateStatus: BEHIND` était le seul indice avant le `git diff`.
+**Symptôme typique** : une branche créée il y a plusieurs jours, pendant lesquels d'autres PRs ont mergé sur master en touchant ou ajoutant des fichiers que la branche n'a pas vus. Le `mergeStateStatus: BEHIND` est souvent le seul indice visible avant le `git diff` détaillé.
 
 **Règle d'or** : un `BEHIND` détecté à la checklist préflight §2.1 doit toujours déclencher `git diff origin/master..origin/<branch> --stat` AVANT de continuer la review. Pas après l'approve.
 
