@@ -15,6 +15,29 @@ logger = logging.getLogger("watchdog")
 # La valeur effective est lue en DB a chaque tick (cf _run_watchdog_check).
 WATCHDOG_TIMEOUT_SECONDS_DEFAULT = 60
 
+# INV-084 (issue #75) : fallback pour la cadence de la boucle watchdog.
+# Cle SystemConfig 'watchdog_tick_seconds' (decision 2026-05-12 : 2 cles
+# separees de escalation_tick_seconds).
+WATCHDOG_TICK_SECONDS_DEFAULT = 30.0
+
+
+def _get_watchdog_tick_seconds(db: Session) -> float:
+    """INV-084 : lit la période de la boucle watchdog depuis SystemConfig.
+
+    Indépendante de `escalation_tick_seconds` (décision 2026-05-12 issue #75) :
+    deux leviers séparés pour accélérer les tests et adapter la cadence en prod
+    sans redéploiement. Fallback sur le default si la clé est absente.
+    """
+    cfg = db.query(SystemConfig).filter(
+        SystemConfig.key == "watchdog_tick_seconds"
+    ).first()
+    if cfg is None:
+        return WATCHDOG_TICK_SECONDS_DEFAULT
+    try:
+        return float(cfg.value)
+    except (TypeError, ValueError):
+        return WATCHDOG_TICK_SECONDS_DEFAULT
+
 
 def _run_watchdog_check(db: Session, now) -> None:
     """Un tick de watchdog : marque offline les users dont le heartbeat
@@ -51,15 +74,22 @@ async def watchdog_loop():
     """
     from .leader_election import is_leader
     while True:
-        if is_leader.is_set():
-            correlation_id_var.set(str(uuid.uuid4()))
+        tick_seconds = WATCHDOG_TICK_SECONDS_DEFAULT
+        try:
+            db: Session = SessionLocal()
             try:
-                db: Session = SessionLocal()
-                try:
-                    _run_watchdog_check(db, clock_now())
-                finally:
-                    db.close()
-            except Exception as e:
-                logger.error(f"Watchdog error: {e}")
+                # INV-084 : lecture du tick à chaque itération pour qu'un changement
+                # admin (POST /api/config/system) prenne effet sans redémarrage.
+                tick_seconds = _get_watchdog_tick_seconds(db)
 
-        await asyncio.sleep(30)  # Check every 30 seconds
+                if is_leader.is_set():
+                    correlation_id_var.set(str(uuid.uuid4()))
+                    # INV-084 : _run_watchdog_check lit watchdog_timeout_seconds
+                    # depuis SystemConfig a chaque appel (pas de cache).
+                    _run_watchdog_check(db, clock_now())
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"Watchdog error: {e}")
+
+        await asyncio.sleep(tick_seconds)

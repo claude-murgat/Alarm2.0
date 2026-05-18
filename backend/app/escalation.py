@@ -22,9 +22,28 @@ from .logic.models import (
 logger = logging.getLogger("escalation")
 
 ONCALL_OFFLINE_DELAY_MINUTES_DEFAULT = 15.0
+ESCALATION_TICK_SECONDS_DEFAULT = 10.0
 
 # Mis à jour à chaque tick — utilisé par /health pour détecter une boucle bloquée
 last_tick_at: Optional[object] = None
+
+
+def _get_escalation_tick_seconds(db: Session) -> float:
+    """INV-084 : lit la période de la boucle d'escalade depuis SystemConfig.
+
+    Permet d'accélérer les tests (ex : 1s au lieu de 10s) et de modifier la
+    cadence en prod sans redéploiement. Fallback sur le default si la clé
+    est absente.
+    """
+    cfg = db.query(SystemConfig).filter(
+        SystemConfig.key == "escalation_tick_seconds"
+    ).first()
+    if cfg is None:
+        return ESCALATION_TICK_SECONDS_DEFAULT
+    try:
+        return float(cfg.value)
+    except (TypeError, ValueError):
+        return ESCALATION_TICK_SECONDS_DEFAULT
 
 # Flag de test : quand True, la boucle NE met PAS à jour last_tick_at.
 # Permet au endpoint /test/simulate-loop-stall de figer l'état stall de manière déterministe.
@@ -128,20 +147,30 @@ async def escalation_loop():
     global last_tick_at
     from .leader_election import is_leader
     while True:
+        tick_seconds = ESCALATION_TICK_SECONDS_DEFAULT
         try:
             correlation_id_var.set(str(uuid.uuid4()))
             now = clock_now()
             if not _simulate_stall:
                 last_tick_at = now  # Toujours mis à jour — permet à /health de détecter un blocage
 
+            # INV-084 : lecture du tick à chaque itération pour qu'un changement
+            # admin (POST /api/config/system) prenne effet sans redémarrage.
+            # Lue ici (avant le branchement leader) pour que les deux chemins
+            # (primary + secondary) respectent la cadence configurée.
+            tick_db = SessionLocal()
+            try:
+                tick_seconds = _get_escalation_tick_seconds(tick_db)
+            finally:
+                tick_db.close()
+
             if not is_leader.is_set():
                 # Nœud secondaire : standby, pas d'escalade
-                await asyncio.sleep(10)
+                await asyncio.sleep(tick_seconds)
                 continue
 
             db: Session = SessionLocal()
             try:
-
                 # --- 1. Ack expiry: reactivate acknowledged alarms ---
                 # Logique de decision extraite dans logic/ack_expiry.py (testee unit).
                 # Ici on ne fait que charger l'etat + appliquer les Actions retournees.
@@ -330,7 +359,7 @@ async def escalation_loop():
         except Exception as e:
             logger.error(f"Escalation error: {e}")
 
-        await asyncio.sleep(10)
+        await asyncio.sleep(tick_seconds)
 
 
 async def _apply_oncall_heartbeat(db: Session, now, escalation_chain):
