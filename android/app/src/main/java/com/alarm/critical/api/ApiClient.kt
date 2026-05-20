@@ -33,7 +33,10 @@ object ApiClient {
     var consecutiveFailures: Int = 0
 
     private val loggingInterceptor = HttpLoggingInterceptor().apply {
-        level = HttpLoggingInterceptor.Level.BODY
+        // BODY en debug uniquement : en release, le body log fuiterait JWT et mots
+        // de passe dans logcat (et dans l'export AppLogger via le bouton aide).
+        level = if (BuildConfig.DEBUG) HttpLoggingInterceptor.Level.BODY
+                else HttpLoggingInterceptor.Level.NONE
     }
 
     private val connectionPool = ConnectionPool(5, 5, TimeUnit.SECONDS)
