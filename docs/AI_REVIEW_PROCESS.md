@@ -41,6 +41,19 @@ Ce process couvre **3 types de PRs** à reviewer. Adapter selon le type :
   - **`ai-bot-replay.yml` (Pipeline 2)** : trigger sur `issues.labeled ai:needs-human` (sauf si `ai:replayed` déjà). Pose `ai:replayed` (anti-boucle), déclenche `ai-bot.yml` pour re-tenter. Si l'issue produit une PR → Pipeline 1 la review automatiquement.
 - Le process documenté ci-dessous (§2–§7) **reste la spec** : les workflows automatisés en sont l'implémentation. Toute évolution du process (calibration, affinements trancheur, anti-patterns) doit être propagée dans le prompt `.github/ai-bot/review-prompt.md`.
 
+#### Comportement adapté PR humaine vs PR bot
+
+Quand le verdict est APPROVE / APPROVE_FOLLOWUP, le workflow différencie selon l'auteur de la PR :
+
+| Auteur PR | Label `ai:approved` posé ? | Merge auto ? | Action humaine attendue |
+|---|---|---|---|
+| `alarm-murgat-bot[bot]` | OUI | OUI (`ai-merge.yml` filtre auteur=bot) | Veto possible en retirant le label avant le merge auto |
+| Humain (ex: `claude-murgat`) | NON | NON (filtre `ai-merge.yml`) | L'humain merge lui-même (`gh pr merge` ou UI) après lecture du commentaire récap |
+
+**Pourquoi** : sur une PR humaine, le label `ai:approved` n'a aucun effet (`ai-merge.yml` filtre par `pr.user.login == alarm-murgat-bot`). Le poser quand même créait une confusion ("label posé mais pas de merge"). Décision 2026-05-22 : sur PR humaine, juste commenter avec le verdict ; ne pas poser le label.
+
+**Si BEHIND détecté par le triplet** : la note "Cas A routine, `gh pr update-branch` avant merge" est ajoutée au commentaire (cf §7.1). Pour PR humaine, c'est l'humain qui exécute. Pour PR bot, voir §7.1 fallback.
+
 ---
 
 Tu (humain ou Claude) es le **goulot review** : sans ton verdict, la PR reste ouverte.

@@ -482,9 +482,36 @@ jobs:
           AUDIT: ${{ steps.verdict.outputs.audit_trail }}
           INV: ${{ steps.verdict.outputs.inv_id }}
           CRIT: ${{ steps.verdict.outputs.criticity }}
+          AUTHOR: ${{ needs.dispatch.outputs.pr_author }}
         run: |
           set -euo pipefail
-          BODY=$(cat <<EOF
+          # PR humaine : commentaire seulement, pas de label `ai:approved`
+          # (ai-merge.yml filtre auteur=bot, donc le label n'a aucun effet sur
+          # une PR humaine — autant ne pas le poser pour eviter la confusion).
+          if [ "$AUTHOR" != "alarm-murgat-bot" ] && [ "$AUTHOR" != "alarm-murgat-bot[bot]" ]; then
+            BODY=$(cat <<EOF
+          ## Triplet review automatique → **APPROVE** (PR humaine)
+
+          - **INV** : ${INV}
+          - **Criticité** : ${CRIT}
+          - **Verdict** : ${SUMMARY}
+
+          <details>
+          <summary>Audit trail (3 phases)</summary>
+
+          ${AUDIT}
+          </details>
+
+          Convergence 3/3 sur APPROVE. La PR est de l'auteur \`${AUTHOR}\` (PR humaine),
+          donc \`ai-merge.yml\` ne mergera pas auto — c'est a l'humain de merger
+          (\`gh pr merge\` ou via UI). Si la PR est \`BEHIND\`, faire \`gh pr update-branch\`
+          avant de merger (cf docs/AI_REVIEW_PROCESS.md §7.1 Cas A).
+          EOF
+            )
+            gh pr comment "$PR" --repo "$REPO" --body "$BODY"
+          else
+            # PR bot : pose ai:approved → ai-merge.yml prend la suite
+            BODY=$(cat <<EOF
           ## Triplet review automatique → **APPROVE**
 
           - **INV** : ${INV}
@@ -500,9 +527,10 @@ jobs:
           Label \`ai:approved\` posé automatiquement. \`ai-merge.yml\` va merger.
           Veto humain : retirer le label avant le merge auto pour annuler.
           EOF
-          )
-          gh pr comment "$PR" --repo "$REPO" --body "$BODY"
-          gh pr edit "$PR" --repo "$REPO" --add-label "ai:approved"
+            )
+            gh pr comment "$PR" --repo "$REPO" --body "$BODY"
+            gh pr edit "$PR" --repo "$REPO" --add-label "ai:approved"
+          fi
 
       - name: Apply verdict — APPROVE_FOLLOWUP (approve + cree issue follow-up)
         if: steps.verdict.outputs.decision == 'APPROVE_FOLLOWUP'
@@ -514,6 +542,7 @@ jobs:
           AUDIT: ${{ steps.verdict.outputs.audit_trail }}
           INV: ${{ steps.verdict.outputs.inv_id }}
           CRIT: ${{ steps.verdict.outputs.criticity }}
+          AUTHOR: ${{ needs.dispatch.outputs.pr_author }}
         run: |
           set -euo pipefail
 
@@ -529,7 +558,30 @@ jobs:
             done
           fi
 
-          BODY=$(cat <<EOF
+          # PR humaine : commentaire seulement (cf APPROVE step). PR bot : label ai:approved.
+          if [ "$AUTHOR" != "alarm-murgat-bot" ] && [ "$AUTHOR" != "alarm-murgat-bot[bot]" ]; then
+            BODY=$(cat <<EOF
+          ## Triplet review automatique → **APPROVE + follow-up** (PR humaine)
+
+          - **INV** : ${INV}
+          - **Criticité** : ${CRIT}
+          - **Verdict** : ${SUMMARY}
+
+          Issues follow-up creees (label \`ai:queue\` → cron 4h les piochera) — voir liste plus haut.
+
+          <details>
+          <summary>Audit trail (3 phases)</summary>
+
+          ${AUDIT}
+          </details>
+
+          PR humaine (\`${AUTHOR}\`) : pas de label \`ai:approved\` (sans effet — \`ai-merge.yml\` filtre auteur=bot).
+          A toi de merger. Si \`BEHIND\` : \`gh pr update-branch\` avant (cf docs/AI_REVIEW_PROCESS.md §7.1 Cas A).
+          EOF
+            )
+            gh pr comment "$PR" --repo "$REPO" --body "$BODY"
+          else
+            BODY=$(cat <<EOF
           ## Triplet review automatique → **APPROVE + follow-up**
 
           - **INV** : ${INV}
@@ -546,9 +598,10 @@ jobs:
 
           Label \`ai:approved\` posé automatiquement. \`ai-merge.yml\` va merger.
           EOF
-          )
-          gh pr comment "$PR" --repo "$REPO" --body "$BODY"
-          gh pr edit "$PR" --repo "$REPO" --add-label "ai:approved"
+            )
+            gh pr comment "$PR" --repo "$REPO" --body "$BODY"
+            gh pr edit "$PR" --repo "$REPO" --add-label "ai:approved"
+          fi
 
       - name: Apply verdict — RETRY (poste /ai-retry → bot itere)
         if: steps.verdict.outputs.decision == 'RETRY'
