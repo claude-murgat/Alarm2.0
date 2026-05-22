@@ -184,6 +184,49 @@ Règles appliquées par le bot :
   `tests/conftest.py`, `docs/AI_STRATEGY.md`, `.claude/**`, etc.
 - Review humaine obligatoire tant que le bot n'a pas 10 PRs propres consécutives
 
+## Bot SRE conversationnel (alarm-sre-bot)
+
+Le projet dispose d'un bot SRE qui répond aux utilisateurs sur Slack et
+diagnostique/répare en autonomie les incidents runtime (cluster Patroni
+stuck, gateway SIM7600 figée, container down, etc.). Complémentaire du bot
+IA contributeur ci-dessus — celui-ci ne touche **pas au code**, il agit sur
+l'infra en exécution.
+
+- **Identité Slack** : App `alarm-sre-bot` dans workspace "Charles Murgat",
+  bot user `alarmsrebot` (U0B5NEFTKLL), via Socket Mode (xapp + xoxb)
+- **Modèle** : Opus 4.7 (API Anthropic directe, pas OAuth Max — clé API
+  dédiée dans `sre-bot/.env`)
+- **Code** : `sre-bot/` (Python, ~600 lignes, 0 dépendance prod hors
+  `anthropic`+`slack-sdk`+`python-dotenv`)
+- **Hébergement actuel** : machine de dev Mathieu (POC). À migrer sur VM
+  ou systemd unit pour persistance.
+- **Lancement** :
+  ```bash
+  cd sre-bot && source .venv/bin/activate && python main.py
+  ```
+- **Doc** : `sre-bot/README.md`
+
+Politique d'action (`sre-bot/policy.py`) — chaque commande est matchée contre
+une allowlist regex :
+
+| Niveau | Exemple | Politique |
+|---|---|---|
+| L1 | `docker logs`, `psql SELECT`, `journalctl`, `ps`, `curl /health` | Auto |
+| L2 | `kill <pid>`, `docker restart <c>`, `systemctl restart alarm-*` | Auto + report user |
+| L3 | `patronictl reinit`, `patronictl switchover`, `kill -9` | Auto + annonce avant |
+| L4 | tout le reste | **Refus** → escalade Slack DM sysadmin |
+
+Garde-fous :
+- Tout est loggé en JSON append-only dans `sre-bot/audit.log`
+  (events : `incident_open`, `tool_call`, `exec_start/done/refused`,
+  `incident_auto_close`, etc.)
+- Auto-close des sessions inactives (>30 min sans message user) — évite
+  les conversations zombies qui font grimper la facture API
+- Hosts SSH whitelistés : `node3` (cloud), `onsite-1`, `onsite-2`
+- Le bot n'a pas accès à `gh` / `git` / `Edit` / `Write` — par construction
+  il ne peut pas modifier le code, juste exécuter des commandes shell
+  pré-approuvées
+
 ## Améliorations futures
 - **Agent autonome de debug Android** : déployer un agent IA capable de recevoir les logs exportés par l'app (via bouton aide) et d'effectuer un diagnostic de premier niveau en autonomie. Distinct du bot IA contributeur (ci-dessus) — ce dernier fixe des bugs GH, pas des logs runtime Android.
 - **Remote logging Firebase Crashlytics** : tracer les erreurs client sans intervention utilisateur
