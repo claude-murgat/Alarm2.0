@@ -125,8 +125,37 @@ if [[ -z "$REMOTE_DIGEST_BACKEND" ]]; then
 fi
 
 if [[ "$LOCAL_DIGEST_BACKEND" == "$REMOTE_DIGEST_BACKEND" ]]; then
-  log "Pas de mise a jour : digest local == distant ($LOCAL_DIGEST_BACKEND). Exit 0."
-  exit 0
+  # Le cache local est a jour vs le registry — mais ca ne suffit pas a conclure
+  # "rien a faire" : le pull-timer (alarm-cd-pull.timer) tourne toutes les 5 min
+  # et a tres bien pu mettre a jour le cache SANS redemarrer le container. Le
+  # container peut donc tourner sur l'ancienne version meme si cache == registry.
+  #
+  # On compare l'image-id du container backend en execution avec l'image-id du
+  # tag :stable cache localement. Si different (= container vieux), on continue
+  # le canary (start-prod-node.sh --pull fera un docker compose up -d qui
+  # detectera le mismatch et restartera). Si meme (= container deja a jour),
+  # rien a faire pour de vrai.
+  #
+  # Cas auto-orchestre (V1.5) : `alarm-cd-orchestrate.sh` appelle ce script
+  # apres que pull-timer a deja pulle, ce qui aboutit systematiquement sur cette
+  # branche. Sans la verif container, le canary V1.5 serait un no-op silencieux
+  # qui laisserait la prod sur l'ancienne version. Cf docs/CD_DESIGN.md §4
+  # (V1.5 — promotion auto entre etapes).
+  CACHED_IMG_ID=$(ssh_target \
+    "docker image inspect ${REGISTRY}/alarm-backend:${TAG} -f '{{.Id}}'" \
+    2>/dev/null || echo "")
+  RUNNING_IMG_ID=$(ssh_target \
+    "docker compose --env-file ${REMOTE_REPO}/.env.prod.node${NODE} -p node${NODE} ps -q backend 2>/dev/null \
+       | head -1 \
+       | xargs -r docker inspect -f '{{.Image}}' 2>/dev/null" \
+    || echo "")
+  RUNNING_IMG_ID=$(echo "$RUNNING_IMG_ID" | head -1)
+
+  if [[ -n "$RUNNING_IMG_ID" && "$RUNNING_IMG_ID" == "$CACHED_IMG_ID" ]]; then
+    log "Pas de mise a jour : cache == registry ET container deja sur :stable ($LOCAL_DIGEST_BACKEND). Exit 0."
+    exit 0
+  fi
+  log "Cache :stable a jour mais container tourne sur ancienne image (running=$RUNNING_IMG_ID, cached=$CACHED_IMG_ID). Restart..."
 fi
 
 log "Diff detecte alarm-backend : local=${LOCAL_DIGEST_BACKEND:-none} -> remote=$REMOTE_DIGEST_BACKEND"
