@@ -1,0 +1,154 @@
+# Bot IA - Pipeline 2 : replay des issues `ai:needs-human` (avec triplet via Pipeline 1).
+#
+# Trigger : `ai:needs-human` est pose sur une issue, ET l'issue n'a PAS
+# le label `ai:replayed` (anti-boucle 1 seul replay par issue).
+#
+# Action : pose `ai:replayed` + declenche ai-bot.yml via workflow_dispatch.
+# Le bot ouvrira (ou pas) une PR. Si PR → Pipeline 1 (ai-bot-review.yml)
+# prendra le relais et appliquera le triplet — c'est la le gain de rigueur
+# vs le bot solo.
+#
+# Si le bot abandonne aussi au replay → reste en ai:needs-human + ai:replayed
+# → humain prend la main (peut retirer ai:replayed pour relancer plus tard).
+#
+# Voir docs/AI_REVIEW_PROCESS.md + .github/ai-bot/README.md.
+
+name: AI Bot Replay (needs-human → re-tentative)
+
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Issue a replayer (utiliser pour re-tenter manuellement)"
+        required: true
+        type: string
+
+concurrency:
+  group: ai-bot-replay
+  cancel-in-progress: false
+
+jobs:
+  replay:
+    name: Replay issue ${{ github.event.issue.number || inputs.issue_number }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Filtre tres tot : ne tourne QUE si label pose = ai:needs-human, ET
+    # l'issue n'a PAS deja ai:replayed. Pour dispatch manuel, on saute le filtre.
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.label.name == 'ai:needs-human' &&
+       !contains(github.event.issue.labels.*.name, 'ai:replayed'))
+    permissions:
+      contents: read
+    steps:
+      - name: Generate installation token (write for labels + workflow trigger)
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.ALARM_BOT_APP_ID }}
+          private-key: ${{ secrets.ALARM_BOT_PRIVATE_KEY }}
+          permission-contents: read
+          permission-issues: write
+          permission-actions: write  # pour gh workflow run
+
+      - name: Resolve issue + verify
+        id: resolve
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          ISSUE="${{ github.event.issue.number || inputs.issue_number }}"
+          echo "issue=${ISSUE}" >> "$GITHUB_OUTPUT"
+
+          gh issue view "$ISSUE" --repo "$REPO" \
+            --json number,state,labels,title > /tmp/issue.json
+
+          STATE=$(jq -r .state /tmp/issue.json)
+          LABELS=$(jq -r '[.labels[].name] | join(",")' /tmp/issue.json)
+          TITLE=$(jq -r .title /tmp/issue.json)
+
+          echo "state=${STATE}" >> "$GITHUB_OUTPUT"
+          echo "labels=${LABELS}" >> "$GITHUB_OUTPUT"
+          echo "title=${TITLE}" >> "$GITHUB_OUTPUT"
+
+          if [ "$STATE" != "OPEN" ]; then
+            echo "Issue #${ISSUE} not open (state=${STATE}) → skip"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Anti-double-replay (defense en profondeur)
+          if echo ",${LABELS}," | grep -q ",ai:replayed,"; then
+            echo "Issue #${ISSUE} deja ai:replayed → skip (anti-boucle)"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # human-required → on ne replaye pas, humain seul decide
+          if echo ",${LABELS}," | grep -q ",human-required,"; then
+            echo "Issue #${ISSUE} labeled human-required → skip"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "ELIGIBLE for replay : Issue #${ISSUE} (${TITLE})"
+          echo "should_run=true" >> "$GITHUB_OUTPUT"
+
+      - name: Mark as replayed (anti-boucle)
+        if: steps.resolve.outputs.should_run == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ steps.resolve.outputs.issue }}
+        run: |
+          set -euo pipefail
+          gh issue edit "$ISSUE" --repo "$REPO" --add-label "ai:replayed"
+          gh issue comment "$ISSUE" --repo "$REPO" --body "Replay declenche par ai-bot-replay.yml (run [${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})). Label \`ai:replayed\` pose pour anti-boucle. Si abandon a nouveau, retirer le label pour re-tenter."
+
+      - name: Trigger ai-bot.yml via workflow_dispatch
+        if: steps.resolve.outputs.should_run == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ steps.resolve.outputs.issue }}
+        run: |
+          set -euo pipefail
+          gh workflow run ai-bot.yml \
+            --repo "$REPO" \
+            --ref master \
+            -f issue_number="$ISSUE"
+          echo "ai-bot.yml dispatched for issue #${ISSUE}"
+
+      - name: Slack DM Mathieu (info replay)
+        if: steps.resolve.outputs.should_run == 'true'
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          ISSUE: ${{ steps.resolve.outputs.issue }}
+          TITLE: ${{ steps.resolve.outputs.title }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SLACK_BOT_TOKEN:-}" ]; then
+            echo "SLACK_BOT_TOKEN absent → skip Slack notif"
+            exit 0
+          fi
+
+          MATHIEU_USER_ID="U02U94G6LMP"
+
+          MSG=$(cat <<EOF
+          *Replay declenche* sur issue <https://github.com/${REPO}/issues/${ISSUE}|#${ISSUE}> (${TITLE})
+
+          \`ai:needs-human\` → \`ai:replayed\`. \`ai-bot.yml\` reprend la main. Si PR produite, Pipeline 1 (triplet review) prendra le relais automatiquement.
+          EOF
+          )
+
+          curl -sS -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg ch "$MATHIEU_USER_ID" --arg t "$MSG" '{channel: $ch, text: $t}')" \
+            > /tmp/slack-resp.json || true
+          OK=$(jq -r .ok /tmp/slack-resp.json 2>/dev/null || echo "false")
+          echo "Slack post ok=${OK}"
