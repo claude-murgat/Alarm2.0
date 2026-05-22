@@ -130,8 +130,14 @@ jobs:
 
           # Status checks rollup : on veut TOUS verts (SUCCESS) sauf les
           # actions secondaires qui peuvent etre SKIPPED/NEUTRAL.
-          FAILED_CHECKS=$(jq -r '[.statusCheckRollup[]? | select(.conclusion == "FAILURE" or .conclusion == "CANCELLED" or .conclusion == "TIMED_OUT") | .name] | join(",")' /tmp/pr-meta.json)
-          PENDING_CHECKS=$(jq -r '[.statusCheckRollup[]? | select(.status == "IN_PROGRESS" or .status == "QUEUED" or .status == "PENDING") | .name] | join(",")' /tmp/pr-meta.json)
+          #
+          # CRITIQUE : exclure workflowName="AI Bot Review" (notre propre
+          # workflow) du filtre. Sinon self-loop : le job Dispatch en cours
+          # d'execution se voit lui-meme comme IN_PROGRESS dans
+          # statusCheckRollup, declenche skip "CI checks pending" et bloque
+          # la review. Reproduit sur run 26282571712 (premier essai #121).
+          FAILED_CHECKS=$(jq -r '[.statusCheckRollup[]? | select((.workflowName // "") != "AI Bot Review") | select(.conclusion == "FAILURE" or .conclusion == "CANCELLED" or .conclusion == "TIMED_OUT") | .name] | join(",")' /tmp/pr-meta.json)
+          PENDING_CHECKS=$(jq -r '[.statusCheckRollup[]? | select((.workflowName // "") != "AI Bot Review") | select(.status == "IN_PROGRESS" or .status == "QUEUED" or .status == "PENDING") | .name] | join(",")' /tmp/pr-meta.json)
 
           echo "failed_checks=${FAILED_CHECKS}" >> "$GITHUB_OUTPUT"
           echo "pending_checks=${PENDING_CHECKS}" >> "$GITHUB_OUTPUT"
