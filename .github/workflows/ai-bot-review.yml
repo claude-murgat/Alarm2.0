@@ -1,0 +1,684 @@
+# Bot IA - Pipeline 1 : review automatique des PRs via triplet.
+#
+# Trigger principal : PR ouverte ou push par alarm-murgat-bot[bot].
+# Apres CI verte, lance un triplet review (Phase 1 + sous-agent critique +
+# sous-agent trancheur) qui produit un verdict APPROVE | RETRY | REJECT.
+#
+# Sortie machine-lisible : JSON dans une balise <TRIPLET_VERDICT_JSON> en
+# fin de l'output Claude. Le workflow parse ce JSON puis :
+#   - APPROVE -> pose label `ai:approved` -> ai-merge.yml merge
+#   - RETRY -> poste comment `/ai-retry <texte>` -> ai-bot.yml itere
+#   - REJECT -> pose label `ai:abandoned` + commente la PR
+#   - WAIT_CI -> exit propre, retournera au prochain check_run.completed
+#
+# Le verdict humain (Mathieu) reste un veto : il peut retirer `ai:approved`
+# avant le merge auto (ai-merge.yml a quelques minutes de delay).
+#
+# Voir docs/AI_REVIEW_PROCESS.md (process triplet) + .github/ai-bot/review-prompt.md.
+
+name: AI Bot Review
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  check_run:
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Numero de PR a reviewer (humaine ou bot)"
+        required: true
+        type: string
+
+# Concurrency par PR : on ne lance pas 2 reviews simultanees sur la meme PR.
+# cancel-in-progress: false pour ne pas perdre un verdict en cours si un
+# nouveau push arrive.
+concurrency:
+  group: ai-bot-review-pr-${{ github.event.pull_request.number || github.event.check_run.pull_requests[0].number || inputs.pr_number || 'unknown' }}
+  cancel-in-progress: false
+
+jobs:
+  # ============================================================================
+  # Job 1 - dispatch : eligibility (auteur, CI verte, pas deja approved)
+  # ============================================================================
+  dispatch:
+    name: Dispatch (eligibility check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      should_run: ${{ steps.finalize.outputs.should_run }}
+      pr_number: ${{ steps.finalize.outputs.pr_number }}
+      head_branch: ${{ steps.finalize.outputs.head_branch }}
+      pr_author: ${{ steps.finalize.outputs.pr_author }}
+      reject_reason: ${{ steps.finalize.outputs.reject_reason }}
+    steps:
+      - name: Generate installation token (read-only)
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.ALARM_BOT_APP_ID }}
+          private-key: ${{ secrets.ALARM_BOT_PRIVATE_KEY }}
+          permission-contents: read
+          permission-pull-requests: read
+          permission-issues: read
+          permission-checks: read
+
+      - name: Resolve PR number
+        id: resolve_pr
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          case "${{ github.event_name }}" in
+            pull_request_target)
+              PR="${{ github.event.pull_request.number }}"
+              ;;
+            check_run)
+              # check_run peut etre lie a plusieurs PRs (rare) ou aucune (push direct master)
+              PR=$(jq -r '.pull_requests[0].number // empty' <<< '${{ toJson(github.event.check_run) }}')
+              if [ -z "$PR" ]; then
+                echo "check_run sans PR associee → skip"
+                echo "pr_number=" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              ;;
+            workflow_dispatch)
+              PR="${{ inputs.pr_number }}"
+              ;;
+            *)
+              echo "event non gere: ${{ github.event_name }}"
+              echo "pr_number=" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          echo "PR resolved: ${PR}"
+          echo "pr_number=${PR}" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch PR metadata
+        id: pr_meta
+        if: steps.resolve_pr.outputs.pr_number != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.resolve_pr.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          gh pr view "$PR" --repo "$REPO" \
+            --json number,state,author,headRefName,baseRefName,labels,statusCheckRollup,mergeStateStatus \
+            > /tmp/pr-meta.json
+
+          STATE=$(jq -r .state /tmp/pr-meta.json)
+          AUTHOR=$(jq -r .author.login /tmp/pr-meta.json)
+          HEAD=$(jq -r .headRefName /tmp/pr-meta.json)
+          BASE=$(jq -r .baseRefName /tmp/pr-meta.json)
+          LABELS=$(jq -r '[.labels[].name] | join(",")' /tmp/pr-meta.json)
+          MERGE_STATE=$(jq -r .mergeStateStatus /tmp/pr-meta.json)
+
+          echo "state=${STATE}" >> "$GITHUB_OUTPUT"
+          echo "author=${AUTHOR}" >> "$GITHUB_OUTPUT"
+          echo "head=${HEAD}" >> "$GITHUB_OUTPUT"
+          echo "base=${BASE}" >> "$GITHUB_OUTPUT"
+          echo "labels=${LABELS}" >> "$GITHUB_OUTPUT"
+          echo "merge_state=${MERGE_STATE}" >> "$GITHUB_OUTPUT"
+
+          # Status checks rollup : on veut TOUS verts (SUCCESS) sauf les
+          # actions secondaires qui peuvent etre SKIPPED/NEUTRAL.
+          FAILED_CHECKS=$(jq -r '[.statusCheckRollup[]? | select(.conclusion == "FAILURE" or .conclusion == "CANCELLED" or .conclusion == "TIMED_OUT") | .name] | join(",")' /tmp/pr-meta.json)
+          PENDING_CHECKS=$(jq -r '[.statusCheckRollup[]? | select(.status == "IN_PROGRESS" or .status == "QUEUED" or .status == "PENDING") | .name] | join(",")' /tmp/pr-meta.json)
+
+          echo "failed_checks=${FAILED_CHECKS}" >> "$GITHUB_OUTPUT"
+          echo "pending_checks=${PENDING_CHECKS}" >> "$GITHUB_OUTPUT"
+
+          echo "PR #${PR} state=${STATE} author=${AUTHOR} head=${HEAD}"
+          echo "labels=${LABELS} merge_state=${MERGE_STATE}"
+          echo "failed_checks=${FAILED_CHECKS}"
+          echo "pending_checks=${PENDING_CHECKS}"
+
+      - name: Finalize eligibility
+        id: finalize
+        if: steps.resolve_pr.outputs.pr_number != ''
+        env:
+          PR: ${{ steps.resolve_pr.outputs.pr_number }}
+          STATE: ${{ steps.pr_meta.outputs.state }}
+          AUTHOR: ${{ steps.pr_meta.outputs.author }}
+          HEAD: ${{ steps.pr_meta.outputs.head }}
+          BASE: ${{ steps.pr_meta.outputs.base }}
+          LABELS: ${{ steps.pr_meta.outputs.labels }}
+          MERGE_STATE: ${{ steps.pr_meta.outputs.merge_state }}
+          FAILED_CHECKS: ${{ steps.pr_meta.outputs.failed_checks }}
+          PENDING_CHECKS: ${{ steps.pr_meta.outputs.pending_checks }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          # Toujours injecter ces outputs pour le job suivant (meme si reject)
+          echo "pr_number=${PR}" >> "$GITHUB_OUTPUT"
+          echo "head_branch=${HEAD}" >> "$GITHUB_OUTPUT"
+          echo "pr_author=${AUTHOR}" >> "$GITHUB_OUTPUT"
+
+          # 1. PR doit etre OPEN
+          if [ "$STATE" != "OPEN" ]; then
+            echo "PR not open (state=${STATE}) → skip"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "reject_reason=pr-not-open" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 2. Base doit etre master
+          if [ "$BASE" != "master" ]; then
+            echo "PR base != master (base=${BASE}) → skip"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "reject_reason=pr-base-not-master" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 3. Auteur : bot OU dispatch manuel (pour PR humaine)
+          if [ "$EVENT" != "workflow_dispatch" ]; then
+            if [ "$AUTHOR" != "alarm-murgat-bot" ] && [ "$AUTHOR" != "alarm-murgat-bot[bot]" ]; then
+              echo "PR author != bot et event != dispatch (author=${AUTHOR}) → skip"
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              echo "reject_reason=pr-not-from-bot-no-dispatch" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          # 4. Pas deja approved (anti-double-review)
+          if echo ",${LABELS}," | grep -q ",ai:approved,"; then
+            echo "PR deja labeled ai:approved → skip (anti double-review)"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "reject_reason=already-approved" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 5. Pas en cours d'abandon
+          if echo ",${LABELS}," | grep -q ",ai:abandoned,\|,ai:denied,"; then
+            echo "PR labeled ai:abandoned ou ai:denied → skip"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "reject_reason=pr-in-abandonment" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 6. human-required → triplet ne tranche pas, humain seul
+          if echo ",${LABELS}," | grep -q ",human-required,"; then
+            echo "PR labeled human-required → triplet skip"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "reject_reason=human-required-label" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 7. CI verte exigee (les checks failed/pending sont bloquants)
+          if [ -n "$FAILED_CHECKS" ]; then
+            echo "CI checks failed: ${FAILED_CHECKS} → skip (verdict WAIT_CI implicite)"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "reject_reason=ci-failed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -n "$PENDING_CHECKS" ]; then
+            echo "CI checks pending: ${PENDING_CHECKS} → wait (skip ce run, retournera sur check_run.completed)"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "reject_reason=ci-pending" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 8. mergeStateStatus : BEHIND ou DIRTY = bloquant (cf process §7.1)
+          if [ "$MERGE_STATE" = "DIRTY" ]; then
+            echo "PR mergeable=DIRTY → skip (conflits a resoudre humainement)"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "reject_reason=pr-dirty-conflicts" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # BEHIND est tolere : le triplet detectera les suppressions
+          # dangereuses dans son preflight.
+
+          echo "ELIGIBLE for triplet review"
+          echo "should_run=true" >> "$GITHUB_OUTPUT"
+          echo "reject_reason=" >> "$GITHUB_OUTPUT"
+
+  # ============================================================================
+  # Job 2 - triplet_review : spawn Claude headless, parse verdict, agir
+  # ============================================================================
+  triplet_review:
+    name: Triplet review (Opus 4.7)
+    needs: dispatch
+    if: needs.dispatch.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - name: Generate installation token (write for labels + comments)
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.ALARM_BOT_APP_ID }}
+          private-key: ${{ secrets.ALARM_BOT_PRIVATE_KEY }}
+          permission-contents: read
+          permission-pull-requests: write
+          permission-issues: write
+          permission-checks: read
+
+      - name: Checkout PR head (pour acceder au diff et aux sources)
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          ref: ${{ needs.dispatch.outputs.head_branch }}
+          fetch-depth: 0
+
+      - name: Fetch master pour comparaison
+        run: |
+          git fetch origin master:refs/remotes/origin/master
+
+      - name: Setup Node.js (Claude Code CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Claude Code CLI
+        run: |
+          set -euo pipefail
+          npm install -g @anthropic-ai/claude-code
+          claude --version
+
+      - name: Build agent input (PR context + metadata)
+        id: build_input
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.dispatch.outputs.pr_number }}
+          AUTHOR: ${{ needs.dispatch.outputs.pr_author }}
+        run: |
+          set -euo pipefail
+
+          # Metadata + diff
+          gh pr view "$PR" --repo "$REPO" \
+            --json number,title,body,headRefName,baseRefName,additions,deletions,files \
+            > /tmp/pr-full.json
+
+          gh pr diff "$PR" --repo "$REPO" > /tmp/pr-diff.patch
+
+          TITLE=$(jq -r .title /tmp/pr-full.json)
+          BODY=$(jq -r .body /tmp/pr-full.json)
+          HEAD=$(jq -r .headRefName /tmp/pr-full.json)
+
+          # Diff vs master stat (pour preflight check §2.1 du process)
+          git diff origin/master..HEAD --stat > /tmp/diff-stat.txt
+
+          # Construire le prompt d'entree
+          cat > /tmp/agent-input.md <<EOF
+          # Mission : triplet review automatique sur PR #${PR}
+
+          Tu es l'agent de review automatique. Process complet dans
+          \`.github/ai-bot/review-prompt.md\` (lis-le en entier).
+
+          ## Metadonnees PR
+
+          - PR_NUMBER : ${PR}
+          - PR_AUTHOR : ${AUTHOR}
+          - PR_TITLE : ${TITLE}
+          - HEAD_BRANCH : ${HEAD}
+
+          ## Body PR
+
+          \`\`\`
+          ${BODY}
+          \`\`\`
+
+          ## Diff vs master (stat)
+
+          \`\`\`
+          $(cat /tmp/diff-stat.txt)
+          \`\`\`
+
+          ## Diff complet
+
+          Acces via : \`gh pr diff ${PR}\` ou lire \`/tmp/pr-diff.patch\`.
+          Tu peux aussi grep les fichiers actuels via Read/Bash, etc.
+
+          ## Instructions
+
+          1. Lis \`.github/ai-bot/review-prompt.md\` integralement.
+          2. Lis \`docs/AI_REVIEW_PROCESS.md\` sections 2, 3, 4.
+          3. Extrais INV_ID du titre PR (regex \`INV-\d+[a-z]?\`). Si absent,
+             cherche dans le body. Si toujours absent, verdict REJECT avec
+             reason \`inv-id-missing\`.
+          4. Lis l'entree INV correspondante dans \`tests/INVARIANTS.md\` pour
+             extraire la criticite [C/H/M/L].
+          5. Execute les 3 phases du triplet (toi + 2 sous-agents avec
+             clause "aucune action").
+          6. Termine par le bloc \`<TRIPLET_VERDICT_JSON>...</TRIPLET_VERDICT_JSON>\`
+             en derniere ligne, JSON valide.
+
+          NE FAIS AUCUN \`gh\` qui modifie l'etat (label, comment, merge).
+          NE FAIS AUCUN \`git\` qui modifie l'etat (commit, push, branch).
+          Tu peux LIRE (\`gh pr view\`, \`gh pr diff\`, \`git diff\`, \`git log\`).
+          Le workflow YAML appellera \`gh\` lui-meme apres avoir parse ton verdict.
+          EOF
+
+          echo "Agent input built ($(wc -l </tmp/agent-input.md) lines)"
+
+      - name: Run Claude Code CLI (triplet review)
+        id: run_claude
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -eu  # PAS -o pipefail (continuer si claude fail)
+
+          # Live log + persistent file (pattern de ai-bot.yml §agent_fix)
+          claude -p "$(cat /tmp/agent-input.md)" \
+            --append-system-prompt "$(cat .github/ai-bot/review-prompt.md)" \
+            --model claude-opus-4-7 \
+            --output-format stream-json \
+            --verbose \
+            --dangerously-skip-permissions \
+            2>&1 | tee /tmp/agent-output.jsonl
+          AGENT_EXIT=${PIPESTATUS[0]}
+          echo "Claude exit code: ${AGENT_EXIT}"
+          echo "agent_exit=${AGENT_EXIT}" >> "$GITHUB_OUTPUT"
+
+          # Extraire le summary final (le dernier event de type "result")
+          AGENT_SUMMARY=$(jq -rs 'map(select(.type == "result")) | last | .result // "(no summary)"' \
+            /tmp/agent-output.jsonl 2>/dev/null || echo "(jq parse error)")
+          echo "$AGENT_SUMMARY" > /tmp/agent-summary.md
+          echo "=== AGENT SUMMARY (last 100 lines) ==="
+          tail -100 /tmp/agent-summary.md
+          echo "======================================"
+
+      - name: Parse verdict JSON
+        id: verdict
+        run: |
+          set -euo pipefail
+
+          # Extrait le bloc <TRIPLET_VERDICT_JSON>...</TRIPLET_VERDICT_JSON>
+          awk '/<TRIPLET_VERDICT_JSON>/{flag=1;next}/<\/TRIPLET_VERDICT_JSON>/{flag=0}flag' \
+            /tmp/agent-summary.md > /tmp/verdict.json || true
+
+          if [ ! -s /tmp/verdict.json ]; then
+            echo "::warning::Bloc TRIPLET_VERDICT_JSON absent ou vide → verdict=PARSE_ERROR"
+            echo "decision=PARSE_ERROR" >> "$GITHUB_OUTPUT"
+            echo "summary=Verdict JSON absent du summary Claude." >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Valider JSON
+          if ! jq empty /tmp/verdict.json 2>/dev/null; then
+            echo "::warning::Bloc TRIPLET_VERDICT_JSON invalide → verdict=PARSE_ERROR"
+            cat /tmp/verdict.json
+            echo "decision=PARSE_ERROR" >> "$GITHUB_OUTPUT"
+            echo "summary=JSON invalide dans le verdict." >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          DECISION=$(jq -r .decision /tmp/verdict.json)
+          INV_ID=$(jq -r '.inv_id // ""' /tmp/verdict.json)
+          CRIT=$(jq -r '.criticity // ""' /tmp/verdict.json)
+          SUMMARY=$(jq -r '.summary // ""' /tmp/verdict.json)
+          RETRY=$(jq -r '.retry_comment // ""' /tmp/verdict.json)
+          AUDIT=$(jq -r '.audit_trail // ""' /tmp/verdict.json)
+
+          echo "decision=${DECISION}" >> "$GITHUB_OUTPUT"
+          echo "inv_id=${INV_ID}" >> "$GITHUB_OUTPUT"
+          echo "criticity=${CRIT}" >> "$GITHUB_OUTPUT"
+          # Echappement pour multi-line via heredoc
+          {
+            echo "summary<<__END_SUMMARY__"
+            echo "$SUMMARY"
+            echo "__END_SUMMARY__"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "retry_comment<<__END_RETRY__"
+            echo "$RETRY"
+            echo "__END_RETRY__"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "audit_trail<<__END_AUDIT__"
+            echo "$AUDIT"
+            echo "__END_AUDIT__"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "VERDICT: decision=${DECISION} inv=${INV_ID} crit=${CRIT}"
+
+      - name: Apply verdict — APPROVE (pose ai:approved → merge auto)
+        if: steps.verdict.outputs.decision == 'APPROVE'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.dispatch.outputs.pr_number }}
+          SUMMARY: ${{ steps.verdict.outputs.summary }}
+          AUDIT: ${{ steps.verdict.outputs.audit_trail }}
+          INV: ${{ steps.verdict.outputs.inv_id }}
+          CRIT: ${{ steps.verdict.outputs.criticity }}
+        run: |
+          set -euo pipefail
+          BODY=$(cat <<EOF
+          ## Triplet review automatique → **APPROVE**
+
+          - **INV** : ${INV}
+          - **Criticité** : ${CRIT}
+          - **Verdict** : ${SUMMARY}
+
+          <details>
+          <summary>Audit trail (3 phases)</summary>
+
+          ${AUDIT}
+          </details>
+
+          Label \`ai:approved\` posé automatiquement. \`ai-merge.yml\` va merger.
+          Veto humain : retirer le label avant le merge auto pour annuler.
+          EOF
+          )
+          gh pr comment "$PR" --repo "$REPO" --body "$BODY"
+          gh pr edit "$PR" --repo "$REPO" --add-label "ai:approved"
+
+      - name: Apply verdict — APPROVE_FOLLOWUP (approve + cree issue follow-up)
+        if: steps.verdict.outputs.decision == 'APPROVE_FOLLOWUP'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.dispatch.outputs.pr_number }}
+          SUMMARY: ${{ steps.verdict.outputs.summary }}
+          AUDIT: ${{ steps.verdict.outputs.audit_trail }}
+          INV: ${{ steps.verdict.outputs.inv_id }}
+          CRIT: ${{ steps.verdict.outputs.criticity }}
+        run: |
+          set -euo pipefail
+
+          # Creer les issues follow-up (si fournies dans le JSON)
+          FOLLOWUP_BODIES=$(jq -c '.followup_issues // []' /tmp/verdict.json)
+          CREATED_LINKS=""
+          if [ "$FOLLOWUP_BODIES" != "[]" ]; then
+            echo "$FOLLOWUP_BODIES" | jq -c '.[]' | while read -r ISSUE; do
+              T=$(echo "$ISSUE" | jq -r .title)
+              B=$(echo "$ISSUE" | jq -r .body)
+              URL=$(gh issue create --repo "$REPO" --title "$T" --body "$B" --label "ai:queue")
+              echo "Follow-up cree: $URL"
+            done
+          fi
+
+          BODY=$(cat <<EOF
+          ## Triplet review automatique → **APPROVE + follow-up**
+
+          - **INV** : ${INV}
+          - **Criticité** : ${CRIT}
+          - **Verdict** : ${SUMMARY}
+
+          Issues follow-up creees (label \`ai:queue\` → cron 4h les piochera) — voir liste plus haut.
+
+          <details>
+          <summary>Audit trail (3 phases)</summary>
+
+          ${AUDIT}
+          </details>
+
+          Label \`ai:approved\` posé automatiquement. \`ai-merge.yml\` va merger.
+          EOF
+          )
+          gh pr comment "$PR" --repo "$REPO" --body "$BODY"
+          gh pr edit "$PR" --repo "$REPO" --add-label "ai:approved"
+
+      - name: Apply verdict — RETRY (poste /ai-retry → bot itere)
+        if: steps.verdict.outputs.decision == 'RETRY'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.dispatch.outputs.pr_number }}
+          RETRY: ${{ steps.verdict.outputs.retry_comment }}
+          SUMMARY: ${{ steps.verdict.outputs.summary }}
+          AUDIT: ${{ steps.verdict.outputs.audit_trail }}
+          INV: ${{ steps.verdict.outputs.inv_id }}
+          CRIT: ${{ steps.verdict.outputs.criticity }}
+          AUTHOR: ${{ needs.dispatch.outputs.pr_author }}
+        run: |
+          set -euo pipefail
+
+          # Si PR humaine, pas de /ai-retry (le bot ne re-tournera pas dessus).
+          # On poste un commentaire normal demandant les retouches.
+          if [ "$AUTHOR" != "alarm-murgat-bot" ] && [ "$AUTHOR" != "alarm-murgat-bot[bot]" ]; then
+            BODY=$(cat <<EOF
+          ## Triplet review automatique → **RETOUCHE demandee** (PR humaine)
+
+          - **INV** : ${INV}
+          - **Criticité** : ${CRIT}
+          - **Verdict** : ${SUMMARY}
+
+          ### Modifications attendues
+
+          ${RETRY}
+
+          <details>
+          <summary>Audit trail (3 phases)</summary>
+
+          ${AUDIT}
+          </details>
+          EOF
+            )
+            gh pr comment "$PR" --repo "$REPO" --body "$BODY"
+          else
+            # PR bot : poster /ai-retry pour declencher ai-bot.yml
+            BODY=$(cat <<EOF
+          /ai-retry
+
+          ${RETRY}
+
+          ---
+
+          ## Triplet review automatique → **RETRY**
+
+          - **INV** : ${INV}
+          - **Criticité** : ${CRIT}
+          - **Verdict** : ${SUMMARY}
+
+          <details>
+          <summary>Audit trail (3 phases)</summary>
+
+          ${AUDIT}
+          </details>
+          EOF
+            )
+            gh pr comment "$PR" --repo "$REPO" --body "$BODY"
+          fi
+
+      - name: Apply verdict — REJECT (pose ai:abandoned + commente)
+        if: steps.verdict.outputs.decision == 'REJECT'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.dispatch.outputs.pr_number }}
+          SUMMARY: ${{ steps.verdict.outputs.summary }}
+          AUDIT: ${{ steps.verdict.outputs.audit_trail }}
+          INV: ${{ steps.verdict.outputs.inv_id }}
+          CRIT: ${{ steps.verdict.outputs.criticity }}
+        run: |
+          set -euo pipefail
+          BODY=$(cat <<EOF
+          ## Triplet review automatique → **REJECT**
+
+          - **INV** : ${INV}
+          - **Criticité** : ${CRIT}
+          - **Verdict** : ${SUMMARY}
+
+          <details>
+          <summary>Audit trail (3 phases)</summary>
+
+          ${AUDIT}
+          </details>
+
+          Label \`ai:abandoned\` posé. Reprise humaine necessaire.
+          EOF
+          )
+          gh pr comment "$PR" --repo "$REPO" --body "$BODY"
+          gh pr edit "$PR" --repo "$REPO" --add-label "ai:abandoned"
+
+      - name: Apply verdict — WAIT_CI ou PARSE_ERROR (no-op, retournera)
+        if: steps.verdict.outputs.decision == 'WAIT_CI' || steps.verdict.outputs.decision == 'PARSE_ERROR'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.dispatch.outputs.pr_number }}
+          DECISION: ${{ steps.verdict.outputs.decision }}
+          SUMMARY: ${{ steps.verdict.outputs.summary }}
+        run: |
+          set -euo pipefail
+          if [ "$DECISION" = "PARSE_ERROR" ]; then
+            # Erreur d'output Claude : signaler a l'humain mais ne pas spam
+            # (un seul commentaire — verifier qu'on ne reposte pas)
+            EXISTING=$(gh pr view "$PR" --repo "$REPO" --json comments \
+              --jq '.comments[] | select(.body | contains("Triplet review : PARSE_ERROR")) | .body' \
+              | head -c 100)
+            if [ -z "$EXISTING" ]; then
+              gh pr comment "$PR" --repo "$REPO" --body "**Triplet review : PARSE_ERROR**. Le verdict Claude n'a pas pu etre parse. Voir les logs du run ${{ github.run_id }} pour le summary brut. Reprise humaine necessaire."
+            fi
+          fi
+          # WAIT_CI : pas de commentaire (le workflow re-tournera sur check_run.completed)
+
+      - name: Upload agent output as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: triplet-review-pr-${{ needs.dispatch.outputs.pr_number }}-run-${{ github.run_id }}
+          path: |
+            /tmp/agent-input.md
+            /tmp/agent-output.jsonl
+            /tmp/agent-summary.md
+            /tmp/verdict.json
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Slack DM Mathieu (verdict notif)
+        if: always() && steps.verdict.outputs.decision != ''
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          PR: ${{ needs.dispatch.outputs.pr_number }}
+          DECISION: ${{ steps.verdict.outputs.decision }}
+          SUMMARY: ${{ steps.verdict.outputs.summary }}
+          INV: ${{ steps.verdict.outputs.inv_id }}
+          CRIT: ${{ steps.verdict.outputs.criticity }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SLACK_BOT_TOKEN:-}" ]; then
+            echo "SLACK_BOT_TOKEN absent → skip Slack notif"
+            exit 0
+          fi
+
+          # ID Slack MathieuP : U02U94G6LMP (cf memory project)
+          MATHIEU_USER_ID="U02U94G6LMP"
+
+          MSG=$(cat <<EOF
+          *Triplet review → ${DECISION}* sur PR <https://github.com/${REPO}/pull/${PR}|#${PR}> (${INV} [${CRIT}])
+
+          ${SUMMARY}
+          EOF
+          )
+
+          # Slack chat.postMessage API direct (pattern alarm-murgat-bot)
+          curl -sS -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg ch "$MATHIEU_USER_ID" --arg t "$MSG" '{channel: $ch, text: $t}')" \
+            > /tmp/slack-resp.json || true
+          OK=$(jq -r .ok /tmp/slack-resp.json 2>/dev/null || echo "false")
+          echo "Slack post ok=${OK}"
