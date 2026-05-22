@@ -29,6 +29,18 @@ Ce process couvre **3 types de PRs** à reviewer. Adapter selon le type :
 ### 1.3 PR humaine pure (autre contributeur)
 - Process applicable si demandé. Mêmes adaptations que 1.2.
 
+### 1.4 Mode automatique (workflows `ai-bot-review.yml` + `ai-bot-replay.yml`)
+- Depuis 2026-05-22, deux workflows automatisent ce process :
+  - **`ai-bot-review.yml` (Pipeline 1)** : 3 triggers possibles —
+    - `pull_request_target.opened/synchronize/reopened` (auteur bot) → review auto à chaque push du bot
+    - `pull_request_target.labeled` avec label `ai:review` → review d'une PR humaine (sessions Claude interactives)
+    - `workflow_dispatch` manuel pour les cas exceptionnels
+    - `check_run.completed` → re-tente quand la CI repasse verte après un fail
+    
+    Lance le triplet Claude headless, parse le verdict JSON, pose `ai:approved` / poste `/ai-retry` / pose `ai:abandoned`. Sort Mathieu du goulot review pour les PR bot ; permet le triplet sur PR humaine via simple pose de label. Veto humain : retirer `ai:approved` avant le merge auto.
+  - **`ai-bot-replay.yml` (Pipeline 2)** : trigger sur `issues.labeled ai:needs-human` (sauf si `ai:replayed` déjà). Pose `ai:replayed` (anti-boucle), déclenche `ai-bot.yml` pour re-tenter. Si l'issue produit une PR → Pipeline 1 la review automatiquement.
+- Le process documenté ci-dessous (§2–§7) **reste la spec** : les workflows automatisés en sont l'implémentation. Toute évolution du process (calibration, affinements trancheur, anti-patterns) doit être propagée dans le prompt `.github/ai-bot/review-prompt.md`.
+
 ---
 
 Tu (humain ou Claude) es le **goulot review** : sans ton verdict, la PR reste ouverte.
@@ -104,6 +116,49 @@ Avec ma review + la critique en input. Décision finale parmi :
 4. REJETER
 
 Même clause "aucune action" obligatoire.
+
+#### 3.2bis Checklist du trancheur (affinements 2026-05-22)
+
+Pour éviter que le trancheur dérive vers la flagornerie (synthétiser deux avis valides) ou la sur-couverture (suivre tous les angles du critique), 5 garde-fous obligatoires dans son prompt :
+
+**1. Défaut par criticité (grille d'or).** Le trancheur doit *justifier l'écart au défaut*, pas le défaut lui-même.
+
+| Crit | Défaut | Écart à justifier |
+|---|---|---|
+| **[C]** | RETRY au moindre trou mutation-proof réel | "APPROUVER direct" exige justification forte |
+| **[H]** | APPROUVER sauf trou structurel | "RETRY" exige un trou structurel cité |
+| **[M]** | APPROUVER | "RETRY" exige un cas exceptionnel |
+| **[L]** | APPROUVER direct | Toute action exige une justification grille |
+
+**2. Citation obligatoire de la grille.** Le trancheur doit citer le passage exact de §2.2 qui justifie son verdict. Pas de "feeling". Exemple :
+> "Sur [L], grille §2.2 = 'Prouver l'existence du comportement suffit'. Le critique trouve un mutant frontière `>=` → `>`. INVALIDE — la grille [L] ne demande pas mutation-proof, mutmut nightly s'en chargera. Pas d'action."
+
+**3. Anti-comité.** Le trancheur n'est **PAS obligé** d'adresser chaque point du critique. Pour chaque retour, il doit demander :
+- (a) Le claim est-il **factuellement correct** ? Si vérifié faux → INVALIDE.
+- (b) L'action demandée est-elle supportée par la grille du niveau de l'INV ? Si la grille [L] dit "approve direct" et le critique demande "ajoute test mutation-proof" → INVALIDE (action hors grille).
+- (c) Le trou pointe-t-il l'invariant central ou un détail marginal ? Mutants frontière marginaux (`>=` → `>`) sur [M]/[H] → mutmut nightly rattrappe, pas de retry.
+
+**4. Heuristique mutants frontière marginaux.** Sur [M]/[H], les mutants qui touchent une demi-seconde, un offset d'1 unité, ou un cas limite arithmétique sans impact business → laisser à mutmut nightly. Réserver l'action aux mutants qui touchent l'invariant central ou un call site nommément cité dans le catalogue.
+
+**5. Format de sortie obligatoire (avec section invalidés).** Le trancheur doit produire ces 4 sections en sortie, dans cet ordre, **toutes obligatoires** :
+
+```
+## Vérifications indépendantes
+[liste des verifs gh/grep/git diff faites, avec résultats factuels]
+
+## Retours critique retenus
+1. [retour] — action recommandée + citation grille qui la supporte
+
+## Retours critique INVALIDÉS
+1. [retour] — INVALIDE car (a) fait vérifié faux OU (b) action hors grille [criticité]
+[Si rien à invalider, écrire EXPLICITEMENT "Aucun retour invalidé" — ne JAMAIS omettre cette section.]
+
+## Décision
+DECISION : APPROVE | APPROVE_FOLLOWUP | RETRY | REJECT
+JUSTIFICATION : 2-3 phrases citant la grille du niveau de l'INV
+```
+
+La section "Retours INVALIDÉS" **explicite** est l'affinement critique. Sans elle, le trancheur a un biais "tous les retours sont valides, j'arbitre entre". Avec elle, il doit *se poser la question* pour chaque retour. Si rien à invalider, c'est OK — mais c'est une décision consciente, pas un oubli.
 
 ### 3.3 Vérifier les claims factuels du sous-agent
 
