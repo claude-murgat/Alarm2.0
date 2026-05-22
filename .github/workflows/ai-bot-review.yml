@@ -20,7 +20,11 @@ name: AI Bot Review
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened]
+    # `labeled` ajoute pour permettre de declencher la review sur une PR humaine
+    # via la pose du label `ai:review` (sinon l'event est filtre par auteur=bot
+    # uniquement dans le job dispatch). Les autres types (opened, synchronize,
+    # reopened) declenchent automatiquement sur les PR du bot.
+    types: [opened, synchronize, reopened, labeled]
   check_run:
     types: [completed]
   workflow_dispatch:
@@ -151,6 +155,8 @@ jobs:
           FAILED_CHECKS: ${{ steps.pr_meta.outputs.failed_checks }}
           PENDING_CHECKS: ${{ steps.pr_meta.outputs.pending_checks }}
           EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action || '' }}
+          LABEL_TRIGGER: ${{ github.event.label.name || '' }}
         run: |
           set -euo pipefail
 
@@ -158,6 +164,18 @@ jobs:
           echo "pr_number=${PR}" >> "$GITHUB_OUTPUT"
           echo "head_branch=${HEAD}" >> "$GITHUB_OUTPUT"
           echo "pr_author=${AUTHOR}" >> "$GITHUB_OUTPUT"
+
+          # 0. Event `pull_request_target.labeled` : ne reagir QUE au label
+          # `ai:review` (sinon n'importe quelle pose de label declencherait
+          # le triplet, gaspillage massif).
+          if [ "$EVENT" = "pull_request_target" ] && [ "$ACTION" = "labeled" ]; then
+            if [ "$LABEL_TRIGGER" != "ai:review" ]; then
+              echo "Event labeled mais label='${LABEL_TRIGGER}' != 'ai:review' → skip"
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              echo "reject_reason=label-not-ai-review" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
 
           # 1. PR doit etre OPEN
           if [ "$STATE" != "OPEN" ]; then
@@ -175,12 +193,19 @@ jobs:
             exit 0
           fi
 
-          # 3. Auteur : bot OU dispatch manuel (pour PR humaine)
-          if [ "$EVENT" != "workflow_dispatch" ]; then
+          # 3. Auteur : bot OU dispatch manuel OU label `ai:review` pose (PR humaine).
+          # Le label `ai:review` ouvre la review aux PR humaines (sessions Claude
+          # interactives type #121) sans necessiter `gh workflow run`.
+          LABEL_BYPASS=""
+          if [ "$EVENT" = "pull_request_target" ] && [ "$ACTION" = "labeled" ] && [ "$LABEL_TRIGGER" = "ai:review" ]; then
+            LABEL_BYPASS="true"
+          fi
+
+          if [ "$EVENT" != "workflow_dispatch" ] && [ -z "$LABEL_BYPASS" ]; then
             if [ "$AUTHOR" != "alarm-murgat-bot" ] && [ "$AUTHOR" != "alarm-murgat-bot[bot]" ]; then
-              echo "PR author != bot et event != dispatch (author=${AUTHOR}) → skip"
+              echo "PR author != bot et event != dispatch/ai:review (author=${AUTHOR}) → skip"
               echo "should_run=false" >> "$GITHUB_OUTPUT"
-              echo "reject_reason=pr-not-from-bot-no-dispatch" >> "$GITHUB_OUTPUT"
+              echo "reject_reason=pr-not-from-bot-no-dispatch-no-label" >> "$GITHUB_OUTPUT"
               exit 0
             fi
           fi

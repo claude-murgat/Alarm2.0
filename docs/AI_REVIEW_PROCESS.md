@@ -31,7 +31,13 @@ Ce process couvre **3 types de PRs** à reviewer. Adapter selon le type :
 
 ### 1.4 Mode automatique (workflows `ai-bot-review.yml` + `ai-bot-replay.yml`)
 - Depuis 2026-05-22, deux workflows automatisent ce process :
-  - **`ai-bot-review.yml` (Pipeline 1)** : trigger sur `pull_request` (auteur bot) + `check_run.completed` + `workflow_dispatch`. Lance le triplet Claude headless, parse le verdict JSON, pose `ai:approved` / poste `/ai-retry` / pose `ai:abandoned`. Sort Mathieu du goulot review pour les PR bot. Veto humain : retirer `ai:approved` avant le merge auto.
+  - **`ai-bot-review.yml` (Pipeline 1)** : 3 triggers possibles —
+    - `pull_request_target.opened/synchronize/reopened` (auteur bot) → review auto à chaque push du bot
+    - `pull_request_target.labeled` avec label `ai:review` → review d'une PR humaine (sessions Claude interactives)
+    - `workflow_dispatch` manuel pour les cas exceptionnels
+    - `check_run.completed` → re-tente quand la CI repasse verte après un fail
+    
+    Lance le triplet Claude headless, parse le verdict JSON, pose `ai:approved` / poste `/ai-retry` / pose `ai:abandoned`. Sort Mathieu du goulot review pour les PR bot ; permet le triplet sur PR humaine via simple pose de label. Veto humain : retirer `ai:approved` avant le merge auto.
   - **`ai-bot-replay.yml` (Pipeline 2)** : trigger sur `issues.labeled ai:needs-human` (sauf si `ai:replayed` déjà). Pose `ai:replayed` (anti-boucle), déclenche `ai-bot.yml` pour re-tenter. Si l'issue produit une PR → Pipeline 1 la review automatiquement.
 - Le process documenté ci-dessous (§2–§7) **reste la spec** : les workflows automatisés en sont l'implémentation. Toute évolution du process (calibration, affinements trancheur, anti-patterns) doit être propagée dans le prompt `.github/ai-bot/review-prompt.md`.
 
