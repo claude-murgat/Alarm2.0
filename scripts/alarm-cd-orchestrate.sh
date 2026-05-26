@@ -42,7 +42,8 @@ STATE_FILE="${STATE_DIR}/orchestrate.state"
 # /run/alarm-cd-orchestrate/ est cree par systemd (RuntimeDirectory= dans le
 # unit) avec owner alarm:alarm. Symetrique a alarm-cd-pull (cf service file).
 LOCK_FILE="/run/alarm-cd-orchestrate/lock"
-API_BASE="${API_BASE:-http://10.99.0.1:8000}"
+API_BASE_DEFAULT="http://10.99.0.1:8000"
+API_BASE="${API_BASE:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Cooldown apres echec (rollback) : 1 h, anti-boucle si :stable cassé en boucle.
 # Cf §5 doc — "hystérésis : pas de nouvelle tentative de pull :stable sur ce
@@ -59,6 +60,33 @@ log() {
   # stderr seul -> systemd capture via StandardError=journal (cf unit file).
   echo "[alarm-cd-orchestrate] $*" >&2
 }
+
+# Decouvre le leader Patroni via GET /health role=primary sur les 3 IPs WG.
+# POST /api/deployments/events (par canary) requiert le leader (replicas -> 503).
+# Sans ce bloc, --api-base default = 10.99.0.1 = NODE3 souvent replica.
+discover_leader() {
+  local ip role
+  for ip in 10.99.0.1 10.99.0.2 10.99.0.3; do
+    role=$(curl -fsS --max-time 3 "http://${ip}:8000/health" 2>/dev/null \
+      | python3 -c "import sys,json;print(json.load(sys.stdin).get('role',''))" 2>/dev/null \
+      || echo "")
+    if [[ "$role" == "primary" ]]; then
+      echo "$ip"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if [[ -z "$API_BASE" ]]; then
+  if leader_ip=$(discover_leader); then
+    API_BASE="http://${leader_ip}:8000"
+    log "Leader Patroni detecte : $API_BASE"
+  else
+    API_BASE="$API_BASE_DEFAULT"
+    log "WARN : aucun leader Patroni joignable, fallback $API_BASE (POST events risque 503)"
+  fi
+fi
 
 # Lock exclusif : empeche deux orchestrate concurrents si le timer triggere
 # avant la fin du precedent (chaine canary = ~30 min, timer = 15 min, overlap
