@@ -28,8 +28,6 @@ from backend.app.logic.models import (
     FCMWakeUp,
     NotificationSnapshot,
     OncallActions,
-    OncallAlarmCreation,
-    OncallAlarmResolution,
     SmsCallActions,
     SmsEnqueue,
     UserSnapshot,
@@ -67,16 +65,12 @@ FROZEN_DATACLASSES = [
     (UserSnapshot, lambda: UserSnapshot(
         id=1, name="x", is_online=True, last_heartbeat=None,
     )),
-    (OncallAlarmResolution, lambda: OncallAlarmResolution(alarm_id=1)),
-    (OncallAlarmCreation, lambda: OncallAlarmCreation(
-        oncall_user_name="x", offline_duration_minutes=15.0, assigned_user_id=2,
-    )),
     (DirectionTechniqueEmail, lambda: DirectionTechniqueEmail(
         oncall_user_name="x", offline_duration_minutes=15.0,
     )),
-    (OncallActions, lambda: OncallActions(
-        resolutions=(), creations=(), emails=(),
-    )),
+    # OncallAlarmCreation et OncallAlarmResolution supprimes 2026-05-26
+    # (deprecation INV-050/051, cf tests/INVARIANTS.md §5).
+    (OncallActions, lambda: OncallActions(emails=())),
     (AlarmCreationPlan, lambda: AlarmCreationPlan(
         assigned_user_id=1, needs_direction_technique_email=False, email_reason=None,
     )),

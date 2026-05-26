@@ -1267,10 +1267,19 @@ class TestCumulativeEscalation:
 # ── Utilisateur d'astreinte hors connexion ────────────────────────────────────
 
 class TestOnCallDisconnectionAlarm:
-    """Quand l'utilisateur #1 de l'escalade (astreinte) perd son heartbeat pendant
-    15 minutes, une alarme automatique est créée pour prévenir les suivants.
-    Les autres utilisateurs n'ont pas besoin d'être sous heartbeat.
-    Si plus personne n'est connecté → email direction technique."""
+    """Couverture INV-053 (email direction technique quand personne n'est joignable).
+
+    Note 2026-05-26 : INV-050/051/052/054 dépréciés (cf tests/INVARIANTS.md §5).
+    L'alarme automatique "astreinte hors connexion" n'est plus créée — on garde
+    uniquement le déclencheur de l'email de dernier recours et on confie le suivi
+    statistique des transitions online/offline à INV-056 (PR séparée).
+
+    Tests historiques supprimés en même temps que le code :
+      - test_oncall_offline_15min_creates_alarm
+      - test_oncall_alarm_auto_resolves_on_reconnection
+      - test_oncall_alarm_escalates_normally
+      - test_no_oncall_alarm_if_not_position1
+    """
 
     @pytest.fixture(autouse=True)
     def setup(self):
@@ -1291,131 +1300,6 @@ class TestOnCallDisconnectionAlarm:
         admin_h = _admin_headers()
         users = requests.get(f"{API}/users/", headers=admin_h).json()
         return next(u["id"] for u in users if u["name"] == name)
-
-    def test_oncall_offline_15min_creates_alarm(self):
-        """User1 (pos 1) perd son heartbeat. Après 15 min, alarme auto créée."""
-        user1_id = self._get_user_id("user1")
-        admin_h = _admin_headers()
-
-        # Mettre user1 offline
-        requests.post(f"{API}/test/simulate-connection-loss")
-        # Remettre les autres online (seul user1 reste offline)
-        token2 = requests.post(f"{API}/auth/login", json={"name": "user2", "password": "user123"}).json()["access_token"]
-        requests.post(f"{API}/devices/heartbeat", headers={"Authorization": f"Bearer {token2}"})
-        token_admin = requests.post(f"{API}/auth/login", json={"name": "admin", "password": "admin123"}).json()["access_token"]
-        requests.post(f"{API}/devices/heartbeat", headers={"Authorization": f"Bearer {token_admin}"})
-
-        # Avancer le temps de 15 min
-        _advance_clock_all_nodes(16)
-        # Après advance-clock, les heartbeats de user2/admin sont stales (16 min old)
-        # → envoyer des heartbeats frais pour qu'ils restent online
-        requests.post(f"{API}/devices/heartbeat", headers={"Authorization": f"Bearer {token2}"})
-        requests.post(f"{API}/devices/heartbeat", headers={"Authorization": f"Bearer {token_admin}"})
-        time.sleep(11)  # Attendre un tick du watchdog/escalation loop
-
-        # Une alarme automatique doit avoir été créée
-        alarms = requests.get(f"{API}/alarms/active", headers=admin_h).json()
-        oncall_alarm = next((a for a in alarms if "astreinte" in a["title"].lower()), None)
-        assert oncall_alarm is not None, \
-            f"Aucune alarme 'astreinte' créée. Alarmes actives : {[a['title'] for a in alarms]}"
-
-        # L'alarme doit être assignée à user2 (le suivant), pas à user1 (qui est offline)
-        user2_id = self._get_user_id("user2")
-        assert oncall_alarm["assigned_user_id"] == user2_id or \
-            user2_id in oncall_alarm.get("notified_user_ids", [])
-
-    def test_oncall_alarm_auto_resolves_on_reconnection(self):
-        """Si user1 revient en ligne, l'alarme d'astreinte se résout automatiquement."""
-        user1_id = self._get_user_id("user1")
-        admin_h = _admin_headers()
-
-        # Mettre user1 offline
-        requests.post(f"{API}/test/simulate-connection-loss")
-        token2 = requests.post(f"{API}/auth/login", json={"name": "user2", "password": "user123"}).json()["access_token"]
-        requests.post(f"{API}/devices/heartbeat", headers={"Authorization": f"Bearer {token2}"})
-
-        # Avancer 16 min → alarme créée
-        _advance_clock_all_nodes(16)
-        # Refresh user2 heartbeat apres advance-clock pour eviter qu'il ne soit marque
-        # offline par le watchdog (last_heartbeat stale apres clock skip), ce qui
-        # empecherait la creation de l'alarme oncall (il faut qu'au moins 1 user online).
-        # Meme pattern que test_oncall_offline_15min_creates_alarm.
-        requests.post(f"{API}/devices/heartbeat", headers={"Authorization": f"Bearer {token2}"})
-        time.sleep(11)
-
-        alarms = requests.get(f"{API}/alarms/active", headers=admin_h).json()
-        assert any("astreinte" in a["title"].lower() for a in alarms)
-
-        # User1 revient en ligne (heartbeat)
-        token1 = requests.post(f"{API}/auth/login", json={"name": "user1", "password": "user123"}).json()["access_token"]
-        requests.post(f"{API}/devices/heartbeat", headers={"Authorization": f"Bearer {token1}"})
-
-        # Attendre un tick
-        time.sleep(11)
-
-        # L'alarme d'astreinte doit être automatiquement résolue
-        alarms = requests.get(f"{API}/alarms/active", headers=admin_h).json()
-        oncall_alarms = [a for a in alarms if "astreinte" in a["title"].lower()]
-        assert len(oncall_alarms) == 0, \
-            "L'alarme d'astreinte devrait être résolue après reconnexion de user1"
-
-    def test_oncall_alarm_escalates_normally(self):
-        """L'alarme d'astreinte suit l'escalade normale (user2 → admin → ...)."""
-        admin_h = _admin_headers()
-        # Tout le monde offline sauf user2 et admin
-        requests.post(f"{API}/test/simulate-connection-loss")
-        token2 = requests.post(f"{API}/auth/login", json={"name": "user2", "password": "user123"}).json()["access_token"]
-        requests.post(f"{API}/devices/heartbeat", headers={"Authorization": f"Bearer {token2}"})
-        token_admin = requests.post(f"{API}/auth/login", json={"name": "admin", "password": "admin123"}).json()["access_token"]
-        requests.post(f"{API}/devices/heartbeat", headers={"Authorization": f"Bearer {token_admin}"})
-
-        # 16 min → alarme d'astreinte créée (assignée à user2)
-        _advance_clock_all_nodes(16)
-        # Après advance-clock, les heartbeats de user2/admin sont stales
-        # → envoyer des heartbeats frais pour qu'ils restent online
-        requests.post(f"{API}/devices/heartbeat", headers={"Authorization": f"Bearer {token2}"})
-        requests.post(f"{API}/devices/heartbeat", headers={"Authorization": f"Bearer {token_admin}"})
-        time.sleep(11)
-
-        alarms = requests.get(f"{API}/alarms/active", headers=admin_h).json()
-        oncall = next((a for a in alarms if "astreinte" in a["title"].lower()), None)
-        assert oncall is not None
-
-        user2_id = self._get_user_id("user2")
-        admin_id = self._get_user_id("admin")
-
-        # Escalader l'alarme d'astreinte via trigger manuel
-        r = requests.post(f"{API}/test/trigger-escalation")
-        assert r.json()["escalated"] >= 1, "Le trigger devrait avoir escaladé l'alarme d'astreinte"
-
-        alarms = requests.get(f"{API}/alarms/active", headers=admin_h).json()
-        oncall = next((a for a in alarms if "astreinte" in a["title"].lower()), None)
-        assert oncall is not None
-        assert oncall["escalation_count"] >= 1, "L'alarme d'astreinte devrait avoir été escaladée"
-
-    def test_no_oncall_alarm_if_not_position1(self):
-        """User2 (pos 2) offline ne déclenche PAS d'alarme d'astreinte.
-        Seul le #1 (astreinte contractuelle) est surveillé."""
-        admin_h = _admin_headers()
-        # Tout le monde online sauf user2
-        requests.post(f"{API}/test/reset")  # Tout online
-        user2_id = self._get_user_id("user2")
-        # Mettre user2 offline manuellement
-        requests.post(f"{API}/test/simulate-connection-loss")
-        token1 = requests.post(f"{API}/auth/login", json={"name": "user1", "password": "user123"}).json()["access_token"]
-        requests.post(f"{API}/devices/heartbeat", headers={"Authorization": f"Bearer {token1}"})
-        token_admin = requests.post(f"{API}/auth/login", json={"name": "admin", "password": "admin123"}).json()["access_token"]
-        requests.post(f"{API}/devices/heartbeat", headers={"Authorization": f"Bearer {token_admin}"})
-
-        # Avancer 20 min
-        _advance_clock_all_nodes(20)
-        time.sleep(11)
-
-        # Aucune alarme d'astreinte ne doit être créée
-        alarms = requests.get(f"{API}/alarms/active", headers=admin_h).json()
-        oncall_alarms = [a for a in alarms if "astreinte" in a["title"].lower()]
-        assert len(oncall_alarms) == 0, \
-            "Pas d'alarme d'astreinte pour user2 — seul le #1 est surveillé"
 
     def test_nobody_connected_sends_email(self):
         """Si absolument personne n'est connecté → email direction technique."""
