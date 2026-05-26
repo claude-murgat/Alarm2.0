@@ -7,7 +7,7 @@ Cf docs/CD_DESIGN.md §6 (Observabilité du déploiement). Le contrat doit garan
   - GET /events est admin-only
   - GET /state agrège correctement le dernier event par (node, image)
 
-Budget P4 : 5 tests max. Ici : 4 tests.
+Budget P4 : 5 tests max. Ici : 5 tests.
 """
 import os
 
@@ -116,3 +116,28 @@ def test_state_endpoint_returns_latest_per_node_image(client, admin_headers):
     # Le plus récent doit être canary_promoted (inséré en 2e)
     assert state[key]["kind"] == "canary_promoted"
     assert state[key]["to_digest"] == "sha256:v2"
+
+
+def test_post_event_on_replica_returns_503(client):
+    """POST sur replica -> 503 'replica' (aligne sur INV-043 heartbeat).
+
+    Sans ce garde, prod test 2026-05-23 : POST events declenche psycopg2
+    ReadOnlySqlTransaction (500) sur les 2 replicas. Scripts CD doivent
+    pouvoir basculer vers le leader via discover_leader() / GET /health.
+    """
+    from backend.app.leader_election import is_leader
+
+    is_leader.clear()
+    try:
+        body = {
+            "node": "node1",
+            "image": "alarm-backend",
+            "kind": "pull",
+            "to_digest": "sha256:test-replica-503",
+            "status": "success",
+        }
+        r = client.post("/api/deployments/events", json=body, headers=_gw_headers())
+        assert r.status_code == 503, r.text
+        assert "replica" in r.json().get("detail", "").lower(), r.json()
+    finally:
+        is_leader.set()

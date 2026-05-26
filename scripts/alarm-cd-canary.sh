@@ -30,7 +30,8 @@ NODE=""
 SOAK_SECONDS=600           # 10 min, cf §4 doc
 SAMPLE_INTERVAL=30         # poll /health toutes les 30s
 FAILURE_THRESHOLD=3        # 3 polls 503 consecutifs -> rollback
-API_BASE="${API_BASE:-http://10.99.0.1:8000}"
+API_BASE_DEFAULT="http://10.99.0.1:8000"
+API_BASE="${API_BASE:-}"
 REGISTRY="${REGISTRY:-ghcr.io/claude-murgat}"
 TAG="${TAG:-stable}"
 SSH_USER="${SSH_USER:-alarm}"
@@ -102,6 +103,34 @@ ssh_target() {
   ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
       "${SSH_USER}@${WG_IP}" "$@"
 }
+
+# Decouvre le leader Patroni via GET /health role=primary sur les 3 IPs WG.
+# POST /api/deployments/events requiert le leader (replicas -> 503 'replica').
+discover_leader() {
+  local ip role
+  for ip in 10.99.0.1 10.99.0.2 10.99.0.3; do
+    role=$(curl -fsS --max-time 3 "http://${ip}:8000/health" 2>/dev/null \
+      | python3 -c "import sys,json;print(json.load(sys.stdin).get('role',''))" 2>/dev/null \
+      || echo "")
+    if [[ "$role" == "primary" ]]; then
+      echo "$ip"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Resolution API_BASE : (1) --api-base CLI, (2) env $API_BASE, (3) discover_leader,
+# (4) fallback default (log WARN, risque 503 si non-leader).
+if [[ -z "$API_BASE" ]]; then
+  if leader_ip=$(discover_leader); then
+    API_BASE="http://${leader_ip}:8000"
+    log "Leader Patroni detecte : $API_BASE"
+  else
+    API_BASE="$API_BASE_DEFAULT"
+    log "WARN : aucun leader Patroni joignable, fallback $API_BASE (POST events risque 503)"
+  fi
+fi
 
 # --- 1. Verif pre-requis ---
 log "Verification pre-requis..."

@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from ..auth import get_current_admin
 from ..database import get_db
 from ..email_service import send_alert_email
+from ..leader_election import is_leader
 from ..models import DeploymentEvent, SystemConfig, User
 
 router = APIRouter(prefix="/api/deployments", tags=["deployments"])
@@ -109,6 +110,12 @@ def insert_event(
             status_code=400,
             detail=f"Invalid status '{event.status}'. Allowed: {sorted(_ALLOWED_STATUS)}",
         )
+
+    # Replicas ne peuvent pas INSERT (ReadOnlySqlTransaction). Pattern aligne sur
+    # devices.py:88 (INV-043). Les scripts CD basculent vers le leader via
+    # discover_leader() / GET /health role=primary.
+    if not is_leader.is_set():
+        raise HTTPException(status_code=503, detail="replica")
 
     row = DeploymentEvent(
         node=event.node,
