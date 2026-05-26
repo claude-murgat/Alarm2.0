@@ -134,33 +134,6 @@ class UserSnapshot:
 
 
 @dataclass(frozen=True)
-class OncallAlarmResolution:
-    """Action : résoudre l'alarme oncall existante (l'user d'astreinte est revenu online).
-
-    L'appelant doit appliquer :
-    - alarm.status = 'resolved'
-    - log_event("alarm_resolved", alarm_id=alarm_id, reason="oncall_back_online")
-    """
-    alarm_id: int
-
-
-@dataclass(frozen=True)
-class OncallAlarmCreation:
-    """Action : créer une alarme automatique oncall (is_oncall_alarm=True).
-
-    L'appelant doit appliquer :
-    - Alarm(title=f"Utilisateur d'astreinte hors connexion ({oncall_user_name})",
-            message=f"{oncall_user_name} est hors ligne depuis {offline_duration_minutes:.0f} minutes",
-            severity='critical', assigned_user_id=assigned_user_id, is_oncall_alarm=True)
-    - _add_notified_user(alarm, assigned_user_id)
-    - log_event("alarm_created", ...)
-    """
-    oncall_user_name: str
-    offline_duration_minutes: float
-    assigned_user_id: int
-
-
-@dataclass(frozen=True)
 class DirectionTechniqueEmail:
     """Action : envoyer un email d'alerte à la direction technique (INV-053).
     L'appelant construit subject/body à partir du payload et appelle send_alert_email."""
@@ -170,14 +143,16 @@ class DirectionTechniqueEmail:
 
 @dataclass(frozen=True)
 class OncallActions:
-    """Retour de evaluate_oncall_heartbeat. Au plus UN élément dans chaque tuple
-    (la logique actuelle ne produit pas plusieurs actions du même type par tick).
+    """Retour de evaluate_oncall_heartbeat. Au plus UN email par tick.
 
     `email_marker_set` / `email_marker_clear` : INV-053 one-shot per episode.
     Mutuellement exclusifs. L'appelant écrit ou efface
-    `SystemConfig.nobody_online_email_sent_at` selon le flag. Voir issue #116."""
-    resolutions: tuple["OncallAlarmResolution", ...] = ()  # pragma: no mutate (INV-053 — string forward ref dans annotation, no runtime impact ; Python lazy eval + aucun test ne reflechit sur __annotations__)
-    creations: tuple["OncallAlarmCreation", ...] = ()  # pragma: no mutate (INV-053 — string forward ref dans annotation, no runtime impact ; Python lazy eval + aucun test ne reflechit sur __annotations__)
+    `SystemConfig.nobody_online_email_sent_at` selon le flag. Voir issue #116.
+
+    Note 2026-05-26 : INV-050/051/052/054 dépréciés (cf tests/INVARIANTS.md §5).
+    Les anciens champs `resolutions` et `creations` ont été retirés — seule la
+    branche INV-053 (email "personne en ligne") est conservée. Voir issue de
+    suivi sur le tracking statistique INV-056 qui remplace l'alarme oncall."""
     emails: tuple["DirectionTechniqueEmail", ...] = ()  # pragma: no mutate (INV-053 — string forward ref dans annotation, no runtime impact ; Python lazy eval + aucun test ne reflechit sur __annotations__)
     email_marker_set: bool = False
     email_marker_clear: bool = False
