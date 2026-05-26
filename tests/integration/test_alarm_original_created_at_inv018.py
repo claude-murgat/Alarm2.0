@@ -397,19 +397,19 @@ def test_inv018_oncall_heartbeat_sets_original_created_at(client, admin_headers)
         _reset_clock(client)
 
 
-def test_inv018_gateway_trigger_alarm_sets_original_created_at(
+def test_inv018_gateway_report_state_alarm_sets_original_created_at(
     client, admin_headers, monkeypatch
 ):
-    """INV-018 : couvre le 5e call site `Alarm(...)` — `trigger_alarm` gateway
-    (alarms_internal.py, INV-120 contact sec NC local).
+    """INV-018 : couvre le 5e call site `Alarm(...)` — `_create_gateway_alarm`
+    appelée depuis `report_state` (alarms_internal.py, INV-120 V2 contact sec
+    NC local, refonte issue #112).
 
-    Pattern reutilise de tests/integration/test_dry_contact_trigger.py
-    (test_trigger_with_valid_key_creates_active_alarm) :
+    Pattern :
       1. Force GATEWAY_KEY env var (le check lit os.getenv() a chaque request)
-      2. POST /internal/alarms/trigger avec X-Gateway-Key valide
+      2. POST /internal/alarms/report-state avec state="open" + X-Gateway-Key valide
       3. Verifie l'alarme creee : original_created_at non NULL, == created_at,
          et dans [before_call, after_call] (preuve clock_now() appele a
-         l'interieur de trigger_alarm)
+         l'interieur de _create_gateway_alarm)
 
     Sans le fix sur alarms_internal.py, le constructeur Alarm() omettait
     original_created_at -> IntegrityError au flush() car la colonne est
@@ -427,25 +427,31 @@ def test_inv018_gateway_trigger_alarm_sets_original_created_at(
     try:
         before = clock_now()
         r = client.post(
-            "/internal/alarms/trigger",
+            "/internal/alarms/report-state",
             headers={"X-Gateway-Key": GATEWAY_KEY},
-            json={
-                "title": "INV-018 gateway trigger",
-                "message": "verifie original_created_at sur 5e call site",
-            },
+            json={"gateway_id": "inv018-onsite-1", "state": "open"},
         )
         after = clock_now()
         assert r.status_code == 200, (
-            f"INV-120 sanity : trigger gateway avec cle valide doit reussir, "
-            f"got {r.status_code} {r.text}"
+            f"INV-120 V2 sanity : report-state gateway avec cle valide doit "
+            f"reussir, got {r.status_code} {r.text}"
         )
-        alarm_id = r.json()["id"]
+        assert r.json().get("alarm_active") is True, (
+            f"INV-120 V2 : 1 gateway 'open' → alarm_active=True, got {r.json()}"
+        )
+
+        # Récupérer l'alarme nouvellement créée (response ne contient pas l'id)
+        rg = client.get("/api/alarms/active", headers=admin_headers)
+        assert rg.status_code == 200
+        active = rg.json()
+        assert len(active) == 1, f"INV-120 V2 : 1 alarme attendue, got {active}"
+        alarm_id = active[0]["id"]
 
         snap = _fetch_alarm_orm(alarm_id)
-        assert snap is not None, f"alarme {alarm_id} introuvable apres trigger"
+        assert snap is not None, f"alarme {alarm_id} introuvable apres report-state"
 
         assert snap["original_created_at"] is not None, (
-            "INV-018 (5e call site, alarms_internal.py:trigger_alarm) : "
+            "INV-018 (5e call site, alarms_internal.py:_create_gateway_alarm) : "
             "original_created_at doit etre rempli a la creation de l'alarme "
             "gateway. Sans le fix, le champ est NULL -> IntegrityError au flush."
         )
@@ -457,7 +463,7 @@ def test_inv018_gateway_trigger_alarm_sets_original_created_at(
         assert before <= snap["original_created_at"] <= after, (
             f"INV-018 : original_created_at ({snap['original_created_at']}) "
             f"doit etre dans [{before}, {after}] de l'appel POST /internal/"
-            f"alarms/trigger — preuve que clock_now() a ete utilise (vs datetime.utcnow)."
+            f"alarms/report-state — preuve que clock_now() a ete utilise (vs datetime.utcnow)."
         )
     finally:
         _reset_clock(client)

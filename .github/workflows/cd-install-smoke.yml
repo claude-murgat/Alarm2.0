@@ -1,22 +1,28 @@
-# CD Install Smoke — verifie que alarm-cd-pull.{service,timer,sh} s'installe
-# proprement et que le 1er run ne casse pas sur des problemes triviaux (perms,
-# fichiers manquants, syntaxe systemd).
+# CD Install Smoke — verifie que les units systemd CD s'installent proprement
+# et que le 1er run ne casse pas sur des problemes triviaux (perms, fichiers
+# manquants, syntaxe systemd, sudoers).
+#
+# Couvre :
+#   - alarm-cd-pull.{service,timer,sh}            : sur les 3 noeuds (V1 PR 3)
+#   - alarm-cd-orchestrate.{service,timer,sh}     : sur NODE3 uniquement (V1.5 PR 9)
+#   - infra/onsite/sudoers/alarm-cd               : NOPASSWD chirurgical
 #
 # Pourquoi ce workflow existe :
-#   La PR de fix `fix/cd-pull-lock-runtime-dir` corrige un bug ou le script
-#   essayait d'ecrire /run/alarm-cd-pull.lock alors qu'il tourne en User=alarm
-#   (donc pas root, donc pas le droit d'ecrire dans /run/). Le bug etait passe
-#   les 8 PRs CD V1 parce qu'aucun test n'exerce l'install reelle, juste le
-#   build des images et la logique applicative. Ce workflow comble ce trou.
+#   La PR initiale de fix `fix/cd-pull-lock-runtime-dir` corrige un bug ou le
+#   script essayait d'ecrire /run/alarm-cd-pull.lock alors qu'il tourne en
+#   User=alarm (donc pas root, donc pas le droit d'ecrire dans /run/). Le bug
+#   etait passe les 8 PRs CD V1 parce qu'aucun test n'exerce l'install reelle.
+#   Ce workflow comble ce trou pour tous les units CD (pull + orchestrate).
 #
 # Ne pas confondre avec :
 #   - cd-build.yml : build et push des images Docker sur GHCR (PR 1).
 #   - cd-promote-stable.yml : promotion sha-XXX -> :stable (PR 7).
 #
-# Scope : on teste que le service demarre, va au-dela de la creation du lock,
-# et que la regression "Permission denied" n'apparait pas. On NE teste PAS le
-# pull GHCR effectif (auth registry pas configuree pour le runner, et de toute
-# facon hors-scope d'un smoke d'install).
+# Scope : on teste que les services demarrent, vont au-dela de la creation du
+# lock, et que la regression "Permission denied" n'apparait pas. On NE teste
+# PAS le pull GHCR effectif (auth registry pas configuree pour le runner, et
+# de toute facon hors-scope d'un smoke d'install). Pareil pour orchestrate :
+# pas de SSH reel vers des noeuds (le runner n'a pas le mesh WG).
 
 name: CD Install Smoke
 
@@ -24,14 +30,18 @@ on:
   pull_request:
     paths:
       - 'scripts/alarm-cd-pull.sh'
+      - 'scripts/alarm-cd-orchestrate.sh'
       - 'infra/onsite/systemd/alarm-cd-pull.*'
+      - 'infra/onsite/systemd/alarm-cd-orchestrate.*'
       - 'infra/onsite/sudoers/alarm-cd'
       - '.github/workflows/cd-install-smoke.yml'
   push:
     branches: [master]
     paths:
       - 'scripts/alarm-cd-pull.sh'
+      - 'scripts/alarm-cd-orchestrate.sh'
       - 'infra/onsite/systemd/alarm-cd-pull.*'
+      - 'infra/onsite/systemd/alarm-cd-orchestrate.*'
       - 'infra/onsite/sudoers/alarm-cd'
       - '.github/workflows/cd-install-smoke.yml'
 
@@ -169,4 +179,138 @@ jobs:
             echo ""
             echo "Verifie : install OK, syntaxe systemd OK, pas de Permission denied,"
             echo "RuntimeDirectory= present."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  smoke-install-orchestrate:
+    name: alarm-cd-orchestrate install smoke (V1.5)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup user alarm (simulant NODE3 cloud)
+        run: |
+          sudo useradd -r -m -s /bin/bash alarm
+          sudo usermod -aG docker alarm
+
+      - name: Install script + units systemd
+        # On installe AUSSI alarm-cd-canary.sh + alarm-cd-rollback.sh dans le
+        # meme dossier que l'orchestrateur. Le script alarm-cd-orchestrate.sh
+        # resout `alarm-cd-canary.sh` via $SCRIPT_DIR (= meme dir) — c'est ce
+        # qu'on teste implicitement ici.
+        run: |
+          sudo install -m 755 scripts/alarm-cd-orchestrate.sh /usr/local/bin/alarm-cd-orchestrate
+          sudo install -m 755 scripts/alarm-cd-canary.sh      /usr/local/bin/alarm-cd-canary.sh
+          sudo install -m 755 scripts/alarm-cd-rollback.sh    /usr/local/bin/alarm-cd-rollback.sh
+          sudo install -m 644 infra/onsite/systemd/alarm-cd-orchestrate.service /etc/systemd/system/
+          sudo install -m 644 infra/onsite/systemd/alarm-cd-orchestrate.timer   /etc/systemd/system/
+          sudo systemctl daemon-reload
+
+      - name: Lint syntaxe unit systemd
+        # systemd-analyze verify : refuse les directives inconnues, typos, etc.
+        run: |
+          sudo systemd-analyze verify \
+            /etc/systemd/system/alarm-cd-orchestrate.service \
+            /etc/systemd/system/alarm-cd-orchestrate.timer
+
+      - name: Verif RuntimeDirectory + StateDirectory + EnvironmentFile presents
+        # RuntimeDirectory= /run/alarm-cd-orchestrate/ (lock ephemere).
+        # StateDirectory= /var/lib/alarm/cd/ (orchestrate.state persistant,
+        # partage avec alarm-cd-pull).
+        # EnvironmentFile= optionnel pour GATEWAY_KEY (cf §4 doc).
+        run: |
+          for directive in 'RuntimeDirectory=' 'StateDirectory=' 'EnvironmentFile='; do
+            sudo systemctl cat alarm-cd-orchestrate.service | grep -E "^${directive}" || {
+              echo "::error::${directive} absent de l'unit installee"
+              exit 1
+            }
+          done
+
+      - name: Timer livre disable par defaut (V1.5 opt-in)
+        # Decision design (cf §4 V1.5) : le timer est livre dans le repo MAIS
+        # n'est pas active par l'install standard. L'operateur l'active
+        # explicitement apres avoir valide 5 cycles canary manuels. On verifie
+        # ici qu'un `daemon-reload` seul ne l'active pas.
+        run: |
+          state=$(sudo systemctl is-enabled alarm-cd-orchestrate.timer 2>&1 || true)
+          echo "state initial : $state"
+          if [[ "$state" == "enabled" ]]; then
+            echo "::error::alarm-cd-orchestrate.timer est enable des l'install — devrait etre disable par defaut (V1.5 opt-in)"
+            exit 1
+          fi
+
+      - name: Lancer le service (Type=oneshot blocking)
+        # Sans /etc/alarm/cd.env et sans image GHCR en cache, le script doit :
+        #   1. Acquerir le lock (pas de Permission denied sur /run)
+        #   2. Detecter qu'il n'y a pas d'image :stable cachee
+        #   3. Log "Pas d'image ... Skip" + exit 0 propre
+        # On tolere un exit non-0 (cas ou Docker n'est pas dispo sur le runner),
+        # mais on echoue si "Permission denied" apparait.
+        run: |
+          sudo systemctl start alarm-cd-orchestrate.service || true
+          sudo systemctl status alarm-cd-orchestrate.service --no-pager --lines=30 || true
+
+      - name: Regression guard — pas de "Permission denied" dans le journal
+        # Bug-archetype : symetrique a alarm-cd-pull. Si quelqu'un oublie
+        # RuntimeDirectory= ou StateDirectory= dans le service, le script
+        # crash sur "/run/alarm-cd-orchestrate/lock: Permission denied".
+        run: |
+          sudo journalctl -u alarm-cd-orchestrate.service --no-pager > /tmp/journal-orch.txt
+          cat /tmp/journal-orch.txt
+          if grep -qi "permission denied" /tmp/journal-orch.txt; then
+            echo "::error::Regression: 'Permission denied' dans le journal alarm-cd-orchestrate"
+            exit 1
+          fi
+
+      - name: Skip propre quand pas d'image :stable cachee
+        # Sans image et sans GATEWAY_KEY, le script doit detecter le premier
+        # blocage (pas d'image cachee) et exit 0 silencieusement (no-op). On
+        # cherche la trace de "Pas d'image" qui prouve qu'on est passe par la
+        # branche de skip et pas par un crash plus tot (avant le check d'image).
+        run: |
+          if ! grep -q "Pas d'image" /tmp/journal-orch.txt; then
+            echo "::warning::Le script n'a pas atteint le check d'image cachee."
+            echo "  Pas necessairement un bug — Docker peut ne pas etre dispo sur le runner."
+            echo "  Mais a verifier si la regression revient."
+            sudo journalctl -u alarm-cd-orchestrate.service --no-pager
+          fi
+
+      - name: Regression — pas de duplication des logs dans le journal
+        # Symetrique a alarm-cd-pull. log() ecrit sur stderr seul -> 1 ligne
+        # par message dans le journal. Si on retrouve `logger -t` ou autre
+        # source de duplication, le compte par ligne sera > 1.
+        run: |
+          sudo journalctl -u alarm-cd-orchestrate.service --no-pager --output=cat \
+            | grep '^\[alarm-cd-orchestrate\]' \
+            | sort | uniq -c | sort -rn > /tmp/log-counts-orch.txt
+          echo "Compte par ligne :"
+          cat /tmp/log-counts-orch.txt
+          max_count=$(awk 'NR==1 {print $1}' /tmp/log-counts-orch.txt)
+          if [[ -n "${max_count:-}" && "$max_count" -gt 1 ]]; then
+            echo "::error::Duplication regression : une ligne apparait $max_count fois"
+            exit 1
+          fi
+
+      - name: Verif resolution alarm-cd-canary.sh via SCRIPT_DIR
+        # L'orchestrateur resout alarm-cd-canary.sh via $SCRIPT_DIR (= meme
+        # dossier). On verifie que les 3 scripts CD sont bien co-localises
+        # apres install.
+        run: |
+          for s in alarm-cd-orchestrate alarm-cd-canary.sh alarm-cd-rollback.sh; do
+            test -x "/usr/local/bin/$s" || {
+              echo "::error::/usr/local/bin/$s manquant ou non executable"
+              exit 1
+            }
+          done
+
+      - name: Resume CI
+        if: always()
+        run: |
+          {
+            echo "### Smoke install alarm-cd-orchestrate (V1.5)"
+            echo ""
+            echo "Verifie : install OK, syntaxe systemd OK, pas de Permission denied,"
+            echo "RuntimeDirectory= / StateDirectory= / EnvironmentFile= presents,"
+            echo "timer livre disable par defaut (opt-in V1.5)."
           } >> "$GITHUB_STEP_SUMMARY"

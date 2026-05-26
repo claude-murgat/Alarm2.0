@@ -4,17 +4,23 @@ Smoke test GPIO contact sec — SIM7600E-H — Alarm 2.0
 
 Vérifie qu'une GPIO du module SIM7600 (par défaut pin 1) est accessible
 en lecture via les AT commands CGDRT/CGGETV, puis monitore les transitions
-pour aider à calibrer la valeur de debounce nécessaire en prod.
+pour valider que le câblage physique est propre (pas de rebond mécanique
+fugitif).
 
-Câblage attendu (contact sec NC) :
-  - Une borne du contact NC sur le pin GPIO module SIM7600 choisi.
-  - L'autre borne sur GND du module.
-  - Au repos NC = fermé → GPIO tiré à GND → CGGETV lit 0.
-  - Déclenchement = NC ouvert → GPIO en l'air → pull-up tire à 1.
-    (si la pin n'a pas de pull-up interne, ajouter une R 10k vers 3V3)
+⚠ INV-120 V2 (issue #112) : la gateway en prod ne fait plus de debounce
+côté logiciel — elle poll toutes les ~5s et envoie l'état courant au
+backend (POST /internal/alarms/report-state, level-based reconciliation).
+La recommandation de debounce affichée par ce script reste utile comme
+indicateur "qualité du câblage" : si on observe des rebonds <50ms, le
+contact ou son montage est sale et peut générer une fausse alarme si
+l'on tombe pile dessus au moment du poll. À corriger physiquement avant
+déploiement (resserrer les vis, remplacer le contact, ajouter un
+snubber RC, etc.).
 
-Lecture/écriture du résultat = empirique : on observe ce que le modem
-renvoie réellement quand tu fermes/ouvres le contact à la main.
+Câblage retenu sur HAT Waveshare SIM7600X (cf config.py) :
+  3V3 ─── [contact NC] ─── IO43 (= GPIO 43 module)
+  - Repos NC fermé → IO43 = 3V3 → CGGETV=43 lit 1 = NORMAL_VALUE → "closed"
+  - Alarme NC ouvert → IO43 floating → CGGETV=43 lit 0 → "open"
 
 Usage :
     # depuis le dossier gateway/, sur le nœud de prod, en SSH
@@ -135,13 +141,14 @@ def monitor(ser, pin: int, duration_s: float) -> int:
         # Rebond probable = transitions très rapprochées (<50ms) qui s'annulent
         rebonds = [g for g in gaps if g < 50]
         if rebonds:
-            recommandation = max(rebonds) + 30
             print(f"  ⚠ {len(rebonds)} transition(s) à <50ms = rebond mécanique probable")
-            print(f"  → Recommandation debounce : {recommandation} ms")
-            print(f"    (max rebond observé {max(rebonds)}ms + marge 30ms)")
+            print(f"    (max rebond observé {max(rebonds)}ms)")
+            print(f"  → INV-120 V2 ne fait PAS de debounce côté gateway. Si on tombe")
+            print(f"    pile sur un rebond ouvert lors d'un poll (~5s), on déclenche")
+            print(f"    une fausse alarme. Corriger physiquement avant déploiement :")
+            print(f"    resserrer les vis, remplacer le contact, snubber RC, etc.")
         else:
-            print("  Aucun rebond <50ms observé.")
-            print("  → Debounce conservateur de 100 ms devrait suffire en prod.")
+            print("  Aucun rebond <50ms observé. → Câblage clean, OK pour la prod.")
     elif len(transitions) == 0:
         print()
         print("  Aucune transition observée. Pistes :")

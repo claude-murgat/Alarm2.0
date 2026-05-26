@@ -1,0 +1,33 @@
+# /etc/systemd/system/alarm-cd-orchestrate.timer
+#
+# Cf docs/CD_DESIGN.md §4 (canary V1.5). Active la chaine canary toutes les
+# 15 min sur NODE3 — le script est idempotent (skip silencieux si pas de
+# nouveau :stable depuis le dernier deploiement reussi).
+#
+# 15 min : compromis entre reactivite et budget chaine canary. Une chaine
+# complete prend ~30 min (3 etapes × 10 min soak), donc 15 min entre 2 fires
+# laisse un cycle entier pour terminer + le lock empeche les overlaps.
+# Plus court (ex: 5 min comme alarm-cd-pull) augmente le risque de tick
+# pendant un soak en cours et n'apporte rien (la promo :stable est rare).
+
+[Unit]
+Description=Timer pour orchestrer la chaine canary 3 -> 2 -> 1 (CD V1.5)
+Documentation=https://github.com/claude-murgat/Alarm2.0/blob/master/docs/CD_DESIGN.md
+
+[Timer]
+# 1er run : 15 min apres boot. Laisse le temps a alarm-cd-pull.timer (5 min
+# apres boot) de pourvoir le cache local si un :stable a ete promu pendant
+# l'arret de la machine.
+OnBootSec=15min
+# Ensuite : toutes les 15 min.
+OnUnitActiveSec=15min
+# Jitter +/- 2 min : evite que le tick tombe systematiquement sur la fin d'un
+# soak ou pendant le pull (qui prennent du temps deterministe).
+RandomizedDelaySec=2min
+# Persistent=true : si la machine etait eteinte au moment du run prevu,
+# rattraper au boot suivant. Coherent avec alarm-cd-pull.timer.
+Persistent=true
+Unit=alarm-cd-orchestrate.service
+
+[Install]
+WantedBy=timers.target

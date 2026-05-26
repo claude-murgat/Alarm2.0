@@ -36,7 +36,7 @@ plutôt que d'interpréter à partir du code (le code peut être buggy).
 | 9. Cluster HA | 0 | 3 | 2 | 0 |
 | 10. Observabilité | 1 | 2 | 0 | 0 (INV-102 ✅ PR0) |
 | 11. Stats | 1 | 1 | 0 | 0 (INV-110 ✅ PR #91) |
-| 13. Hardware trigger | 0 | 0 | 1 | 0 (INV-120 nouveau 2026-05-13) |
+| 13. Hardware trigger | 3 | 0 | 0 | 0 (INV-120 V2 + INV-122 + INV-123 ✅ PR1 issue #112 — 2026-05-18) |
 
 **Restant prioritaire** : INV-018/018b (`original_created_at`), INV-084 (reste 2/3 sous-cas : `watchdog_timeout_seconds` + `escalation_tick_seconds`), INV-085 (quorum email). Issues backlog `ai:queue` ouvertes (8) : #74 (INV-084 watchdog), #75 (INV-084 escalation_tick), #76-#78 (INV-018/018b), #79-#81 (INV-085), #96 (INV-074 path négatif suite review PR #92). Cron 4h pioche automatiquement la plus ancienne.
 
@@ -524,73 +524,214 @@ Exclut weekday 8-12 et 14-17 (heure locale Europe/Paris). Inclut WE et fériés.
 
 ## 13. Déclenchement hardware (contact sec on-site)
 
-### INV-120 [H] ⚠️ Trigger par contact sec NC local sur gateway
-Un front sortant (depuis l'état au repos vers son opposé, validé par un
-debounce ≥ 200 ms) sur un contact sec NC câblé sur une entrée du module
-SIM7600 doit déclencher l'appel `POST /internal/alarms/trigger`
-(authentification `X-Gateway-Key`), créant une alarme dont l'effet métier
-est **strictement identique** à un `POST /api/alarms/send` : respect de
-INV-001 (unicité), INV-080 (fallback chaîne vide), INV-066 (clock_now),
-FCM envoyé aux notifiés.
-- **Pourquoi** : canal de déclenchement physique indépendant du backend
-  des capteurs IT amont. Un capteur externe (fuite, fumée, intrusion,
-  sortie GTC) câblé en contact sec sur NODE1 doit pouvoir déclencher
-  l'alarme même si tout le reste du SI est indisponible.
-- **Edge detection (pas niveau)** : déclenchement uniquement sur la
-  transition repos→alarme. Tant que le contact reste en état alarme,
-  aucun nouveau POST n'est émis — la résolution physique exige que le
-  contact se referme puis se rouvre pour redéclencher. C'est ce qui
-  empêche le spam pendant la boucle d'escalade.
-- **Debounce minimum** : 200 ms (valeur retenue 2026-05-13). À ajuster
-  empiriquement via `gateway/probe_dry_contact.py` si rebond mécanique
-  observé sur le contact réel.
-- **Détection — deux stratégies** (`DRY_CONTACT_MODE` côté gateway) :
-  - `gpio` (**défaut, mode retenu**) : polling `AT+CGGETV=<pin>` (lecture
-    0/1 directe). Nécessite `AT+CGDRT=<pin>,0` au démarrage. Sur firmware
-    SIM7600M22_V2.0.1 du HAT Waveshare SIM7600X, les pins AT-addressables
-    sont **3, 6, 41, 43, 44, 77** (40 réservé STATUS). Le label silkscreen
-    **"IO43"** du header droit du HAT = **GPIO 43 du module** (mapping
-    validé empiriquement 2026-05-13 sur node2 : touch 3V3 → CGGETV=43
-    lit 1, lâché → 0). GPIO 43 supporte le maintien 3V3 sans freeze
-    (30 s testé, 4818/4818 stable, AT health 5/5 OK) ET reste stable à
-    0 quand floating (30 s, 4977/4977, 0 fluctuation).
-  - `adc` (fallback historique) : polling `AT+CADC=<channel>` (lecture mV
-    brute, seuil binaire appliqué côté gateway). Sur le HAT Waveshare
-    SIM7600X, **canal 2 = pin ADC1 du HAT** (vérifié 2026-05-13).
-    Saturation à ~1800 mV pour 3V3 appliqué. Seuil par défaut 900 mV.
-    Câblage moins propre que GPIO 43 — voir ⚠ ci-dessous.
-- **Câblage retenu mode GPIO sur HAT Waveshare SIM7600X** (validé
-  2026-05-13 sur node2) :
-  `3V3 ─── [contact NC] ─── IO43`  (un seul fil, **zéro composant
-  externe**)
-  - Repos NC fermé → IO43 = 3V3 → `CGGETV=43` lit **1**.
-  - Alarme NC ouvert → IO43 flottant, default-low module → `CGGETV=43`
-    lit **0**.
-  - Front d'alarme = descendant 1 → 0. `DRY_CONTACT_NORMAL_VALUE=1`.
-  - Test transitions empiriques (toggle manuel 30 s, debounce 200 ms) :
-    4 alarmes confirmées sur 7 raw_flips, 3 retours-stables, modem AT
-    OK final → pattern propre, aucun rebond non géré.
-- **⚠ Contrainte hardware constatée mode ADC** : sur ce HAT, **maintenir
-  ADC1 à GND fait freezer le firmware du modem** (constat empirique
-  2026-05-13 : court ADC1↔GND maintenu >5 s → AT plus aucune réponse
-  sur les 5 ttyUSB, USB toujours présent côté kernel, recovery
-  uniquement via switch PWRKEY). C'est la raison pour laquelle GPIO 43
-  est retenu plutôt qu'ADC1 — GPIO 43 supporte les deux états (3V3
-  maintenu ET floating à 0) sans corruption.
-- **Idempotence backend** : si une alarme est déjà active
-  (`status IN ('active','escalated')`, cf INV-001), l'endpoint renvoie
-  HTTP 409. Le gateway logue l'événement mais n'en fait pas une erreur
-  (pas de retry).
-- **Auth** : `X-Gateway-Key` obligatoire (cf INV-065). Sans la clé →
-  401, pas de création d'alarme.
-- **Couverture** :
-  - E2E backend (tier 2) : `tests/integration/test_dry_contact_trigger.py`
-    — 5 tests (401, 200+pos1, 409, 080 chaîne vide, custom title/message)
-    tous GREEN au 2026-05-13.
-  - Smoke test SSH hardware : `gateway/probe_dry_contact.py` (manuel,
-    hors CI — le hardware n'est pas en CI). Validé sur node2 onsite.
-- **Manque** : test E2E réel avec câblage NC + pull-up + résistance sur
-  ADC1 du HAT (à faire après que le hardware soit câblé physiquement).
+### INV-120 [H] ✅ Déclenchement gateway level-based, reconciliation backend
+Chaque gateway on-site (1 par nœud, identifiée par `gateway_id`) poll son
+contact sec NC à intervalle régulier (`DRY_CONTACT_POLL_SECONDS`, défaut 5 s)
+et POST `/internal/alarms/report-state` (auth `X-Gateway-Key`) avec son
+état observé. Le backend **reconcilie** ensuite l'état "alarme gateway
+active" avec les états reportés par les gateways alive selon la
+politique d'agrégation OR (cf INV-122).
+
+**Endpoint** : `POST /internal/alarms/report-state`
+
+Body : `{"gateway_id": "<string>", "state": "open" | "closed"}`
+- `state="open"` = contact NC ouvert = condition d'alarme physique.
+- `state="closed"` = contact NC fermé = état au repos.
+
+Réponse : `{"alarm_active": bool, "dissensus": bool}` (debug gateway).
+
+**Logique backend** (à chaque POST) :
+1. **UPSERT** dans table `gateway_states` (`gateway_id` PK, `state`, `last_seen=clock_now()`).
+2. **Compute** : `alive_gateways = { g | g.last_seen > clock_now() - liveness_window }` ;
+   `should_be_active = any(g.state == "open" for g in alive_gateways)`.
+3. **Reconcile** (uniquement sur les alarmes `source = "gateway_dry_contact"`) :
+   - `should_be_active=True` ET pas d'alarme `source="gateway_dry_contact"` active
+     ET pas d'autre alarme active (INV-001) → **CREATE** alarme `source="gateway_dry_contact"`,
+     effet identique à `POST /api/alarms/send` : assignation pos 1 chaîne via
+     `evaluate_alarm_creation_plan`, INV-080 chaîne vide, FCM, audit log,
+     `original_created_at = clock_now()` (INV-018).
+   - `should_be_active=True` ET autre alarme active (`source != "gateway_dry_contact"`,
+     ex: `"api"` ou `"oncall"`) → **no-op** (INV-001 : 1 alarme suffit, le user est
+     déjà notifié, on n'écrase pas l'autre source).
+   - `should_be_active=False` ET alarme `source="gateway_dry_contact"` active →
+     **RESOLVE** (`status="resolved"`, `updated_at=clock_now()`, audit log).
+   - `should_be_active=False` ET autre alarme active → **no-op** (ne résout PAS
+     une alarme manuelle ou oncall).
+   - Sinon (`alive_gateways` vide, aucun report récent) → **no-op** (conservateur :
+     fail-to-alarm — on ne résout PAS une alarme existante sur silence prolongé).
+4. **Dissensus** : cf INV-123.
+
+**Recovery automatique** : aucun état local côté gateway (pas de cache, pas
+de queue, pas de mémorisation d'id alarme). Un reboot, un crash ou un
+restart de la gateway est sans conséquence — le prochain poll reconcilie
+l'état physique avec le backend.
+
+**Pourquoi** :
+- Canal de déclenchement physique indépendant du backend des capteurs IT
+  amont (capteur fuite/fumée/intrusion/sortie GTC).
+- Level-based (vs edge V1) → recovery boot gratuite, pas de race condition,
+  code gateway ~30 lignes (vs 200+ pour edge+queue+boot recovery).
+- L'aller-retour reconciliation supplante INV-121 (auto-resolve sur retour
+  repos) qui était prévu mais jamais introduit dans le catalogue —
+  subsumé ici, ne pas créer.
+
+**Auth** : `X-Gateway-Key` obligatoire (cf INV-065). Sans la clé → 401,
+pas d'effet de bord (pas d'upsert dans `gateway_states`).
+
+**Migration** : voir bloc "Migrations DB" en bas de section.
+
+**Couverture** : `tests/integration/test_report_state_inv120v2.py` (7 tests
+tier 2, tous GREEN — 12 passed avec les 5 tests INV-018 adaptés) :
+- `test_report_state_without_key_returns_401` (auth, INV-065)
+- `test_report_open_creates_alarm_when_none_active` (CREATE)
+- `test_report_open_no_op_when_gateway_alarm_already_active` (idempotence poll)
+- `test_report_closed_resolves_gateway_alarm` (RESOLVE)
+- (cf INV-122 + INV-123 ci-dessous pour les 3 autres tests)
+
+Couverture indirecte (5e call site INV-018) : `tests/integration/test_alarm_
+original_created_at_inv018.py::test_inv018_gateway_report_state_alarm_sets_
+original_created_at` (adapté du V1, vérifie que `_create_gateway_alarm` fige
+bien `original_created_at` au moment du `POST /report-state`).
+
+**Câblage hardware retenu** (inchangé V1, validé empiriquement 2026-05-13
+sur node2) :
+- Mode GPIO sur HAT Waveshare SIM7600X, pin GPIO 43 du module
+  (silkscreen "IO43"). Câblage `3V3 ─── [contact NC] ─── IO43`, zéro
+  composant externe. Repos NC fermé → lit 1. Alarme NC ouvert → lit 0.
+- Côté gateway, lecture brute via `AT+CGGETV=43`, mapping `value == 1`
+  → `"closed"`, `value == 0` → `"open"`.
+- Mode ADC abandonné : maintenir ADC1 à GND >5 s freeze le firmware
+  modem (recovery uniquement via PWRKEY). GPIO 43 supporte les 2 états
+  sans corruption.
+
+### INV-122 [H] ✅ Redondance hardware multi-gateway, agrégation OR fail-to-alarm
+Deux (ou plus) gateways onsite reçoivent le **même contact NC physiquement
+splitté** sur leurs IO43 respectifs. Le backend agrège leurs `state`
+reportés selon la politique **OR fail-to-alarm** :
+**au moins une** gateway alive reportant `"open"` → alarme active.
+
+**Définition "alive"** : `g.last_seen > clock_now() - liveness_window`,
+où `liveness_window = 3 × DRY_CONTACT_POLL_SECONDS` côté backend (défaut
+15 s pour un poll gateway de 5 s, configurable via env
+`GATEWAY_LIVENESS_WINDOW_SECONDS`). Une gateway silencieuse au-delà est
+ignorée dans l'agrégation OR (pas d'influence sur la décision).
+
+**Tolérance pannes** :
+- 1 gateway crash/reboot → l'autre continue de reporter, alarme toujours
+  détectée. Recovery au boot automatique (cf INV-120).
+- Toutes silencieuses simultanément (`alive_gateways == ∅`) → no-op
+  (ne crée pas, ne résout pas).
+- Si une gateway nouvelle (jamais vue) POST `report-state`, simple upsert
+  dans `gateway_states` (auto-enrôlement). La protection est l'auth
+  `X-Gateway-Key` commune (INV-065), pas une whitelist d'IDs.
+
+**Pourquoi** : la mission #1 du système est de ne JAMAIS rater une alarme
+physique. Une seule carte (V1) = point de défaillance unique. Deux
+cartes en OR éliminent ce SPOF sans complexité côté backend (la logique
+de reconcile est identique pour N=1 ou N=10 gateways).
+
+**Couverture** : `tests/integration/test_report_state_inv120v2.py::
+test_or_policy_one_open_one_closed_keeps_alarm_active` (2 gateways alive,
+1 open + 1 closed → alarme reste active sur la seule "open"). Cas
+"1 gateway silencieuse" non explicitement testé en tier 2 (le test
+implicite est : à chaque POST le code recalcule `alive_gateways` via
+`last_seen > now - liveness_window`, et la fonction est triviale —
+mutation aurait peu de portée). À ajouter en E2E hardware (smoke
+PR2/déploiement) en débranchant un fil onsite.
+
+### INV-123 [H] ✅ Détection dissensus capteurs HW + alerte sysadmin
+Si parmi les `alive_gateways` (cf INV-122), des gateways reportent des
+`state` divergents (au moins une `"open"` ET au moins une `"closed"`)
+pendant plus de **5 minutes**, le système alerte qu'un câblage HW est
+probablement cassé.
+
+**Champs sur `Alarm`** (uniquement pour les alarmes
+`source = "gateway_dry_contact"`) :
+- `sensor_dissensus_since: TIMESTAMP NULL` — premier instant où le
+  dissensus a été détecté lors de la reconciliation courante. Reset à
+  `NULL` dès que les `alive_gateways` redeviennent cohérents (ou alive
+  count < 2).
+- `sensor_dissensus_email_sent_at: TIMESTAMP NULL` — timestamp du
+  dernier email sysadmin émis pour cet épisode. Reset à `NULL` en même
+  temps que `sensor_dissensus_since` (anti-spam : 1 seul email par
+  épisode, jusqu'à résolution).
+
+**Logique à chaque POST `/internal/alarms/report-state`** (après reconcile,
+sur l'alarme `source="gateway_dry_contact"` active si elle existe) :
+1. `divergent = (len(alive_gateways) >= 2) ET (set(g.state for g in alive_gateways) == {"open", "closed"})`.
+2. Si `divergent` ET `sensor_dissensus_since IS NULL` → set à `clock_now()`.
+3. Si `divergent` ET `clock_now() - sensor_dissensus_since > 5 min` ET
+   `sensor_dissensus_email_sent_at IS NULL` → envoi email
+   `send_alert_email(subject="Discordance capteurs HW — intervention requise",
+   body=..., to=<system_config.alert_email>)` ; set
+   `sensor_dissensus_email_sent_at = clock_now()`.
+4. Si NON divergent (cohérence retrouvée ou alive count < 2) → reset
+   les deux champs à `NULL`.
+
+**Flag UI** : si `alarm.sensor_dissensus_since IS NOT NULL`, le frontend
+(web admin + Android) affiche un badge orange ⚠ "Discordance capteurs
+hardware — vérifier câblage / état des cartes" sur la carte alarme.
+Cible : opérateur. Implémentation frontend = PR3 (hors scope PR1).
+
+**Pourquoi** : si une seule carte voit "ouvert" alors que l'autre voit
+"fermé", le contact n'est pas câblé correctement (ou une des cartes a un
+GPIO mort). Sans alerte, on perd silencieusement la tolérance aux pannes
+de INV-122. L'email sysadmin n'est PAS une alerte critique au sens
+business (pas un appel téléphonique escaladé) — c'est un info à
+direction technique, "merci d'aller voir les cartes". L'alarme métier
+sous-jacente (si elle existe via la politique OR) reste active
+normalement.
+
+**Couverture** : `tests/integration/test_report_state_inv120v2.py` :
+- `test_dissensus_over_5min_sets_flag_and_sends_email` (détection après
+  5 min + email avec sujet/contenu différenciés de INV-080 chaîne vide
+  + set `sensor_dissensus_email_sent_at`)
+- `test_dissensus_resolved_resets_flag_and_no_second_email` (reset des
+  2 champs si cohérence retrouvée ; 2e épisode redémarre le compteur,
+  pas de 2e email avant 5 min)
+
+Note méthodo : les 2 tests overrident `GATEWAY_LIVENESS_WINDOW_SECONDS=3600`
+pour éviter qu'entre re-POST séquentiels d'une gateway après `advance-clock`,
+l'autre gateway soit considérée temporairement silencieuse et fasse reset
+spurieux du `sensor_dissensus_since`. En prod, chaque gateway poll toutes
+les 5s donc les 2 sont en permanence "alive" sur la fenêtre 15s par défaut.
+
+### Migrations DB (PR1)
+
+Inline dans `backend/app/database.py` (pas d'Alembic, cf pattern existant) :
+
+1. **Nouvelle table `gateway_states`** :
+   - `gateway_id TEXT PRIMARY KEY`
+   - `state TEXT NOT NULL` (valeurs `"open"` ou `"closed"`)
+   - `last_seen TIMESTAMP NOT NULL`
+   - Idempotent : `CREATE TABLE IF NOT EXISTS` (PostgreSQL) / check
+     `sqlite_master` (SQLite).
+2. **Nouvelle colonne `alarms.source TEXT NOT NULL DEFAULT 'api'`** :
+   - Backfill : `UPDATE alarms SET source = 'oncall' WHERE is_oncall_alarm = TRUE`,
+     reste à `'api'` (défaut). Pas d'alarme historique `source="gateway_dry_contact"`
+     (le V1 n'écrivait pas ce champ).
+   - Valeurs métier : `"api"`, `"oncall"`, `"gateway_dry_contact"`. Stockage
+     TEXT (pas enum SQL strict) pour souplesse migration.
+3. **Nouvelles colonnes `alarms.sensor_dissensus_since TIMESTAMP NULL`**
+   et `alarms.sensor_dissensus_email_sent_at TIMESTAMP NULL` :
+   - Toujours NULL au backfill (V1 ne savait pas détecter).
+
+### Suppression de l'endpoint V1 `/internal/alarms/trigger` (PR1)
+
+L'endpoint `POST /internal/alarms/trigger` (V1, mergée PR #100) est
+**retiré** en PR1, supplanté par `/internal/alarms/report-state`. Pas
+d'alias legacy. Caller production unique : `gateway/modem_gateway.py:660`
+(refonte en PR2). PR1 + PR2 doivent être déployés ensemble côté cloud
+pour éviter une fenêtre où la gateway encore en V1 reçoive du 404.
+
+Les 5 tests existants `tests/integration/test_dry_contact_trigger.py`
+sont **supprimés** en PR1 (ils testent un endpoint qui n'existe plus).
+Le test `tests/integration/test_alarm_original_created_at_inv018.py`
+ligne 400-469 (5e call site INV-018 via `/internal/alarms/trigger`) est
+**adapté** pour pointer sur `/internal/alarms/report-state` avec un body
+`{"gateway_id": "test-onsite-1", "state": "open"}`.
+
+
 
 
 ---
@@ -668,6 +809,6 @@ Ordre recommandé pour les prochains PRs :
 | ~~INV-074~~ | C | — | ✅ Fixé PR #92 (bot IA, 2026-05-13). Follow-ups : issue #96 [H] path négatif, issue #97 clarif stateless JWT. |
 | ~~INV-077~~ | H | — | ✅ Fixé PR #93 (bot IA, 2026-05-13) — 5 endpoints admin-only. |
 | ~~INV-078~~ | M | — | ✅ Fixé PR #95 (bot IA, 2026-05-13). Cas pédagogique : 1er run abandonné, reformulation + PR #94 prompt.md ajoute section "regression-lock". |
-| INV-120 | H | ★★ | Endpoint `POST /internal/alarms/trigger` (auth `X-Gateway-Key`) + `DryContactMonitorThread` côté gateway (polling AT+CGGETV + debounce 200ms + edge-detection). Smoke test SSH disponible : `gateway/probe_dry_contact.py`. Pin GPIO module à confirmer empiriquement avant le PR. |
+| ~~INV-120 V2 + 122 + 123 backend~~ | H | — | ✅ PR1 (issue #112). `POST /internal/alarms/report-state` + table `gateway_states` + colonnes `Alarm.source` / `sensor_dissensus_*` + suppression `/trigger` V1. PR2 (refonte `DryContactMonitorThread` stateless côté gateway) et PR3 (badge UI dissensus web + Android) à suivre. |
 
 **Parallèles possibles** : PR6 (endpoint `/test/evaluate-now` qui élimine le flaky `trigger-escalation` incomplet) — désirable avant d'attaquer INV-018 car va simplifier les tests.

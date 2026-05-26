@@ -77,6 +77,10 @@ class AlarmResponse(BaseModel):
     is_oncall_alarm: bool = False
     escalation_count: int
     created_at: datetime
+    # INV-018b : date d'evenement immuable (vs created_at = timer reset par escalade).
+    # Les consumers (Android, frontend) doivent lire ce champ pour l'historique.
+    # `created_at` est conserve pour ne pas casser les consumers existants.
+    original_created_at: datetime
     updated_at: datetime
 
     class Config:
@@ -122,6 +126,7 @@ class AlarmResponse(BaseModel):
             is_oncall_alarm=alarm.is_oncall_alarm or False,
             escalation_count=alarm.escalation_count,
             created_at=alarm.created_at,
+            original_created_at=alarm.original_created_at,
             updated_at=alarm.updated_at,
         )
 
