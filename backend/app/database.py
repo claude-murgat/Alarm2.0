@@ -57,6 +57,9 @@ def run_migrations(engine):
         # ── INV-123 : colonnes alarms.sensor_dissensus_since/_email_sent_at
         _migrate_alarm_sensor_dissensus(conn, is_sqlite)
 
+        # ── INV-056 : table connectivity_events (transitions online/offline)
+        _migrate_connectivity_events(conn, is_sqlite)
+
 
 def _migrate_alarm_notifications(conn, is_sqlite: bool):
     """Crée la table alarm_notifications et migre les données CSV si nécessaire."""
@@ -322,6 +325,44 @@ def _migrate_alarm_sensor_dissensus(conn, is_sqlite: bool):
         ))
         conn.commit()
         logger.info("Migration: alarms.sensor_dissensus_* verifiees/ajoutees (INV-123)")
+
+
+def _migrate_connectivity_events(conn, is_sqlite: bool):
+    """INV-056 : crée la table connectivity_events qui trace chaque transition
+    online <-> offline d'un user (remplace l'alarme oncall_offline INV-050
+    dépréciée le 2026-05-26)."""
+    if is_sqlite:
+        exists = conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name='connectivity_events'")
+        ).fetchone()
+    else:
+        exists = conn.execute(
+            text("SELECT to_regclass('public.connectivity_events')")
+        ).fetchone()
+        exists = exists[0] if exists else None
+
+    if not exists:
+        conn.execute(text("""
+            CREATE TABLE connectivity_events (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                event VARCHAR NOT NULL,
+                ts TIMESTAMP NOT NULL
+            )
+        """) if not is_sqlite else text("""
+            CREATE TABLE connectivity_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                event VARCHAR NOT NULL,
+                ts TIMESTAMP NOT NULL
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX idx_connectivity_events_user_ts "
+            "ON connectivity_events(user_id, ts DESC)"
+        ))
+        conn.commit()
+        logger.info("Migration: table connectivity_events creee (INV-056)")
 
 
 def get_db():

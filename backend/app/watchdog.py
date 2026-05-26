@@ -4,7 +4,7 @@ import uuid
 from datetime import timedelta
 from sqlalchemy.orm import Session
 from .database import SessionLocal
-from .models import SystemConfig, User
+from .models import ConnectivityEvent, SystemConfig, User
 from .clock import now as clock_now
 from .events import log_event
 from .logging_config import correlation_id_var
@@ -62,6 +62,8 @@ def _run_watchdog_check(db: Session, now) -> None:
                 f"Last: {user.last_heartbeat}"
             )
             user.is_online = False
+            # INV-056 : event "went_offline" emis sur transition is_online True -> False
+            db.add(ConnectivityEvent(user_id=user.id, event="went_offline", ts=now))
             log_event("watchdog_offline", db=db, user_id=user.id, user_name=user.name)
             db.commit()
 
