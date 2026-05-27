@@ -35,6 +35,23 @@ class AlarmPollingService : Service() {
         // Perte de heartbeat : alerte après ce délai (2 min par défaut, configurable pour tests)
         var heartbeatLossTimeoutMs = 120_000L
         var heartbeatLostSince: Long = 0L
+
+        // INV-ANDROID-104 (2026-05-26) : 2 drapeaux distincts depuis le découplage
+        // bandeau visuel / sonnerie locale.
+        //
+        // `heartbeatLostVisual` (info) : armé dès que `heartbeatLostSince > timeout`.
+        //   → bandeau visible (texte rassurant "Serveur injoignable — SMS dispo").
+        //   → AUCUNE sonnerie.
+        //
+        // `heartbeatLostAlarm` (action requise) : armé quand `heartbeatLostVisual`
+        //   ET `NetworkAvailabilityMonitor.isNoNetwork` (cf INV-ANDROID-305).
+        //   → bandeau visible (texte d'action "déplacez-vous pour retrouver du
+        //     réseau") + sonnerie locale via `connectionLostSoundManager`.
+        //
+        // Le drapeau sonnerie tombe à `false` dès qu'un des canaux réseau revient
+        // (même si heartbeat encore perdu) — le téléphone est à nouveau joignable
+        // par le système d'astreinte (SMS gateway / push différé).
+        var heartbeatLostVisual = false
         var heartbeatLostAlarm = false
 
         // Refresh token toutes les 12h (configurable pour tests)
@@ -60,6 +77,9 @@ class AlarmPollingService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        // INV-ANDROID-305 : démarrer la surveillance réseau (data + cellulaire)
+        // pour piloter l'armement de la sonnerie hors-connexion (INV-302).
+        com.alarm.critical.util.NetworkAvailabilityMonitor.init(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -207,8 +227,9 @@ class AlarmPollingService : Service() {
                     if (response.isSuccessful) {
                         lastHeartbeatOk = true
                         needsUrlSwitch = false  // On est sur le primary, plus besoin de switch
-                        // Heartbeat OK → reset du compteur de perte
+                        // Heartbeat OK → reset bandeau ET sonnerie (cf INV-ANDROID-303)
                         heartbeatLostSince = 0L
+                        heartbeatLostVisual = false
                         heartbeatLostAlarm = false
                     } else if (response.code() == 503) {
                         // 503 = replica — signaler au poll de switcher
@@ -245,12 +266,35 @@ class AlarmPollingService : Service() {
         if (heartbeatLostSince == 0L) {
             heartbeatLostSince = now
         }
-        // Si la perte dure plus que le timeout → déclencher l'alerte
         val elapsed = now - heartbeatLostSince
-        if (elapsed >= heartbeatLossTimeoutMs && !heartbeatLostAlarm) {
-            heartbeatLostAlarm = true
-            com.alarm.critical.util.AppLogger.log("Heartbeat", "PERDU depuis ${(System.currentTimeMillis() - heartbeatLostSince)/1000}s")
-            Log.w(TAG, "Heartbeat perdu depuis ${elapsed}ms — alerte connexion déclenchée")
+        if (elapsed >= heartbeatLossTimeoutMs) {
+            // INV-ANDROID-104 : bandeau visuel armé d'office (info "serveur injoignable")
+            if (!heartbeatLostVisual) {
+                heartbeatLostVisual = true
+                com.alarm.critical.util.AppLogger.log(
+                    "Heartbeat",
+                    "PERDU depuis ${(System.currentTimeMillis() - heartbeatLostSince)/1000}s — bandeau visuel arme"
+                )
+                Log.w(TAG, "Heartbeat perdu depuis ${elapsed}ms — bandeau visuel déclenché")
+            }
+            // INV-ANDROID-302 : sonnerie locale armée UNIQUEMENT si pas de reseau du tout
+            val noNetwork = com.alarm.critical.util.NetworkAvailabilityMonitor.isNoNetwork
+            if (noNetwork && !heartbeatLostAlarm) {
+                heartbeatLostAlarm = true
+                com.alarm.critical.util.AppLogger.log(
+                    "Heartbeat",
+                    "Reseau totalement perdu (data + cellular) — sonnerie INV-302 armee"
+                )
+                Log.w(TAG, "Reseau totalement perdu — sonnerie locale armée (INV-302)")
+            } else if (!noNetwork && heartbeatLostAlarm) {
+                // Reseau revenu (data OU cellular) — couper la sonnerie même si heartbeat encore perdu
+                heartbeatLostAlarm = false
+                com.alarm.critical.util.AppLogger.log(
+                    "Heartbeat",
+                    "Reseau (data ou cellular) revenu — sonnerie INV-302 desarmee"
+                )
+                Log.w(TAG, "Reseau revenu — sonnerie locale désarmée")
+            }
         }
     }
 
@@ -374,6 +418,8 @@ class AlarmPollingService : Service() {
         heartbeatJob?.cancel()
         tokenRefreshJob?.cancel()
         scope.cancel()
+        // INV-ANDROID-305 : libérer les callbacks réseau
+        com.alarm.critical.util.NetworkAvailabilityMonitor.release()
         super.onDestroy()
     }
 }
