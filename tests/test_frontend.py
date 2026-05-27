@@ -119,6 +119,7 @@ class TestNavigation:
             "Alarmes": "#alarms",
             "Escalade": "#escalation",
             "Tests": "#tests",
+            "Disponibilité": "#connectivity",
             "Cluster": "#cluster",
             "Tableau de bord": "#dashboard",
         }
@@ -346,3 +347,56 @@ class TestCluster:
 
         rows = dashboard.locator("#clusterMembers tr")
         assert rows.count() >= 1, f"Attendu au moins 1 membre, got {rows.count()}"
+
+
+# ---------------------------------------------------------------------------
+# Onglet Disponibilite operateurs (INV-056)
+# ---------------------------------------------------------------------------
+
+class TestConnectivityTab:
+    """INV-056 — vérifier que l'onglet 'Disponibilité' charge et affiche
+    la liste des opérateurs avec leur uptime, et que le bouton 'Détails'
+    déploie l'historique d'événements."""
+
+    def _go_to_connectivity(self, page: Page):
+        page.locator(".tab:text('Disponibilité')").click()
+        page.wait_for_timeout(1500)
+
+    def test_connectivity_tab_shows_users_table(self, dashboard: Page):
+        """La table principale liste les users avec leurs colonnes attendues."""
+        self._go_to_connectivity(dashboard)
+
+        # En-têtes
+        expect(dashboard.locator("#connectivity th").first).to_contain_text("Opérateur")
+        # Au moins 1 ligne (les 3 seed users : admin, user1, user2)
+        rows = dashboard.locator("#connectivityTable tr")
+        assert rows.count() >= 1, f"Attendu au moins 1 user, got {rows.count()}"
+
+    def test_connectivity_days_selector_reloads(self, dashboard: Page):
+        """Changer la fenêtre relance le fetch (déclencheur onchange)."""
+        self._go_to_connectivity(dashboard)
+
+        dashboard.locator("#connectivityDays").select_option("7")
+        dashboard.wait_for_timeout(500)
+        # La table doit toujours être présente après reload
+        rows = dashboard.locator("#connectivityTable tr")
+        assert rows.count() >= 1
+
+    def test_connectivity_history_card_hidden_by_default(self, dashboard: Page):
+        """Le bloc historique est masqué tant qu'on n'a pas cliqué sur Détails."""
+        self._go_to_connectivity(dashboard)
+
+        history_card = dashboard.locator("#connectivityHistoryCard")
+        expect(history_card).to_be_hidden()
+
+    def test_connectivity_details_button_reveals_history(self, dashboard: Page):
+        """Cliquer 'Détails' sur une ligne affiche le bloc historique."""
+        self._go_to_connectivity(dashboard)
+
+        # Cliquer le bouton Détails de la première ligne (peu importe quel user)
+        dashboard.locator("#connectivityTable button").first.click()
+        dashboard.wait_for_timeout(800)
+
+        history_card = dashboard.locator("#connectivityHistoryCard")
+        expect(history_card).to_be_visible()
+        expect(dashboard.locator("#connectivityHistoryTitle")).to_contain_text("Historique")
