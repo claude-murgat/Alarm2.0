@@ -1,12 +1,16 @@
 package com.alarm.critical
 
+import android.Manifest
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import android.util.Log
 import com.alarm.critical.api.ApiClient
@@ -32,6 +36,21 @@ class MainActivity : AppCompatActivity() {
         // Toujours repartir de l'URL 0 au demarrage
         ApiClient.currentUrlIndex = 0
         ApiClient.consecutiveFailures = 0
+
+        // INV-ANDROID-305 : demander READ_PHONE_STATE pour détecter la perte
+        // de signal cellulaire (voix/SMS). Si refusée → NetworkAvailabilityMonitor
+        // fait fail open (cellularInService=true) — la sonnerie INV-302 ne
+        // s'armera donc jamais, mais le bandeau visuel et tout le reste marchent.
+        if (ContextCompat.checkSelfPermission(
+                this, Manifest.permission.READ_PHONE_STATE
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.READ_PHONE_STATE),
+                REQUEST_CODE_READ_PHONE_STATE,
+            )
+        }
 
         val savedToken = prefs.getString("token", null)
         if (savedToken != null) {
@@ -144,5 +163,10 @@ class MainActivity : AppCompatActivity() {
         intent.putExtra("token", token)
         startActivity(intent)
         finish()
+    }
+
+    companion object {
+        // INV-ANDROID-305 : code de retour pour la demande de READ_PHONE_STATE.
+        private const val REQUEST_CODE_READ_PHONE_STATE = 1001
     }
 }
