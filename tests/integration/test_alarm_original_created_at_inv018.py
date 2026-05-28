@@ -279,122 +279,13 @@ def test_original_created_at_uses_clock_now(client, admin_headers):
             pass
 
 
-def test_inv018_oncall_heartbeat_sets_original_created_at(client, admin_headers):
-    """INV-018 : couvre le 4e call site `Alarm(...)` — `_apply_oncall_heartbeat`.
-
-    Pattern reutilise de tests/integration/test_oncall_delay_config.py
-    (test_oncall_delay_read_from_system_config_not_hardcoded) :
-      1. Reduit oncall_offline_delay_minutes a 2 pour declencher rapidement
-      2. user1 (pos 1, de garde) offline depuis 3 min, user2 online
-      3. Appel direct de _apply_oncall_heartbeat(db, now, chain)
-      4. Verifie l'alarme oncall creee : original_created_at non NULL, ==
-         created_at, et dans [before_call, after_call] (preuve clock_now()
-         appele a l'interieur de la branche INV-050 du loop)
-
-    Sans le fix sur escalation.py, le constructeur Alarm() omettait
-    original_created_at -> IntegrityError (NOT NULL viole) car la colonne est
-    NOT NULL au niveau modele.
-    """
-    from backend.app.clock import now as clock_now
-    from backend.app.database import SessionLocal
-    import asyncio
-    from backend.app.escalation import _apply_oncall_heartbeat
-    from backend.app.models import Alarm, EscalationConfig, User
-
-    _reset_clock(client)
-
-    r = client.post(
-        "/api/config/system",
-        json={"key": "oncall_offline_delay_minutes", "value": "2"},
-        headers=admin_headers,
-    )
-    assert r.status_code == 200, r.text
-
-    db = SessionLocal()
-    created_alarm_id = None
-    try:
-        chain = db.query(EscalationConfig).order_by(EscalationConfig.position).all()
-        assert len(chain) >= 2, (
-            f"seed chain should have >=2 entries (user1 pos1, user2 pos2), "
-            f"got {[(c.position, c.user_id) for c in chain]}"
-        )
-        pos1_user_id = chain[0].user_id
-        pos2_user_id = chain[1].user_id
-
-        active = (
-            db.query(Alarm)
-            .filter(Alarm.status.in_(["active", "escalated"]))
-            .all()
-        )
-        for a in active:
-            a.status = "resolved"
-        db.commit()
-
-        now_ref = clock_now()
-        u1 = db.query(User).filter(User.id == pos1_user_id).first()
-        u2 = db.query(User).filter(User.id == pos2_user_id).first()
-        assert u1 is not None and u2 is not None
-        u1.is_online = False
-        u1.last_heartbeat = now_ref - timedelta(minutes=3)
-        u2.is_online = True
-        u2.last_heartbeat = now_ref
-        db.commit()
-
-        before = clock_now()
-        # Bug #105 : _apply_oncall_heartbeat est devenu async (envoi SMTP via
-        # asyncio.to_thread pour ne pas geler l'event loop). On le pilote ici
-        # via asyncio.run depuis un contexte de test sync.
-        asyncio.run(_apply_oncall_heartbeat(db, now_ref, chain))
-        after = clock_now()
-        db.expire_all()
-
-        oncall_alarm = (
-            db.query(Alarm)
-            .filter(
-                Alarm.is_oncall_alarm == True,  # noqa: E712 (SQLAlchemy)
-                Alarm.status.in_(["active", "escalated"]),
-            )
-            .order_by(Alarm.id.desc())
-            .first()
-        )
-        assert oncall_alarm is not None, (
-            "sanity : _apply_oncall_heartbeat doit creer une alarme oncall "
-            "avec user1 offline 3min > delay 2min (cf test_oncall_delay_config)"
-        )
-        created_alarm_id = oncall_alarm.id
-
-        assert oncall_alarm.original_created_at is not None, (
-            "INV-018 (4e call site, escalation.py:_apply_oncall_heartbeat) : "
-            "original_created_at doit etre rempli a la creation de l'alarme "
-            "oncall. Sans le fix, ce champ est NULL -> IntegrityError."
-        )
-        assert oncall_alarm.original_created_at == oncall_alarm.created_at, (
-            f"INV-018 : a la creation d'une alarme oncall, original_created_at "
-            f"({oncall_alarm.original_created_at}) doit etre identique a "
-            f"created_at ({oncall_alarm.created_at})."
-        )
-        assert before <= oncall_alarm.original_created_at <= after, (
-            f"INV-018 : original_created_at ({oncall_alarm.original_created_at}) "
-            f"doit etre dans la fenetre [{before}, {after}] de l'appel a "
-            f"_apply_oncall_heartbeat — preuve que clock_now() a ete utilise."
-        )
-    finally:
-        if created_alarm_id is not None:
-            a = db.query(Alarm).filter(Alarm.id == created_alarm_id).first()
-            if a is not None:
-                a.status = "resolved"
-        for user in db.query(User).all():
-            user.is_online = True
-            user.last_heartbeat = clock_now()
-        db.commit()
-        db.close()
-
-        client.post(
-            "/api/config/system",
-            json={"key": "oncall_offline_delay_minutes", "value": "15"},
-            headers=admin_headers,
-        )
-        _reset_clock(client)
+# Test test_inv018_oncall_heartbeat_sets_original_created_at supprime 2026-05-26 :
+# il verifiait le 4e call site Alarm(...) dans _apply_oncall_heartbeat. Avec la
+# deprecation INV-050 (cf tests/INVARIANTS.md §5 encadre "Changement de strategie"),
+# ce call site n'existe plus — la boucle `for creation in actions.creations` a ete
+# retiree de escalation.py et la fonction pure evaluate_oncall_heartbeat ne produit
+# plus de creations. Les 3 autres call sites INV-018 sont couverts par les tests
+# voisins (test_original_created_at_set_at_creation, test_inv018_gateway_report_state_alarm_*).
 
 
 def test_inv018_gateway_report_state_alarm_sets_original_created_at(

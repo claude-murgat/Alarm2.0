@@ -257,6 +257,8 @@ class DashboardActivity : AppCompatActivity() {
             val connectionLostAlert = findViewById<TextView>(R.id.connectionLostAlert)
             val reconnectButton = findViewById<Button>(R.id.reconnectButton)
 
+            // INV-ANDROID-104 (2026-05-26) : 3 etats distincts pour le bandeau
+            // selon la criticite (auth error > sonnerie reseau perdu > bandeau info).
             if (AlarmPollingService.authErrorAlarm) {
                 connectionLostAlert.text = AlarmPollingService.authErrorMessage ?: "Session expiree"
                 connectionLostContainer.visibility = View.VISIBLE
@@ -266,13 +268,24 @@ class DashboardActivity : AppCompatActivity() {
                 }
                 connectionLostSoundManager?.startAlarmSound()
             } else if (AlarmPollingService.heartbeatLostAlarm) {
-                connectionLostAlert.text = "Connexion perdue avec le serveur"
+                // INV-ANDROID-302 : reseau totalement perdu (data + cellular)
+                // → action requise, sonnerie active
+                connectionLostAlert.text =
+                    "Connexion perdue — déplacez-vous pour retrouver du réseau"
                 connectionLostContainer.visibility = View.VISIBLE
                 reconnectButton.visibility = View.GONE
                 if (connectionLostSoundManager == null) {
                     connectionLostSoundManager = AlarmSoundManager(this@DashboardActivity)
                 }
                 connectionLostSoundManager?.startAlarmSound()
+            } else if (AlarmPollingService.heartbeatLostVisual) {
+                // INV-ANDROID-104 : heartbeat perdu mais reseau dispo (data ou SMS)
+                // → bandeau info uniquement, AUCUNE sonnerie
+                connectionLostAlert.text =
+                    "Serveur injoignable — vous recevrez les alarmes par SMS si nécessaire"
+                connectionLostContainer.visibility = View.VISIBLE
+                reconnectButton.visibility = View.GONE
+                connectionLostSoundManager?.stopAlarmSound()
             } else {
                 connectionLostContainer.visibility = View.GONE
                 connectionLostSoundManager?.stopAlarmSound()

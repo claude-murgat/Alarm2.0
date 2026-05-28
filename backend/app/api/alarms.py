@@ -126,10 +126,12 @@ def list_alarms(
     from datetime import timedelta
     days = max(1, min(days, 90))
     since = clock_now() - timedelta(days=days)
+    # INV-018b : lectures historiques sur original_created_at (date d'evenement
+    # immuable), pas created_at (timer interne reset a chaque palier d'escalade).
     alarms = (
         db.query(Alarm)
-        .filter(Alarm.created_at >= since)
-        .order_by(Alarm.created_at.desc())
+        .filter(Alarm.original_created_at >= since)
+        .order_by(Alarm.original_created_at.desc())
         .all()
     )
     return [_alarm_response(a, db) for a in alarms]
@@ -140,10 +142,11 @@ def active_alarms(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    # INV-018b : ORDER BY sur original_created_at (date d'evenement, pas timer).
     alarms = (
         db.query(Alarm)
         .filter(Alarm.status.in_(["active", "escalated"]))
-        .order_by(Alarm.created_at.desc())
+        .order_by(Alarm.original_created_at.desc())
         .all()
     )
     return [_alarm_response(a, db) for a in alarms]

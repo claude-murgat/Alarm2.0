@@ -118,6 +118,7 @@
         <div class="tab" data-tab="alarms">Alarmes</div>
         <div class="tab" data-tab="tests">Tests</div>
         <div class="tab" data-tab="audit">Log</div>
+        <div class="tab" data-tab="connectivity">Disponibilité</div>
         <div class="tab" data-tab="cluster">Cluster</div>
     </div>
 
@@ -247,6 +248,50 @@
                     <table><thead><tr><th>Titre</th><th>Occurrences</th></tr></thead>
                     <tbody id="recurringTable"></tbody></table>
                 </div>
+            </div>
+        </div>
+
+        <!-- Disponibilite operateurs (INV-056) -->
+        <div class="panel" id="connectivity">
+            <div class="card">
+                <h3>Disponibilité des opérateurs</h3>
+                <p style="color:#94a3b8;font-size:0.9rem;margin-bottom:16px">
+                    Suivi statistique des transitions en ligne / hors ligne — remplace l'alarme automatique <code>oncall_offline</code>
+                    (dépréciée 2026-05-26). Lit la table <code>connectivity_events</code> alimentée par le watchdog et l'endpoint
+                    heartbeat.
+                </p>
+                <div style="display:flex;gap:16px;align-items:center;margin-bottom:16px;flex-wrap:wrap">
+                    <div>
+                        <label style="color:#94a3b8;font-size:0.85rem">Fenêtre</label><br>
+                        <select id="connectivityDays" onchange="loadConnectivity()" style="background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:6px 10px;">
+                            <option value="1">24 heures</option>
+                            <option value="7">7 jours</option>
+                            <option value="30" selected>30 jours</option>
+                            <option value="90">90 jours</option>
+                            <option value="365">1 an</option>
+                        </select>
+                    </div>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Opérateur</th>
+                            <th style="text-align:right">Transitions hors ligne</th>
+                            <th style="text-align:right">Durée hors ligne cumulée</th>
+                            <th style="text-align:right">Uptime</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="connectivityTable"></tbody>
+                </table>
+            </div>
+            <div class="card" id="connectivityHistoryCard" style="display:none">
+                <h3 id="connectivityHistoryTitle">Historique détaillé</h3>
+                <div style="height:300px"><canvas id="connectivityChart"></canvas></div>
+                <table style="margin-top:16px">
+                    <thead><tr><th>Horodatage</th><th>Événement</th></tr></thead>
+                    <tbody id="connectivityHistoryTable"></tbody>
+                </table>
             </div>
         </div>
 
@@ -444,6 +489,7 @@
                 tab.classList.add('active');
                 document.getElementById(tab.dataset.tab).classList.add('active');
                 if (tab.dataset.tab === 'audit') loadAuditEvents(1);
+                if (tab.dataset.tab === 'connectivity') loadConnectivity();
             });
         });
 
@@ -1102,6 +1148,118 @@
 
         // Auto-refresh toutes les 5s (seulement si connecte)
         setInterval(() => { if (authToken) loadAll(); }, 5000);
+
+        // ── INV-056 : Disponibilité opérateurs ──────────────────────────
+        let connectivityChartInstance = null;
+
+        function _fmtDuration(seconds) {
+            if (seconds < 60) return `${seconds}s`;
+            const m = Math.floor(seconds / 60);
+            if (m < 60) return `${m} min`;
+            const h = Math.floor(m / 60);
+            const rem = m % 60;
+            if (h < 24) return rem ? `${h} h ${rem} min` : `${h} h`;
+            const d = Math.floor(h / 24);
+            const remH = h % 24;
+            return remH ? `${d} j ${remH} h` : `${d} j`;
+        }
+
+        function _uptimeBadge(pct) {
+            let color = '#10b981';   // vert
+            if (pct < 99) color = '#f59e0b';   // orange
+            if (pct < 95) color = '#ef4444';   // rouge
+            return `<span style="color:${color};font-weight:600">${pct.toFixed(2)} %</span>`;
+        }
+
+        async function loadConnectivity() {
+            const days = document.getElementById('connectivityDays')?.value || 30;
+            try {
+                const data = await api(`/api/stats/connectivity?days=${days}`);
+                const tbody = document.getElementById('connectivityTable');
+                tbody.innerHTML = data.users.map(u => `
+                    <tr>
+                        <td>${u.user_name}</td>
+                        <td style="text-align:right">${u.transitions_offline}</td>
+                        <td style="text-align:right">${_fmtDuration(u.total_offline_seconds)}</td>
+                        <td style="text-align:right">${_uptimeBadge(u.uptime_percent)}</td>
+                        <td style="text-align:right"><button onclick="showConnectivityHistory(${u.user_id}, '${u.user_name.replace(/'/g, "\\'")}', ${days})">Détails</button></td>
+                    </tr>
+                `).join('');
+                // masquer le bloc historique tant qu'on n'a pas cliqué
+                const histCard = document.getElementById('connectivityHistoryCard');
+                if (histCard) histCard.style.display = 'none';
+            } catch (err) {
+                console.error('loadConnectivity error', err);
+            }
+        }
+
+        async function showConnectivityHistory(userId, userName, days) {
+            try {
+                const data = await api(`/api/users/${userId}/connectivity-history?days=${days}`);
+                document.getElementById('connectivityHistoryCard').style.display = 'block';
+                document.getElementById('connectivityHistoryTitle').textContent =
+                    `Historique — ${userName} (${days} derniers jours, ${data.events.length} événements)`;
+
+                // Tableau chronologique inverse
+                const tbody = document.getElementById('connectivityHistoryTable');
+                tbody.innerHTML = data.events.map(e => {
+                    const label = e.event === 'went_offline' ? '🔴 Hors ligne' : '🟢 En ligne';
+                    return `<tr><td>${new Date(e.ts).toLocaleString('fr-FR')}</td><td>${label}</td></tr>`;
+                }).join('');
+
+                // Chart : un point par event, avec valeur 0 (offline) / 1 (online)
+                // Reconstruit l'état dans le temps depuis le plus ancien.
+                const sorted = [...data.events].reverse();
+                const points = [];
+                // état initial inconnu — on commence à 1 (online) si premier event = went_offline,
+                // sinon à 0
+                let state = sorted.length && sorted[0].event === 'went_offline' ? 1 : 0;
+                if (sorted.length) {
+                    points.push({ x: new Date(sorted[0].ts).getTime() - 1000, y: state });
+                }
+                for (const e of sorted) {
+                    const t = new Date(e.ts).getTime();
+                    points.push({ x: t, y: state });
+                    state = e.event === 'went_offline' ? 0 : 1;
+                    points.push({ x: t, y: state });
+                }
+                // Dernier segment jusqu'à maintenant
+                if (sorted.length) {
+                    points.push({ x: Date.now(), y: state });
+                }
+
+                const ctx = document.getElementById('connectivityChart');
+                if (connectivityChartInstance) connectivityChartInstance.destroy();
+                connectivityChartInstance = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        datasets: [{
+                            label: `${userName} — état connectivité`,
+                            data: points,
+                            stepped: true,
+                            borderColor: '#3b82f6',
+                            backgroundColor: 'rgba(59,130,246,0.15)',
+                            fill: true,
+                            pointRadius: 0,
+                        }],
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            x: { type: 'linear', ticks: { callback: v => new Date(v).toLocaleDateString('fr-FR') } },
+                            y: {
+                                min: -0.1, max: 1.1,
+                                ticks: { callback: v => v === 1 ? 'En ligne' : v === 0 ? 'Hors ligne' : '' },
+                            },
+                        },
+                        plugins: { legend: { display: false } },
+                    },
+                });
+            } catch (err) {
+                console.error('showConnectivityHistory error', err);
+            }
+        }
     </script>
 </body>
 </html>

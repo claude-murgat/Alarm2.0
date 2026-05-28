@@ -1,0 +1,58 @@
+# /etc/systemd/system/alarm-cd-orchestrate.service
+#
+# Cf docs/CD_DESIGN.md §4 (canary V1.5 — promotion auto entre etapes apres
+# soak vert). Wrapper systemd pour /usr/local/bin/alarm-cd-orchestrate.
+#
+# DEPLOIEMENT : uniquement sur NODE3 cloud (le seul noeud qui voit les 3 cibles
+# via le mesh WG). Les onsite-1 / onsite-2 n'ont QUE alarm-cd-pull (ils sont
+# pilotes par NODE3).
+#
+# ACTIVATION : ce service est livre **disable** par defaut. L'operateur l'active
+# explicitement apres avoir valide 5 cycles canary manuels :
+#   sudo systemctl enable --now alarm-cd-orchestrate.timer
+
+[Unit]
+Description=Orchestre la chaine canary 3 -> 2 -> 1 (CD V1.5)
+Documentation=https://github.com/claude-murgat/Alarm2.0/blob/master/docs/CD_DESIGN.md
+After=docker.service network-online.target alarm-cd-pull.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# L'user `alarm` est dans le groupe docker (cf docs/PROVISIONING_ONSITE.md §14),
+# donc peut parler au socket Docker local sans sudo. Pour les noeuds CIBLES,
+# c'est SSH par cle vers alarm@10.99.0.X qui apporte le meme privilege docker.
+User=alarm
+Group=alarm
+# Lecture optionnelle de GATEWAY_KEY (et autres surcharges) depuis un fichier
+# protege root:alarm 640. Le `-` rend le fichier optionnel — sans lui, le
+# script exit 1 avec un message explicite (cf alarm-cd-orchestrate.sh).
+#
+# Exemple de contenu /etc/alarm/cd.env :
+#   GATEWAY_KEY=<meme valeur que dans .env.prod.secrets sur les noeuds backend>
+#   # Overrides optionnels :
+#   # SOAK=600
+#   # API_BASE=http://10.99.0.1:8000
+#   # REGISTRY=ghcr.io/claude-murgat
+#   # TAG=stable
+EnvironmentFile=-/etc/alarm/cd.env
+# /run/alarm-cd-orchestrate/ : owner alarm:alarm pour le lock. Pattern systemd
+# standard pour services User=non-root (memes raisons que alarm-cd-pull —
+# /run/ est root-only sinon).
+RuntimeDirectory=alarm-cd-orchestrate
+# /var/lib/alarm/cd/ : partage avec alarm-cd-pull (digests.tsv + orchestrate.state).
+# Cree owner alarm:alarm.
+StateDirectory=alarm/cd
+# Limite de temps : 3 etapes canary × (restart + soak 10 min) + preflight +
+# overhead ~= 45 min max. On laisse 1 h de marge avant kill brutal.
+TimeoutStartSec=3600
+ExecStart=/usr/local/bin/alarm-cd-orchestrate
+# Pas de Restart= (Type=oneshot). Le timer relance toutes les 15 min de toute
+# facon, et un retry immediat sur fail risque la boucle (le cooldown 1 h dans
+# le script empeche ca, mais l'unit systemd doit aussi respecter cette logique).
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

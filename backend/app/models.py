@@ -186,3 +186,23 @@ class DeploymentEvent(Base):
     status = Column(String, nullable=False)      # 'success' | 'failure' | 'in_progress'
     actor = Column(String, nullable=True)
     details = Column(String, nullable=True)      # JSON string
+
+
+class ConnectivityEvent(Base):
+    """INV-056 : trace des transitions online <-> offline d'un user (2026-05-26).
+
+    Remplace la création d'alarme oncall_offline (INV-050 déprécié) par un
+    suivi statistique. Émis sur transition seulement (pas à chaque heartbeat).
+
+    - `went_offline` : émis par `watchdog._mark_offline_users()` quand
+      `is_online` passe True -> False.
+    - `went_online`  : émis par `api/devices/heartbeat` quand le heartbeat
+      remet `is_online` à True alors qu'il était False (transition).
+
+    Conservé 365 jours par défaut (cf docs/INV-056 / purge job à venir).
+    """
+    __tablename__ = "connectivity_events"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    event = Column(String, nullable=False)  # 'went_online' | 'went_offline'
+    ts = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)

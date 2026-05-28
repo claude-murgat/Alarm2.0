@@ -90,6 +90,7 @@ Après `acknowledgeAlarm` réussi depuis AlarmActivity : `stopPulseAnimations()`
 ### INV-ANDROID-007 [C] ⚠️ Sonnerie "connexion perdue" utilise aussi le stream ALARM
 Quand `heartbeatLostAlarm` ou `authErrorAlarm` passent true, `connectionLostSoundManager.startAlarmSound()` est démarré (même mécanisme que l'alarme standard).
 - **Pourquoi** : une perte de connexion prolongée = même criticité qu'une alarme (on ne recevra rien).
+- **Note 2026-05-26** : la condition d'armement de `heartbeatLostAlarm` a été resserrée (cf INV-ANDROID-302 — exige aussi `noNetwork` au sens INV-ANDROID-305). Le **canal sonore et son comportement sont inchangés** ; seule la **gâchette** devient plus restrictive. `authErrorAlarm` reste indépendant : la sonnerie sur erreur d'auth ne dépend PAS de l'état réseau (token expiré = action manuelle requise quelle que soit la connectivité).
 - **Couverture** : test09 vérifie l'affichage du bandeau, pas la sonnerie audio.
 - **Manque** : test qui vérifie l'état du MediaPlayer après `heartbeatLostAlarm=true`.
 
@@ -122,12 +123,22 @@ Calcul dans `updateStatus()` :
 - **Pourquoi** : comprendre pourquoi on ne reçoit (pas) d'alarme.
 - **Manque** : aucun test ne couvre l'état "En attente" spécifique au mode veille.
 
-### INV-ANDROID-104 [H] ⚠️ Alerte "Connexion perdue" : bandeau permanent, pas toast
-Quand `heartbeatLostAlarm || authErrorAlarm`, `connectionLostContainer.visibility=VISIBLE` avec texte explicite :
-- `heartbeatLostAlarm` → "Connexion perdue avec le serveur", bouton reconnexion GONE (resolution automatique attendue).
-- `authErrorAlarm` → le message personnalisé (ex: "Votre session a expiré..."), bouton "Reconnexion" VISIBLE (action manuelle requise).
-- **Pourquoi** : un toast qui disparaît en 3s = l'utilisateur ne le voit pas s'il n'a pas le téléphone en main. Un bandeau permanent force la lecture.
-- **Couverture** : test09 (heartbeat lost), test17 (auth error).
+### INV-ANDROID-104 [H] ⚠️ Alerte "Connexion perdue" : bandeau permanent, pas toast — découplé de la sonnerie depuis 2026-05-26
+Le bandeau "Connexion perdue avec le serveur" doit apparaître **dès que le heartbeat est perdu** (sans attendre la condition de sonnerie de INV-ANDROID-302). La sonnerie locale, elle, n'est armée que si le réseau est aussi totalement perdu.
+
+2 drapeaux distincts dans `AlarmPollingService` :
+- `heartbeatLostVisual` (info) → `elapsed >= 120 000ms` depuis dernier heartbeat 2xx → bandeau VISIBLE, **pas de son**.
+- `heartbeatLostAlarm` (action) → `heartbeatLostVisual && noNetwork` (cf INV-305) → bandeau VISIBLE + sonnerie locale (INV-302).
+- `authErrorAlarm` (inchangé) → message personnalisé, bouton "Reconnexion" VISIBLE, sonnerie déclenchée (indépendant de l'état réseau, cf INV-007).
+
+Textes du bandeau :
+- `heartbeatLostVisual && !noNetwork` → "Serveur injoignable — vous recevrez les alarmes par SMS si nécessaire" (texte rassurant, pas de panique).
+- `heartbeatLostAlarm` (= heartbeat + noNetwork) → "Connexion perdue — déplacez-vous pour retrouver du réseau" (texte d'action, accompagné de la sonnerie).
+- `authErrorAlarm` → message personnalisé (ex: "Votre session a expiré..."), bouton "Reconnexion" VISIBLE.
+
+- **Pourquoi** : un toast qui disparaît en 3s = l'utilisateur ne le voit pas s'il n'a pas le téléphone en main. Un bandeau permanent force la lecture. Distinguer info-only vs action-required évite le cri-loup.
+- **Statut** : code implémenté 2026-05-27 (cf `AlarmPollingService.kt:31-50` pour les 2 drapeaux companion, `onHeartbeatFail()` pour l'armement, `DashboardActivity.kt:260+` pour le rendu 3-états).
+- **Couverture** : ⚠️ tests Espresso à étoffer (test09 actuel ne distingue pas encore les 2 textes). À ajouter dans une PR follow-up.
 
 ### INV-ANDROID-105 [M] ⚠️ Historique affiché = 10 derniers jours filtrés sur resolved/acknowledged
 `getAlarmHistory(days=10)` appelé toutes les 10s, filtré côté client sur `status in {resolved, acknowledged}`. Affichage en liste chronologique avec timeline (dot + ligne) côté gauche.
@@ -211,10 +222,18 @@ Champ `connectionStatus` sur DashboardActivity affiche ✅ ou ❌ selon `AlarmPo
 - **Pourquoi** : feedback immédiat de l'état réseau.
 - **Couverture** : test05 (OK), test06 (fail).
 
-### INV-ANDROID-302 [C] ⚠️ Perte heartbeat > 2 min → alerte permanente + sonnerie locale
-`heartbeatLossTimeoutMs = 120_000L` (configurable pour tests). Si `elapsed >= timeout` depuis `heartbeatLostSince`, `heartbeatLostAlarm = true`. La DashboardActivity déclenche alors bandeau + sonnerie via `connectionLostSoundManager`.
-- **Pourquoi** : si l'appareil ne communique plus depuis 2 min, on peut rater une alarme qui s'accumule côté backend. L'utilisateur doit SAVOIR et agir.
-- **Couverture** : test09 (avec timeout réduit à 3s pour la vitesse).
+### INV-ANDROID-302 [C] ⚠️ Sonnerie locale "hors connexion" : armée uniquement si perte heartbeat > 2 min ET réseau totalement perdu
+`heartbeatLossTimeoutMs = 120_000L` (configurable pour tests). Au-delà de ce délai depuis `heartbeatLostSince`, on évalue la connectivité réseau du téléphone (cf INV-ANDROID-305) :
+- **réseau présent** (data 4G/Wi-Fi disponible **OU** signal cellulaire voix/SMS disponible) → `heartbeatLostAlarm` reste `false`. Le bandeau visuel "Serveur injoignable" reste affiché via `heartbeatLostSince` (cf INV-ANDROID-104), mais **aucune sonnerie locale** n'est démarrée.
+- **réseau totalement perdu** (ni data **ni** signal cellulaire) → `heartbeatLostAlarm = true`, `connectionLostSoundManager.startAlarmSound()` démarre.
+Le drapeau retombe à `false` dès que (a) un heartbeat repasse 2xx (cf INV-ANDROID-303), **OU** (b) l'un des deux canaux réseau redevient disponible — auquel cas le téléphone est à nouveau joignable par le système d'astreinte (SMS via gateway ou push différé) et la sonnerie n'a plus de raison d'être.
+- **Pourquoi** : la sonnerie locale a pour seul but de signaler à l'opérateur **qu'il est lui-même hors de portée de tous les canaux** et doit donc bouger pour retrouver du réseau. Si le téléphone a du SMS ou de la data, le système peut le joindre d'une manière ou d'une autre (SMS gateway, push différé quand connexion revient) — la sonnerie est anxiogène et inutile. Cas typiques de faux positifs aujourd'hui : backend en panne courte, maintenance planifiée, tunnel/changement Wi-Fi avec rétablissement < 10 min. Ces cas restent visibles par le bandeau, sans réveiller l'opérateur.
+- **Statut** : code implémenté 2026-05-27 — `AlarmPollingService.onHeartbeatFail()` consulte `NetworkAvailabilityMonitor.isNoNetwork` (cf INV-305) avant d'armer `heartbeatLostAlarm`. Si le réseau revient (data OU cellular) alors que heartbeat reste perdu, le drapeau retombe au tick suivant — la sonnerie s'arrête sans attendre un heartbeat 2xx.
+- **Couverture à compléter** : test09 (aujourd'hui : heartbeat lost ⇒ bandeau, ne vérifie pas la sonnerie) doit devenir 3 tests Espresso (à ajouter dans une PR follow-up — nécessite injection d'un `FakeNetworkMonitor` ou utilisation de `NetworkAvailabilityMonitor._setStatesForTest`) :
+  - `test_heartbeat_lost_with_network_no_local_alarm` : heartbeat down + data OU cellular up → bandeau VISIBLE mais `connectionLostSoundManager.isPlaying == false`.
+  - `test_heartbeat_lost_and_no_network_triggers_local_alarm` : heartbeat down + data DOWN + cellular DOWN → sonnerie démarre.
+  - `test_local_alarm_stops_when_network_returns` : à partir du cas précédent, restaurer data OU cellular → sonnerie s'arrête immédiatement, sans attendre un heartbeat 2xx.
+- **Dépendance** : INV-ANDROID-305 (définition formelle de "no network at all") et INV-ANDROID-007 (canal sonore réutilisé tel quel — seule la condition d'armement change).
 
 ### INV-ANDROID-303 [H] ⚠️ Heartbeat qui revient avant timeout → reset, pas d'alerte
 Un `heartbeat.isSuccessful` reset `heartbeatLostSince=0L` et `heartbeatLostAlarm=false`. Pas d'alerte si glitch réseau passager.
@@ -225,6 +244,29 @@ Un `heartbeat.isSuccessful` reset `heartbeatLostSince=0L` et `heartbeatLostAlarm
 Cas spécial : `response.code() == 503` signifie "backend est un replica, pas le primary". Le heartbeat set `needsUrlSwitch=true` (volatile) — le poll suivant détecte le flag et fait `switchToNextUrl()` + delay 4s pour laisser le heartbeat revalider.
 - **Pourquoi** : suivre automatiquement le primary après failover Patroni côté backend. Le heartbeat ne doit PAS lui-même switcher (il suit passivement l'URL courante).
 - **Manque** : test Espresso dédié au scénario 503 heartbeat (test22 couvre les 503 polling, pas heartbeat).
+
+### INV-ANDROID-305 [C] ⚠️ Détection "réseau totalement perdu" = ni data ni signal cellulaire
+Le téléphone est considéré "sans aucun réseau" si **les deux** conditions sont vraies simultanément :
+1. **Pas de data utilisable** : `ConnectivityManager.getActiveNetwork()` retourne `null`, **ou** le `NetworkCapabilities` du réseau actif ne contient pas `NET_CAPABILITY_INTERNET` + `NET_CAPABILITY_VALIDATED`. Couvre Wi-Fi et mobile data.
+2. **Pas de signal cellulaire voix/SMS** : `TelephonyManager.getServiceState().getState() != STATE_IN_SERVICE` (ou équivalent multi-SIM via `getServiceStateForSubscriber` ≥ API 30). Couvre la capacité du téléphone à envoyer/recevoir un SMS et à passer/recevoir un appel.
+
+État évalué de façon réactive via :
+- `ConnectivityManager.registerDefaultNetworkCallback()` pour data (events `onAvailable` / `onLost`).
+- `TelephonyManager.registerTelephonyCallback(ServiceStateListener)` (API 31+) ou `listen(PhoneStateListener.LISTEN_SERVICE_STATE)` (legacy) pour cellulaire.
+- Pas de polling périodique : on s'abonne aux callbacks au démarrage de `AlarmPollingService` et on les libère au stop.
+
+Permissions nécessaires (déjà au manifest pour la plupart) : `ACCESS_NETWORK_STATE` (data), `READE_PHONE_STATE` (cellular service state — à ajouter si absent, runtime perm sur Android 6+).
+
+- **Pourquoi** : c'est l'unique signal exploitable pour distinguer "le backend est inatteignable mais je peux être joint autrement" de "je suis dans un trou réseau total". Cf INV-ANDROID-302 pour l'usage.
+- **Edge cases attendus** :
+  - Mode avion → les 2 conditions deviennent vraies en quelques secondes → no-network = true.
+  - Wi-Fi connecté sans Internet (captive portal non validé) → `NET_CAPABILITY_VALIDATED` absent → data considérée indisponible. Si cellular aussi down → no-network = true. Correct : le téléphone n'est effectivement joignable par rien.
+  - Tunnel court (< 10 s) → callbacks bouncent ; tant qu'on n'arme pas la sonnerie avant 2 min de heartbeat lost (INV-302), pas de faux positif.
+- **Statut** : code implémenté 2026-05-27 — singleton `util/NetworkAvailabilityMonitor.kt` initialisé par `AlarmPollingService.onCreate()` et libéré dans `onDestroy()`. `READ_PHONE_STATE` demandée au runtime dans `MainActivity.onCreate` ; refus → fail open conservateur (`cellularInService = true`, donc INV-302 ne s'armera jamais sans cette perm).
+- **Couverture à créer** (PR follow-up) :
+  - `test_no_network_when_airplane_mode` : activer mode avion via `UiAutomation.executeShellCommand("cmd connectivity airplane-mode enable")` → state lu doit être `noNetwork = true` sous 5 s.
+  - `test_data_only_loss_is_not_no_network` : couper data, garder cellular → `noNetwork = false`.
+  - `test_cellular_only_loss_is_not_no_network` : couper cellular (retirer SIM côté émulateur ou forcer via `cmd phone`), garder Wi-Fi → `noNetwork = false`.
 
 ---
 

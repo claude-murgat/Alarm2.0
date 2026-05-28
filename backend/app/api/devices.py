@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from typing import List
 from ..clock import now as clock_now
 from ..database import get_db
-from ..models import User, DeviceToken
+from ..models import ConnectivityEvent, User, DeviceToken
 from ..schemas import UserResponse, FcmTokenRequest, FcmTokenDeleteRequest
 from ..auth import get_current_user, security, SECRET_KEY, ALGORITHM
 from ..events import log_event
@@ -92,6 +92,10 @@ def heartbeat(
     now = clock_now()
     current_user.last_heartbeat = now
     current_user.is_online = True
+    if was_offline:
+        # INV-056 : event "went_online" emis sur transition is_online False -> True
+        # (et pas sur chaque heartbeat — uniquement le passage).
+        db.add(ConnectivityEvent(user_id=current_user.id, event="went_online", ts=now))
     db.commit()
     if was_offline:
         log_event("user_online", db=db, user_id=current_user.id, user_name=current_user.name)
