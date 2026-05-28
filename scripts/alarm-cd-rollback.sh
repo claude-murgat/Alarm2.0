@@ -21,7 +21,8 @@ set -euo pipefail
 NODE=""
 SSH_USER="${SSH_USER:-alarm}"
 REMOTE_REPO="${REMOTE_REPO:-/opt/alarm}"
-API_BASE="${API_BASE:-http://10.99.0.1:8000}"
+API_BASE_DEFAULT="http://10.99.0.1:8000"
+API_BASE="${API_BASE:-}"
 REGISTRY="${REGISTRY:-ghcr.io/claude-murgat}"
 GATEWAY_KEY="${GATEWAY_KEY:-}"
 IMAGE="${IMAGE:-alarm-backend}"
@@ -69,6 +70,33 @@ esac
 
 log() { echo "[rollback-$NODE_NAME] $*" >&2; }
 
+# Decouvre le leader Patroni via GET /health role=primary sur les 3 IPs WG.
+# POST /api/deployments/events requiert le leader (replicas -> 503 'replica').
+# Quand appele depuis canary.sh, --api-base est deja resolu -> on skip ce bloc.
+discover_leader() {
+  local ip role
+  for ip in 10.99.0.1 10.99.0.2 10.99.0.3; do
+    role=$(curl -fsS --max-time 3 "http://${ip}:8000/health" 2>/dev/null \
+      | python3 -c "import sys,json;print(json.load(sys.stdin).get('role',''))" 2>/dev/null \
+      || echo "")
+    if [[ "$role" == "primary" ]]; then
+      echo "$ip"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if [[ -z "$API_BASE" ]]; then
+  if leader_ip=$(discover_leader); then
+    API_BASE="http://${leader_ip}:8000"
+    log "Leader Patroni detecte : $API_BASE"
+  else
+    API_BASE="$API_BASE_DEFAULT"
+    log "WARN : aucun leader Patroni joignable, fallback $API_BASE (POST events risque 503)"
+  fi
+fi
+
 ssh_target() {
   ssh -o BatchMode=yes -o ConnectTimeout=10 \
       "${SSH_USER}@${WG_IP}" "$@"
@@ -88,7 +116,10 @@ if [[ -z "$PREV_DIGEST" ]]; then
   log "  Action humaine : choisir un sha precis et faire `docker pull <repo>:sha-<short>`"
   log "  puis re-tag manuellement :stable."
 
-  curl -fsS -X POST "$API_BASE/api/deployments/events" \
+  # --retry-all-errors absorbe transients + cas commun "leader Patroni
+  # change pendant le restart" (cf canary.sh post_event() pour le contexte).
+  curl --retry 3 --retry-delay 3 --retry-all-errors --max-time 15 \
+    -fsS -X POST "$API_BASE/api/deployments/events" \
     -H "X-Gateway-Key: $GATEWAY_KEY" \
     -H "Content-Type: application/json" \
     -d "{
@@ -126,7 +157,8 @@ DETAILS=$(cat <<JSON
 {"trigger": "$TRIGGER", "previous": "$CURRENT_DIGEST", "rolled_back_to": "$PREV_DIGEST"}
 JSON
 )
-curl -fsS -X POST "$API_BASE/api/deployments/events" \
+curl --retry 3 --retry-delay 3 --retry-all-errors --max-time 15 \
+  -fsS -X POST "$API_BASE/api/deployments/events" \
   -H "X-Gateway-Key: $GATEWAY_KEY" \
   -H "Content-Type: application/json" \
   -d "{

@@ -21,6 +21,7 @@ from .api.test_api import router as test_router
 from .api.sms import router as sms_router
 from .api.alarms_internal import router as alarms_internal_router
 from .api.audit import router as audit_router
+from .api.connectivity import router as connectivity_router
 from .escalation import escalation_loop
 from .watchdog import watchdog_loop
 from .leader_election import leader_election_loop, is_leader
@@ -190,6 +191,7 @@ app.include_router(alarms_internal_router)
 from .api.calls import router as calls_router
 app.include_router(calls_router)
 app.include_router(audit_router)
+app.include_router(connectivity_router)
 
 from .api.stats import router as stats_router
 app.include_router(stats_router)

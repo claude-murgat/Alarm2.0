@@ -400,25 +400,26 @@ async def _apply_oncall_heartbeat(db: Session, now, escalation_chain):
         float(delay_cfg.value) if delay_cfg else ONCALL_OFFLINE_DELAY_MINUTES_DEFAULT
     )
 
+    # Issue #116 : marker "personne online — email déjà envoyé pour cet épisode".
+    # Vide/absent = autorisé à envoyer. Non-vide = déjà envoyé, skip.
+    marker_cfg = db.query(SystemConfig).filter(
+        SystemConfig.key == "nobody_online_email_sent_at"
+    ).first()
+    email_already_sent = bool(marker_cfg and marker_cfg.value)
+
     actions = evaluate_oncall_heartbeat(
         chain_snapshot,
         user_snapshots,
         alarm_snapshots,
         oncall_delay_minutes,
         now,
+        email_already_sent=email_already_sent,
     )
 
-    alarm_by_id = {a.id: a for a in alarms_orm}
-
-    # INV-051 : resoudre les alarmes oncall existantes
-    for resolution in actions.resolutions:
-        alarm = alarm_by_id.get(resolution.alarm_id)
-        if alarm is not None:
-            logger.info(
-                f"On-call user back online, resolving oncall alarm {alarm.id}"
-            )
-            alarm.status = "resolved"
-            db.commit()
+    # INV-050/051/052/054 dépréciés 2026-05-26 (cf tests/INVARIANTS.md §5) :
+    # plus de création ni résolution d'alarme oncall_offline. Seul INV-053 (email
+    # "personne en ligne") reste actif. Le suivi statistique des transitions
+    # online/offline est porté par INV-056 (table connectivity_events, PR B).
 
     # INV-053 : email direction technique (personne online)
     # Bug #105 : asyncio.to_thread pour ne pas bloquer l'event loop si SMTP timeout.
@@ -435,30 +436,20 @@ async def _apply_oncall_heartbeat(db: Session, now, escalation_chain):
             to=recipient,
         )
 
-    # INV-050 : creer l'alarme oncall
-    for creation in actions.creations:
-        # INV-018 : original_created_at fige t0 (jamais modifie ensuite)
-        _now = clock_now()
-        alarm = Alarm(
-            title=f"Utilisateur d'astreinte hors connexion ({creation.oncall_user_name})",
-            message=(
-                f"{creation.oncall_user_name} est hors ligne depuis "
-                f"{creation.offline_duration_minutes:.0f} minutes"
-            ),
-            severity="critical",
-            assigned_user_id=creation.assigned_user_id,
-            is_oncall_alarm=True,
-            original_created_at=_now,
-            created_at=_now,
-        )
-        db.add(alarm)
-        db.flush()  # Obtenir l'ID avant d'ajouter la notification
-        _add_notified_user(db, alarm, creation.assigned_user_id)
+    # Issue #116 : poser / effacer le marker after l'envoi (ou non-envoi).
+    if actions.email_marker_set:
+        if marker_cfg is None:
+            db.add(SystemConfig(
+                key="nobody_online_email_sent_at",
+                value=now.isoformat(),
+            ))
+        else:
+            marker_cfg.value = now.isoformat()
         db.commit()
-        logger.warning(
-            f"On-call alarm created: {creation.oncall_user_name} offline for "
-            f"{creation.offline_duration_minutes:.0f}min, assigned to user {creation.assigned_user_id}"
-        )
+    elif actions.email_marker_clear:
+        if marker_cfg is not None and marker_cfg.value:
+            marker_cfg.value = ""
+            db.commit()
 
 
 def _find_next_user(db, escalation_chain, current_position, current_user_id):

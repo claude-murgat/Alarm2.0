@@ -35,8 +35,11 @@
 
 Cmnd_Alias ALARM_CD_INSTALL = \
     /usr/bin/install -m * /usr/local/bin/alarm-cd-pull, \
+    /usr/bin/install -m * /usr/local/bin/alarm-cd-orchestrate, \
     /usr/bin/install -m * /etc/systemd/system/alarm-cd-pull.service, \
-    /usr/bin/install -m * /etc/systemd/system/alarm-cd-pull.timer
+    /usr/bin/install -m * /etc/systemd/system/alarm-cd-pull.timer, \
+    /usr/bin/install -m * /etc/systemd/system/alarm-cd-orchestrate.service, \
+    /usr/bin/install -m * /etc/systemd/system/alarm-cd-orchestrate.timer
 
 Cmnd_Alias ALARM_CD_SYSTEMCTL = \
     /usr/bin/systemctl daemon-reload, \
@@ -57,7 +60,25 @@ Cmnd_Alias ALARM_CD_SYSTEMCTL = \
     /usr/bin/systemctl cat alarm-cd-pull.service, \
     /usr/bin/systemctl cat alarm-cd-pull.timer, \
     /usr/bin/systemctl reset-failed alarm-cd-pull.service, \
-    /usr/bin/systemctl reset-failed alarm-cd-pull.timer
+    /usr/bin/systemctl reset-failed alarm-cd-pull.timer, \
+    /usr/bin/systemctl enable alarm-cd-orchestrate.timer, \
+    /usr/bin/systemctl enable --now alarm-cd-orchestrate.timer, \
+    /usr/bin/systemctl disable alarm-cd-orchestrate.timer, \
+    /usr/bin/systemctl disable --now alarm-cd-orchestrate.timer, \
+    /usr/bin/systemctl start alarm-cd-orchestrate.service, \
+    /usr/bin/systemctl start alarm-cd-orchestrate.timer, \
+    /usr/bin/systemctl stop alarm-cd-orchestrate.service, \
+    /usr/bin/systemctl stop alarm-cd-orchestrate.timer, \
+    /usr/bin/systemctl restart alarm-cd-orchestrate.service, \
+    /usr/bin/systemctl restart alarm-cd-orchestrate.timer, \
+    /usr/bin/systemctl status alarm-cd-orchestrate.service, \
+    /usr/bin/systemctl status alarm-cd-orchestrate.timer, \
+    /usr/bin/systemctl is-enabled alarm-cd-orchestrate.timer, \
+    /usr/bin/systemctl is-active alarm-cd-orchestrate.timer, \
+    /usr/bin/systemctl cat alarm-cd-orchestrate.service, \
+    /usr/bin/systemctl cat alarm-cd-orchestrate.timer, \
+    /usr/bin/systemctl reset-failed alarm-cd-orchestrate.service, \
+    /usr/bin/systemctl reset-failed alarm-cd-orchestrate.timer
 
 Cmnd_Alias ALARM_CD_JOURNAL = \
     /usr/bin/journalctl -u alarm-cd-pull, \
@@ -65,6 +86,12 @@ Cmnd_Alias ALARM_CD_JOURNAL = \
     /usr/bin/journalctl -u alarm-cd-pull.service, \
     /usr/bin/journalctl -u alarm-cd-pull.service *, \
     /usr/bin/journalctl -u alarm-cd-pull.timer, \
-    /usr/bin/journalctl -u alarm-cd-pull.timer *
+    /usr/bin/journalctl -u alarm-cd-pull.timer *, \
+    /usr/bin/journalctl -u alarm-cd-orchestrate, \
+    /usr/bin/journalctl -u alarm-cd-orchestrate *, \
+    /usr/bin/journalctl -u alarm-cd-orchestrate.service, \
+    /usr/bin/journalctl -u alarm-cd-orchestrate.service *, \
+    /usr/bin/journalctl -u alarm-cd-orchestrate.timer, \
+    /usr/bin/journalctl -u alarm-cd-orchestrate.timer *
 
 alarm ALL=(root) NOPASSWD: ALARM_CD_INSTALL, ALARM_CD_SYSTEMCTL, ALARM_CD_JOURNAL

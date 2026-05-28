@@ -239,47 +239,60 @@ Un heartbeat envoyé à un noeud replica renvoie 503 (l'app doit failover sur le
 
 ## 5. Astreinte (oncall)
 
-### INV-050 [C] ✅ Oncall offline > 15min → alarme auto créée
-Si user position 1 a `is_online=False` et `last_heartbeat < now - 15min` → création alarme `is_oncall_alarm=True`.
-- **Pourquoi** : la continuité de service DOIT être garantie.
-- **Fix/Extraction** : PR4 (878366b). Logique dans `logic/oncall.py`.
-- **Couverture** :
-  - Unit : `test_oncall.py::TestInv050CreateAlarmAfterDelay` (3 tests : above/exactly/below delay avec boundaries)
-  - E2E : `TestOnCallDisconnectionAlarm::test_oncall_offline_15min_creates_alarm`
+> **Changement de stratégie 2026-05-26** : la création automatique d'une alarme "oncall_offline" (INV-050) générait trop de faux positifs — un opérateur qui perd sa data (4G/Wi-Fi) mais garde son signal cellulaire (SMS + voix) est marqué offline alors qu'il reste joignable. Décision : **supprimer la création d'alarme** sur user pos 1 offline, et la **remplacer par un tracking statistique** des transitions online ↔ offline (cf nouveau INV-056). L'email "personne en ligne" (INV-053) reste, car il couvre un cas business différent (sortie de boucle quand le système ne sait plus à qui parler). Cohérent avec la décision client `INV-ANDROID-302/305` (la sonnerie locale "hors connexion" ne se déclenche que si le téléphone est totalement injoignable — data + cellulaire perdus).
 
-### INV-051 [H] ✅ Oncall de retour online → alarme oncall auto-résolue
-Si une alarme `is_oncall_alarm=True, status in (active, escalated)` existe et position 1 est `is_online=True` → `status → 'resolved'`.
-- **Pourquoi** : le problème s'est résolu de lui-même.
-- **Couverture** :
-  - Unit : `test_oncall.py::TestInv051AutoResolveOnReconnect` (3 tests : resolve, no-op sans alarme, ignore non-oncall)
-  - E2E : `TestOnCallDisconnectionAlarm::test_oncall_alarm_auto_resolves_on_reconnection`
+### INV-050 [C] ❌ DEPRECATED (2026-05-26) — l'alarme oncall_offline n'est plus créée
+Avant : si user position 1 a `is_online=False` et `last_heartbeat < now - 15min` → création alarme `is_oncall_alarm=True`. **Cette logique est supprimée.**
+- **Pourquoi** : trop de faux positifs (cf encadré "Changement de stratégie" en tête de section). Remplacé par tracking statistique (INV-056) — pas d'escalade automatique sur déconnexion data.
+- **À faire dans le PR de fix** : supprimer le code de création (`logic/oncall.py::evaluate_oncall_creation_plan` ou équivalent), supprimer les tests `test_oncall.py::TestInv050CreateAlarmAfterDelay` et `TestOnCallDisconnectionAlarm::test_oncall_offline_15min_creates_alarm`, retirer la clé `oncall_offline_delay_minutes` de `SystemConfig` si elle n'a plus d'autre usage (vérifier que INV-053 ne s'en sert pas — voir ci-dessous).
+- **Statut historique** : couverture conservée comme témoin jusqu'à la PR de retrait. À ne PAS étendre.
 
-### INV-052 [H] ✅ Alarme oncall assignée au SUIVANT, pas au #1
-L'alarme oncall n'est PAS assignée à l'user offline (position 1) mais au prochain online dans la chaîne.
-- **Pourquoi** : évident (l'offline ne peut pas la prendre).
-- **Couverture** :
-  - Unit : `test_oncall.py::TestInv052AssignedToNextOnline` (2 tests : next online pos 2, skip offline → pos 3)
-  - E2E : `TestOnCallDisconnectionAlarm::test_oncall_offline_15min_creates_alarm` (assert assigned_user_id == user2)
+### INV-051 [H] ❌ DEPRECATED (2026-05-26) — corollaire de INV-050
+Avant : alarme oncall auto-résolue au retour online de pos 1. **Cette logique disparaît avec INV-050.**
+- **À faire dans le PR de fix** : supprimer `logic/oncall.py::auto_resolve_oncall_alarms` et les tests `TestInv051AutoResolveOnReconnect` + `test_oncall_alarm_auto_resolves_on_reconnection`.
 
-### INV-053 [C] ✅ Personne en ligne → email direction technique
-Si tous les users sont offline et position 1 est offline > 15min → email à `system_config.alert_email` (pas d'alarme créée).
-- **Pourquoi** : dernier recours, sortir du système.
-- **Couverture** :
+### INV-052 [H] ❌ DEPRECATED (2026-05-26) — corollaire de INV-050
+Avant : alarme oncall assignée au prochain online dans la chaîne. **Sans alarme à assigner, sans objet.**
+- **À faire dans le PR de fix** : supprimer `TestInv052AssignedToNextOnline` ; vérifier que `logic/oncall.py` n'expose plus de helper "find next online".
+
+### INV-053 [C] ✅ Personne en ligne > 15min → email direction technique (déclencheur découplé de l'alarme)
+Si **tous les users** sont `is_online=False` et que **la condition dure > 15 min** (mesuré sur `last_heartbeat` du plus récent online connu, ou bien sur le timestamp de l'event "went_offline" du dernier user à passer offline — à préciser dans le PR de refactor) → email à `system_config.alert_email`. **Aucune alarme n'est créée** (ni à l'époque ni maintenant).
+- **Pourquoi** : dernier recours business — quand le système n'a plus aucun téléphone joignable, prévenir un humain par email pour qu'il intervienne hors-bande (appel direct, déplacement, etc.).
+- **Changement 2026-05-26** : avant, le code d'INV-053 était entrelacé avec la création d'alarme INV-050 (même tick d'évaluation). Avec la suppression de INV-050, INV-053 devient un **chemin autonome** : la boucle de surveillance évalue uniquement la condition "tous offline > 15 min" et envoie l'email, sans flux de création d'alarme. Anti-spam : 1 seul email par épisode (réf INV-085 / quorum / dissensus comme modèle de cooldown), à confirmer dans le PR.
+- **Couverture existante à conserver** :
   - Unit : `test_oncall.py::TestInv053EmailIfNobodyOnline::test_nobody_online_sends_email`
   - E2E : `TestOnCallDisconnectionAlarm::test_nobody_connected_sends_email` (Mailhog)
+- **Manque à combler dans le PR de refactor** : test qui vérifie qu'INV-053 fonctionne **après** retrait de INV-050 — le hook d'évaluation peut avoir besoin d'un nouveau call site.
 
-### INV-054 [H] ✅ Pas de doublon d'alarme oncall
-Si une alarme `is_oncall_alarm=True, status in (active, escalated)` existe déjà, ne pas en créer une seconde.
-- **Pourquoi** : éviter pollution.
-- **Couverture** :
-  - Unit : `test_oncall.py::TestInv054NoDuplicateOncallAlarm` (3 tests : active prevents, escalated prevents, resolved allows)
+### INV-054 [H] ❌ DEPRECATED (2026-05-26) — corollaire de INV-050
+Avant : pas de doublon d'alarme oncall. **Sans alarme oncall, sans objet.**
+- **À faire dans le PR de fix** : supprimer `TestInv054NoDuplicateOncallAlarm`.
 
-### INV-055 [M] ✅ Oncall : seul position 1 déclenche la surveillance
-User position 2+ offline ne déclenche PAS d'alarme oncall, même prolongée.
-- **Pourquoi** : seul le #1 a un contrat d'astreinte.
-- **Couverture** :
-  - Unit : `test_oncall.py::TestInv055OnlyPos1IsMonitored::test_pos2_offline_does_not_trigger_creation`
-  - E2E : `TestOnCallDisconnectionAlarm::test_no_oncall_alarm_if_not_position1`
+### INV-055 [M] ✅ → REINTERPRÉTÉ 2026-05-26 : seul position 1 déclenche l'email INV-053 ; le tracking INV-056 concerne tous les users
+Avant : "seul position 1 déclenche la surveillance" (= la création d'alarme oncall). Avec la suppression de INV-050, cet invariant reste pertinent pour clarifier **qui** déclenche **quoi** :
+- L'**email** INV-053 ("tous offline > 15 min") évalue toujours la chaîne et se déclenche dès que la condition est vraie. La position de l'opérateur dans la chaîne n'a pas d'importance pour l'email — c'est la situation "personne joignable" qui compte. (Note : cette reformulation est plus large que la version précédente où l'email ne partait que si pos 1 offline en plus.)
+- Le **tracking** INV-056 enregistre les transitions de **tous** les users (pas seulement pos 1) — pour stats RH, monitoring qualité réseau, KPI astreinte. La spec antérieure "seul pos 1 est monitoré" ne s'applique plus.
+- **À faire dans le PR de fix** : mettre à jour `TestInv055OnlyPos1IsMonitored` (renommer + adapter au nouveau périmètre, ou supprimer si redondant avec INV-053/056). Décider si l'email doit garder un AND avec "pos 1 offline" ou se déclencher dès "tous offline" — à trancher par le mainteneur.
+
+### INV-056 [H] 🐛 Tracking des transitions online ↔ offline (remplace l'alarme INV-050)
+Chaque transition `is_online: True → False` ou `False → True` sur **n'importe quel user** doit être enregistrée comme un event dans une table dédiée (proposition : `connectivity_events` avec colonnes `id`, `user_id`, `event` ∈ {`went_online`, `went_offline`}, `ts`). Le watchdog (INV-041) émet les events `went_offline` au moment où il flip `is_online`. Le POST /devices/heartbeat émet `went_online` au moment où il flip `is_online` (uniquement lors de la transition, pas à chaque heartbeat).
+- **Pourquoi** : on a coupé l'alarme automatique (INV-050) qui était trop bruyante. On garde un suivi factuel "qui est passé offline, combien de temps, combien de fois" pour :
+  - éclairer les statistiques d'astreinte (disponibilité opérateur, qualité réseau du terrain),
+  - permettre au mainteneur d'identifier un opérateur qui a un problème récurrent (téléphone HS, zone mal couverte),
+  - garder un historique exploitable a posteriori si un incident révèle qu'un opérateur était hors-réseau.
+- **Statut 🐛** : règle introduite 2026-05-26 ; table + emission d'events à créer (migration DB + hooks dans `watchdog.py` et `api/heartbeat`).
+- **Exposition API** (minimum viable) :
+  - `GET /api/users/{user_id}/connectivity-history?days=<N>` : retourne la liste paginée des events, du plus récent au plus ancien.
+  - `GET /api/stats/connectivity?weeks=<N>` : agrégat par user (nombre de transitions offline, durée cumulée offline, % uptime sur la fenêtre).
+  - Auth : tokens admin uniquement (les opérateurs n'ont pas besoin de voir l'historique des autres).
+- **Frontend** (hors scope minimum, à prévoir en follow-up) : onglet "Disponibilité opérateurs" dans l'admin web, avec courbe temporelle par user.
+- **Anti-pollution** : ne PAS enregistrer un event si la transition est intra-tick du watchdog (offline détecté puis online ré-établi dans le même appel — peu probable mais filtrer). Et ne PAS double-poster un event si l'app envoie un heartbeat alors qu'elle était déjà `is_online=True`.
+- **Couverture à créer** :
+  - Unit `test_connectivity_events.py::test_went_offline_inserted_when_watchdog_flips_user` : forcer un user `is_online=True, last_heartbeat=now-90s` → tick watchdog → assert ligne `went_offline` dans `connectivity_events`.
+  - Unit `test_went_online_inserted_only_on_transition` : heartbeat sur user `is_online=False` insère `went_online` ; heartbeat sur user déjà `is_online=True` n'insère rien.
+  - Integration `test_connectivity_history_api` : créer 3 transitions, GET endpoint → vérifier ordre + pagination.
+  - E2E (tier 3) : `test_full_offline_cycle_recorded` : login → 60 s sans heartbeat → re-heartbeat → vérifier 2 events en DB.
+- **Rétention** : à trancher. Par défaut : garder 365 jours (1 an), purger via tâche planifiée. À aligner avec les autres tables temporelles (`alarms`, `audit_log`).
 
 ---
 
@@ -432,7 +445,7 @@ Aucun délai métier ne doit être hardcodé dans le code. Chaque valeur est lue
 |---|---|---|---|
 | `escalation_delay_minutes` | 15 | Délai entre chaque palier d'escalade (INV-011) | ✅ lu en DB (pure fn en prend la valeur en paramètre) |
 | `sms_call_delay_minutes` | 2 | Délai avant enqueue SMS/Call après notification (INV-060) | ✅ lu en DB |
-| `oncall_offline_delay_minutes` | 15 | Délai avant qu'oncall offline déclenche alarme (INV-050) | ✅ **lu en DB** (PR #25 pilote bot 2026-04-21). Constante renommée en `ONCALL_OFFLINE_DELAY_MINUTES_DEFAULT` (fallback si clé absente), lecture `SystemConfig` à chaque tick d'escalade. |
+| `oncall_offline_delay_minutes` | 15 | ~~Délai avant qu'oncall offline déclenche alarme (INV-050)~~ → INV-050 DEPRECATED 2026-05-26. Usage résiduel = délai de l'email INV-053 si le mainteneur garde la même fenêtre 15 min. À retirer du seed sinon. | ⚠️ à clarifier dans le PR de retrait INV-050 |
 | `watchdog_timeout_seconds` | 60 | Délai avant marquer user offline (INV-041) | 🐛 seedé mais **hardcodé** dans `watchdog.py:14` |
 | `escalation_tick_seconds` | 10 | Période de la boucle d'escalade | 🐛 **hardcodé** dans `escalation.py:331` (+ `watchdog.py:48` avec 30s — voir note ci-dessous) |
 | ~~`fcm_escalation_delay_minutes`~~ | — | **Retiré**. Plus lu (PR2, INV-011) ni seedé (vérifié 2026-04-20). Rien à faire. | ✅ |

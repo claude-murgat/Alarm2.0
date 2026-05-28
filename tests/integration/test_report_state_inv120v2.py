@@ -220,6 +220,74 @@ def test_report_open_no_op_when_gateway_alarm_already_active(
     )
 
 
+def test_report_open_no_op_when_gateway_alarm_acknowledged(
+    client, admin_headers
+):
+    """INV-120 V2 + ack : tant que le contact sec reste physiquement OUVERT
+    après acquittement d'une alarme gateway, les polls suivants doivent être
+    no-op — pas de re-création d'alarme. Sinon l'opérateur subit 3-4 cycles
+    sonnerie/ack pour une seule cause physique (cf bug terrain 2026-05-19,
+    issue #118).
+
+    Le filtre `any_active_alarm` doit donc considérer `acknowledged` comme
+    un statut non-terminal (au même titre que `active`/`escalated`)."""
+    _reset_alarms(client, admin_headers)
+    _reset_clock(client)
+
+    # user1 = position 1 de la chaîne (cf seed_data main.py), donc notifié
+    # par défaut sur les alarmes gateway et autorisé à acquitter (INV-031).
+    r = client.post(
+        "/api/auth/login", json={"name": "user1", "password": "user123"}
+    )
+    assert r.status_code == 200, r.text
+    user1_headers = {"Authorization": f"Bearer {r.json()['access_token']}"}
+
+    # Tick #1 : contact NC physiquement ouvert → CREATE A1
+    r1 = _report(client, "onsite-1", "open")
+    assert r1.status_code == 200, r1.text
+    active = _get_active(client, admin_headers)
+    assert len(active) == 1, f"INV-120 V2 : 1 alarme attendue après tick #1, got {active}"
+    alarm_id = active[0]["id"]
+
+    # user1 ack → A1.status = "acknowledged"
+    r_ack = client.post(f"/api/alarms/{alarm_id}/ack", headers=user1_headers)
+    assert r_ack.status_code == 200, (
+        f"INV-031 : user1 (notifié pos 1) doit pouvoir ack, got "
+        f"{r_ack.status_code} {r_ack.text}"
+    )
+    assert _get_active(client, admin_headers) == [], (
+        "Sanity : alarme acquittée ne doit plus apparaître dans /active"
+    )
+
+    # Tick #2 : contact toujours physiquement ouvert (cause non levée).
+    # Avant fix : any_active_alarm est None (acknowledged exclu du filtre)
+    # → CREATE A2 → l'opérateur re-sonne. APRÈS FIX : no-op.
+    r2 = _report(client, "onsite-1", "open")
+    assert r2.status_code == 200, r2.text
+
+    # Assertion clé du bug : pas de 2e alarme créée
+    assert _get_active(client, admin_headers) == [], (
+        f"INV-120 V2 + ack : tant que l'alarme gateway est acquittée et le "
+        f"contact reste ouvert, le poll suivant doit être no-op. Got "
+        f"{_get_active(client, admin_headers)}"
+    )
+
+    # Vérification DB directe : exactement 1 alarme en DB, et c'est A1 ack.
+    from backend.app.database import SessionLocal
+    from backend.app.models import Alarm
+
+    db = SessionLocal()
+    try:
+        rows = db.query(Alarm).order_by(Alarm.id).all()
+        snap = [(a.id, a.status, getattr(a, "source", None)) for a in rows]
+    finally:
+        db.close()
+    assert snap == [(alarm_id, "acknowledged", "gateway_dry_contact")], (
+        f"INV-120 V2 + ack : DB doit contenir uniquement A1 (acknowledged), "
+        f"pas de A2 re-créée. Got {snap}"
+    )
+
+
 def test_report_closed_resolves_gateway_alarm(client, admin_headers):
     """INV-120 V2 : quand toutes les gateways alive reportent 'closed', le
     backend RESOLVE l'alarme gateway active (recovery automatique)."""

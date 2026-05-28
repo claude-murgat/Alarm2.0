@@ -115,39 +115,44 @@ Pas de build sur PR (les images preview ne servent pas à grand-chose tant qu'on
 
 ## 2. Modèle de promotion `:stable`
 
-### Recommandation
+### Recommandation (V1.6, depuis 2026-05-28)
 
-**Manuelle V1**, via `workflow_dispatch` du workflow `.github/workflows/promote-stable.yml`, avec input :
+**Automatique** via trigger `workflow_run` du workflow `.github/workflows/cd-promote-stable.yml` :
 
-- `sha` (string, 7 caractères) — le sha à promouvoir
-- `confirm` (string, doit valoir `PROMOTE`) — anti-clic-distrait
+- Se déclenche dès que le workflow **CI** termine en succès sur `master`
+- Vérifie aussi **CD Build** et **CD Install Smoke** verts sur le même sha (wait 5 min max)
+- Re-tag atomique sur GHCR : `docker buildx imagetools create -t .../alarm-backend:stable .../alarm-backend:sha-<short>` (idem patroni)
+- `concurrency: cd-promote-stable, cancel-in-progress: false` : promos sérialisées, aucun sha qui passe CI n'est sauté
 
 **Prérequis vérifiés par le workflow avant la promo** :
 
-1. ✅ Tier 1 + Tier 2 + Tier 3 (worker 1 et 2) verts pour ce sha sur master
-2. ✅ Tier 1.5 mutation testing à 100 % (déjà bloquant en CI)
-3. ✅ Tier 4 (failback nightly) vert sur le ou les runs qui couvrent ce sha — si aucun n'a tourné depuis le merge, déclencher un run à la demande et attendre
-4. ✅ ≥ 24 h écoulées depuis le merge — laisse passer le nightly mutation + le tier 4
-5. ✅ Pas de revert de ce sha dans `git log master`
-6. ✅ Le sha existe dans GHCR sous `:sha-<short>` (sinon → erreur claire, build d'abord)
+1. ✅ CI verte sur master @ sha (garanti par le trigger `workflow_run`)
+2. ✅ CD Build + CD Install Smoke verts sur le même sha (poll 5 min max)
+3. ✅ Le sha existe sur master (paranoia)
+4. ✅ Pas de revert de ce sha dans `git log master`
+5. ✅ Images `:sha-<short>` existent sur GHCR (cd-build a publié)
 
-Si tous OK : `docker buildx imagetools create -t ghcr.io/.../alarm-backend:stable ghcr.io/.../alarm-backend:sha-<short>` (idem patroni). C'est **du re-tagging d'image existante**, pas un rebuild — atomique côté registry.
+Si tous OK : re-tag :stable, POST `kind=manual_override` `actor=github-actions:auto-promote` dans `deployment_events` (si `vars.CD_API_BASE` configuré — V1 limitation : runner GH-hosted hors mesh WG, donc step skip aujourd'hui ; les events sont posés par les scripts canary depuis NODE3 ensuite).
 
-**Qui peut promouvoir** : humains uniquement (membres du repo avec `write` access). Le bot IA `alarm-murgat-bot[bot]` est **explicitement exclu** par règle dans le workflow (`if: github.actor != 'alarm-murgat-bot[bot]'`). Cf §7.
+**Philosophie "tout ce qui a passé CI est safe"** : le canary auto + soak 10 min + rollback auto (cf §4-5) absorbent le résidual risk. Le gate manuel V1.0 avait du sens quand canary était lui-même manuel — depuis V1.5 (PR #126, orchestrateur auto 3→2→1), il devient friction inutile.
 
-**Notification post-promo** : email à `direction_technique@charlesmurgat.com` + commentaire automatique sur le dernier commit master (« promu :stable, déploiement canary démarré le … »).
+**Qui peut promouvoir** : implicitement, **tout merger sur master**. Le bot IA `alarm-murgat-bot[bot]` ne peut pas merger sans label `ai:approved` humain (cf `.github/workflows/ai-merge.yml`) → garantit que le bot ne déclenche pas indirectement la promo. Check `actor != bot` reste actif dans le workflow en défense en profondeur (cf §7).
+
+**Notification post-promo** : event SQL `manual_override` actor `github-actions:auto-promote` dans `deployment_events` (visible dans dashboard `/admin/deployments`) + step summary GH lisible. (V2 envisagé : email automatique, cf §7.)
 
 ### Alternatives considérées
 
-- **Promo auto après tier 1-4 verts + N heures d'observation** : tentant, mais V1 ne dispose ni d'environnement de staging ni de baseline metrics fiables (pas de Grafana, pas d'alerting). On promouvrait à l'aveugle. **Différé V2**.
-- **Label PR `promote-stable`** : élégant côté UX mais couple la décision de promo à l'auteur de la PR (qui pose le label avant que la CI nightly ait tourné). Préférable de garder la promo séparée du merge. **Rejeté**.
-- **Commande slash sur PR/issue** : nécessite un bot listener, complexité non justifiée pour 2-3 promos par semaine attendues. **Différé**.
+- **Promo manuelle V1.0 (workflow_dispatch + input `confirm: PROMOTE`)** : abandonnée 2026-05-28. Le gate manuel était utile quand canary V1.0 était lui-même manuel — l'opérateur avait une décision "go/no-go" cohérente. Depuis V1.5 (canary auto, PR #126), il devient redondant. En pratique 3 PRs (#129, #130, #131) ont attendu 24h sans que personne ne surveille la fenêtre → friction sans bénéfice.
+- **Cooldown 24h** : supprimé en V1.6. La fenêtre était censée laisser passer tier 4 nightly + observer une éventuelle régression — mais aucun observateur dédié n'existait, et le canary soak 10 min couvre déjà la régression rapide.
+- **Promo auto après tier 1-4 verts + N heures d'observation** : tier 4 nightly couvre le failback E2E spécifiquement, pas le runtime applicatif. Pas nécessaire en gate.
+- **Label PR `promote-stable`** : élégant mais couple la décision au moment du merge. Auto sur CI green = décision déléguée à la CI, plus simple.
+- **Staging env dédié** : NODE3 seul avant onsite. Hors scope V1, repris en Q2.2.
 
 ### Questions ouvertes
 
-- **Q2.1** Cooldown 24 h : trop long ? trop court ? On peut le rendre configurable (input `bypass_cooldown=true` qui force, journalisé dans `deployment_events`).
-- **Q2.2** Doit-on avoir un environnement de **staging** dédié (NODE3 seul ?) où la `:stable` candidate tourne pendant 24 h avant d'aller en prod ? Coûte une 4e env mais est l'unique vraie protection contre les bugs invisibles en CI. **Forte recommandation** d'en discuter avant Phase 3.
-- **Q2.3** Smoke tests post-promo : faut-il une suite minimaliste (créer une alarme test, l'acquitter, vérifier les logs) qui tourne automatiquement contre `:stable` après promo, indépendamment du déploiement nœud ? Probablement oui, mais hors scope V1 (couvert en V2 quand staging sera là).
+- **Q2.1** ~~Cooldown 24 h~~ — supprimé 2026-05-28 (cf alternatives).
+- **Q2.2** Staging env dédié (NODE3 seul pendant N heures avant onsite-1/2) — toujours valide. Discussion à rouvrir si une régression non détectée par CI atteint prod après V1.6.
+- **Q2.3** Smoke tests post-promo (créer une alarme test, l'acquitter, vérifier logs) — toujours valide, V2.
 
 ---
 
@@ -555,7 +560,12 @@ Un job nightly `.github/workflows/ai-streak-evaluator.yml` :
 | 8 | `feat(cd): notification email rollback + promo` | `backend/app/notifications/cd_email.py`, branchement orchestrateur | (V1.5) |
 
 **V1.5** (à activer après 5 déploiements clean) :
-- 9 — `feat(cd): promotion canary auto après soak vert`
+- 9 — ✅ `feat(cd): promotion canary auto après soak vert` — **fait 2026-05-22**.
+  - `scripts/alarm-cd-orchestrate.sh` chaîne `alarm-cd-canary.sh` pour les 3 nœuds dans l'ordre §4 (NODE3 → onsite-2 → onsite-1), halt au 1er fail.
+  - Idempotence : state file `/var/lib/alarm/cd/orchestrate.state` mémorise `<digest>\t<outcome>\t<ts>` ; no-op si même digest déjà déployé avec succès, cooldown 1 h après fail.
+  - Préflight SSH 3 nœuds + lock `/run/alarm-cd-orchestrate/lock`.
+  - Unit systemd `alarm-cd-orchestrate.{service,timer}` sur **NODE3 uniquement**, timer **disable par défaut** (opt-in opérateur après 5 cycles canary manuels validés).
+  - Patch couplé sur `alarm-cd-canary.sh` : le check d'early-exit ne se limite plus à `cache vs registry` (qui devient toujours vrai après le pull-timer V1.5) — il vérifie aussi `running container vs cached :stable`, sinon la chaîne auto serait un no-op silencieux laissant la prod sur l'ancienne image.
 - 10 — `feat(ai-bot): ai_clean_streak evaluator + auto-merge sans label après ≥ 10 propres`
 
 **V2** (séparé) :
@@ -621,6 +631,105 @@ Un job nightly `.github/workflows/ai-streak-evaluator.yml` :
 - **Q-X1** Déclenchement initial du cluster Patroni : la 1re fois que `start-prod-node.sh` tourne sur les 3 nœuds, **aucun** n'a d'image `:stable` locale. Le timer de pull doit donc avoir tourné au moins une fois avant (ou alors `start-prod-node.sh` accepte un fallback `IMAGE_TAG=sha-<short>`). **À documenter dans le bring-up séquentiel**.
 - **Q-X2** Coexistence avec le bring-up actuel `docker compose up --build -d` (qui rebuild localement) : on garde le `--build` comme mode dev et on isole le mode prod via une env var `LOCAL_BUILD=true`, ou on supprime carrément le build local en prod ? Proposition : un nouveau script `scripts/start-prod-node.sh --pull` qui pull plutôt que build, sans toucher au comportement existant tant que les images ne sont pas dans GHCR.
 - **Q-X3** Comment gérer une PR qui modifie **simultanément** le code backend ET le `docker-compose.yml` (ex: ajout d'un service) ? Le canary doit refléter ce double changement. Proposition : `docker-compose.yml` est désormais versionné via le clone `/opt/alarm` (déjà le cas), un `git pull` est fait dans `start-prod-node.sh` avant le `up -d`. Le pull-image timer ne suffit plus seul ; il faut aussi un pull-git timer (ou les coupler).
+
+---
+
+## 9bis. Activation V1.5 (runbook opérateur)
+
+> Procédure à appliquer **uniquement après 5 cycles canary manuels validés** (cf §4 — "à activer après 5 déploiements clean"). Sans validation préalable, garder le timer désactivé : la chaîne canary reste pilotée à la main via `./scripts/alarm-cd-canary.sh --node N` un nœud après l'autre.
+
+**Pré-requis (sur NODE3 uniquement)** :
+1. `alarm-cd-pull.timer` actif sur les 3 nœuds (sinon l'image n'est jamais en cache pour le canary).
+2. Clé SSH `alarm@NODE3` → `alarm@10.99.0.{1,2,3}` fonctionnelle sans password.
+   **État constaté 2026-05-22** (vérif live SSH) : aucun de ces 3 paths ne marche aujourd'hui. À mettre en place avant activation :
+   - **SSH-from-NODE3 vers onsite (10.99.0.2 + 10.99.0.3) timeout** : UFW sur onsite n'autorise SSH que depuis `172.16.0.0/16` (LAN site). Ajouter sur chaque onsite : `sudo ufw allow from 10.99.0.0/24 to any port 22 proto tcp comment 'SSH mesh WG (CD orchestrator)'`.
+   - **SSH-from-NODE3 vers NODE3 lui-même (10.99.0.1) refused** : sshd sur NODE3 écoute sur `Port 50922` (adaptation cloud OVH cf provisioning §22ter), pas 22. Configurer `~/.ssh/config` du user `alarm` sur NODE3 : `Host 10.99.0.1\n  Port 50922`.
+   - **Pas de clé SSH outbound sur NODE3** : `/home/alarm/.ssh/` ne contient que `authorized_keys`. Générer une paire dédiée : `sudo -u alarm ssh-keygen -t ed25519 -N "" -C "alarm-cd-orchestrator" -f /home/alarm/.ssh/id_ed25519`, puis déposer la pubkey dans `authorized_keys` de `alarm@onsite-1` et `alarm@onsite-2` (et sur NODE3 lui-même pour le self-loop du canary `--node 3`).
+3. Fichier `/etc/alarm/cd.env` avec `GATEWAY_KEY=<même valeur que `.env.prod.secrets`>` ; mode `640 root:alarm`.
+
+**Activation** :
+```bash
+# === Etape A — Prereqs SSH (depuis ~/poste admin~ et NODE3) ===
+# A.1. UFW sur onsite-1 ET onsite-2 (le LAN UFW bloque par defaut le SSH depuis WG)
+ssh -i ~/.ssh/alarm_onsite_1 alarm@172.16.1.121 \
+  "sudo ufw allow from 10.99.0.0/24 to any port 22 proto tcp comment 'SSH mesh WG (CD orchestrator)'"
+ssh -i ~/.ssh/alarm_onsite_2 alarm@172.16.1.120 \
+  "sudo ufw allow from 10.99.0.0/24 to any port 22 proto tcp comment 'SSH mesh WG (CD orchestrator)'"
+
+# A.2. Keypair outbound sur NODE3 (alarm) + ssh_config pour le self-loop sur 50922
+ssh -p 50922 -i ~/.ssh/alarm_node3 alarm@51.210.105.102 '
+  ssh-keygen -t ed25519 -N "" -C "alarm-cd-orchestrator" -f ~/.ssh/id_ed25519
+  cat >> ~/.ssh/config <<EOF
+Host 10.99.0.1
+  Port 50922
+EOF
+  chmod 600 ~/.ssh/config
+'
+# Recuperer la pubkey :
+ALARM_CD_PUB=$(ssh -p 50922 -i ~/.ssh/alarm_node3 alarm@51.210.105.102 'cat ~/.ssh/id_ed25519.pub')
+# Distribuer aux 3 noeuds (incl. NODE3 lui-meme) :
+ssh -i ~/.ssh/alarm_onsite_1 alarm@172.16.1.121 "echo '$ALARM_CD_PUB' >> ~/.ssh/authorized_keys && sort -u ~/.ssh/authorized_keys -o ~/.ssh/authorized_keys"
+ssh -i ~/.ssh/alarm_onsite_2 alarm@172.16.1.120 "echo '$ALARM_CD_PUB' >> ~/.ssh/authorized_keys && sort -u ~/.ssh/authorized_keys -o ~/.ssh/authorized_keys"
+ssh -p 50922 -i ~/.ssh/alarm_node3 alarm@51.210.105.102 "echo '$ALARM_CD_PUB' >> ~/.ssh/authorized_keys && sort -u ~/.ssh/authorized_keys -o ~/.ssh/authorized_keys"
+# Verif :
+ssh -p 50922 -i ~/.ssh/alarm_node3 alarm@51.210.105.102 '
+  for ip in 10.99.0.1 10.99.0.2 10.99.0.3; do
+    ssh -o BatchMode=yes -o ConnectTimeout=5 alarm@$ip "echo OK on $(hostname)"
+  done
+'  # Doit afficher 3 lignes "OK on ..."
+
+# === Etape B — Install scripts + units + sudoers + cd.env (sur NODE3 uniquement) ===
+ssh -p 50922 -i ~/.ssh/alarm_node3 alarm@51.210.105.102 '
+  cd /opt/alarm && git pull
+  sudo install -m 755 scripts/alarm-cd-orchestrate.sh /usr/local/bin/alarm-cd-orchestrate
+  sudo install -m 755 scripts/alarm-cd-canary.sh      /usr/local/bin/alarm-cd-canary.sh
+  sudo install -m 755 scripts/alarm-cd-rollback.sh    /usr/local/bin/alarm-cd-rollback.sh
+  sudo install -m 644 infra/onsite/systemd/alarm-cd-orchestrate.service /etc/systemd/system/
+  sudo install -m 644 infra/onsite/systemd/alarm-cd-orchestrate.timer   /etc/systemd/system/
+  sudo install -m 440 infra/onsite/sudoers/alarm-cd                     /etc/sudoers.d/alarm-cd
+  sudo visudo -c                              # doit afficher "parsed OK"
+  sudo install -d -m 750 -o root -g alarm /etc/alarm
+  GATEWAY_KEY=$(grep "^GATEWAY_KEY=" /opt/alarm/.env.prod.secrets | cut -d= -f2)
+  echo "GATEWAY_KEY=$GATEWAY_KEY" | sudo tee /etc/alarm/cd.env >/dev/null
+  sudo chmod 640 /etc/alarm/cd.env && sudo chown root:alarm /etc/alarm/cd.env
+  sudo systemctl daemon-reload
+'
+
+# === Etape C — Smoke (forcer un cycle pour valider) ===
+ssh -p 50922 -i ~/.ssh/alarm_node3 alarm@51.210.105.102 '
+  # Le service va detecter que :stable cache == running container sur les 3
+  # noeuds -> chaine canary no-op (silent exit 0). Bonne preuve de bon
+  # cablage SSH + cd.env + scripts sans rien casser.
+  sudo systemctl start alarm-cd-orchestrate.service
+  sudo journalctl -u alarm-cd-orchestrate -n 30 --no-pager
+'
+
+# === Etape D — Activation du timer (apres validation de l etape C) ===
+ssh -p 50922 -i ~/.ssh/alarm_node3 alarm@51.210.105.102 '
+  sudo systemctl enable --now alarm-cd-orchestrate.timer
+  sudo systemctl is-enabled alarm-cd-orchestrate.timer   # enabled
+  sudo systemctl list-timers alarm-cd-orchestrate.timer  # next fire dans < 15 min
+'
+```
+
+**Désactivation (revert si V1.5 cause des problèmes)** :
+```bash
+# Sur NODE3 :
+sudo systemctl disable --now alarm-cd-orchestrate.timer
+sudo systemctl stop alarm-cd-orchestrate.service
+# La chaine canary devient a nouveau manuelle (V1) — alarm-cd-pull.timer
+# continue de mettre en cache, mais le restart est pilote a la main.
+```
+
+**Diagnostic** :
+```bash
+# Voir l'etat dernier deploiement orchestre :
+cat /var/lib/alarm/cd/orchestrate.state   # <digest>\t<outcome>\t<unix_ts>
+# Voir les events CD cross-noeud :
+curl -fsS http://10.99.0.1:8000/api/deployments/state -H "Authorization: Bearer <admin_token>"
+# Forcer un cycle (apres mise a jour du :stable sans attendre le tick timer) :
+sudo systemctl start alarm-cd-orchestrate.service
+```
 
 ---
 
@@ -749,3 +858,5 @@ Dans ce flux, on a remplacé 8 h de service KO + nuit blanche pour l'humain par 
 - **2026-05-10** — ajout du **mode urgence** §7 (auto-promo bot conditionnelle si service mesurablement cassé). Issu d'une question utilisateur sur le cas « panne nocturne, bot fix, personne pour valider ». Design : balance bénéfice/risque qui s'inverse quand le statu quo est déjà KO. Voir §11 Annexe bis pour le flux. Q7.5/7.6/7.7 ajoutées.
 - **2026-05-10 (suite)** — durcissement mode urgence pour exclure les pannes réseau : ajout **Cond 0 préfiltre réseau** (Internet + mesh WG + GitHub joignables avant tout jugement applicatif), refonte **Cond 1** en **vue cross-nœud avec vote majoritaire 2/3** via nouvel endpoint `/api/system/peer-health`. Distinction explicite 503-explicite vs timeout/refused (réseau-like). Triggers 1b/1c durcis : ne déclenchent que si etcd/Postgres répondent et reportent eux-mêmes l'état dégradé, jamais sur leur silence. Q7.8/7.9/7.10 ajoutées.
 - **2026-05-10 (final)** — décision tranchée après 2 rounds d'avocat du diable (mode urgence puis stratégie self-healing alternative). Self-healing **rejeté** (action sans diagnostic, code non-validé, pas de baseline, ROI faible vs SMS-réveil). Mode urgence **retenu** avec : (a) filet de sécurité explicite = suite de tests (tier 1.5 mutation 100 % bloquant), (b) fallback opérateur hors-bande = appel téléphonique vers admin, (c) section "Risques acceptés" formalisant les 4 risques pris en connaissance de cause. La complexité de Cond 0 + vote majoritaire est conservée parce qu'elle protège contre un faux positif net (pannes réseau), distinct des risques liés au bot lui-même.
+- **2026-05-22** — **CD V1.5 livré (PR 9 §8)** : `scripts/alarm-cd-orchestrate.sh` + units systemd `alarm-cd-orchestrate.{service,timer}` chaînent automatiquement `alarm-cd-canary.sh` pour les 3 nœuds dans l'ordre §4. Idempotence par state file + cooldown 1 h post-fail. Patch couplé sur `alarm-cd-canary.sh` (check du container en cours d'exécution, pas seulement du cache vs registry — sinon no-op silencieux après pull-timer). Timer `alarm-cd-orchestrate.timer` livré **disable**, à activer explicitement par l'opérateur après 5 cycles canary manuels validés (`sudo systemctl enable --now alarm-cd-orchestrate.timer` sur NODE3). Sudoers `infra/onsite/sudoers/alarm-cd` étendu en miroir (`ALARM_CD_INSTALL`, `ALARM_CD_SYSTEMCTL`, `ALARM_CD_JOURNAL`). Smoke test `cd-install-smoke.yml` étend le job au nouvel orchestrateur (RuntimeDirectory/StateDirectory/EnvironmentFile présents, timer disable par défaut, pas de Permission denied, pas de duplication logs).
+- **2026-05-22 (vérif live)** — état prod inspecté par SSH avant merge de PR 9. **Constat** : les 3 nœuds tournent `:stable` sha-de1131ac (promu 2026-05-19) depuis 3 jours, `alarm-cd-pull.timer` enabled + active partout, cluster Patroni sain (leader `node1`=onsite-1, replicas sync lag=0). **Pré-requis SSH-from-NODE3 manquants** : (a) `ufw` onsite n'autorise SSH que depuis LAN 172.16.0.0/16 — ajouter règle `from 10.99.0.0/24` ; (b) `/home/alarm/.ssh/` sur NODE3 n'a pas de keypair outbound ; (c) sshd NODE3 écoute `Port 50922` (adaptation cloud), nécessite `~/.ssh/config` pour le self-loop canary `--node 3`. Ces 3 prérequis ajoutés au runbook §9bis. Sans eux, l'orchestrate `Preflight SSH` exit 1 proprement (pas de risque de chaîne incomplète).
