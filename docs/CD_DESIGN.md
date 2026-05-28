@@ -115,39 +115,44 @@ Pas de build sur PR (les images preview ne servent pas à grand-chose tant qu'on
 
 ## 2. Modèle de promotion `:stable`
 
-### Recommandation
+### Recommandation (V1.6, depuis 2026-05-28)
 
-**Manuelle V1**, via `workflow_dispatch` du workflow `.github/workflows/promote-stable.yml`, avec input :
+**Automatique** via trigger `workflow_run` du workflow `.github/workflows/cd-promote-stable.yml` :
 
-- `sha` (string, 7 caractères) — le sha à promouvoir
-- `confirm` (string, doit valoir `PROMOTE`) — anti-clic-distrait
+- Se déclenche dès que le workflow **CI** termine en succès sur `master`
+- Vérifie aussi **CD Build** et **CD Install Smoke** verts sur le même sha (wait 5 min max)
+- Re-tag atomique sur GHCR : `docker buildx imagetools create -t .../alarm-backend:stable .../alarm-backend:sha-<short>` (idem patroni)
+- `concurrency: cd-promote-stable, cancel-in-progress: false` : promos sérialisées, aucun sha qui passe CI n'est sauté
 
 **Prérequis vérifiés par le workflow avant la promo** :
 
-1. ✅ Tier 1 + Tier 2 + Tier 3 (worker 1 et 2) verts pour ce sha sur master
-2. ✅ Tier 1.5 mutation testing à 100 % (déjà bloquant en CI)
-3. ✅ Tier 4 (failback nightly) vert sur le ou les runs qui couvrent ce sha — si aucun n'a tourné depuis le merge, déclencher un run à la demande et attendre
-4. ✅ ≥ 24 h écoulées depuis le merge — laisse passer le nightly mutation + le tier 4
-5. ✅ Pas de revert de ce sha dans `git log master`
-6. ✅ Le sha existe dans GHCR sous `:sha-<short>` (sinon → erreur claire, build d'abord)
+1. ✅ CI verte sur master @ sha (garanti par le trigger `workflow_run`)
+2. ✅ CD Build + CD Install Smoke verts sur le même sha (poll 5 min max)
+3. ✅ Le sha existe sur master (paranoia)
+4. ✅ Pas de revert de ce sha dans `git log master`
+5. ✅ Images `:sha-<short>` existent sur GHCR (cd-build a publié)
 
-Si tous OK : `docker buildx imagetools create -t ghcr.io/.../alarm-backend:stable ghcr.io/.../alarm-backend:sha-<short>` (idem patroni). C'est **du re-tagging d'image existante**, pas un rebuild — atomique côté registry.
+Si tous OK : re-tag :stable, POST `kind=manual_override` `actor=github-actions:auto-promote` dans `deployment_events` (si `vars.CD_API_BASE` configuré — V1 limitation : runner GH-hosted hors mesh WG, donc step skip aujourd'hui ; les events sont posés par les scripts canary depuis NODE3 ensuite).
 
-**Qui peut promouvoir** : humains uniquement (membres du repo avec `write` access). Le bot IA `alarm-murgat-bot[bot]` est **explicitement exclu** par règle dans le workflow (`if: github.actor != 'alarm-murgat-bot[bot]'`). Cf §7.
+**Philosophie "tout ce qui a passé CI est safe"** : le canary auto + soak 10 min + rollback auto (cf §4-5) absorbent le résidual risk. Le gate manuel V1.0 avait du sens quand canary était lui-même manuel — depuis V1.5 (PR #126, orchestrateur auto 3→2→1), il devient friction inutile.
 
-**Notification post-promo** : email à `direction_technique@charlesmurgat.com` + commentaire automatique sur le dernier commit master (« promu :stable, déploiement canary démarré le … »).
+**Qui peut promouvoir** : implicitement, **tout merger sur master**. Le bot IA `alarm-murgat-bot[bot]` ne peut pas merger sans label `ai:approved` humain (cf `.github/workflows/ai-merge.yml`) → garantit que le bot ne déclenche pas indirectement la promo. Check `actor != bot` reste actif dans le workflow en défense en profondeur (cf §7).
+
+**Notification post-promo** : event SQL `manual_override` actor `github-actions:auto-promote` dans `deployment_events` (visible dans dashboard `/admin/deployments`) + step summary GH lisible. (V2 envisagé : email automatique, cf §7.)
 
 ### Alternatives considérées
 
-- **Promo auto après tier 1-4 verts + N heures d'observation** : tentant, mais V1 ne dispose ni d'environnement de staging ni de baseline metrics fiables (pas de Grafana, pas d'alerting). On promouvrait à l'aveugle. **Différé V2**.
-- **Label PR `promote-stable`** : élégant côté UX mais couple la décision de promo à l'auteur de la PR (qui pose le label avant que la CI nightly ait tourné). Préférable de garder la promo séparée du merge. **Rejeté**.
-- **Commande slash sur PR/issue** : nécessite un bot listener, complexité non justifiée pour 2-3 promos par semaine attendues. **Différé**.
+- **Promo manuelle V1.0 (workflow_dispatch + input `confirm: PROMOTE`)** : abandonnée 2026-05-28. Le gate manuel était utile quand canary V1.0 était lui-même manuel — l'opérateur avait une décision "go/no-go" cohérente. Depuis V1.5 (canary auto, PR #126), il devient redondant. En pratique 3 PRs (#129, #130, #131) ont attendu 24h sans que personne ne surveille la fenêtre → friction sans bénéfice.
+- **Cooldown 24h** : supprimé en V1.6. La fenêtre était censée laisser passer tier 4 nightly + observer une éventuelle régression — mais aucun observateur dédié n'existait, et le canary soak 10 min couvre déjà la régression rapide.
+- **Promo auto après tier 1-4 verts + N heures d'observation** : tier 4 nightly couvre le failback E2E spécifiquement, pas le runtime applicatif. Pas nécessaire en gate.
+- **Label PR `promote-stable`** : élégant mais couple la décision au moment du merge. Auto sur CI green = décision déléguée à la CI, plus simple.
+- **Staging env dédié** : NODE3 seul avant onsite. Hors scope V1, repris en Q2.2.
 
 ### Questions ouvertes
 
-- **Q2.1** Cooldown 24 h : trop long ? trop court ? On peut le rendre configurable (input `bypass_cooldown=true` qui force, journalisé dans `deployment_events`).
-- **Q2.2** Doit-on avoir un environnement de **staging** dédié (NODE3 seul ?) où la `:stable` candidate tourne pendant 24 h avant d'aller en prod ? Coûte une 4e env mais est l'unique vraie protection contre les bugs invisibles en CI. **Forte recommandation** d'en discuter avant Phase 3.
-- **Q2.3** Smoke tests post-promo : faut-il une suite minimaliste (créer une alarme test, l'acquitter, vérifier les logs) qui tourne automatiquement contre `:stable` après promo, indépendamment du déploiement nœud ? Probablement oui, mais hors scope V1 (couvert en V2 quand staging sera là).
+- **Q2.1** ~~Cooldown 24 h~~ — supprimé 2026-05-28 (cf alternatives).
+- **Q2.2** Staging env dédié (NODE3 seul pendant N heures avant onsite-1/2) — toujours valide. Discussion à rouvrir si une régression non détectée par CI atteint prod après V1.6.
+- **Q2.3** Smoke tests post-promo (créer une alarme test, l'acquitter, vérifier logs) — toujours valide, V2.
 
 ---
 
