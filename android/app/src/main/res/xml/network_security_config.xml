@@ -2,9 +2,16 @@
 <network-security-config>
     <base-config cleartextTrafficPermitted="true" />
     <domain-config cleartextTrafficPermitted="true">
+        <!-- Dev : émulateur (10.0.2.2 = localhost du PC), téléphone sur réseau dev -->
         <domain includeSubdomains="true">10.0.2.2</domain>
         <domain includeSubdomains="true">localhost</domain>
         <domain includeSubdomains="true">127.0.0.1</domain>
         <domain includeSubdomains="true">172.16.2.191</domain>
+        <!-- Prod : cluster 3 nœuds (cf .env.prod.node{1,2,3}). -->
+        <!-- NODE3 cloud OVH (Internet) — primary release. -->
+        <domain includeSubdomains="true">51.210.105.102</domain>
+        <!-- onsite-1 / onsite-2 (LAN site 172.16.0.0/16). -->
+        <domain includeSubdomains="true">172.16.1.121</domain>
+        <domain includeSubdomains="true">172.16.1.120</domain>
     </domain-config>
 </network-security-config>

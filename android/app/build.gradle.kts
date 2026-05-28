@@ -20,9 +20,8 @@ android {
         versionName = "1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // URLs backend : 3 noeuds HA (Patroni + etcd)
-        // 10.0.2.2 = alias localhost du PC depuis l'émulateur Android
-        // Pour téléphone physique, remplacer par l'IP réseau (ex: 172.16.2.191)
+        // URLs backend dev (10.0.2.2 = alias localhost du PC depuis l'émulateur).
+        // Overridées en `release` ci-dessous pour pointer vers le cluster prod.
         buildConfigField("String", "PRIMARY_BACKEND_URL", "\"http://10.0.2.2:8000/\"")
         buildConfigField("String", "FALLBACK_BACKEND_URL", "\"http://10.0.2.2:8001/\"")
         buildConfigField("String", "FALLBACK_BACKEND_URL_2", "\"http://10.0.2.2:8002/\"")
@@ -31,6 +30,15 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            // Cluster prod (cf .env.prod.node{1,2,3} + docs/PROVISIONING_ONSITE.md §22bis).
+            // Ordre cloud-first : NODE3 OVH est le seul backend joignable hors LAN site
+            // (UFW onsite-1/-2 limite l'accès à 172.16.0.0/16). En 4G ou WiFi externe,
+            // les onsite ne répondent pas — donc primary = cloud évite ~6s de timeout
+            // au démarrage. Sur LAN site, le failover circulaire (INV-ANDROID-402)
+            // bascule sur les onsite si le cloud devient injoignable.
+            buildConfigField("String", "PRIMARY_BACKEND_URL", "\"http://51.210.105.102:8000/\"")
+            buildConfigField("String", "FALLBACK_BACKEND_URL", "\"http://172.16.1.121:8000/\"")
+            buildConfigField("String", "FALLBACK_BACKEND_URL_2", "\"http://172.16.1.120:8000/\"")
         }
     }
 
