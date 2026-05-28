@@ -116,7 +116,10 @@ if [[ -z "$PREV_DIGEST" ]]; then
   log "  Action humaine : choisir un sha precis et faire `docker pull <repo>:sha-<short>`"
   log "  puis re-tag manuellement :stable."
 
-  curl -fsS -X POST "$API_BASE/api/deployments/events" \
+  # --retry-all-errors absorbe transients + cas commun "leader Patroni
+  # change pendant le restart" (cf canary.sh post_event() pour le contexte).
+  curl --retry 3 --retry-delay 3 --retry-all-errors --max-time 15 \
+    -fsS -X POST "$API_BASE/api/deployments/events" \
     -H "X-Gateway-Key: $GATEWAY_KEY" \
     -H "Content-Type: application/json" \
     -d "{
@@ -154,7 +157,8 @@ DETAILS=$(cat <<JSON
 {"trigger": "$TRIGGER", "previous": "$CURRENT_DIGEST", "rolled_back_to": "$PREV_DIGEST"}
 JSON
 )
-curl -fsS -X POST "$API_BASE/api/deployments/events" \
+curl --retry 3 --retry-delay 3 --retry-all-errors --max-time 15 \
+  -fsS -X POST "$API_BASE/api/deployments/events" \
   -H "X-Gateway-Key: $GATEWAY_KEY" \
   -H "Content-Type: application/json" \
   -d "{

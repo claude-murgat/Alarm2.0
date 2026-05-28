@@ -222,12 +222,43 @@ JSON
   if (( DRY_RUN )); then
     echo "DRY-RUN POST $API_BASE/api/deployments/events :"
     echo "$body"
-  else
-    curl -fsS -X POST "$API_BASE/api/deployments/events" \
-      -H "X-Gateway-Key: $GATEWAY_KEY" \
-      -H "Content-Type: application/json" \
-      -d "$body" >/dev/null || log "WARN : POST event $kind a echoue"
+    return 0
   fi
+
+  # Robustesse aux failovers Patroni pendant le canary :
+  # - curl --retry-all-errors couvre les transients (5xx, timeout, connection reset)
+  # - Si fail malgre retry curl -> probable failover avec leader change
+  #   -> re-discover et 2e tentative avec nouvelle API_BASE.
+  # Sans ce wrapper, le scenario "restart node3 -> failover Patroni -> POST
+  # canary_promoted vers ex-leader" (observe en prod 2026-05-28) perdait tous
+  # les events suivants de la chaine.
+  local attempt
+  for attempt in 1 2; do
+    if curl --retry 3 --retry-delay 3 --retry-all-errors --max-time 15 \
+            -fsS -X POST "$API_BASE/api/deployments/events" \
+            -H "X-Gateway-Key: $GATEWAY_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$body" >/dev/null 2>&1; then
+      return 0
+    fi
+    if [[ $attempt -eq 1 ]]; then
+      log "POST $kind echec apres curl --retry, re-discover leader..."
+      local new_leader
+      if new_leader=$(discover_leader); then
+        if [[ "$API_BASE" != "http://${new_leader}:8000" ]]; then
+          log "Failover Patroni detecte : $API_BASE -> http://${new_leader}:8000"
+          API_BASE="http://${new_leader}:8000"
+        else
+          log "Leader inchange ($API_BASE), 2e tentative inutile"
+          break
+        fi
+      else
+        log "discover_leader echoue, 2e tentative inutile"
+        break
+      fi
+    fi
+  done
+  log "WARN : POST event $kind a echoue definitivement"
 }
 
 log "POST kind=canary_start"
