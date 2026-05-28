@@ -23,6 +23,7 @@ from .api.alarms_internal import router as alarms_internal_router
 from .api.audit import router as audit_router
 from .api.connectivity import router as connectivity_router
 from .escalation import escalation_loop
+from .quorum_monitor import quorum_monitor_loop
 from .watchdog import watchdog_loop
 from .leader_election import leader_election_loop, is_leader
 from .database import DATABASE_URL
@@ -141,7 +142,10 @@ async def lifespan(app: FastAPI):
 
     escalation_task = asyncio.create_task(escalation_loop())
     watchdog_task = asyncio.create_task(watchdog_loop())
-    logger.info("Background tasks started: leader_election + escalation + watchdog")
+    quorum_task = asyncio.create_task(quorum_monitor_loop())
+    logger.info(
+        "Background tasks started: leader_election + escalation + watchdog + quorum_monitor"
+    )
 
     yield
 
@@ -149,6 +153,7 @@ async def lifespan(app: FastAPI):
     election_task.cancel()
     escalation_task.cancel()
     watchdog_task.cancel()
+    quorum_task.cancel()
 
 
 app = FastAPI(title="Alarme Murgat", version="1.0.0", lifespan=lifespan)

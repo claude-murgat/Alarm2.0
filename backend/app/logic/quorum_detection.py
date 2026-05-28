@@ -103,3 +103,69 @@ def evaluate_quorum_loss(
         is_lost=is_lost,
         lost_since=lost_since if is_lost else None,
     )
+
+
+# Fenêtres reminders anti-spam INV-085 (sous-cas 3/3) — tranché 2026-04-20.
+# Après l'email initial, ré-alerter à 1h, 3h, 6h. Aucun reminder au-delà : à
+# 6h+, on suppose que l'opérateur est conscient (ou que l'incident est mort
+# de lui-même). Liste ordonnée croissante : la logique reposera sur ça.
+REMINDER_WINDOWS = (
+    timedelta(hours=1),
+    timedelta(hours=3),
+    timedelta(hours=6),
+)
+
+
+def should_send_initial_email(
+    state: QuorumState,
+    email_sent_at: Optional[datetime],
+) -> bool:
+    """INV-085 sous-cas 2/3 (#80) : décide si on doit envoyer le 1er email
+    d'alerte direction technique sur cet incident de perte de quorum.
+
+    Règle : envoyer SI le quorum est déclaré perdu (`is_lost=True`, ce qui
+    suppose déjà la fenêtre anti-flapping > 3 min franchie) ET aucun email
+    n'a encore été envoyé pour cet incident (`email_sent_at is None`).
+
+    state : sortie de `evaluate_quorum_loss` sur le tick courant.
+    email_sent_at : timestamp 1er email pour CET incident (None = pas envoyé).
+      Persisté dans `quorum_state.email_sent_at`, reset à NULL au retour à sain.
+    """
+    return state.is_lost and email_sent_at is None
+
+
+def should_send_reminder(
+    state: QuorumState,
+    email_sent_at: Optional[datetime],
+    reminders_sent_at: list[timedelta],
+    now: datetime,
+) -> Optional[timedelta]:
+    """INV-085 sous-cas 3/3 (#81) : décide si un reminder anti-spam est dû.
+
+    Règle : un reminder pour la fenêtre W ∈ {1h, 3h, 6h} est dû SI :
+    - quorum toujours perdu (`state.is_lost is True`), ET
+    - email initial déjà envoyé (`email_sent_at is not None`), ET
+    - `now - email_sent_at >= W` (borne inclusive), ET
+    - le reminder pour cette fenêtre n'a pas déjà été envoyé.
+
+    Retourne la PLUS GRANDE fenêtre due qui n'a pas encore été envoyée. Aucun
+    reminder au-delà de 6h. Si rien à envoyer → None.
+
+    state : sortie de `evaluate_quorum_loss` sur le tick courant.
+    email_sent_at : timestamp 1er email (None = pas encore envoyé → None).
+    reminders_sent_at : liste des fenêtres déjà envoyées (subset de
+      `REMINDER_WINDOWS`). Persisté en JSON dans `quorum_state.reminders_sent_at`.
+    now : timestamp du tick courant.
+    """
+    if not state.is_lost:
+        return None
+    if email_sent_at is None:
+        return None
+    elapsed = now - email_sent_at
+    # Parcours du plus grand au plus petit : on retourne la fenêtre la plus
+    # avancée qui est due ET pas encore envoyée. Garantit qu'à T0+3h05 avec
+    # 1h envoyé, on retourne 3h (et pas 1h à tort).
+    for window in reversed(REMINDER_WINDOWS):
+        if elapsed >= window and window not in reminders_sent_at:
+            return window
+    return None

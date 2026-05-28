@@ -157,6 +157,28 @@ class GatewayState(Base):
     last_seen = Column(DateTime, nullable=False)
 
 
+class QuorumStateRow(Base):
+    """INV-085 : état persistant du monitoring quorum (singleton, id=1).
+
+    Une seule row (PK id=1). Le tick `quorum_monitor_loop` la lit/écrit pour
+    persister l'incident en cours à travers les redémarrages backend.
+
+    - `lost_since` : début de la série non-saine continue, posé quand
+      `evaluate_quorum_loss` déclare `is_lost=True`. Reset à NULL au retour à sain.
+    - `email_sent_at` : timestamp du 1er email d'alerte envoyé pour CET incident.
+      Reset à NULL au retour à sain. Anti-doublon : si non-NULL et état toujours
+      lost, on n'en envoie pas un 2e (#80).
+    - `reminders_sent_at` : JSON liste des fenêtres-reminders déjà envoyées pour
+      cet incident, exprimées en secondes depuis email_sent_at (ex: "[3600, 10800]"
+      = reminders 1h et 3h envoyés). Reset à "[]" au retour à sain (#81).
+    """
+    __tablename__ = "quorum_state"
+    id = Column(Integer, primary_key=True)  # toujours 1 (singleton)
+    lost_since = Column(DateTime, nullable=True)
+    email_sent_at = Column(DateTime, nullable=True)
+    reminders_sent_at = Column(String, nullable=False, default="[]")
+
+
 class DeploymentEvent(Base):
     """Trace des actions CD (pull, canary, rollback, promote).
 
