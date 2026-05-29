@@ -397,6 +397,7 @@ jobs:
           pytest tests/ \
             --ignore=tests/unit \
             --ignore=tests/integration \
+            --ignore=tests/prod_config \
             --ignore=tests/test_frontend.py \
             --ignore=tests/test_failback.py \
             --ignore=tests/test_manual_multi_emulator.py \
