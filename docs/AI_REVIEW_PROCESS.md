@@ -47,12 +47,15 @@ Quand le verdict est APPROVE / APPROVE_FOLLOWUP, le workflow différencie selon 
 
 | Auteur PR | Label `ai:approved` posé ? | Merge auto ? | Action humaine attendue |
 |---|---|---|---|
-| `alarm-murgat-bot[bot]` | OUI | OUI (`ai-merge.yml` filtre auteur=bot) | Veto possible en retirant le label avant le merge auto |
-| Humain (ex: `claude-murgat`) | NON | NON (filtre `ai-merge.yml`) | L'humain merge lui-même (`gh pr merge` ou UI) après lecture du commentaire récap |
+| `alarm-murgat-bot[bot]` | OUI | OUI (`ai-merge.yml`) | Veto possible en retirant le label avant le merge auto |
+| `claude-murgat` (session Claude) | OUI | OUI (`ai-merge.yml`) | Veto possible en retirant le label avant le merge auto |
+| Autre humain | NON | NON | L'humain merge lui-même (`gh pr merge` ou UI) après lecture du commentaire récap |
 
-**Pourquoi** : sur une PR humaine, le label `ai:approved` n'a aucun effet (`ai-merge.yml` filtre par `pr.user.login == alarm-murgat-bot`). Le poser quand même créait une confusion ("label posé mais pas de merge"). Décision 2026-05-22 : sur PR humaine, juste commenter avec le verdict ; ne pas poser le label.
+**Pourquoi `claude-murgat` est autorisé au merge auto (décision 2026-05-28)** : les PRs de session Claude interactive sont produites avec le même process TDD que les PRs bot (RED→GREEN, tests prouvés, INV-aware) et passent par le même triplet review. Imposer une revalidation humaine systématique recréait le goulot review que `ai-bot-review.yml` cherchait à éliminer. Le triplet reste le filtre de qualité ; le merge auto n'a lieu que sur convergence 3/3 APPROVE + CI verte. Le veto humain reste toujours possible en retirant le label avant que `ai-merge.yml` ne tourne.
 
-**Si BEHIND détecté par le triplet** : la note "Cas A routine, `gh pr update-branch` avant merge" est ajoutée au commentaire (cf §7.1). Pour PR humaine, c'est l'humain qui exécute. Pour PR bot, voir §7.1 fallback.
+**Pourquoi les autres humains restent manuels** : par défaut on n'auto-merge qu'une identité maîtrisée. Élargir la liste demandera une décision explicite par auteur.
+
+**Si BEHIND détecté par le triplet** : la note "Cas A routine, `gh pr update-branch` avant merge" est ajoutée au commentaire (cf §7.1). Pour les auteurs auto-mergés (bot + `claude-murgat`), `ai-merge.yml` fait le `pr update-branch` au besoin via son fallback §7.1.
 
 ---
 

@@ -263,9 +263,15 @@ def report_state(
     alive_states = [g.state for g in alive_gateways]
     should_be_active = any(s == "open" for s in alive_states)
 
-    # 3. Reconcile (touche UNIQUEMENT les alarmes source="gateway_dry_contact")
+    # 3. Reconcile (touche UNIQUEMENT les alarmes source="gateway_dry_contact").
+    # "acknowledged" est inclus avec "active"/"escalated" : tant que l'alarme
+    # n'est pas terminale (resolved/cancelled), un re-poll du contact ouvert
+    # doit être no-op — sinon l'opérateur subit un cycle sonnerie/ack par tick
+    # tant que la cause physique persiste (issue #118, INV-120 V2 + ack).
     any_active_alarm = (
-        db.query(Alarm).filter(Alarm.status.in_(["active", "escalated"])).first()
+        db.query(Alarm)
+        .filter(Alarm.status.in_(["active", "escalated", "acknowledged"]))
+        .first()
     )
     gateway_alarm = None
     if any_active_alarm is not None and any_active_alarm.source == "gateway_dry_contact":
