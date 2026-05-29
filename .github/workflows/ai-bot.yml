@@ -1006,9 +1006,23 @@ jobs:
           {
             echo "Salut ! J'ai produit un fix + test pour l'issue #${ISSUE_NUMBER}."
             echo ""
-            echo "Si tu veux que je corrige quelque chose, commente avec \`/ai-retry <instructions>\` ou mentionne \`@alarm-murgat-bot\`. Si tu valides, pose le label \`ai:approved\` (phase 4 a venir)."
+            echo "J'ai pose le label \`ai:review\` pour declencher la review LLM (triplet Opus 4.7) automatiquement. Tu n'as rien a faire — le verdict APPROVE/RETRY/REJECT arrivera en commentaire dans ~5 min apres CI verte."
+            echo ""
+            echo "Si tu veux que je corrige quelque chose avant ou apres la review, commente avec \`/ai-retry <instructions>\` ou mentionne \`@alarm-murgat-bot\`. Le merge final reste a la main de l'humain (label \`ai:approved\` apres review)."
           } > /tmp/pr-initial-comment.md
           gh pr comment "$PR_NUMBER" --body-file /tmp/pr-initial-comment.md
+
+          # Pose `ai:review` -> declenche ai-bot-review.yml (triplet LLM).
+          # Le workflow ai-bot-review.yml gere l'attente CI : si checks pending
+          # au moment du label, il skip avec reject_reason=ci-checks-pending,
+          # puis l'event check_run.completed re-declenche quand CI termine
+          # (cf ai-bot-review.yml ligne 27 + 29 : types labeled + check_run).
+          # Avant cette modif : humain devait poser le label manuellement, ce
+          # qui causait des PRs bot oubliees sans review (cf PR #145, attendu
+          # 2h avant pose manuelle).
+          # Le merge final reste humain via label `ai:approved` (separe).
+          gh pr edit "$PR_NUMBER" --add-label "ai:review" || \
+            echo "::warning::pose ai:review echouee — review LLM ne sera pas auto-declenche"
 
       - name: Update PR body (mode=retry-*)
         if: steps.diff.outputs.produced == 'true' && needs.dispatch.outputs.mode != 'new'
