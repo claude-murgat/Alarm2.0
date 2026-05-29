@@ -67,6 +67,49 @@ jobs:
           path: reports/
           retention-days: 14
 
+  prod_config_check:
+    # INV-076 [C] : verrouille en CI le fait qu'en prod (ENABLE_TEST_ENDPOINTS=false),
+    # les endpoints `/api/test/*` retournent 404. Sans ce job, une regression silencieuse
+    # (guard `_require_test_endpoints()` retire d'un handler) ne serait pas detectee — et
+    # tous les endpoints `/api/test/*` exposent des actions dangereuses en prod
+    # (reset alarmes, advance-clock, send-alarm). Voir INVARIANTS.md INV-076.
+    #
+    # Doit tourner dans un process pytest SEPARE de tier2 : ENABLE_TEST_ENDPOINTS est
+    # lu au module-level dans `backend/app/api/test_api.py` (cache au 1er import).
+    # tests/integration/conftest.py force =true ; tests/prod_config/conftest.py force =false.
+    # Mixer les 2 dans un meme `pytest` = comportement non-deterministe selon l'ordre de
+    # collection. D'ou ce job autonome (~30s).
+    name: Prod config check (INV-076 — /api/test/* disabled)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run tests/prod_config (ENABLE_TEST_ENDPOINTS=false)
+        # ENABLE_TEST_ENDPOINTS=false est aussi force au top du conftest, mais on
+        # le met aussi ici en defense en profondeur (clarte + protection contre un
+        # rebase qui retirerait l'override conftest).
+        env:
+          ENABLE_TEST_ENDPOINTS: "false"
+        run: |
+          pytest tests/prod_config -p no:randomly --tb=short
+
   mutation_logic:
     # Tier 1.5 — Mutation testing sur la logique pure backend/app/logic/.
     # Path-filtre : ne tourne que si logic/, tests/unit/ ou pyproject.toml ont change
@@ -354,6 +397,7 @@ jobs:
           pytest tests/ \
             --ignore=tests/unit \
             --ignore=tests/integration \
+            --ignore=tests/prod_config \
             --ignore=tests/test_frontend.py \
             --ignore=tests/test_failback.py \
             --ignore=tests/test_manual_multi_emulator.py \
