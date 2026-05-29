@@ -381,9 +381,14 @@ POST /auth/refresh avec token valide → nouveau token différent.
 ### INV-075 [C] ⚠️ Token cross-node
 Un token émis par un noeud est accepté par tous (même SECRET_KEY).
 
-### INV-076 [C] ❌ ENABLE_TEST_ENDPOINTS=false → /api/test/* renvoie 404
+### INV-076 [C] ✅ ENABLE_TEST_ENDPOINTS=false → /api/test/* renvoie 404
 En production, tous les endpoints de test sont désactivés.
-- **🐛 Test manquant** : aucun test ne tourne avec cette variable false. En CI, ajouter un job dédié.
+- **Implémentation** : `_require_test_endpoints()` ([backend/app/api/test_api.py:18](backend/app/api/test_api.py:18)) appelé en tête de chaque handler `/api/test/*` (22 handlers couverts au 2026-05-29). Le flag `ENABLE_TEST_ENDPOINTS` est lu au module-level depuis env var, défaut `"false"`.
+- **Couverture CI** : nouveau job `prod_config_check` dans `.github/workflows/pr.yml` qui lance `pytest tests/prod_config` dans un process **séparé** de tier 2 (la conftest tier 2 force `=true`, la conftest prod_config force `=false` — mixer dans le même run = non-déterministe).
+- **Tests** (`tests/prod_config/test_test_endpoints_disabled_inv076.py`) :
+  - 6 endpoints critiques paramétrés (reset, send-alarm, advance-clock, simulate-watchdog-failure, status, trigger-escalation) → 404 attendu
+  - Défense en profondeur : même avec JWT admin valide, 404 attendu (guard avant `Depends(get_current_admin)`)
+  - Anti-faux-positif : `/api/config/escalation` et `/api/cluster` restent fonctionnels (le flag ne casse QUE `/api/test/*`)
 
 ### INV-077 [H] ✅ Admin-only endpoints protégés
 DELETE /users/{id}, POST /alarms/reset, POST /config/* → requièrent `is_admin=True`.
@@ -817,8 +822,8 @@ Ordre recommandé pour les prochains PRs :
 | INV-020 | M | ★ | Rejeter user_id dupliqués dans `POST /config/escalation` single endpoint (bulk déjà OK). Distinct de INV-019 qui portait sur position. |
 | ~~INV-073~~ | H | — | ✅ déjà fixé et testé (audit 2026-04-20). |
 | INV-084 (reste 2/3) | C | ★★ | Migrer `WATCHDOG_TIMEOUT_SECONDS` (issue #74) + `escalation_tick_seconds`+`watchdog_tick_seconds` (issue #75, 2 clés séparées tranché 2026-05-12) en SystemConfig. Sous-cas `ONCALL_OFFLINE_DELAY_MINUTES` fixé PR #25 (2026-04-21). |
-| ~~INV-085~~ | C | — | ✅ Fixé via 3 PRs incrémentales : PR #103 (#79 détection pure, 2026-05-18), PR <à venir> (#80 email initial + #81 reminders 1h/3h/6h + wiring `quorum_monitor_loop` leader-gated + table `quorum_state` singleton, 2026-05-28). Tests : 21 unit + 4 integ. |
-| INV-076 | C | ★ | Job CI dédié avec `ENABLE_TEST_ENDPOINTS=false` vérifiant que `/api/test/*` renvoie 404. Issue #82 (`human-required`). |
+| ~~INV-085~~ | C | — | ✅ Fixé via 3 PRs incrémentales : PR #103 (#79 détection pure, 2026-05-18), PR #136 (#80 email initial + #81 reminders 1h/3h/6h + wiring `quorum_monitor_loop` leader-gated + table `quorum_state` singleton, 2026-05-29). Tests : 21 unit + 4 integ. |
+| ~~INV-076~~ | C | — | ✅ Fixé via PR #138 (2026-05-29, session Claude) — job CI `prod_config_check` dans `pr.yml` + 8 tests dans `tests/prod_config/`. Issue #82 closes auto au merge. |
 | ~~INV-005~~ | H | — | ✅ Fixé PR #27 (pilote bot IA lvl 3, 2026-04-21) — property-based hypothesis. |
 | ~~INV-007~~ | M | — | ✅ Fixé PR #90 (bot IA, 2026-05-12) — verrouillage régression sur /active et /mine. |
 | ~~INV-110~~ | L | — | ✅ Fixé PR #91 (bot IA, 2026-05-13) — test paramétré clamp days. |
