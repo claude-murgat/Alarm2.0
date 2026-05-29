@@ -12,7 +12,10 @@ import pytest
 from backend.app.logic.quorum_detection import (
     ClusterSnapshot,
     QuorumState,
+    REMINDER_WINDOWS,
     evaluate_quorum_loss,
+    should_send_initial_email,
+    should_send_reminder,
 )
 
 NOW = datetime(2026, 5, 14, 12, 0, 0)
@@ -275,4 +278,238 @@ def test_quorum_history_empty_with_unhealthy_snapshot():
         "Si le mutant `lost_since = None` (au lieu de snapshot.timestamp) est "
         "introduit, la fonction crashe sur TypeError `datetime - None` au lieu "
         "de retourner proprement."
+    )
+
+
+# ============================================================================
+# INV-085 sous-cas 2/3 (#80) — should_send_initial_email
+#
+# Décide si l'email initial d'alerte direction technique doit être envoyé.
+# Règle : envoyer SSI is_lost=True ET aucun email pas encore envoyé pour
+# l'incident courant.
+# ============================================================================
+
+
+_LOST = QuorumState(is_lost=True, lost_since=NOW - timedelta(minutes=4))
+_SANE = QuorumState(is_lost=False, lost_since=None)
+
+
+def test_initial_email_due_when_lost_and_never_sent():
+    """INV-085 sous-cas 2/3 (#80) : sur transition is_lost=True et
+    email_sent_at=None, l'email initial DOIT partir.
+
+    Tue le stub RED (return False) : avec le stub, ce test échoue car
+    on attend True. C'est la fonction CŒUR de #80."""
+    assert should_send_initial_email(_LOST, email_sent_at=None) is True, (
+        "INV-085 #80 : is_lost=True + email_sent_at=None → doit retourner True. "
+        "Sinon aucun email ne part jamais et l'invariant 'alerter la direction "
+        "sur quorum perdu' n'est jamais respecté."
+    )
+
+
+def test_initial_email_not_due_when_already_sent_in_same_incident():
+    """INV-085 sous-cas 2/3 (#80) anti-doublon : si l'email a déjà été envoyé
+    pour cet incident (email_sent_at non-None), un tick suivant qui constate
+    encore is_lost=True ne doit PAS renvoyer le même email — sinon spam à
+    chaque tick (60s → 60 emails/h hors anti-spam #81).
+
+    Tue le mutant `email_sent_at is None` ↔ `email_sent_at is not None`."""
+    assert should_send_initial_email(
+        _LOST,
+        email_sent_at=NOW - timedelta(minutes=2),
+    ) is False, (
+        "INV-085 #80 : is_lost=True mais email déjà envoyé il y a 2 min "
+        "→ no-op (pas de renvoi). Sinon spam à chaque tick (60s)."
+    )
+
+
+def test_initial_email_not_due_when_not_lost():
+    """INV-085 sous-cas 2/3 (#80) : quand le quorum est sain (is_lost=False),
+    aucun email à envoyer — même si email_sent_at est None (cas le plus
+    fréquent en régime nominal).
+
+    Tue le mutant `state.is_lost is True` ↔ `True` (toujours True) :
+    sans cette branche, la fonction enverrait un email à CHAQUE tick en régime
+    sain (catastrophe — bypass complet de la détection)."""
+    assert should_send_initial_email(_SANE, email_sent_at=None) is False, (
+        "INV-085 #80 : is_lost=False → no-op systématique. Sinon spam permanent "
+        "en régime nominal (60 emails/h)."
+    )
+
+
+# ============================================================================
+# INV-085 sous-cas 3/3 (#81) — should_send_reminder
+#
+# Décide si un reminder anti-spam est dû pour la fenêtre 1h, 3h ou 6h depuis
+# l'email initial. Retourne la fenêtre due (timedelta) ou None.
+#
+# Convention boundary : "≥ W" (à exactement W écoulé, le reminder est dû).
+# Spec catalogue : "reminders à 1h, 3h, 6h" — borne inclusive (1h pile suffit).
+# ============================================================================
+
+
+# Référence : email initial envoyé à T0 = NOW - 7h. On peut donc tester
+# toutes les fenêtres (1h, 3h, 6h) avec divers `now` = T0 + delta.
+_T0 = NOW - timedelta(hours=7)
+
+
+def test_reminder_not_due_before_1h_after_initial_email():
+    """INV-085 #81 : à 30 min après l'email initial, AUCUN reminder n'est dû
+    (la 1ère fenêtre est à 1h).
+
+    Tue le mutant `>= 1h` ↔ `>= 0s` (seuil ramené à zéro) qui ferait partir
+    un reminder dès le tick suivant l'email initial."""
+    now = _T0 + timedelta(minutes=30)
+    assert should_send_reminder(
+        state=_LOST,
+        email_sent_at=_T0,
+        reminders_sent_at=[],
+        now=now,
+    ) is None, (
+        "INV-085 #81 : 30 min < 1h → aucun reminder dû (None attendu). "
+        "Sinon spam dès le 1er tick après l'email initial."
+    )
+
+
+def test_reminder_1h_due_at_exactly_1h_when_none_sent():
+    """INV-085 #81 boundary 1h : à exactement 1h après l'email initial,
+    le reminder 1h est dû (borne `>=`, pas `>`).
+
+    Tue le mutant `>= 1h` ↔ `> 1h` (off-by-one strict) : avec `>`, à 1h pile
+    le test échoue car None retourné au lieu de 1h."""
+    now = _T0 + timedelta(hours=1)
+    result = should_send_reminder(
+        state=_LOST,
+        email_sent_at=_T0,
+        reminders_sent_at=[],
+        now=now,
+    )
+    assert result == timedelta(hours=1), (
+        f"INV-085 #81 : à T0+1h pile, reminder 1h dû. Attendu timedelta(hours=1), "
+        f"got {result!r}. Si None : le mutant `> 1h` (au lieu de `>= 1h`) "
+        f"est passé — la fenêtre 1h est skippée d'un tick."
+    )
+
+
+def test_reminder_1h_not_redue_if_already_sent():
+    """INV-085 #81 anti-doublon : après envoi du reminder 1h, un tick suivant
+    à 1h05 ne doit PAS le ré-envoyer (sinon spam intra-fenêtre).
+
+    Tue le mutant qui ignorerait le filtre `reminders_sent_at` :
+    sans filtre, la fonction renverrait 1h à chaque tick entre 1h et 3h."""
+    now = _T0 + timedelta(hours=1, minutes=5)
+    assert should_send_reminder(
+        state=_LOST,
+        email_sent_at=_T0,
+        reminders_sent_at=[timedelta(hours=1)],
+        now=now,
+    ) is None, (
+        "INV-085 #81 : reminder 1h déjà envoyé, le tick suivant à 1h05 doit "
+        "retourner None. Sinon spam à chaque tick (60s) jusqu'à 3h."
+    )
+
+
+def test_reminder_3h_due_at_3h_when_1h_already_sent():
+    """INV-085 #81 fenêtre 3h : à 3h exact, 1h déjà envoyé, le reminder 3h
+    est dû.
+
+    Tue 2 mutants potentiels :
+    - `>= 3h` ↔ `> 3h` : à 3h pile, mutant `>` retournerait None
+    - boucle qui sortirait à la 1ère fenêtre due sans regarder les suivantes
+      (return 1h à tort puisque déjà envoyé) : le filtre exclut 1h, doit
+      passer à 3h."""
+    now = _T0 + timedelta(hours=3)
+    result = should_send_reminder(
+        state=_LOST,
+        email_sent_at=_T0,
+        reminders_sent_at=[timedelta(hours=1)],
+        now=now,
+    )
+    assert result == timedelta(hours=3), (
+        f"INV-085 #81 : à T0+3h, 1h déjà envoyé → reminder 3h dû. "
+        f"Attendu timedelta(hours=3), got {result!r}."
+    )
+
+
+def test_reminder_6h_due_at_6h_when_1h_and_3h_already_sent():
+    """INV-085 #81 fenêtre 6h : à 6h exact, 1h+3h déjà envoyés, le 6h est dû.
+    Dernière fenêtre du jeu."""
+    now = _T0 + timedelta(hours=6)
+    result = should_send_reminder(
+        state=_LOST,
+        email_sent_at=_T0,
+        reminders_sent_at=[timedelta(hours=1), timedelta(hours=3)],
+        now=now,
+    )
+    assert result == timedelta(hours=6), (
+        f"INV-085 #81 : à T0+6h, reminders 1h+3h déjà envoyés → 6h dû. "
+        f"Attendu timedelta(hours=6), got {result!r}."
+    )
+
+
+def test_reminder_stops_after_6h():
+    """INV-085 #81 stop final : à 7h, tous les 3 reminders déjà envoyés
+    (1h+3h+6h) → AUCUN nouveau reminder. La spec est explicite : aucun
+    reminder au-delà de 6h (tranché 2026-04-20).
+
+    Tue un mutant qui ajouterait une 4e fenêtre (12h, 24h, etc.)."""
+    now = _T0 + timedelta(hours=7)
+    assert should_send_reminder(
+        state=_LOST,
+        email_sent_at=_T0,
+        reminders_sent_at=list(REMINDER_WINDOWS),
+        now=now,
+    ) is None, (
+        "INV-085 #81 : tous reminders (1h/3h/6h) envoyés → silence radio "
+        "définitif après 6h. La spec interdit toute nouvelle relance "
+        "(décision 2026-04-20). Si != None, une 4e fenêtre a été ajoutée."
+    )
+
+
+def test_reminder_not_due_when_initial_email_not_yet_sent():
+    """INV-085 #81 ordre causal : tant que l'email initial n'a pas été envoyé
+    (email_sent_at=None), aucun reminder n'est dû — sinon on enverrait des
+    reminders sur un email inexistant.
+
+    Cas réaliste : transition is_lost=True intercepte au même tick que
+    `should_send_initial_email` → on appelle d'abord initial puis reminder ;
+    si le code de reminder ne checke pas email_sent_at, il peut considérer
+    `now - None` et crasher OU se déclencher à tort.
+
+    Tue le mutant `if email_sent_at is None: return None` ↔ pas de check
+    (path TypeError ou behavior incorrect)."""
+    now = NOW
+    assert should_send_reminder(
+        state=_LOST,
+        email_sent_at=None,
+        reminders_sent_at=[],
+        now=now,
+    ) is None, (
+        "INV-085 #81 : pas de reminder sans email initial préalable. "
+        "Le tick courant doit traiter d'abord `should_send_initial_email`. "
+        "Si crash ou non-None : la fonction n'a pas géré le guard email_sent_at=None."
+    )
+
+
+def test_reminder_not_due_when_quorum_recovered():
+    """INV-085 #81 garde-fou : si le quorum est revenu sain (is_lost=False)
+    entre 2 ticks, AUCUN reminder ne doit partir, même si la fenêtre temporelle
+    est franchie depuis l'email initial.
+
+    Réaliste : email initial envoyé, puis quorum résolu à T0+30min, puis
+    le tick à T0+1h05 voit `is_lost=False` → la persistance d'incident
+    (reset) sera faite par l'orchestrateur dans le même tick, mais la
+    fonction pure doit déjà être robuste à ce cas.
+
+    Tue le mutant `state.is_lost is True` ↔ `True` (toujours True) qui
+    enverrait des reminders éternels même après résolution."""
+    now = _T0 + timedelta(hours=1, minutes=5)
+    assert should_send_reminder(
+        state=_SANE,
+        email_sent_at=_T0,
+        reminders_sent_at=[],
+        now=now,
+    ) is None, (
+        "INV-085 #81 : is_lost=False → no-op, peu importe la fenêtre. "
+        "Sinon des reminders partent même après que le quorum est revenu."
     )

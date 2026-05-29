@@ -38,7 +38,7 @@ plutôt que d'interpréter à partir du code (le code peut être buggy).
 | 11. Stats | 1 | 1 | 0 | 0 (INV-110 ✅ PR #91) |
 | 13. Hardware trigger | 3 | 0 | 0 | 0 (INV-120 V2 + INV-122 + INV-123 ✅ PR1 issue #112 — 2026-05-18) |
 
-**Restant prioritaire** : INV-018/018b (`original_created_at`), INV-084 (reste 2/3 sous-cas : `watchdog_timeout_seconds` + `escalation_tick_seconds`), INV-085 (quorum email). Issues backlog `ai:queue` ouvertes (8) : #74 (INV-084 watchdog), #75 (INV-084 escalation_tick), #76-#78 (INV-018/018b), #79-#81 (INV-085), #96 (INV-074 path négatif suite review PR #92). Cron 4h pioche automatiquement la plus ancienne.
+**Restant prioritaire** : INV-018b résiduel (#78 stats KPI, #85 frontend timeAgo), INV-084 (reste 2/3 sous-cas : `watchdog_timeout_seconds` + `escalation_tick_seconds`), INV-076 (#82 CI test endpoints désactivés), INV-093/095 (#83/#84 split-brain + atomicité failover). INV-085 désormais ✅ (2026-05-28, PR <à venir>).
 
 ---
 
@@ -461,15 +461,18 @@ Aucun délai métier ne doit être hardcodé dans le code. Chaque valeur est lue
 
 **Règle d'écriture** : toute nouvelle constante temporelle doit être dans SystemConfig dès le jour 1. Pas de "TODO paramétrer plus tard".
 
-### INV-085 [C] 🐛 Perte de quorum cluster → email direction technique
+### INV-085 [C] ✅ Perte de quorum cluster → email direction technique
 Si le cluster perd son quorum (< majorité de noeuds healthy dans Patroni/etcd), un email est envoyé à `system_config.alert_email` pour alerter la direction technique qu'une intervention manuelle est requise.
 - **Pourquoi** : sans quorum, aucun primary ne peut être élu → écritures bloquées → alarmes non traitées. Le système ne peut pas se récupérer tout seul.
 - **Conditions de déclenchement** :
   - `quorum.has_quorum == False` dans `/api/cluster` (moins de N/2+1 noeuds healthy)
   - OU Patroni injoignable depuis tous les noeuds pendant > **3 minutes** (seuil arbitré 2026-04-20 pour couvrir les glitches courts type redémarrage Patroni sans flapping)
 - **Anti-spam** : 1 email initial + reminders à **1h, 3h, 6h** jusqu'à résolution (arbitré 2026-04-20). Équilibre information opérateur ↔ bruit. Le reminder s'arrête dès que `has_quorum == True` à nouveau.
-- **🐛 Non implémenté** : le code actuel expose `/api/cluster` avec `has_quorum` mais ne déclenche aucun email.
-- **Test** : stopper 2 des 3 etcd → quorum perdu → email arrive dans Mailhog dans les 2 min.
+- **Architecture** : `quorum_monitor_loop()` (tick 60s, leader-gated via `is_leader.is_set()` pour éviter 3 emails en cluster) construit un snapshot `/api/cluster` à chaque tick, garde un historique in-memory > 3 min, appelle `_run_quorum_check` qui orchestre `evaluate_quorum_loss` + `should_send_initial_email` + `should_send_reminder`. État persistant dans `quorum_state` (singleton id=1) : `lost_since`, `email_sent_at`, `reminders_sent_at` (JSON liste secondes), reset complet au retour à sain.
+- **Tests** :
+  - Tier 1 unit pur (`tests/unit/test_quorum_detection.py`) : 21 tests (détection + 2 fonctions pures, boundaries `>= 1h/3h/6h` mutmut-aware)
+  - Tier 2 intégration (`tests/integration/test_quorum_monitor_inv085.py`) : 4 tests (envoi initial + reset + reminder 1h + anti-doublon 60s)
+  - Tier 3 smoke manuel : stopper 2 des 3 etcd → quorum perdu → email arrive dans Mailhog dans les 4-5 min (3 min anti-flapping + 1 tick).
 
 ---
 
@@ -814,7 +817,7 @@ Ordre recommandé pour les prochains PRs :
 | INV-020 | M | ★ | Rejeter user_id dupliqués dans `POST /config/escalation` single endpoint (bulk déjà OK). Distinct de INV-019 qui portait sur position. |
 | ~~INV-073~~ | H | — | ✅ déjà fixé et testé (audit 2026-04-20). |
 | INV-084 (reste 2/3) | C | ★★ | Migrer `WATCHDOG_TIMEOUT_SECONDS` (issue #74) + `escalation_tick_seconds`+`watchdog_tick_seconds` (issue #75, 2 clés séparées tranché 2026-05-12) en SystemConfig. Sous-cas `ONCALL_OFFLINE_DELAY_MINUTES` fixé PR #25 (2026-04-21). |
-| INV-085 | C | ★★ | Quorum perdu → email. Nécessite un ping Patroni périodique + anti-spam (seuil 3 min + reminders 1h/3h/6h, tranché 2026-04-20). **Décomposé en backlog** : issues #79 (détection), #80 (email initial), #81 (reminders). |
+| ~~INV-085~~ | C | — | ✅ Fixé via 3 PRs incrémentales : PR #103 (#79 détection pure, 2026-05-18), PR <à venir> (#80 email initial + #81 reminders 1h/3h/6h + wiring `quorum_monitor_loop` leader-gated + table `quorum_state` singleton, 2026-05-28). Tests : 21 unit + 4 integ. |
 | INV-076 | C | ★ | Job CI dédié avec `ENABLE_TEST_ENDPOINTS=false` vérifiant que `/api/test/*` renvoie 404. Issue #82 (`human-required`). |
 | ~~INV-005~~ | H | — | ✅ Fixé PR #27 (pilote bot IA lvl 3, 2026-04-21) — property-based hypothesis. |
 | ~~INV-007~~ | M | — | ✅ Fixé PR #90 (bot IA, 2026-05-12) — verrouillage régression sur /active et /mine. |
@@ -822,6 +825,6 @@ Ordre recommandé pour les prochains PRs :
 | ~~INV-074~~ | C | — | ✅ Fixé PR #92 (bot IA, 2026-05-13). Follow-ups : issue #96 [H] path négatif, issue #97 clarif stateless JWT. |
 | ~~INV-077~~ | H | — | ✅ Fixé PR #93 (bot IA, 2026-05-13) — 5 endpoints admin-only. |
 | ~~INV-078~~ | M | — | ✅ Fixé PR #95 (bot IA, 2026-05-13). Cas pédagogique : 1er run abandonné, reformulation + PR #94 prompt.md ajoute section "regression-lock". |
-| ~~INV-120 V2 + 122 + 123 backend~~ | H | — | ✅ PR1 (issue #112). `POST /internal/alarms/report-state` + table `gateway_states` + colonnes `Alarm.source` / `sensor_dissensus_*` + suppression `/trigger` V1. PR2 (refonte `DryContactMonitorThread` stateless côté gateway) et PR3 (badge UI dissensus web + Android) à suivre. |
+| ~~INV-120 V2 + 122 + 123 backend~~ | H | — | ✅ PR1 (#113, 2026-05-18) `POST /internal/alarms/report-state` + table `gateway_states` + colonnes `Alarm.source` / `sensor_dissensus_*` + suppression `/trigger` V1. ✅ PR2 (#115, 2026-05-18) `DryContactMonitorThread` stateless côté gateway. ✅ Patch (#119, 2026-05-28) ajout `acknowledged` au filtre `any_active_alarm` → no-op pendant ack (bug terrain #118). Reste PR3 : badge UI dissensus web + Android (issue #112 ouverte, scope clarifié dans son commentaire). |
 
 **Parallèles possibles** : PR6 (endpoint `/test/evaluate-now` qui élimine le flaky `trigger-escalation` incomplet) — désirable avant d'attaquer INV-018 car va simplifier les tests.

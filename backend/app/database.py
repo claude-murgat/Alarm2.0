@@ -60,6 +60,9 @@ def run_migrations(engine):
         # ── INV-056 : table connectivity_events (transitions online/offline)
         _migrate_connectivity_events(conn, is_sqlite)
 
+        # ── INV-085 : table quorum_state (singleton, persistance incident)
+        _migrate_quorum_state(conn, is_sqlite)
+
 
 def _migrate_alarm_notifications(conn, is_sqlite: bool):
     """Crée la table alarm_notifications et migre les données CSV si nécessaire."""
@@ -363,6 +366,42 @@ def _migrate_connectivity_events(conn, is_sqlite: bool):
         ))
         conn.commit()
         logger.info("Migration: table connectivity_events creee (INV-056)")
+
+
+def _migrate_quorum_state(conn, is_sqlite: bool):
+    """INV-085 : crée la table quorum_state (singleton id=1) qui persiste
+    l'incident quorum en cours à travers les redémarrages backend.
+
+    - lost_since : début de la série non-saine continue (NULL si sain).
+    - email_sent_at : timestamp 1er email d'alerte (NULL = pas encore envoyé).
+    - reminders_sent_at : JSON liste des fenêtres reminders envoyées (secondes).
+    """
+    if is_sqlite:
+        exists = conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name='quorum_state'")
+        ).fetchone()
+    else:
+        exists = conn.execute(
+            text("SELECT to_regclass('public.quorum_state')")
+        ).fetchone()
+        exists = exists[0] if exists else None
+
+    if not exists:
+        conn.execute(text("""
+            CREATE TABLE quorum_state (
+                id INTEGER PRIMARY KEY,
+                lost_since TIMESTAMP,
+                email_sent_at TIMESTAMP,
+                reminders_sent_at VARCHAR NOT NULL DEFAULT '[]'
+            )
+        """))
+        # Singleton : insert la row id=1 vide
+        conn.execute(text(
+            "INSERT INTO quorum_state (id, lost_since, email_sent_at, reminders_sent_at) "
+            "VALUES (1, NULL, NULL, '[]')"
+        ))
+        conn.commit()
+        logger.info("Migration: table quorum_state creee + row singleton (INV-085)")
 
 
 def get_db():
