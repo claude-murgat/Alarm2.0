@@ -54,6 +54,57 @@ class AlarmPollingService : Service() {
         var heartbeatLostVisual = false
         var heartbeatLostAlarm = false
 
+        // INV-ANDROID-307 (2026-05-29) : snooze 5 min de la sonnerie locale.
+        // Pendant le snooze, la sonnerie est désactivée même si les conditions
+        // (heartbeat lost + noNetwork) restent vraies. Limité à 3 occurrences
+        // par épisode pour éviter qu'un opérateur d'astreinte ne se mette
+        // silencieux à perpétuité. L'épisode se termine quand le heartbeat
+        // revient OK (reset des compteurs).
+        const val LOCAL_ALARM_SNOOZE_DURATION_MS = 5 * 60 * 1000L
+        const val LOCAL_ALARM_SNOOZE_MAX_COUNT = 3
+        var snoozeUntilElapsedMs: Long = 0L
+        var snoozeCount: Int = 0
+
+        /** True si une sonnerie locale est actuellement en cours de snooze. */
+        fun isLocalAlarmSnoozed(
+            now: Long = android.os.SystemClock.elapsedRealtime()
+        ): Boolean {
+            return snoozeUntilElapsedMs > 0L && now < snoozeUntilElapsedMs
+        }
+
+        /** Snooze restant en millisecondes (0 si pas en snooze). */
+        fun snoozeRemainingMs(
+            now: Long = android.os.SystemClock.elapsedRealtime()
+        ): Long {
+            return (snoozeUntilElapsedMs - now).coerceAtLeast(0L)
+        }
+
+        /**
+         * INV-ANDROID-307 : déclenche un snooze de 5 min sur la sonnerie locale.
+         * Retourne `true` si snooze armé, `false` si quota épuisé
+         * (`snoozeCount >= LOCAL_ALARM_SNOOZE_MAX_COUNT`).
+         */
+        fun snoozeLocalAlarm(): Boolean {
+            if (snoozeCount >= LOCAL_ALARM_SNOOZE_MAX_COUNT) {
+                com.alarm.critical.util.AppLogger.log(
+                    "Heartbeat",
+                    "Snooze refuse : quota epuise " +
+                        "($snoozeCount/$LOCAL_ALARM_SNOOZE_MAX_COUNT)"
+                )
+                return false
+            }
+            snoozeCount += 1
+            snoozeUntilElapsedMs =
+                android.os.SystemClock.elapsedRealtime() + LOCAL_ALARM_SNOOZE_DURATION_MS
+            heartbeatLostAlarm = false
+            com.alarm.critical.util.AppLogger.log(
+                "Heartbeat",
+                "Sonnerie INV-302 mise en sourdine 5 min " +
+                    "(snooze $snoozeCount/$LOCAL_ALARM_SNOOZE_MAX_COUNT)"
+            )
+            return true
+        }
+
         // Refresh token toutes les 12h (configurable pour tests)
         var tokenRefreshIntervalMs = 12 * 60 * 60 * 1000L
 
@@ -231,6 +282,9 @@ class AlarmPollingService : Service() {
                         heartbeatLostSince = 0L
                         heartbeatLostVisual = false
                         heartbeatLostAlarm = false
+                        // INV-ANDROID-307 : fin d'episode → reset le quota de snooze
+                        snoozeUntilElapsedMs = 0L
+                        snoozeCount = 0
                     } else if (response.code() == 503) {
                         // 503 = replica — signaler au poll de switcher
                         Log.w(TAG, "Heartbeat: backend is replica (503)")
@@ -277,9 +331,12 @@ class AlarmPollingService : Service() {
                 )
                 Log.w(TAG, "Heartbeat perdu depuis ${elapsed}ms — bandeau visuel déclenché")
             }
-            // INV-ANDROID-302 : sonnerie locale armée UNIQUEMENT si pas de reseau du tout
+            // INV-ANDROID-302 : sonnerie locale armée UNIQUEMENT si pas de reseau du tout.
+            // INV-ANDROID-307 : en periode de snooze, on ne (re-)arme PAS la sonnerie ;
+            // a la fin du snooze, le tick suivant l'armera si les conditions sont encore vraies.
             val noNetwork = com.alarm.critical.util.NetworkAvailabilityMonitor.isNoNetwork
-            if (noNetwork && !heartbeatLostAlarm) {
+            val snoozed = isLocalAlarmSnoozed(now)
+            if (noNetwork && !snoozed && !heartbeatLostAlarm) {
                 heartbeatLostAlarm = true
                 com.alarm.critical.util.AppLogger.log(
                     "Heartbeat",
