@@ -33,11 +33,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # Filter tres tot : ne tourne QUE si le label pose est ai:approved ET
-    # que l'auteur de la PR est bien le bot. Eviter tout travail inutile.
+    # que l'auteur de la PR est :
+    #   - le bot `alarm-murgat-bot` (cas historique, PRs autonomes), OU
+    #   - `claude-murgat` (PRs de session Claude interactive, decision 2026-05-28)
+    # Les autres PRs humaines doivent rester mergees manuellement.
     if: |
       github.event.label.name == 'ai:approved' &&
       (github.event.pull_request.user.login == 'alarm-murgat-bot' ||
-       github.event.pull_request.user.login == 'alarm-murgat-bot[bot]')
+       github.event.pull_request.user.login == 'alarm-murgat-bot[bot]' ||
+       github.event.pull_request.user.login == 'claude-murgat')
     permissions:
       contents: read
 
