@@ -164,14 +164,15 @@ Après INV-016, toutes les `AlarmNotification.sms_sent` et `.call_sent` sont rem
 Nouveau champ `original_created_at` initialisé à la création et **jamais modifié**. `created_at` continue d'être utilisé comme "timer d'escalade" (reset à chaque escalade).
 - **Pourquoi** : séparer la donnée historique (quand l'événement s'est produit) du compteur de logique métier (quand commence le timer actuel).
 
-### INV-018b [C] 🐛 Toute lecture historique utilise `original_created_at`
+### INV-018b [C] ⚠️ Toute lecture historique utilise `original_created_at`
 Les usages suivants doivent lire `original_created_at`, PAS `created_at` :
-- `alarms.py:116-117` — filtre `/alarms/?days=N` (historique)
-- `alarms.py:131` — ORDER BY pour `/active`
-- `schemas.py:124` — champ exposé dans `AlarmResponse`
-- `stats.py:108, 120, 140, 143` — bucketing KPI par semaine, calcul MTTR
-- `index.html:567, 575` — affichage timeAgo dans le front
-- **Impact actuel** : une alarme escaladée 2h après création apparaît comme "il y a 2min" dans l'historique, compte dans la mauvaise semaine en KPI, et a un MTTR artificiellement raccourci.
+- ✅ `alarms.py:133-134` — filtre `/alarms/?days=N` (historique) — PR #114 + #121
+- ✅ `alarms.py:149` — ORDER BY pour `/active` — PR #114 + #121
+- ✅ `schemas.py:83/129` — champ exposé dans `AlarmResponse` — PR #102
+- ✅ `stats.py:107-149` — bucketing KPI par semaine + MTTR + filtre période — PR <à venir 2026-05-29>
+- ❌ `index.html:567, 575` — affichage timeAgo dans le front — issue #85 (`human-required`)
+- **Statut backend** : ✅ complet (3 sous-issues bot/Claude mergées). **Statut frontend** : ⚠️ reste #85.
+- **Impact actuel** (frontend) : une alarme escaladée 2h après création apparaît comme "il y a 2min" dans l'historique web (le backend renvoie pourtant `original_created_at` correct dans `AlarmResponse`).
 - **Seul usage qui garde `created_at` (timer)** : `escalation.py:185` (calcul `elapsed` pour décision d'escalade), `escalation.py:132, 204` (reset après ack expiry et escalade), `calls.py:96` (reset DTMF escalate).
 
 ### INV-019 [M] ✅ Chaîne d'escalade : positions uniques → rejet 409
@@ -816,7 +817,7 @@ Ordre recommandé pour les prochains PRs :
 
 | INV | Criticité | Complexité | Note |
 |---|---|---|---|
-| INV-018 + INV-018b | C | ★★★ | Ajouter `original_created_at` immuable. Migration DB + 5 call sites (stats, schemas, frontend). Gros PR. **Décomposé en backlog** : issues #76 (modèle), #77 (lectures), #78 (stats), #85 (frontend, `human-required`). |
+| INV-018 + INV-018b | C | ⚠️ | ✅ #76 modèle (PR #102 bot, 2026-05-14), ✅ #77 lectures `/alarms` (PRs #114 + #121 bot+Claude), ✅ #78 stats KPI (PR <à venir 2026-05-29> session Claude). **Reste** : #85 frontend `timeAgo` (`human-required`). Backend complet ; impact résiduel = affichage web seul. |
 | ~~INV-082~~ | H | — | ✅ Fixé PR #89 (bot IA, 2026-05-12) — test concurrence threading. |
 | ~~INV-019~~ | M | — | ✅ Fixé PR #20 (pilote bot IA lvl 1, 2026-04-21). |
 | INV-020 | M | ★ | Rejeter user_id dupliqués dans `POST /config/escalation` single endpoint (bulk déjà OK). Distinct de INV-019 qui portait sur position. |
