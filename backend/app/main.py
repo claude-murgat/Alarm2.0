@@ -65,6 +65,45 @@ def _migrate_alarm_original_created_at(engine):
         conn.commit()
 
 
+def _init_db_schema(engine):
+    """Init/migrate le schéma DB. À appeler sur TOUS les nodes (primary ET
+    replica) — issue #144 / INV-056.
+
+    `create_all` et `run_migrations` sont idempotents en SQL (CREATE TABLE
+    IF NOT EXISTS, ALTER TABLE ADD COLUMN IF NOT EXISTS), donc rejouer sur
+    un schéma déjà initialisé est sans effet.
+
+    Sur un replica Patroni, toute tentative de DDL renvoie
+    `psycopg2.errors.ReadOnlySqlTransaction` (wrappé en SQLAlchemy
+    OperationalError). Cette erreur est attrapée et loggée — on ne crashe
+    pas le boot du backend secondary.
+
+    Pourquoi inconditionnel : avant ce fix, l'init était gardée par
+    `if is_leader.is_set()` dans le lifespan. Pendant le canary deploy
+    V1.6 (2026-05-29), chaque node restart pendant un failover Patroni →
+    tous bootaient en secondary → tous skipaient create_all → la table
+    `connectivity_events` (ajoutée par PR #130) n'a jamais été matérialisée.
+    Au failover suivant, le nouveau primary tournait sans la table → 500
+    en boucle. En rendant l'init inconditionnelle, au moins un node tente
+    l'init avec succès dès qu'il est primary (ou le sera plus tard).
+    """
+    from sqlalchemy.exc import OperationalError, InternalError
+    try:
+        Base.metadata.create_all(bind=engine)
+        run_migrations(engine)
+        _migrate_alarm_original_created_at(engine)
+        logger.info("Schema init OK (create_all + run_migrations + alarm migration)")
+    except (OperationalError, InternalError) as e:
+        msg = str(e)
+        if "read-only" in msg.lower() or "ReadOnlySqlTransaction" in msg:
+            logger.info(
+                "Schema init skip — replica Patroni read-only (%s)",
+                type(e).__name__,
+            )
+        else:
+            raise
+
+
 def seed_data():
     """Create default users and escalation config if DB is empty."""
     db = SessionLocal()
@@ -121,12 +160,15 @@ async def lifespan(app: FastAPI):
             break
         await asyncio.sleep(0.5)
 
+    # Issue #144 / INV-056 : init schema sur TOUS les nodes (idempotent en SQL,
+    # erreur read-only attrapée sur replica). Garantit que tout nouveau modèle
+    # SQLAlchemy a sa table matérialisée même si TOUS les nodes ont booté en
+    # mode secondary pendant un canary deploy (cas reproduit le 2026-05-29).
+    _init_db_schema(engine)
+
     if is_leader.is_set():
-        # Primary : creer les tables et seeder
-        logger.info("Ce noeud est PRIMARY — init DB + seed")
-        Base.metadata.create_all(bind=engine)
-        run_migrations(engine)
-        _migrate_alarm_original_created_at(engine)
+        # Primary : seed les users par défaut (INSERT → forcément leader)
+        logger.info("Ce noeud est PRIMARY — seed")
         seed_data()
     else:
         # Replica : attendre que la DB soit accessible en lecture
