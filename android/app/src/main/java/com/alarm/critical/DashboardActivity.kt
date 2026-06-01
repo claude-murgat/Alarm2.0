@@ -52,6 +52,10 @@ class DashboardActivity : AppCompatActivity() {
     private var pulseAnimator: ObjectAnimator? = null
     private var lastCardState: String = "calm"
 
+    // INV-ANDROID-306/307 : track le dernier cas affiche du bandeau "Connexion perdue"
+    // pour ne logger qu'aux TRANSITIONS (eviter spam 1 ligne/seconde).
+    private var lastBandeauCase: String? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_dashboard)
@@ -73,6 +77,17 @@ class DashboardActivity : AppCompatActivity() {
         val userName = prefs.getString("user_name", "Utilisateur") ?: "Utilisateur"
 
         AppLogger.log("Dashboard", "Ouvert (user=$userName)")
+
+        // INV-ANDROID-305 : snapshot initial de l'etat reseau pour aider au diagnostic.
+        run {
+            val nm = com.alarm.critical.util.NetworkAvailabilityMonitor
+            AppLogger.log(
+                "Dashboard",
+                "Snapshot reseau initial : data=${nm.dataAvailable} cell=${nm.cellularInService} " +
+                    "isNoNetwork=${nm.isNoNetwork}. Si cell=true et que tu n'as pas autorise " +
+                    "READ_PHONE_STATE, le check cellular est en fail open (cf logs Network)."
+            )
+        }
 
         // Header : nom + initiale
         findViewById<TextView>(R.id.userNameText).text = userName
@@ -123,6 +138,17 @@ class DashboardActivity : AppCompatActivity() {
         // Bouton reconnexion (dans alerte)
         findViewById<Button>(R.id.reconnectButton).setOnClickListener {
             performLogout()
+        }
+
+        // INV-ANDROID-307 : bouton "Faire taire 5 min" sur la sonnerie INV-302.
+        // Limite à 3 occurrences par episode — la fonction snoozeLocalAlarm()
+        // renvoie false si quota epuise, on coupe le son meme dans ce cas
+        // (defensif, ne devrait pas arriver car le bouton est cache).
+        findViewById<Button>(R.id.snoozeLocalAlarmButton).setOnClickListener {
+            val armed = AlarmPollingService.snoozeLocalAlarm()
+            if (armed) {
+                connectionLostSoundManager?.stopAlarmSound()
+            }
         }
 
         // Bouton aide flottant — export logs
@@ -256,9 +282,59 @@ class DashboardActivity : AppCompatActivity() {
             val connectionLostContainer = findViewById<LinearLayout>(R.id.connectionLostContainer)
             val connectionLostAlert = findViewById<TextView>(R.id.connectionLostAlert)
             val reconnectButton = findViewById<Button>(R.id.reconnectButton)
+            val connectionLostArcTimer =
+                findViewById<ArcTimerView>(R.id.connectionLostArcTimer)
+            val connectionLostCountdownLabel =
+                findViewById<TextView>(R.id.connectionLostCountdownLabel)
+            val snoozeButton =
+                findViewById<Button>(R.id.snoozeLocalAlarmButton)
 
             // INV-ANDROID-104 (2026-05-26) : 3 etats distincts pour le bandeau
             // selon la criticite (auth error > sonnerie reseau perdu > bandeau info).
+            // INV-ANDROID-306/307 (2026-05-29) : ajout countdown + bouton snooze
+            // pour la sonnerie hors-connexion (INV-302).
+            val now = android.os.SystemClock.elapsedRealtime()
+            val noNetwork = com.alarm.critical.util.NetworkAvailabilityMonitor.isNoNetwork
+            val snoozeActive = AlarmPollingService.isLocalAlarmSnoozed(now)
+            val snoozeQuotaRemaining =
+                AlarmPollingService.LOCAL_ALARM_SNOOZE_MAX_COUNT - AlarmPollingService.snoozeCount
+
+            // États dépendant de heartbeat-lost (par défaut tout caché)
+            connectionLostArcTimer.visibility = View.GONE
+            connectionLostCountdownLabel.visibility = View.GONE
+            snoozeButton.visibility = View.GONE
+
+            // INV-ANDROID-306/307 : log la transition entre cas pour pouvoir diagnostiquer
+            // depuis l'export "Envoyer les logs". 1 ligne par transition, pas a chaque tick.
+            val bandeauCase: String = when {
+                AlarmPollingService.authErrorAlarm -> "AUTH_ERROR"
+                AlarmPollingService.heartbeatLostAlarm -> "INV302_SONNERIE"
+                snoozeActive -> "INV307_SNOOZE"
+                AlarmPollingService.heartbeatLostVisual -> "INV104_VISUAL_ONLY"
+                AlarmPollingService.heartbeatLostSince > 0L && noNetwork -> "INV306_COUNTDOWN_PRE_ALARM"
+                AlarmPollingService.heartbeatLostSince > 0L && !noNetwork -> "HEARTBEAT_LOST_BUT_NETWORK_OK_HIDDEN"
+                else -> "HIDDEN"
+            }
+            if (bandeauCase != lastBandeauCase) {
+                val data = com.alarm.critical.util.NetworkAvailabilityMonitor.dataAvailable
+                val cell = com.alarm.critical.util.NetworkAvailabilityMonitor.cellularInService
+                val elapsedSec = if (AlarmPollingService.heartbeatLostSince > 0L)
+                    (now - AlarmPollingService.heartbeatLostSince) / 1000L else 0L
+                com.alarm.critical.util.AppLogger.log(
+                    "Bandeau",
+                    "transition $lastBandeauCase -> $bandeauCase " +
+                        "data=$data cell=$cell isNoNetwork=$noNetwork " +
+                        "heartbeatLostSince=${AlarmPollingService.heartbeatLostSince}ms " +
+                        "(elapsed ${elapsedSec}s) " +
+                        "hbVisual=${AlarmPollingService.heartbeatLostVisual} " +
+                        "hbAlarm=${AlarmPollingService.heartbeatLostAlarm} " +
+                        "snoozeCount=${AlarmPollingService.snoozeCount}/" +
+                        "${AlarmPollingService.LOCAL_ALARM_SNOOZE_MAX_COUNT} " +
+                        "snoozeActive=$snoozeActive"
+                )
+                lastBandeauCase = bandeauCase
+            }
+
             if (AlarmPollingService.authErrorAlarm) {
                 connectionLostAlert.text = AlarmPollingService.authErrorMessage ?: "Session expiree"
                 connectionLostContainer.visibility = View.VISIBLE
@@ -278,6 +354,28 @@ class DashboardActivity : AppCompatActivity() {
                     connectionLostSoundManager = AlarmSoundManager(this@DashboardActivity)
                 }
                 connectionLostSoundManager?.startAlarmSound()
+                // INV-ANDROID-307 : bouton snooze visible si quota disponible
+                if (snoozeQuotaRemaining > 0) {
+                    snoozeButton.text =
+                        "Faire taire 5 min ($snoozeQuotaRemaining restants)"
+                    snoozeButton.visibility = View.VISIBLE
+                }
+            } else if (snoozeActive) {
+                // INV-ANDROID-307 : sonnerie INV-302 en cours de snooze
+                // → bandeau visible avec countdown vers la reprise de la sonnerie, sans son
+                connectionLostAlert.text =
+                    "Sonnerie en sourdine — reprise prévue dans :"
+                connectionLostContainer.visibility = View.VISIBLE
+                reconnectButton.visibility = View.GONE
+                connectionLostSoundManager?.stopAlarmSound()
+                val remainingMs = AlarmPollingService.snoozeRemainingMs(now)
+                val totalSec =
+                    (AlarmPollingService.LOCAL_ALARM_SNOOZE_DURATION_MS / 1000L).toInt()
+                val remainingSec = ((remainingMs + 999L) / 1000L).toInt()
+                connectionLostArcTimer.setTime(totalSec, remainingSec)
+                connectionLostArcTimer.visibility = View.VISIBLE
+                connectionLostCountdownLabel.text = _formatHmsCountdown(remainingMs)
+                connectionLostCountdownLabel.visibility = View.VISIBLE
             } else if (AlarmPollingService.heartbeatLostVisual) {
                 // INV-ANDROID-104 : heartbeat perdu mais reseau dispo (data ou SMS)
                 // → bandeau info uniquement, AUCUNE sonnerie
@@ -286,6 +384,27 @@ class DashboardActivity : AppCompatActivity() {
                 connectionLostContainer.visibility = View.VISIBLE
                 reconnectButton.visibility = View.GONE
                 connectionLostSoundManager?.stopAlarmSound()
+            } else if (
+                AlarmPollingService.heartbeatLostSince > 0L &&
+                noNetwork
+            ) {
+                // INV-ANDROID-306 : countdown pre-sonnerie. Heartbeat tombé MAIS pas
+                // encore au seuil 2 min, et réseau totalement perdu → on prévient
+                // l'utilisateur que la sonnerie va se déclencher.
+                val totalMs = AlarmPollingService.heartbeatLossTimeoutMs
+                val elapsedMs = now - AlarmPollingService.heartbeatLostSince
+                val remainingMs = (totalMs - elapsedMs).coerceAtLeast(0L)
+                connectionLostAlert.text =
+                    "Aucun réseau — la sonnerie va se déclencher dans :"
+                connectionLostContainer.visibility = View.VISIBLE
+                reconnectButton.visibility = View.GONE
+                connectionLostSoundManager?.stopAlarmSound()
+                val totalSec = (totalMs / 1000L).toInt()
+                val remainingSec = ((remainingMs + 999L) / 1000L).toInt()
+                connectionLostArcTimer.setTime(totalSec, remainingSec)
+                connectionLostArcTimer.visibility = View.VISIBLE
+                connectionLostCountdownLabel.text = _formatHmsCountdown(remainingMs)
+                connectionLostCountdownLabel.visibility = View.VISIBLE
             } else {
                 connectionLostContainer.visibility = View.GONE
                 connectionLostSoundManager?.stopAlarmSound()
@@ -674,5 +793,17 @@ class DashboardActivity : AppCompatActivity() {
         soundManager?.stopAlarmSound()
         connectionLostSoundManager?.stopAlarmSound()
         super.onDestroy()
+    }
+
+    /**
+     * INV-ANDROID-306 / 307 : format human du countdown du bandeau connection lost.
+     * "Xm Ys" si >= 1 min, sinon "Ys".
+     */
+    private fun _formatHmsCountdown(remainingMs: Long): String {
+        val totalSec = ((remainingMs + 999L) / 1000L).coerceAtLeast(0L)
+        val minutes = totalSec / 60
+        val seconds = totalSec % 60
+        return if (minutes > 0L) "${minutes}m ${seconds.toString().padStart(2, '0')}s"
+        else "${seconds}s"
     }
 }

@@ -102,11 +102,15 @@ def get_kpis(
     now = clock_now()
     since = now - timedelta(weeks=weeks)
 
-    # Toutes les alarmes de la periode
+    # INV-018b #78 : toutes les lectures KPI utilisent `original_created_at`
+    # (date d'evenement immuable INV-018) au lieu de `created_at` (timer
+    # interne reset a chaque escalade par escalation_loop). Sans ce changement,
+    # une alarme escaladee 2h apres creation compte dans la mauvaise semaine
+    # et son MTTR est artificiellement raccourci.
     all_alarms = (
         db.query(Alarm)
-        .filter(Alarm.created_at >= since)
-        .order_by(Alarm.created_at)
+        .filter(Alarm.original_created_at >= since)
+        .order_by(Alarm.original_created_at)
         .all()
     )
 
@@ -117,10 +121,10 @@ def get_kpis(
         week_end = now - timedelta(weeks=weeks - w - 1)
 
         week_alarms = [a for a in all_alarms
-                       if week_start <= a.created_at < week_end]
+                       if week_start <= a.original_created_at < week_end]
 
         if hors_heures_only:
-            filtered = [a for a in week_alarms if _est_hors_heures_ouvrees(a.created_at)]
+            filtered = [a for a in week_alarms if _est_hors_heures_ouvrees(a.original_created_at)]
         else:
             filtered = week_alarms
 
@@ -136,11 +140,14 @@ def get_kpis(
     escalation_rate = round(escalated / total_alarms * 100, 1) if total_alarms > 0 else 0
 
     # ===== 3. MTTR (Mean Time To Resolve) =====
+    # MTTR mesure depuis `original_created_at` (vrai t0 evenement) jusqu'a
+    # `updated_at` (resolution). `created_at` etait reset par l'escalade →
+    # MTTR sous-estime (vu uniquement la derniere fenetre apres reset).
     resolved = [a for a in all_alarms
-                if a.status == "resolved" and a.acknowledged_at and a.created_at]
+                if a.status == "resolved" and a.acknowledged_at and a.original_created_at]
     if resolved:
         total_seconds = sum(
-            (a.updated_at - a.created_at).total_seconds()
+            (a.updated_at - a.original_created_at).total_seconds()
             for a in resolved
             if a.updated_at
         )

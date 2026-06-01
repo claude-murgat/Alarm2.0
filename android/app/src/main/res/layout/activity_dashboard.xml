@@ -164,6 +164,39 @@
                     android:textColor="#fca5a5"
                     android:textStyle="bold" />
 
+                <!-- INV-ANDROID-306 : countdown graphique pre-sonnerie ou pendant snooze.
+                     Reutilise ArcTimerView (cf INV-ANDROID-203 pour ack countdown). -->
+                <com.alarm.critical.view.ArcTimerView
+                    android:id="@+id/connectionLostArcTimer"
+                    android:layout_width="120dp"
+                    android:layout_height="120dp"
+                    android:layout_gravity="center_horizontal"
+                    android:layout_marginTop="12dp"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/connectionLostCountdownLabel"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center"
+                    android:layout_marginTop="4dp"
+                    android:textSize="12sp"
+                    android:textColor="#fca5a5"
+                    android:visibility="gone" />
+
+                <!-- INV-ANDROID-307 : bouton "Faire taire 5 min" (max 3 snoozes par episode). -->
+                <Button
+                    android:id="@+id/snoozeLocalAlarmButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="42dp"
+                    android:text="Faire taire 5 min (3 restants)"
+                    android:backgroundTint="#f59e0b"
+                    android:textColor="#1e293b"
+                    android:textSize="14sp"
+                    android:textStyle="bold"
+                    android:visibility="gone"
+                    android:layout_marginTop="10dp" />
+
                 <Button
                     android:id="@+id/reconnectButton"
                     android:layout_width="match_parent"
