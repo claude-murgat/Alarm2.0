@@ -278,6 +278,9 @@ class AlarmPollingService : Service() {
                     if (response.isSuccessful) {
                         lastHeartbeatOk = true
                         needsUrlSwitch = false  // On est sur le primary, plus besoin de switch
+                        val wasLost = heartbeatLostSince != 0L
+                        val wasInAlarm = heartbeatLostAlarm
+                        val wasInSnooze = isLocalAlarmSnoozed()
                         // Heartbeat OK → reset bandeau ET sonnerie (cf INV-ANDROID-303)
                         heartbeatLostSince = 0L
                         heartbeatLostVisual = false
@@ -285,6 +288,14 @@ class AlarmPollingService : Service() {
                         // INV-ANDROID-307 : fin d'episode → reset le quota de snooze
                         snoozeUntilElapsedMs = 0L
                         snoozeCount = 0
+                        if (wasLost || wasInAlarm || wasInSnooze) {
+                            com.alarm.critical.util.AppLogger.log(
+                                "Heartbeat",
+                                "Heartbeat 2xx → reset complet " +
+                                    "(wasLost=$wasLost wasInAlarm=$wasInAlarm wasInSnooze=$wasInSnooze) " +
+                                    "tous drapeaux + snoozeCount remis a zero (INV-303 + INV-307)"
+                            )
+                        }
                     } else if (response.code() == 503) {
                         // 503 = replica — signaler au poll de switcher
                         Log.w(TAG, "Heartbeat: backend is replica (503)")
@@ -317,8 +328,20 @@ class AlarmPollingService : Service() {
     private fun onHeartbeatFail() {
         lastHeartbeatOk = false
         val now = android.os.SystemClock.elapsedRealtime()
-        if (heartbeatLostSince == 0L) {
+        val wasZero = heartbeatLostSince == 0L
+        if (wasZero) {
             heartbeatLostSince = now
+            // INV-ANDROID-306 : premier echec → log explicite pour pouvoir
+            // mesurer le delai d'apparition de l'ArcTimer dans le bandeau.
+            val noNetworkInit = com.alarm.critical.util.NetworkAvailabilityMonitor.isNoNetwork
+            com.alarm.critical.util.AppLogger.log(
+                "Heartbeat",
+                "1er echec → heartbeatLostSince arme. " +
+                    "data=${com.alarm.critical.util.NetworkAvailabilityMonitor.dataAvailable} " +
+                    "cell=${com.alarm.critical.util.NetworkAvailabilityMonitor.cellularInService} " +
+                    "isNoNetwork=$noNetworkInit timeout=${heartbeatLossTimeoutMs}ms " +
+                    "→ ArcTimer INV-306 devrait s'afficher au tick UI suivant si isNoNetwork=true"
+            )
         }
         val elapsed = now - heartbeatLostSince
         if (elapsed >= heartbeatLossTimeoutMs) {
@@ -327,7 +350,8 @@ class AlarmPollingService : Service() {
                 heartbeatLostVisual = true
                 com.alarm.critical.util.AppLogger.log(
                     "Heartbeat",
-                    "PERDU depuis ${(System.currentTimeMillis() - heartbeatLostSince)/1000}s — bandeau visuel arme"
+                    "PERDU depuis ${elapsed/1000}s (>= timeout ${heartbeatLossTimeoutMs/1000}s) — " +
+                        "INV-104 bandeau visuel arme"
                 )
                 Log.w(TAG, "Heartbeat perdu depuis ${elapsed}ms — bandeau visuel déclenché")
             }
@@ -340,7 +364,9 @@ class AlarmPollingService : Service() {
                 heartbeatLostAlarm = true
                 com.alarm.critical.util.AppLogger.log(
                     "Heartbeat",
-                    "Reseau totalement perdu (data + cellular) — sonnerie INV-302 armee"
+                    "INV-302 sonnerie armee (noNetwork=true snoozeCount=$snoozeCount " +
+                        "data=${com.alarm.critical.util.NetworkAvailabilityMonitor.dataAvailable} " +
+                        "cell=${com.alarm.critical.util.NetworkAvailabilityMonitor.cellularInService})"
                 )
                 Log.w(TAG, "Reseau totalement perdu — sonnerie locale armée (INV-302)")
             } else if (!noNetwork && heartbeatLostAlarm) {
@@ -348,9 +374,14 @@ class AlarmPollingService : Service() {
                 heartbeatLostAlarm = false
                 com.alarm.critical.util.AppLogger.log(
                     "Heartbeat",
-                    "Reseau (data ou cellular) revenu — sonnerie INV-302 desarmee"
+                    "INV-302 sonnerie desarmee (reseau revenu " +
+                        "data=${com.alarm.critical.util.NetworkAvailabilityMonitor.dataAvailable} " +
+                        "cell=${com.alarm.critical.util.NetworkAvailabilityMonitor.cellularInService})"
                 )
                 Log.w(TAG, "Reseau revenu — sonnerie locale désarmée")
+            } else if (noNetwork && snoozed && !heartbeatLostAlarm) {
+                // Pas de log spammeur, mais utile une fois en debug
+                // (snoozeRemaining decroit a chaque tick — eviter le spam : ne log pas ici)
             }
         }
     }
