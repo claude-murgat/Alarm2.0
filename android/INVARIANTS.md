@@ -268,6 +268,38 @@ Permissions nécessaires (déjà au manifest pour la plupart) : `ACCESS_NETWORK_
   - `test_data_only_loss_is_not_no_network` : couper data, garder cellular → `noNetwork = false`.
   - `test_cellular_only_loss_is_not_no_network` : couper cellular (retirer SIM côté émulateur ou forcer via `cmd phone`), garder Wi-Fi → `noNetwork = false`.
 
+### INV-ANDROID-306 [H] ⚠️ Countdown graphique pré-sonnerie (fenêtre 2 min vers INV-302)
+Quand `heartbeatLostSince > 0L` ET `NetworkAvailabilityMonitor.isNoNetwork == true` ET `heartbeatLostAlarm == false` (= heartbeat tombé, réseau totalement perdu, mais on est encore dans la fenêtre 2 min avant que la sonnerie INV-302 ne tape), `DashboardActivity` affiche dans le bandeau "Connexion perdue" :
+- un `ArcTimerView` (composant déjà utilisé pour le countdown ack, cf INV-ANDROID-203) initialisé avec `setTime(120, remainingSec)` — l'arc se vide en sens horaire.
+- un label texte "Aucun réseau — la sonnerie va se déclencher dans : Xm Ys", remis à jour à 1 Hz par la boucle `statusUpdateJob`.
+- aucune sonnerie locale tant que le seuil 2 min n'est pas atteint.
+
+Dès que le réseau revient (data OU cellular) ou que le heartbeat repasse 2xx, le countdown disparaît instantanément (le bandeau bascule sur l'état INV-ANDROID-104 "Serveur injoignable" sans son, ou se masque complètement).
+
+- **Pourquoi** : prévenir l'opérateur quelques dizaines de secondes avant que sa sonnerie hors-connexion ne le réveille, pour lui laisser le temps de retrouver une zone couverte ou d'anticiper l'inconvénient. Évite l'effet "alarme brutale sans préavis" quand on entre dans un trou réseau.
+- **Statut** : code implémenté 2026-05-29 — `DashboardActivity` branche le countdown dans la même boucle qui pilote les drapeaux INV-302/104, layout `activity_dashboard.xml` ajoute `connectionLostArcTimer` + `connectionLostCountdownLabel` dans le bandeau existant.
+- **Couverture à créer** (PR follow-up) :
+  - `test_arc_visible_when_heartbeat_lost_and_no_network` : forcer `heartbeatLostSince = elapsedRealtime - 30s` + `NetworkAvailabilityMonitor._setStatesForTest(false, false)` → ArcTimerView VISIBLE, label "1m 30s" (avec tolérance).
+  - `test_arc_disappears_when_network_returns` : à partir du cas précédent, `_setStatesForTest(true, true)` → ArcTimerView GONE au prochain tick.
+
+### INV-ANDROID-307 [H] ⚠️ Snooze 5 min de la sonnerie locale (max 3 par épisode)
+Quand la sonnerie INV-302 est active (`heartbeatLostAlarm == true`), un bouton "Faire taire 5 min (N restants)" est visible **uniquement si `snoozeCount < LOCAL_ALARM_SNOOZE_MAX_COUNT` (= 3)**. Au clic :
+- `AlarmPollingService.snoozeLocalAlarm()` est appelée. Elle incrémente `snoozeCount`, arme `snoozeUntilElapsedMs = now + 5 min`, et set `heartbeatLostAlarm = false`.
+- La sonnerie s'arrête immédiatement (`connectionLostSoundManager?.stopAlarmSound()`).
+- Le bandeau reste visible avec un countdown 5 min (réutilise le même `connectionLostArcTimer` que INV-306) et le texte "Sonnerie en sourdine — reprise prévue dans : Xm Ys".
+
+À l'expiration du snooze, le prochain tick de `onHeartbeatFail` ré-arme `heartbeatLostAlarm` (= sonnerie redémarre) **si les conditions sont encore vraies** (`isNoNetwork` ET `elapsed >= timeout`). Si le réseau est revenu pendant le snooze, l'épisode est terminé et la sonnerie ne repart pas.
+
+Le compteur `snoozeCount` se reset à 0 **uniquement** quand un heartbeat revient 2xx (= fin d'épisode). Tant que l'épisode dure, l'opérateur peut snoozer 3 fois maximum (3 × 5 min = 15 min de répit total), après quoi le bouton disparaît et la sonnerie reste active jusqu'à action externe (retour réseau ou logout).
+
+- **Pourquoi** : laisser à l'opérateur d'astreinte un répit court pour gérer la situation (déplacement, recherche de réseau) sans pour autant lui permettre de mettre indéfiniment son téléphone en silencieux — l'astreinte critique exige qu'il reste joignable au-delà de 15 min cumulées de snooze.
+- **Statut** : code implémenté 2026-05-29 — vars `snoozeUntilElapsedMs` / `snoozeCount` dans le companion de `AlarmPollingService`, méthode `snoozeLocalAlarm()` qui renforce le quota, `onHeartbeatFail` consulte `isLocalAlarmSnoozed()` avant d'armer la sonnerie, reset dans la branche heartbeat 2xx.
+- **Couverture à créer** (PR follow-up) :
+  - `test_snooze_silences_alarm_5min` : armer sonnerie, cliquer snooze → `MediaPlayer.isPlaying() == false`, label "Sonnerie en sourdine".
+  - `test_snooze_quota_3_times_then_button_gone` : 3 snoozes consécutifs → 4e affichage du bandeau : bouton GONE.
+  - `test_snooze_resets_on_heartbeat_2xx` : armer sonnerie, snoozer, heartbeat OK → `snoozeCount == 0`, `snoozeUntilElapsedMs == 0`. Un futur épisode rouvre 3 snoozes.
+- **Dépendance** : INV-ANDROID-302 (la sonnerie qu'on snooze), INV-ANDROID-306 (réutilise le même `ArcTimerView` pour le countdown 5 min de fin de snooze).
+
 ---
 
 ## 5. Failover backend
