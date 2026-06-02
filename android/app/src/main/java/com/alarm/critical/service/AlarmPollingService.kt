@@ -296,6 +296,9 @@ class AlarmPollingService : Service() {
                                     "tous drapeaux + snoozeCount remis a zero (INV-303 + INV-307)"
                             )
                         }
+                        // INV-ANDROID-308 : fin d'episode → reset aussi le controleur
+                        // SMS wake (sonnerie declenchee par SMS du backend, cf SmsWakeReceiver).
+                        com.alarm.critical.util.SmsWakeAlarmController.reset()
                     } else if (response.code() == 503) {
                         // 503 = replica — signaler au poll de switcher
                         Log.w(TAG, "Heartbeat: backend is replica (503)")
