@@ -37,18 +37,28 @@ class MainActivity : AppCompatActivity() {
         ApiClient.currentUrlIndex = 0
         ApiClient.consecutiveFailures = 0
 
-        // INV-ANDROID-305 : demander READ_PHONE_STATE pour détecter la perte
-        // de signal cellulaire (voix/SMS). Si refusée → NetworkAvailabilityMonitor
-        // fait fail open (cellularInService=true) — la sonnerie INV-302 ne
-        // s'armera donc jamais, mais le bandeau visuel et tout le reste marchent.
+        // INV-ANDROID-305 : READ_PHONE_STATE pour le check cellulaire (héritage,
+        // mais voir INV-308 ci-dessous qui supersede ce mécanisme).
+        // INV-ANDROID-308 : RECEIVE_SMS pour capter les SMS de commande wake
+        // envoyés par le backend. C'est désormais la source canonique de la
+        // sonnerie "hors connexion" — sans cette perm, l'app ne pourra PAS
+        // sonner même si elle reçoit le SMS.
+        val needed = mutableListOf<String>()
         if (ContextCompat.checkSelfPermission(
                 this, Manifest.permission.READ_PHONE_STATE
             ) != PackageManager.PERMISSION_GRANTED
         ) {
+            needed += Manifest.permission.READ_PHONE_STATE
+        }
+        if (ContextCompat.checkSelfPermission(
+                this, Manifest.permission.RECEIVE_SMS
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            needed += Manifest.permission.RECEIVE_SMS
+        }
+        if (needed.isNotEmpty()) {
             ActivityCompat.requestPermissions(
-                this,
-                arrayOf(Manifest.permission.READ_PHONE_STATE),
-                REQUEST_CODE_READ_PHONE_STATE,
+                this, needed.toTypedArray(), REQUEST_CODE_PERMISSIONS
             )
         }
 
@@ -166,7 +176,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
-        // INV-ANDROID-305 : code de retour pour la demande de READ_PHONE_STATE.
-        private const val REQUEST_CODE_READ_PHONE_STATE = 1001
+        // INV-ANDROID-305/308 : code de retour pour la demande conjointe
+        // READ_PHONE_STATE + RECEIVE_SMS.
+        private const val REQUEST_CODE_PERMISSIONS = 1001
     }
 }

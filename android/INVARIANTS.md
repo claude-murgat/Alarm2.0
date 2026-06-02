@@ -300,6 +300,52 @@ Le compteur `snoozeCount` se reset à 0 **uniquement** quand un heartbeat revien
   - `test_snooze_resets_on_heartbeat_2xx` : armer sonnerie, snoozer, heartbeat OK → `snoozeCount == 0`, `snoozeUntilElapsedMs == 0`. Un futur épisode rouvre 3 snoozes.
 - **Dépendance** : INV-ANDROID-302 (la sonnerie qu'on snooze), INV-ANDROID-306 (réutilise le même `ArcTimerView` pour le countdown 5 min de fin de snooze).
 
+### INV-ANDROID-308 [C] ⚠️ Sonnerie locale déclenchée par SMS de commande du backend (canon, 2026-06-02)
+
+Source canonique de la sonnerie "hors connexion" depuis 2026-06-02. Remplace fonctionnellement les heuristiques locales INV-ANDROID-302 / 305 / 306 (qui restent en place comme **fallback** mais sont en passe d'obsolescence — cf "Pourquoi" ci-dessous).
+
+**Mécanisme** :
+1. Le backend détecte qu'un opérateur d'astreinte n'a plus de heartbeat depuis X min, et que le test de joignabilité SMS (envoi + attente du Delivery Report Orange/Sosh) a échoué ou expiré.
+2. Le backend envoie un SMS via la gateway SIM7600 au numéro de l'opérateur. Format : payload commençant par le préfixe magique exact `[ALARME-MURGAT-WAKE]`. Le reste du SMS est libre (audit visible côté app Messages, sert de trace).
+3. Le tél reçoit le SMS. L'app capte via `SmsWakeReceiver` (BroadcastReceiver déclaré dans le manifest, donc actif **même si le foreground service `AlarmPollingService` a été tué par l'OEM**).
+4. Le receiver parse le PDU, vérifie le préfixe, et appelle `SmsWakeAlarmController.trigger(context)` qui démarre `AlarmSoundManager` sur le stream ALARM (USAGE_ALARM, volume max, loop infini — sonne même en mode silencieux).
+5. `DashboardActivity` voit `SmsWakeAlarmController.active == true` au prochain tick `statusUpdateJob` (1 Hz max) et affiche le bandeau "Hors connexion — vous êtes signalé injoignable par le système. Déplacez-vous." + le bouton "Faire taire 5 min".
+
+**Snooze** : réutilise la sémantique INV-ANDROID-307 (5 min × 3 max par épisode). L'épisode se termine quand un heartbeat 2xx revient — `AlarmPollingService` appelle alors `SmsWakeAlarmController.reset()` qui coupe le son et remet `snoozeCount = 0`.
+
+**Pourquoi ce design (vs détection locale via INV-302/305)** :
+- Sur Android moderne (Crosscall Core-M6 Android 15 observé 2026-05-29 → 2026-06-01), aucune API tierce ne donne un état réseau fiable :
+  - `ConnectivityManager.activeNetwork` persiste vers un fallback même en mode avion total.
+  - `TelephonyCallback.ServiceStateListener` n'est jamais déclenché par l'OS Crosscall en mode avion.
+  - `TelephonyManager.serviceState.state` retourne une valeur figée (suspicion : redaction Android 14/15 pour apps non-privilégiées).
+- La seule source de vérité opérationnelle pour "l'opérateur est-il joignable ?" est le **test concret côté serveur** (heartbeat HTTP + Delivery Report SMS de la gateway Orange/Sosh).
+- Architecturalement, la décision "il faut faire sonner localement" est plus correctement prise par le backend (qui a la vue globale : heartbeat KO, DLR KO, escalade en cours) que par le tél (qui ne peut deviner que sa propre data, et encore mal).
+
+**Permissions requises** :
+- `RECEIVE_SMS` (runtime, dangerous) — demandée au login dans `MainActivity` avec `READ_PHONE_STATE`. Si refusée, l'app ne peut pas sonner — il faut prévoir un onboarding qui explique cette dépendance.
+- `BROADCAST_SMS` sur le receiver (déclaré dans le manifest) — exigé du sender (`com.android.providers.telephony` système), empêche un broadcast forgé par une app malveillante.
+
+**Format SMS attendu côté backend** :
+```
+[ALARME-MURGAT-WAKE] $message_audit
+```
+où `$message_audit` est libre — typiquement le timestamp + raison pour audit côté Messages. Pas de signature/HMAC en V1 (préfixe seul, suffisant statistiquement pour éviter les faux positifs). V2 ajoutera un token signé partagé via SharedPreferences au login.
+
+**Coût opérationnel** : 1 SMS sortant par épisode de désynchronisation (~2 c). À comparer aux 8 640 SMS/mois (~170 €) du ping périodique 5 min — épisodique vs continu, négligeable.
+
+**Statut** : code implémenté 2026-06-02 — `util/SmsWakeAlarmController.kt`, `service/SmsWakeReceiver.kt`, manifest perm + receiver, MainActivity demande la perm runtime, AlarmPollingService reset sur heartbeat 2xx, DashboardActivity rend 2 nouveaux cas (`INV308_SMS_WAKE_SONNERIE`, `INV308_SMS_WAKE_SNOOZE`) en priorité après `AUTH_ERROR`.
+
+**Couverture à créer** (PR follow-up — nécessite émulateur multi-SIM ou un harness SMS mock) :
+- `test_receiver_triggers_on_matching_prefix` : émettre via `SmsManager` un SMS avec préfixe → `SmsWakeAlarmController.active == true`.
+- `test_receiver_ignores_non_matching_sms` : envoyer un SMS lambda → contrôleur reste inactif.
+- `test_snooze_respects_quota_3` : 3 snoozes successifs → bouton GONE au 4e affichage.
+- `test_reset_on_heartbeat_2xx_clears_quota` : armer, snoozer, heartbeat OK → `snoozeCount == 0`.
+
+**Dépendances** :
+- Côté backend : nouveau service qui (a) détecte les heartbeat tombés, (b) ping SMS pour confirmer l'isolation, (c) envoie le SMS wake si confirmé. À implémenter en PR backend séparée.
+- Côté gateway SIM7600 : déjà capable d'envoyer + recevoir DLR (cf INV-060 SMS). Aucune modif.
+- Coexistence : INV-302/305/306 restent en place comme fallback transitoire (cas où le backend ne pourrait pas envoyer le SMS — gateway down). À retirer dans une PR ultérieure quand INV-308 sera validé en prod sur 1-2 semaines.
+
 ---
 
 ## 5. Failover backend
