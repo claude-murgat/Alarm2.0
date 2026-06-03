@@ -22,9 +22,8 @@
 - **Escalade cumulative** : tout le monde continue de sonner, n'importe qui peut acquitter
 - **Acquittement** : suspend 30 min, puis re-sonne si non résolu
 - **Alarme ack visible** : les autres notifiés voient "Acquittée par X" avec countdown
-- **Watchdog** : si l'app de l'astreinte (pos.1) perd le heartbeat > 15 min → alarme auto vers pos.2
-- **Perte réseau app** : sonnerie continue après 2 min sans heartbeat
-- **Chaîne vide / tout offline** : email direction_technique@charlesmurgat.com
+- **Watchdog** : si l'app de l'astreinte (pos.1) perd le heartbeat → tracking statistique (INV-056), **pas d'alarme automatique** (INV-050 supprimé 2026-05-26, trop de faux positifs sur perte data seule). Backend envoie un SMS `[ALARME-MURGAT-PING]` au pos.1 toutes les 2 min tant que son heartbeat est KO (INV-067), et l'app fait sonner une sonnerie locale si **aucun** de ces SMS n'arrive dans les 5 min suivant la perte du heartbeat HTTP (INV-ANDROID-308 — preuve d'isolation totale)
+- **Chaîne vide / tout offline** : email direction_technique@charlesmurgat.com (INV-053, après > 15 min)
 
 ## Scénarios de panne analysés
 
@@ -44,9 +43,10 @@
 
 ### Défaillance backend (panne hardware serveur)
 - Backend sur site : ❌ mort
-- App Android : ne reçoit plus rien, sonnerie "perte heartbeat" après 2 min
-- → L'astreinte est alertée par la sonnerie de perte de connexion, mais ne sait pas POURQUOI
-- → **Point de défaillance unique identifié**
+- App Android : ne reçoit plus rien
+- Sonnerie locale "hors connexion" après ~5 min (cf INV-ANDROID-308) **si et seulement si** la gateway SMS SIM7600 du back est aussi inaccessible — tant qu'un autre backend du cluster peut piloter la gateway et émettre des SMS `[ALARME-MURGAT-PING]` (cf INV-067), l'app reçoit le ping, n'arme pas la sonnerie, mais affiche un bandeau "Serveur injoignable" silencieux.
+- → L'astreinte est alertée par la sonnerie de perte de connexion **uniquement** quand le système entier (back + gateway SMS) est hors d'atteinte, mais ne sait pas POURQUOI précisément.
+- → **Point de défaillance unique réduit** : le cluster 3-noeuds + le canal SMS hors-bande font qu'il faut perdre back ET gateway SMS pour que l'astreinte sonne localement.
 
 ### Défaillance backend cloud (VPS)
 - Le fournisseur cloud a des onduleurs, du RAID, de la supervision — mais pas de garantie zéro
@@ -59,10 +59,10 @@
 
 | # | Risque | Couvert ? | Par quoi |
 |---|--------|-----------|----------|
-| 1 | Backend tombe (hardware) | ⚠️ Partiel | Sonnerie perte heartbeat, mais pas d'info sur l'alarme industrielle |
+| 1 | Backend tombe (hardware) | ⚠️ Partiel | Cluster 3-noeuds masque la panne d'1 noeud (cf INV-091 failover). Sonnerie locale INV-308 (back + gateway SMS injoignables 5 min) si panne totale, mais pas d'info sur l'alarme industrielle |
 | 2 | Connectivité totale perdue (fibre+mobile+Starlink) | ❌ Non | Seule sirène locale |
 | 3 | PLC ne peut pas atteindre backend (réseau interne) | ⚠️ Selon archi | Dépend de comment le PLC envoie les alarmes |
-| 4 | Téléphone astreinte HS (batterie, app tuée) | ✅ Oui | Escalade (pas d'ack → +15 min → user2) + alarme astreinte si heartbeat perdu |
+| 4 | Téléphone astreinte HS (batterie, app tuée) | ⚠️ Partiel | Côté back : tracking statistique des transitions on/off pos 1 (INV-056) + email "tous offline > 15 min" à direction technique (INV-053). Côté escalade : pas d'alarme automatique sur pos 1 hors connexion depuis 2026-05-26 (INV-050 DEPRECATED, trop de faux positifs). L'alarme métier suivante atteindra pos 2 puis pos 3 via la chaîne normale |
 | 5 | Ack délibéré sans intervention | ⚠️ Partiel | Re-sonne après 30 min, mais délai accepté |
 | 6 | Toute l'équipe indisponible | ⚠️ Partiel | Email direction_technique, mais si réseau KO → rien |
 
