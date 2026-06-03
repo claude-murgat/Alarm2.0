@@ -123,31 +123,14 @@ Le champ `is_oncall` dans la reponse de login indique le mode (position 1 = true
 
 ### 3b. Utilisateur d'astreinte hors connexion
 
-```
-  User #1 (astreinte contractuelle, position 1)
-       │
-       │ Heartbeat perdu depuis > 15 min
-       ▼
-  ┌─────────────────────────────────────────────────┐
-  │ ALARME AUTO : "Utilisateur d'astreinte hors     │
-  │                connexion (user1)"               │
-  │ → Assignée à user #2 (solidarité)              │
-  │ → Escalade normale si non acquittée            │
-  │ → Auto-résolue si user #1 revient en ligne     │
-  └─────────────────────────────────────────────────┘
-       │
-       │ Si PERSONNE n'est connecté
-       ▼
-  📧 Email direction_technique@charlesmurgat.com
-```
+Architecture révisée 2026-06-03 — détection conjointe backend + app, **sans création d'alarme backend** :
 
-**Règles :**
-- **Seul le #1** (position 1, astreinte contractuelle) est surveillé
-- Les autres positions (solidarité) ne déclenchent PAS d'alarme s'ils se déconnectent
-- Le délai avant alerte est de **15 minutes** d'absence
-- L'alarme d'astreinte suit l'**escalade normale** (user2 → admin → rebouclage)
-- **Auto-résolution** si user #1 revient en ligne (heartbeat)
-- Si **personne** n'est connecté → email à la direction technique
+- Dès que le heartbeat HTTP du pos 1 est KO ≥ 30 s, le backend lui envoie un SMS `[ALARME-MURGAT-PING] <iso_ts>` (cf INV-067), répété toutes les 2 min tant que le heartbeat reste KO.
+- Côté app (cf INV-ANDROID-308) : si **aucun** de ces SMS n'arrive dans les 5 min suivant la perte du heartbeat → **sonnerie locale** + bouton snooze (5 min × 3 max). Si un SMS arrive dans la fenêtre → bandeau info silencieux (l'opérateur reste joignable hors-bande).
+- Tracking séparé : les transitions online ↔ offline du pos 1 sont comptées en statistiques (cf INV-056) — utile pour suivre la qualité du réseau opérateur sans déclencher de bruit.
+- Email direction technique (INV-053) : si **tous** les users sont offline > 15 min → email envoyé. Inchangé.
+
+**Changement historique** : l'ancien flux « création d'alarme oncall_offline après 15 min + escalade solidarité user #2 » (anciens INV-050/051/052/054) est supprimé depuis 2026-05-26 — trop de faux positifs (perte data sans perte cellulaire ⇒ opérateur réellement joignable). Voir le catalogue [tests/INVARIANTS.md](tests/INVARIANTS.md) §5 pour le détail de la décision.
 
 ### 4. Watchdog / Heartbeat (mode astreinte uniquement)
 
@@ -279,7 +262,7 @@ python -m pytest tests/ -v
 | Persistence Docker | 1 | Données survivent au restart |
 | Email SMTP (Mailhog) | 1 | Email réel capturé dans Mailhog |
 | Escalade cumulative | 3 | Alarme visible par tous les notifiés, n'importe qui peut ack, liste des notifiés |
-| Astreinte hors connexion | 5 | Alarme auto après 15min, auto-résolution, escalade, pas pour #2+, email si personne |
+| Astreinte hors connexion | 5 | Email direction technique si TOUS offline > 15 min (INV-053, actif). 4 témoins legacy INV-050/051/052/054 conservés jusqu'à PR de retrait (création d'alarme oncall_offline supprimée depuis 2026-05-26, cf §3b) |
 | Visibilité notifiés | 1 | notified_user_names dans la réponse API |
 | Visibilité alarme acquittée | 3 | Alarme ack visible par autres notifiés, countdown ack_remaining_seconds, visible par l'acker aussi |
 
