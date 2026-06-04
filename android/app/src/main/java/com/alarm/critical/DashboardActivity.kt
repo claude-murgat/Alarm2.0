@@ -140,18 +140,12 @@ class DashboardActivity : AppCompatActivity() {
             performLogout()
         }
 
-        // INV-ANDROID-307 / 308 : bouton "Faire taire 5 min". Snooze applique
-        // a la source de sonnerie actuelle :
-        // - INV-308 (SMS wake) en priorite si active
-        // - sinon INV-302 (heuristique heartbeat lost + noNetwork)
-        // Limite a 3 occurrences par episode. Defensif : on coupe meme si
-        // snooze refuse (le bouton est cense etre cache dans ce cas).
+        // INV-ANDROID-307 : bouton "Faire taire 5 min" sur la sonnerie INV-302.
+        // Limite à 3 occurrences par episode — la fonction snoozeLocalAlarm()
+        // renvoie false si quota epuise, on coupe le son meme dans ce cas
+        // (defensif, ne devrait pas arriver car le bouton est cache).
         findViewById<Button>(R.id.snoozeLocalAlarmButton).setOnClickListener {
-            val armed = if (com.alarm.critical.util.SmsWakeAlarmController.active) {
-                com.alarm.critical.util.SmsWakeAlarmController.snooze()
-            } else {
-                AlarmPollingService.snoozeLocalAlarm()
-            }
+            val armed = AlarmPollingService.snoozeLocalAlarm()
             if (armed) {
                 connectionLostSoundManager?.stopAlarmSound()
             }
@@ -305,15 +299,6 @@ class DashboardActivity : AppCompatActivity() {
             val snoozeQuotaRemaining =
                 AlarmPollingService.LOCAL_ALARM_SNOOZE_MAX_COUNT - AlarmPollingService.snoozeCount
 
-            // INV-ANDROID-308 : sonnerie declenchee par SMS de commande backend.
-            // Prend priorite sur les heuristiques INV-302/305/306 (qui restent en
-            // fallback). cf SmsWakeReceiver / SmsWakeAlarmController.
-            val smsWakeActive = com.alarm.critical.util.SmsWakeAlarmController.active
-            val smsWakeSnoozed = com.alarm.critical.util.SmsWakeAlarmController.isSnoozed(now)
-            val smsWakeQuotaRemaining =
-                com.alarm.critical.util.SmsWakeAlarmController.SNOOZE_MAX_COUNT -
-                    com.alarm.critical.util.SmsWakeAlarmController.snoozeCount
-
             // États dépendant de heartbeat-lost (par défaut tout caché)
             connectionLostArcTimer.visibility = View.GONE
             connectionLostCountdownLabel.visibility = View.GONE
@@ -323,8 +308,6 @@ class DashboardActivity : AppCompatActivity() {
             // depuis l'export "Envoyer les logs". 1 ligne par transition, pas a chaque tick.
             val bandeauCase: String = when {
                 AlarmPollingService.authErrorAlarm -> "AUTH_ERROR"
-                smsWakeActive -> "INV308_SMS_WAKE_SONNERIE"
-                smsWakeSnoozed -> "INV308_SMS_WAKE_SNOOZE"
                 AlarmPollingService.heartbeatLostAlarm -> "INV302_SONNERIE"
                 snoozeActive -> "INV307_SNOOZE"
                 AlarmPollingService.heartbeatLostVisual -> "INV104_VISUAL_ONLY"
@@ -360,38 +343,6 @@ class DashboardActivity : AppCompatActivity() {
                     connectionLostSoundManager = AlarmSoundManager(this@DashboardActivity)
                 }
                 connectionLostSoundManager?.startAlarmSound()
-            } else if (smsWakeActive) {
-                // INV-ANDROID-308 : sonnerie declenchee par SMS de commande du backend
-                // (l'utilisateur est detecte hors connexion par le serveur via heartbeat
-                // perdu + DLR SMS positif/négatif). Action requise, son actif.
-                connectionLostAlert.text =
-                    "Hors connexion — vous êtes signalé injoignable par le système. Déplacez-vous."
-                connectionLostContainer.visibility = View.VISIBLE
-                reconnectButton.visibility = View.GONE
-                if (connectionLostSoundManager == null) {
-                    connectionLostSoundManager = AlarmSoundManager(this@DashboardActivity)
-                }
-                connectionLostSoundManager?.startAlarmSound()
-                if (smsWakeQuotaRemaining > 0) {
-                    snoozeButton.text =
-                        "Faire taire 5 min ($smsWakeQuotaRemaining restants)"
-                    snoozeButton.visibility = View.VISIBLE
-                }
-            } else if (smsWakeSnoozed) {
-                // INV-ANDROID-308 : sonnerie SMS wake en cours de snooze
-                connectionLostAlert.text =
-                    "Sonnerie hors connexion en sourdine — reprise prévue dans :"
-                connectionLostContainer.visibility = View.VISIBLE
-                reconnectButton.visibility = View.GONE
-                connectionLostSoundManager?.stopAlarmSound()
-                val remainingMs = com.alarm.critical.util.SmsWakeAlarmController.snoozeRemainingMs(now)
-                val totalSec =
-                    (com.alarm.critical.util.SmsWakeAlarmController.SNOOZE_DURATION_MS / 1000L).toInt()
-                val remainingSec = ((remainingMs + 999L) / 1000L).toInt()
-                connectionLostArcTimer.setTime(totalSec, remainingSec)
-                connectionLostArcTimer.visibility = View.VISIBLE
-                connectionLostCountdownLabel.text = _formatHmsCountdown(remainingMs)
-                connectionLostCountdownLabel.visibility = View.VISIBLE
             } else if (AlarmPollingService.heartbeatLostAlarm) {
                 // INV-ANDROID-302 : reseau totalement perdu (data + cellular)
                 // → action requise, sonnerie active

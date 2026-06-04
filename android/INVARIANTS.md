@@ -367,11 +367,13 @@ Préfixe exact, pas de variation. Le timestamp est purement informatif (audit vi
 - **Premier login de l'app** : `lastPingReceivedElapsedMs = elapsedRealtime()` au démarrage du service polling. Donne 5 min de grâce avant la 1re possibilité de sonnerie.
 - **Backend en panne (gateway down)** : aucun ping ne sort → après 5 min de heartbeat KO, le tél sonne. Faux positif acceptable (signal correct « le système ne me parle plus »), absorbé par le snooze INV-307.
 
-**Statut** : **🐛 spec à implémenter**. Le code mergé en PR #153 (sens inverse) est à **transformer** :
-- `SmsWakeReceiver` → `SmsPingReceiver` (matche `[ALARME-MURGAT-PING]`).
-- `SmsWakeAlarmController` → supprimé. La logique d'armement de la sonnerie revient dans `AlarmPollingService.onHeartbeatFail()` (qui consulte `lastPingReceivedElapsedMs`).
-- `DashboardActivity` : 2 cas `INV308_SMS_WAKE_*` retirés, remplacés par la machine d'état ci-dessus (réutilise les cas existants `INV302_SONNERIE` et `INV104_VISUAL_ONLY` avec la nouvelle condition).
-- Catalogue : INV-302/305/306 (heuristiques locales noNetwork) deviennent ❌ DEPRECATED dans la même PR (le test "no SMS in 5 min" remplace fonctionnellement leur intention business).
+**Statut** : **🐛 spec à implémenter**. Le code mergé en PR #153 (sens inverse, "SMS WAKE on reception") a été **retiré** dans la même PR que cette spec (cf revert ci-après) — le code Android est revenu à l'état pré-#153, basé sur les heuristiques INV-302-LEGACY / INV-305-LEGACY. À implémenter à partir de cet état clean :
+- Nouveau `SmsPingReceiver` (BroadcastReceiver static, manifest, perm `RECEIVE_SMS`) matche `[ALARME-MURGAT-PING]` et set `lastPingReceivedElapsedMs`.
+- Nouvelle variable `lastPingReceivedElapsedMs: Long` dans `AlarmPollingService` (resettée sur heartbeat 2xx, cf INV-303).
+- `AlarmPollingService.onHeartbeatFail()` : remplacer la consultation de `NetworkAvailabilityMonitor.isNoNetwork` (INV-302-LEGACY) par `lastPingReceivedElapsedMs < heartbeatLostSince` (INV-308). Timer de la fenêtre 5 min au lieu de 2 min.
+- `DashboardActivity` : la branche bandeau existante (cas `INV302_SONNERIE` / `INV104_VISUAL_ONLY`) reste, mais les textes sont ajustés pour refléter le nouveau déclencheur (cf INV-104 révisée).
+- `NetworkAvailabilityMonitor.kt` (singleton legacy INV-305) et son init dans `AlarmPollingService` : à supprimer dans la même PR que l'implémentation INV-308 (ne sera plus consulté nulle part).
+- Catalogue : INV-302/305/306 (déjà ❌ SUPERSEDED dans cette PR doc) peuvent voir leurs corps LEGACY retirés une fois INV-308 implémenté + validé prod.
 
 **Tests à créer** (PR d'implémentation) :
 - `test_no_ping_after_heartbeat_lost_5min_arms_alarm` : forcer heartbeatLost depuis 5 min, aucun ping → `heartbeatLostAlarm == true`.

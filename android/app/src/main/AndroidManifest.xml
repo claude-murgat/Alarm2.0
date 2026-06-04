@@ -12,11 +12,6 @@
     <!-- READ_PHONE_STATE = runtime permission Android 6+ ; sans elle, le
          NetworkAvailabilityMonitor fait fail open (cellularInService=true) -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
-    <!-- INV-ANDROID-308 (2026-06-02) : recevoir les SMS de commande
-         "[ALARME-MURGAT-WAKE]" envoyés par le backend via gateway SIM7600
-         pour déclencher la sonnerie locale "hors connexion". Runtime
-         permission Android 6+, demandée au login dans MainActivity. -->
-    <uses-permission android:name="android.permission.RECEIVE_SMS" />
 
     <application
         android:allowBackup="true"
@@ -62,18 +57,6 @@
                 <action android:name="com.google.firebase.MESSAGING_EVENT" />
             </intent-filter>
         </service>
-
-        <!-- INV-ANDROID-308 : recevoir les SMS de commande wake du backend.
-             Receiver static (manifest) → reste actif même si le foreground
-             service AlarmPollingService a été tué par l'OS. -->
-        <receiver
-            android:name=".service.SmsWakeReceiver"
-            android:exported="true"
-            android:permission="android.permission.BROADCAST_SMS">
-            <intent-filter>
-                <action android:name="android.provider.Telephony.SMS_RECEIVED" />
-            </intent-filter>
-        </receiver>
 
     </application>
 </manifest>
