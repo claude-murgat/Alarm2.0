@@ -98,7 +98,7 @@ ne doit jamais être figé par un test — le catalogue tranche.
 - **Login par nom uniquement** : lowercase, sans espaces, case-insensitive
 - **Une seule alarme active** a la fois (HTTP 409 si doublon)
 - **Rotation bloquee** en portrait sur l'app mobile
-- **Sonnerie continue** pour : alarme active, perte heartbeat > 2min, echec refresh token
+- **Sonnerie continue** pour : alarme active, hors connexion (cf INV-ANDROID-308 : heartbeat HTTP perdu + aucun SMS `[ALARME-MURGAT-PING]` recu dans 5 min), echec refresh token
 - **Escalade cumulative** : tous les utilisateurs appeles continuent de sonner
 - **Logout supprime le token FCM** cote backend (plus de push apres deconnexion)
 - **Push FCM sur changement chaine** : notifie tous les utilisateurs de leur nouvelle position

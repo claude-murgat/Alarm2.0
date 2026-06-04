@@ -240,7 +240,13 @@ Un heartbeat envoyé à un noeud replica renvoie 503 (l'app doit failover sur le
 
 ## 5. Astreinte (oncall)
 
-> **Changement de stratégie 2026-05-26** : la création automatique d'une alarme "oncall_offline" (INV-050) générait trop de faux positifs — un opérateur qui perd sa data (4G/Wi-Fi) mais garde son signal cellulaire (SMS + voix) est marqué offline alors qu'il reste joignable. Décision : **supprimer la création d'alarme** sur user pos 1 offline, et la **remplacer par un tracking statistique** des transitions online ↔ offline (cf nouveau INV-056). L'email "personne en ligne" (INV-053) reste, car il couvre un cas business différent (sortie de boucle quand le système ne sait plus à qui parler). Cohérent avec la décision client `INV-ANDROID-302/305` (la sonnerie locale "hors connexion" ne se déclenche que si le téléphone est totalement injoignable — data + cellulaire perdus).
+> **Changement de stratégie 2026-05-26** (révision 2026-06-03 — architecture client/serveur INV-308) : la création automatique d'une alarme "oncall_offline" (INV-050) générait trop de faux positifs — un opérateur qui perd sa data (4G/Wi-Fi) mais garde son signal cellulaire (SMS + voix) est marqué offline alors qu'il reste joignable. Décision : **supprimer la création d'alarme** sur user pos 1 offline, et la **remplacer par un tracking statistique** des transitions online ↔ offline (cf nouveau INV-056). L'email "personne en ligne" (INV-053) reste, car il couvre un cas business différent (sortie de boucle quand le système ne sait plus à qui parler).
+>
+> **Architecture client/serveur de la détection « hors connexion »** (révisée 2026-06-03) : la responsabilité de prévenir l'opérateur quand son téléphone perd contact avec le back se joue maintenant en deux étages couplés.
+> - **Étage backend (INV-067)** : dès que le heartbeat HTTP du pos 1 est KO depuis ≥ 30 s, le back envoie un SMS `[ALARME-MURGAT-PING] <iso_ts>` au pos 1, puis le rejoue toutes les 2 min tant que le heartbeat reste KO.
+> - **Étage client (INV-ANDROID-308)** : quand l'app constate `heartbeatLostSince` ≥ 5 min sans avoir reçu un seul de ces SMS pendant la fenêtre, elle déclenche une sonnerie locale + snooze 5 min × 3 max. Si un SMS PING arrive dans la fenêtre, seul un bandeau info s'affiche (pas de son) — le canal SMS prouve que l'opérateur est joignable hors-bande.
+>
+> L'ancienne référence `INV-ANDROID-302/305` (sonnerie sur perte de réseau total via callbacks `ConnectivityManager` + `TelephonyManager`) est marquée ❌ SUPERSEDED depuis cette révision : impossible à fiabiliser sur Crosscall Core-M6 / Android 15 (callbacks non émis, `ServiceState` rédigé). L'absence de SMS PING devient la **preuve indirecte** qu'au moins un des trois maillons (back, gateway SIM7600, opérateur cellulaire opérateur de garde) est cassé — sans avoir à interroger des APIs telephony non fiables.
 
 ### INV-050 [C] ❌ DEPRECATED (2026-05-26) — l'alarme oncall_offline n'est plus créée
 Avant : si user position 1 a `is_online=False` et `last_heartbeat < now - 15min` → création alarme `is_oncall_alarm=True`. **Cette logique est supprimée.**
@@ -332,6 +338,46 @@ SMS/Call avec `retries >= 3` n'apparaît plus dans `/internal/sms|calls/pending`
 `/internal/sms/*` et `/internal/calls/*` nécessitent header `X-Gateway-Key` valide.
 - **Pourquoi** : sécurité — ces endpoints exposent les numéros de tel.
 - **Couverture** : E2E `TestSmsAndHealth::test_sms_pending_requires_gateway_key` + `test_sms_pending_wrong_key_returns_401`.
+
+### INV-067 [C] 🐛 SMS ping périodique au pos 1 d'astreinte tant que son heartbeat est KO (2026-06-03)
+
+Pendant fortifier la sonnerie d'isolation locale (cf `android/INVARIANTS.md` INV-ANDROID-308 nouvelle version 2026-06-03), le backend doit envoyer un SMS `[ALARME-MURGAT-PING] $iso_timestamp` au numéro de téléphone du user en **position 1** de la chaîne d'escalade, **dès** que son heartbeat HTTP est KO depuis ≥ 30 s (≈ 1 cycle watchdog INV-041), puis **toutes les 2 minutes** tant que ce heartbeat reste KO.
+
+**Mécanisme** :
+1. À chaque tick d'`escalation_loop` (cf section 4) ou tick dédié, on consulte `User.last_heartbeat` du pos 1.
+2. Si `now - last_heartbeat >= 30s` ET pas de ping envoyé depuis ≥ 2 min (`SystemConfig.last_ping_sent_at_user_<id>` ou colonne `User.last_ping_sent_at`, à choisir), insertion dans `SmsQueue` :
+   - `to_number = pos1.phone_number`
+   - `body = f"[ALARME-MURGAT-PING] {clock_now().isoformat()}"`
+   - `alarm_id = NULL` (ce n'est pas un SMS d'alarme métier)
+   - `is_ping = TRUE` (nouvelle colonne ; permet anti-pollution stats SMS et filtrage côté `INV-060` qui ne doit PAS considérer ces SMS comme notifications d'alarme).
+3. La gateway SIM7600 envoie via son flux normal (cf INV-060).
+4. Le DLR (Delivery Report Orange/Sosh) est reçu côté gateway → upsert dans une table dédiée (`PingDeliveryReport(user_id, sent_at, delivered_at, status_code, retries)`) pour audit + diagnostic. Pas de logique métier sur le DLR côté backend dans cette V1 — la décision est entièrement côté app (réception SMS ou non).
+5. Quand `User.is_online` repasse `True` (heartbeat 2xx, cf INV-040), reset `last_ping_sent_at` à NULL.
+
+**Pourquoi** : sans cet envoi serveur, l'app Android ne peut PAS distinguer "isolation totale" de "backend juste down" — elle sonnera dès 5 min de heartbeat KO peu importe la cause. INV-067 garantit qu'un SMS atteint le tél (s'il est joignable par cellulaire) dans la fenêtre de 5 min côté client, ce qui désamorce la sonnerie locale dans tous les cas où l'opérateur reste joignable par SMS.
+
+**Marge de timing** : le client a un timeout de 5 min après `heartbeatLostSince`. Le backend tente d'envoyer dès 30 s + relance toutes les 2 min → au pire 1 ping dans la fenêtre [30s, 4min30s], le SMSC Orange peut prendre jusqu'à ~1 min en routage normal. Marge effective ≥ 30 s avant déclenchement.
+
+**Coût opérationnel** : zéro SMS en fonctionnement nominal (heartbeat OK). Pendant un épisode de heartbeat KO de durée D : `ceil(D / 2 min)` SMS. Pour le coût du forfait Sosh "SMS illimités" (~10€/mois) côté SIM gateway, marginal nul.
+
+**Coexistence avec INV-060 (SMS d'alarme métier)** :
+- INV-060 vise les notifications d'alarmes (`AlarmNotification` actives, déclenchées par escalade).
+- INV-067 vise les pings de joignabilité (aucun lien avec une alarme métier).
+- La colonne `SmsQueue.is_ping` (à ajouter) permet à la gateway de tracer les 2 flux. Le DLR d'un ping est stocké séparément (table `PingDeliveryReport`), pas dans `AlarmNotification.sms_sent`.
+- Aucune interférence avec INV-062 (anti-doublon SMS d'alarme) parce que les pings ont `alarm_id = NULL` et un body unique (timestamp ISO différent à chaque envoi).
+
+**Couverture à créer** (PR d'implémentation backend) :
+- Unit `test_send_ping_when_pos1_heartbeat_lost_for_30s` : forcer pos1 offline 31s → SmsQueue contient 1 ping avec body `[ALARME-MURGAT-PING] ...`.
+- Unit `test_no_ping_when_pos1_heartbeat_recent` : pos1 online → 0 ping inséré.
+- Unit `test_no_ping_to_pos2` : seul pos1 reçoit des pings (pas pos2, pos3, etc.). Choix business : seul l'opérateur **de garde** est censé être réveillé localement.
+- Unit `test_ping_interval_2min` : pos1 offline 5 min → exactement 2-3 pings (1 à 30s, 1 à 2m30s, 1 à 4m30s).
+- Integration `test_pos1_reconnects_clears_last_ping_sent_at` : heartbeat 2xx → `last_ping_sent_at` reset, futur épisode redémarre à zéro.
+- E2E `test_ping_visible_in_sms_queue_then_delivered` : nécessite Mailhog-like pour SMS ou la vraie gateway Mailhog.
+
+**Dépendances** :
+- `User.phone_number` doit être non-NULL pour pos 1 (sinon pas de destination — cf INV-061 réutilisé). Si NULL, log + skip + email direction technique 1× par épisode pour signaler le défaut de configuration.
+- `gateway/modem_gateway.py` : aucun changement direct, le flux d'envoi standard convient. Mais le delivery report (DLR) doit être capté et POSTé à un nouvel endpoint `/internal/sms/delivery-report` (auth `X-Gateway-Key`) pour audit + futur usage. À spécifier dans une INV-068 séparée si besoin (hors scope INV-067 V1).
+- INV-053 (email "personne en ligne") : non impacté, fonctionne en parallèle pour la chaîne entière. INV-067 est plus rapide à se déclencher (30s vs 15 min) et cible uniquement pos1, donc complémentaire.
 
 ### INV-066 [H] ✅ Toutes les références temporelles utilisent `clock_now()`, pas `datetime.utcnow()`
 **Contexte** : le backend a une horloge injectable (`clock.py`) pour que les tests puissent simuler "15 minutes se sont écoulées" en appelant `POST /api/test/advance-clock?minutes=15` au lieu d'attendre réellement 15 minutes. `clock_now()` retourne `datetime.utcnow() + offset`. En prod, l'offset est à 0, donc `clock_now() == datetime.utcnow()`.
