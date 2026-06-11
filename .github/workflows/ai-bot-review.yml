@@ -202,8 +202,12 @@ jobs:
           # 3. Auteur : bot OU dispatch manuel OU label `ai:review` pose (PR humaine).
           # Le label `ai:review` ouvre la review aux PR humaines (sessions Claude
           # interactives type #121) sans necessiter `gh workflow run`.
+          # Le bypass se fonde sur la presence courante du label (pas seulement
+          # le moment exact de pose) : sinon les re-dispatch declenches par
+          # `check_run.completed` perdent le bypass et tombent dans le check
+          # auteur != bot, alors meme que `ai:review` reste pose sur la PR.
           LABEL_BYPASS=""
-          if [ "$EVENT" = "pull_request_target" ] && [ "$ACTION" = "labeled" ] && [ "$LABEL_TRIGGER" = "ai:review" ]; then
+          if echo ",${LABELS}," | grep -q ",ai:review,"; then
             LABEL_BYPASS="true"
           fi
 
