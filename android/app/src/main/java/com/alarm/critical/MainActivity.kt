@@ -62,6 +62,9 @@ class MainActivity : AppCompatActivity() {
         val passwordInput = findViewById<EditText>(R.id.passwordInput)
         val loginButton = findViewById<Button>(R.id.loginButton)
         val statusText = findViewById<TextView>(R.id.statusText)
+        val shareLogsButton = findViewById<TextView>(R.id.shareLogsButton)
+
+        shareLogsButton.setOnClickListener { shareLogs() }
 
         // Pré-rempli uniquement en mode debug (jamais en production)
         if (BuildConfig.DEBUG) {
@@ -163,6 +166,19 @@ class MainActivity : AppCompatActivity() {
         intent.putExtra("token", token)
         startActivity(intent)
         finish()
+    }
+
+    private fun shareLogs() {
+        val userName = prefs.getString("user_name", null) ?: "(non connecté)"
+        val version = try { packageManager.getPackageInfo(packageName, 0).versionName } catch (_: Exception) { "?" }
+        val logs = com.alarm.critical.util.AppLogger.exportLogs(userName, version ?: "?")
+
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, "Alarme Murgat - Logs de diagnostic (login)")
+            putExtra(Intent.EXTRA_TEXT, logs)
+        }
+        startActivity(Intent.createChooser(intent, "Envoyer les logs via..."))
     }
 
     companion object {
