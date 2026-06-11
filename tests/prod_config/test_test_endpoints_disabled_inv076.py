@@ -24,38 +24,83 @@ import pytest
 pytestmark = pytest.mark.integration  # tier 2 (TestClient + SQLite), comme integration/
 
 
-# Liste explicite des endpoints les plus critiques de `/api/test/*` a verrouiller.
-# Verifies via `grep '@router\.' backend/app/api/test_api.py` (21 endpoints au total
-# au 2026-05-29). On en couvre 6 representatifs : 2 actions destructrices
-# (reset, send-alarm), 2 manipulations runtime (advance-clock, simulate-watchdog),
-# 1 lecture (status), 1 escalation (trigger-escalation).
-#
-# Strategie : tester (method, path, body) en parametre paramétré. Si un mutant
-# retire `_require_test_endpoints()` d'UN seul endpoint, le test correspondant
-# echoue. Couverture mutation-aware [C] : 6 tests = 6 mutants tues.
-_TEST_API_ENDPOINTS = [
-    ("POST", "/api/test/reset", None),
-    ("POST", "/api/test/send-alarm", None),
-    ("POST", "/api/test/advance-clock", {"minutes": 1}),
-    ("POST", "/api/test/simulate-watchdog-failure", None),
-    ("GET", "/api/test/status", None),
-    ("POST", "/api/test/trigger-escalation", None),
-]
+def _discover_test_api_routes():
+    """Introspecte l'app FastAPI pour decouvrir TOUTES les routes `/api/test/*`.
+
+    Renvoie une liste de tuples `(method, path)` triee, deduplique HEAD/OPTIONS.
+
+    Pourquoi introspection plutot qu'une liste hardcodee : si un dev ajoute
+    `@router.get("/api/test/nouveau-endpoint")` mais OUBLIE le
+    `_require_test_endpoints()` en tete du handler, l'introspection le couvre
+    AUTOMATIQUEMENT. La liste hardcodee laissait 15 handlers (sur 21) muets,
+    dont des endpoints destructeurs (`reset-sms-queue`, `configure-smtp`,
+    `insert-sms`, `insert-call`, `reset-call-queue`, `reset-fcm`). Un mutant
+    qui retire le guard de l'un de ces 15 ne tuait personne -> trou de
+    couverture mutation-aware.
+
+    Cf issue #140 (hardening mutation-proof INV-076).
+    """
+    from backend.app.main import app
+    routes = []
+    for route in app.routes:
+        methods = getattr(route, "methods", None)
+        if not methods:
+            continue
+        path = getattr(route, "path", "")
+        if not path.startswith("/api/test/"):
+            continue
+        for method in methods - {"HEAD", "OPTIONS"}:
+            routes.append((method, path))
+    return sorted(routes)
 
 
-@pytest.mark.parametrize("method,path,params", _TEST_API_ENDPOINTS)
-def test_test_endpoint_returns_404_when_disabled(client, method, path, params):
+_TEST_API_ROUTES = _discover_test_api_routes()
+
+
+def test_test_api_route_count_meta_at_least_21():
+    """INV-076 meta-test : l'introspection FastAPI doit decouvrir AU MOINS
+    21 routes `/api/test/*` (compte au 2026-05-29).
+
+    Pourquoi : si l'introspection silencieusement renvoie 0 ou 5 routes (bug
+    de signature `app.routes`, refactor mounting, version FastAPI change),
+    le test parametre `test_test_endpoint_returns_404_when_disabled` passerait
+    sur les routes effectivement decouvertes mais laisserait silencieusement
+    les autres non testees. Ce meta-test attrape ce mode de defaillance.
+
+    Si plus de routes sont ajoutees a `backend/app/api/test_api.py`, ce test
+    continue de passer (assertion >=, pas ==). Si un endpoint est supprime
+    legitimement et le total descend sous 21, mettre a jour ce seuil ICI ET
+    confirmer dans la PR que la suppression est intentionnelle.
+    """
+    assert len(_TEST_API_ROUTES) >= 21, (
+        f"INV-076 meta : introspection FastAPI a decouvert {len(_TEST_API_ROUTES)} "
+        f"routes /api/test/* mais on en attend >= 21. Soit l'introspection est "
+        f"cassee (verifier `_discover_test_api_routes` dans ce fichier), soit "
+        f"des endpoints ont ete supprimes legitimement (mettre a jour le seuil "
+        f"si intentionnel). Routes vues : {_TEST_API_ROUTES}"
+    )
+
+
+@pytest.mark.parametrize("method,path", _TEST_API_ROUTES)
+def test_test_endpoint_returns_404_when_disabled(client, method, path):
     """INV-076 [C] : tout `/api/test/*` doit retourner 404 quand
     ENABLE_TEST_ENDPOINTS=false (env de prod).
 
     Si ce test echoue → le guard `_require_test_endpoints()` a ete retire
     de l'endpoint correspondant, OU le mecanisme de chargement de la variable
     a regresse. C'est un VECTEUR D'ATTAQUE direct en prod (cf docstring module).
+
+    Couverture mutation-aware [C] : 21 routes introspectees = 21 mutants tues
+    (un par handler). Cf `_discover_test_api_routes` ci-dessus.
     """
+    # `json={}` est inoffensif pour les endpoints sans body et necessaire pour
+    # les endpoints qui declarent `payload: dict` (insert-sms, insert-call) :
+    # sans body, FastAPI renvoie 422 AVANT d'entrer dans le handler -> le
+    # guard `_require_test_endpoints()` ne serait jamais teste sur ces routes.
     if method == "GET":
-        r = client.get(path, params=params or {})
+        r = client.get(path)
     elif method == "POST":
-        r = client.post(path, params=params or {})
+        r = client.post(path, json={})
     else:  # pragma: no cover
         raise ValueError(f"method non geree: {method}")
 
@@ -64,28 +109,87 @@ def test_test_endpoint_returns_404_when_disabled(client, method, path, params):
         f"ENABLE_TEST_ENDPOINTS=false. Got {r.status_code} : {r.text[:200]}. "
         f"Si 200 : le guard `_require_test_endpoints()` est manquant sur ce "
         f"handler → VULNERABILITE PROD (endpoint dangereux exposé). "
-        f"Si 401/403 : guard auth applique avant guard `_require`, l'attaquant "
-        f"avec credentials passerait."
+        f"Si 422 : body Pydantic invalide a court-circuite le guard "
+        f"(envoyer un body plus tolerant)."
+    )
+
+
+def test_enable_test_endpoints_default_is_false_when_env_var_absent():
+    """INV-076 [C] : le defaut hardcode de `ENABLE_TEST_ENDPOINTS` dans
+    `backend/app/api/test_api.py` doit etre `"false"` — pas `"true"`, `"1"`
+    ni `"yes"`.
+
+    Pourquoi un test dedie : la conftest force `os.environ['ENABLE_TEST_ENDPOINTS']
+    = 'false'` AVANT l'import du module. Un mutant qui changerait le defaut de
+    `os.getenv(..., 'false')` en `os.getenv(..., 'true')` survivrait — la
+    valeur captee a l'import resterait `false` grace au conftest, masquant la
+    mutation. En prod, l'env var est typiquement ABSENTE et le defaut prend
+    le relais : un defaut a `true` exposerait tous les `/api/test/*`.
+
+    Strategie : inspection statique de la source de `test_api.py` (regex sur
+    la ligne `ENABLE_TEST_ENDPOINTS = os.getenv(...)`). Pas besoin de
+    subprocess / reload — le AST source est la source de verite.
+
+    Vecteur d'attaque tue : "dev a inverse le defaut pour tests locaux et a
+    oublie de restorer". Le job CI `prod_config_check` echoue immediatement.
+    """
+    import inspect
+    import re
+    from backend.app.api import test_api
+
+    src = inspect.getsource(test_api)
+    match = re.search(
+        r'ENABLE_TEST_ENDPOINTS\s*=\s*os\.getenv\(\s*["\']ENABLE_TEST_ENDPOINTS["\']\s*,\s*["\']([^"\']+)["\']\s*\)',
+        src,
+    )
+    assert match, (
+        "INV-076 meta : impossible de localiser le pattern "
+        "`ENABLE_TEST_ENDPOINTS = os.getenv(\"ENABLE_TEST_ENDPOINTS\", \"...\")` "
+        "dans backend/app/api/test_api.py. Le mecanisme de chargement a-t-il "
+        "ete refactore (variable d'env -> SystemConfig, deplace ailleurs) ? "
+        "Si oui, adapter ce test pour pointer vers la nouvelle source de verite."
+    )
+    default_literal = match.group(1).lower()
+    assert default_literal not in ("true", "1", "yes"), (
+        f"INV-076 [C] VULNERABILITE PROD : le defaut hardcode de "
+        f"ENABLE_TEST_ENDPOINTS est '{default_literal}'. En prod sans env var "
+        f"explicit (cas normal), ce defaut s'applique → tous les /api/test/* "
+        f"seraient EXPOSES (endpoints destructeurs `reset`, `send-alarm`, "
+        f"`advance-clock`, `configure-smtp`, `insert-sms`, `insert-call`...). "
+        f"Restaurer 'false' dans backend/app/api/test_api.py."
     )
 
 
 def test_test_endpoint_returns_404_even_with_admin_auth(client, admin_headers):
-    """INV-076 [C] defense en profondeur : meme avec un JWT admin valide,
-    `/api/test/reset` doit renvoyer 404 quand ENABLE_TEST_ENDPOINTS=false.
+    """INV-076 [C] defense en profondeur : un JWT admin valide ne doit PAS
+    bypass le 404 sur `/api/test/reset` quand ENABLE_TEST_ENDPOINTS=false.
 
-    Verifie que le guard `_require_test_endpoints()` est appele AVANT
-    `Depends(get_current_admin)` (sinon un admin authentifie aurait acces).
+    Ce que prouve ce test : le 404 est INCONDITIONNEL, il n'est pas
+    contournable par presentation de credentials (ni admin, ni utilisateur).
+    L'attaquant qui vole / leak un JWT admin valide tombe quand meme sur 404
+    en prod — le drapeau ENABLE_TEST_ENDPOINTS est la barriere ultime,
+    independante de l'auth.
 
-    Vecteur d'attaque verrouille : compromis credentials admin (vol JWT,
-    leak password) ne doit PAS suffire a appeler `/api/test/reset` en prod.
-    Le drapeau ENABLE_TEST_ENDPOINTS est la barriere ultime.
+    Ce que ce test NE prouve PAS : un ordre `_require_test_endpoints` AVANT
+    `Depends(get_current_admin)`. La raison : `/api/test/reset` n'a PAS de
+    `Depends(get_current_admin)` dans le code prod actuel (uniquement
+    `Depends(get_db)` au 2026-05-29). Le test envoie un header Bearer pour
+    documenter le scenario d'attaque (admin compromis) ; le header est ignore
+    par le handler. Si un futur refactor ajoute `Depends(get_current_admin)`
+    a `/api/test/reset`, ce test verrouillera mecaniquement l'ordre : un
+    guard auth applique avant `_require_test_endpoints()` renverrait 401/403
+    en plus du 404, et l'assertion ci-dessous attraperait ce changement de
+    comportement.
     """
     r = client.post("/api/test/reset", headers=admin_headers)
     assert r.status_code == 404, (
         f"INV-076 [C] : POST /api/test/reset avec JWT admin valide doit AUSSI "
         f"renvoyer 404 quand ENABLE_TEST_ENDPOINTS=false. Got {r.status_code}. "
-        f"Si 200 : `_require_test_endpoints` est apres `Depends(get_current_admin)` "
-        f"dans la chaine FastAPI → un admin compromis peut vider les alarmes prod."
+        f"Si 200 : `_require_test_endpoints` a ete retire OU place apres une "
+        f"dependance auth qui passe -> un admin compromis peut vider les alarmes "
+        f"prod. Si 401/403 : un guard auth a ete ajoute AVANT "
+        f"`_require_test_endpoints()` -> l'attaquant sans creds verrait 401, "
+        f"l'attaquant avec creds (cas ici) verrait 200 -> regression."
     )
 
 
