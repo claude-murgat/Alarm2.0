@@ -1,0 +1,13 @@
+[Unit]
+Description=Alarm 2.0 - Modem RAT WCDMA+LTE sans 2G (coexistence voix+data 4G)
+After=network-online.target
+Before=alarm-sms-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 /opt/alarm/modem-set-rat.py
+
+[Install]
+WantedBy=multi-user.target

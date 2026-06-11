@@ -1,0 +1,15 @@
+[Unit]
+Description=Alarm 2.0 - Failover 4G standby chaud (SIM7600 QMI, metrique 300)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=APN=orange
+ExecStart=/opt/alarm/4g-standby.sh
+Restart=always
+RestartSec=10
+TimeoutStopSec=25
+
+[Install]
+WantedBy=multi-user.target
