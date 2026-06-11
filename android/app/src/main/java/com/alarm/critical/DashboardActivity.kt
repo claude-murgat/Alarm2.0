@@ -237,6 +237,10 @@ class DashboardActivity : AppCompatActivity() {
         }
 
         prefs.edit().clear().apply()
+        // Vider les logs collectes pendant la session, sinon un user suivant
+        // qui clique "Envoyer les logs" sur l'ecran de login (cf INV-ANDROID-108)
+        // exporterait les events de la session precedente — fuite cross-user.
+        AppLogger.clear()
         stopPollingService()
         soundManager?.stopAlarmSound()
         connectionLostSoundManager?.stopAlarmSound()
