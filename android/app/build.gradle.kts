@@ -32,7 +32,9 @@ fun gitOutput(vararg args: String): String? {
 
 val gitCommitCount: Int = gitOutput("rev-list", "--count", "HEAD")?.toIntOrNull() ?: 1
 val gitShortSha: String = gitOutput("rev-parse", "--short", "HEAD") ?: "unknown"
-val gitDirty: Boolean = !gitOutput("status", "--porcelain").isNullOrBlank()
+// --untracked-files=no : ignorer les fichiers non suivis (build outputs, IDE
+// caches, etc.) pour ne marquer "dirty" QUE si un fichier suivi est modifie.
+val gitDirty: Boolean = !gitOutput("status", "--porcelain", "--untracked-files=no").isNullOrBlank()
 val baseVersion = "1.0"
 val computedVersionName = buildString {
     append("$baseVersion.$gitCommitCount-$gitShortSha")
