@@ -1,7 +1,42 @@
+import java.io.ByteArrayOutputStream
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("com.google.gms.google-services")
+}
+
+// INV-ANDROID-109 : versionCode et versionName derives automatiquement de
+// git à chaque build. Aucune action manuelle requise pour "bumper" la
+// version — tout commit produit une version distincte et tracable au sha.
+//
+// - versionCode = nombre total de commits sur la branche courante (monotone)
+// - versionName = "<base>.<commits>-<shortSha>[-dirty]"
+//
+// Si le repo n'est pas accessible (CI sans git, etc.), fallback sur 1 / "1.0-unknown".
+fun gitOutput(vararg args: String): String? {
+    return try {
+        val stdout = ByteArrayOutputStream()
+        val result = exec {
+            commandLine = listOf("git") + args.toList()
+            standardOutput = stdout
+            errorOutput = ByteArrayOutputStream()
+            isIgnoreExitValue = true
+            workingDir = rootDir.parentFile  // racine du repo (au-dessus de android/)
+        }
+        if (result.exitValue == 0) stdout.toString().trim().takeIf { it.isNotEmpty() } else null
+    } catch (e: Exception) {
+        null
+    }
+}
+
+val gitCommitCount: Int = gitOutput("rev-list", "--count", "HEAD")?.toIntOrNull() ?: 1
+val gitShortSha: String = gitOutput("rev-parse", "--short", "HEAD") ?: "unknown"
+val gitDirty: Boolean = !gitOutput("status", "--porcelain").isNullOrBlank()
+val baseVersion = "1.0"
+val computedVersionName = buildString {
+    append("$baseVersion.$gitCommitCount-$gitShortSha")
+    if (gitDirty) append("-dirty")
 }
 
 android {
@@ -16,8 +51,8 @@ android {
         applicationId = "com.alarm.critical"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = gitCommitCount
+        versionName = computedVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // URLs backend dev (10.0.2.2 = alias localhost du PC depuis l'émulateur).
