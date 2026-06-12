@@ -67,10 +67,12 @@ Quand le polling détecte une alarme active (`currentAlarm != null`, ID différe
 - **Couverture** : indirect (test03_acknowledgeShowsStatusAndRemainingTime vérifie que l'ack trigger stopAlarmSound via l'absence de sonnerie ensuite — mais l'absence n'est pas vérifiée directement).
 - **Manque** : test qui vérifie `soundManager.isPlaying() == true` après alarme affichée.
 
-### INV-ANDROID-003 [C] ⚠️ Volume forcé au maximum sur le stream alarme
-À chaque `startAlarmSound()`, `audioManager.setStreamVolume(STREAM_ALARM, maxVol, 0)` est appelé.
-- **Pourquoi** : si l'utilisateur a baissé son volume la veille, la sonnerie doit quand même être audible. Le stream ALARM est par design non affecté par le mode silencieux.
-- **Manque** : aucun test ne vérifie le volume du stream après déclenchement.
+### INV-ANDROID-003 [C] ⚠️ Volume forcé à 50% du maximum sur le stream alarme (révisé 2026-06-04)
+À chaque `startAlarmSound()`, `audioManager.setStreamVolume(STREAM_ALARM, (maxVol * 0.5f).toInt(), 0)` est appelé. Le même code sert pour la sonnerie alarme métier et pour la sonnerie « hors connexion » (cf INV-ANDROID-007).
+- **Pourquoi** : si l'utilisateur a baissé son volume la veille, la sonnerie doit quand même être audible. Le stream ALARM est par design non affecté par le mode silencieux. La cible 50% est un compromis entre audibilité (toujours réveille) et agressivité ergonomique (le 100% saturait à l'oreille sur les appareils d'astreinte testés Crosscall où max=15).
+- **Changement 2026-06-04** : valeur passée de `maxVol` à `(maxVol * 0.5f).toInt()`. Décision business propriétaire après retour terrain « trop fort, agressif au réveil ». 50% reste loin au-dessus du seuil de réveil.
+- **Effet de bord persistant** : `setStreamVolume` écrit la valeur dans le réglage système (pas juste le lecteur). Si l'utilisateur ajuste manuellement, la prochaine sonnerie rebascule à 50%. `stopAlarmSound()` ne restaure pas l'ancienne valeur (inchangé vs version max).
+- **Manque** : aucun test ne vérifie le volume du stream après déclenchement (manque préexistant, indépendant du changement de cible).
 
 ### INV-ANDROID-004 [C] ⚠️ Back button désactivé dans AlarmActivity
 `onBackPressed()` overridé vide → le bouton retour ne ferme pas l'activité. L'utilisateur doit acquitter (ou utiliser "Retour au dashboard" qui ne ferme que l'activité, pas l'alarme sous-jacente).
@@ -154,6 +156,13 @@ Textes du bandeau :
 `helpFab.setOnClickListener { shareLogs() }` → `Intent.ACTION_SEND` MIME `text/plain` avec contenu `AppLogger.exportLogs(userName, version)`. Le contenu inclut un en-tête (user, version, device, Android, timestamp, count) + les 500 dernières entrées au format `[ts] tag: message`.
 - **Pourquoi** : debug à distance par l'équipe technique sans accès ADB. Mesure de résilience opérationnelle.
 - **Manque** : aucun test ne vérifie la présence du bouton ni l'envoi du share intent.
+
+### INV-ANDROID-108 [M] ❌ Bouton "Envoyer les logs" sur la page de login (pré-auth) — révisé 2026-06-04
+`shareLogsButton.setOnClickListener { shareLogs() }` sur `MainActivity` → mêmes `AppLogger.exportLogs(...)` + `Intent.ACTION_SEND` que INV-ANDROID-107. `user_name` = `"(non connecté)"` dans l'en-tête du export puisque la session n'a pas encore d'identité confirmée.
+- **Pourquoi** : INV-ANDROID-107 n'est accessible qu'une fois loggé. Si le login échoue (URL backend inaccessible, timeout réseau, mauvais credentials), l'opérateur ne pouvait pas exporter les logs depuis l'app — il fallait passer par ADB ou re-essayer indéfiniment. Le bouton login est explicitement conçu pour les diagnostics réseau au démarrage (rotation des URLs cluster, certificats, DNS).
+- **Privacy (anti-fuite cross-user)** : `AppLogger.clear()` est appelé dans la procédure logout de `DashboardActivity` (cf code) **avant** de revenir à `MainActivity`. Garantit que le contenu de `AppLogger` au moment du clic « Envoyer les logs » sur l'écran de login ne contient QUE les events de la session courante (pré-login) ou ceux du démarrage app si pas de session précédente — jamais ceux d'un user A précédemment déconnecté.
+- **Statut** : code implémenté 2026-06-04 (cf `MainActivity.shareLogs()` + ligne `AppLogger.clear()` dans `DashboardActivity.logout()`).
+- **Manque** : aucun test ne vérifie la présence du bouton, l'envoi du share intent, ni le clear au logout. Tests Espresso à ajouter dans une PR follow-up.
 
 ---
 

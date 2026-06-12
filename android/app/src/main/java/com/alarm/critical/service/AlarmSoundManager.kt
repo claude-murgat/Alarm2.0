@@ -31,10 +31,9 @@ class AlarmSoundManager(private val context: Context) {
                 start()
             }
 
-            // Set volume to max
             val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
             val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_ALARM)
-            audioManager.setStreamVolume(AudioManager.STREAM_ALARM, maxVol, 0)
+            audioManager.setStreamVolume(AudioManager.STREAM_ALARM, (maxVol * 0.5f).toInt(), 0)
         } catch (e: Exception) {
             e.printStackTrace()
         }
