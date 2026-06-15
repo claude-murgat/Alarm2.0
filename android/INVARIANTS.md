@@ -157,12 +157,14 @@ Textes du bandeau :
 - **Pourquoi** : debug à distance par l'équipe technique sans accès ADB. Mesure de résilience opérationnelle.
 - **Manque** : aucun test ne vérifie la présence du bouton ni l'envoi du share intent.
 
-### INV-ANDROID-108 [M] ❌ Bouton "Envoyer les logs" sur la page de login (pré-auth) — révisé 2026-06-04
+### INV-ANDROID-108 [M] ❌ Bouton "Envoyer les logs" sur la page de login (pré-auth) + diagnostic login tracé — révisé 2026-06-15
 `shareLogsButton.setOnClickListener { shareLogs() }` sur `MainActivity` → mêmes `AppLogger.exportLogs(...)` + `Intent.ACTION_SEND` que INV-ANDROID-107. `user_name` = `"(non connecté)"` dans l'en-tête du export puisque la session n'a pas encore d'identité confirmée.
 - **Pourquoi** : INV-ANDROID-107 n'est accessible qu'une fois loggé. Si le login échoue (URL backend inaccessible, timeout réseau, mauvais credentials), l'opérateur ne pouvait pas exporter les logs depuis l'app — il fallait passer par ADB ou re-essayer indéfiniment. Le bouton login est explicitement conçu pour les diagnostics réseau au démarrage (rotation des URLs cluster, certificats, DNS).
+- **Tracé du flow login (2026-06-15)** : `MainActivity.login()` émet des events `AppLogger.log("Login", ...)` à chaque étape — tentative (user + URL courante), résultat de chaque essai (`HTTP <code>` ou `reseau KO (<msg>)`) y compris pendant la rotation des 3 URLs, succès (user/oncall/pos), ou échec définitif avec le code et le message affiché. Avant ce changement, aucune trace côté `AppLogger` : un login en échec (401, timeout, serveur down) n'apparaissait PAS dans l'export, rendant le bouton inutile pour diagnostiquer justement le cas qu'il vise.
+- **Message clair (2026-06-15)** : `loginErrorMessage(code)` traduit la cause en message lisible (`401` → "Identifiants incorrects (nom ou mot de passe)", `429` → "Trop de tentatives — réessayez dans 1 minute", `5xx` → "Serveur en erreur", `null`/réseau → "Serveur injoignable — vérifiez votre connexion réseau"). Remplace l'ancien `"Échec de connexion : 401"` cryptique. `ApiClient.currentBaseUrl()` ajouté pour exposer l'URL backend courante aux logs.
 - **Privacy (anti-fuite cross-user)** : `AppLogger.clear()` est appelé dans la procédure logout de `DashboardActivity` (cf code) **avant** de revenir à `MainActivity`. Garantit que le contenu de `AppLogger` au moment du clic « Envoyer les logs » sur l'écran de login ne contient QUE les events de la session courante (pré-login) ou ceux du démarrage app si pas de session précédente — jamais ceux d'un user A précédemment déconnecté.
-- **Statut** : code implémenté 2026-06-04 (cf `MainActivity.shareLogs()` + ligne `AppLogger.clear()` dans `DashboardActivity.logout()`).
-- **Manque** : aucun test ne vérifie la présence du bouton, l'envoi du share intent, ni le clear au logout. Tests Espresso à ajouter dans une PR follow-up.
+- **Statut** : code implémenté 2026-06-04, tracé login + messages clairs 2026-06-15 (cf `MainActivity.login()` / `loginErrorMessage()` / `shareLogs()` + `ApiClient.currentBaseUrl()` + `AppLogger.clear()` dans `DashboardActivity.logout()`).
+- **Manque** : aucun test ne vérifie la présence du bouton, l'envoi du share intent, le clear au logout, ni les events de login tracés. Tests Espresso à ajouter dans une PR follow-up.
 
 ### INV-ANDROID-109 [H] ❌ Version de build dérivée automatiquement de git (anti-bump-manquant) — 2026-06-12
 `versionCode` et `versionName` du `defaultConfig` Gradle sont calculés au build time depuis git, pas hardcodés :
