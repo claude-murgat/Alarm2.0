@@ -473,10 +473,14 @@ Avant le `clear()`, `ApiProvider.service.deleteFcmToken(auth, FcmTokenDeleteRequ
 ### INV-ANDROID-505 [C] ⚠️ Refresh 2xx → nouveau token en prefs + en mémoire service
 Sur `refreshToken.isSuccessful`, `newToken = body.access_token` → `prefs.putString("token", newToken)` + `this.token = newToken`.
 - **Pourquoi** : polling/heartbeat suivants utilisent immédiatement le nouveau token, pas de 401 intermédiaire.
+- **Révision INV-079 (2026-06-15)** : `tryRefreshToken()` envoie maintenant le `refresh_token` (UUID opaque) dans le body de `POST /auth/refresh`, pas l'access expiré en header. Stocké dans `prefs.refresh_token` au login (cf INV-079). Le nouveau access reçu remplace l'ancien dans prefs+mémoire comme avant.
 
-### INV-ANDROID-506 [C] ⚠️ Refresh échoué → sonnerie locale + message permanent, PAS logout silencieux
-`forceLogout()` NE force PAS de retour à MainActivity. Au lieu : `authErrorAlarm=true`, `authErrorMessage="Votre session a expiré et n'a pas pu être renouvelée. Veuillez vous reconnecter."`, bandeau permanent visible, sonnerie démarrée, bouton "Reconnexion" visible.
+### INV-ANDROID-506 [C] ⚠️ Refresh échoué → sonnerie locale + message permanent, PAS logout silencieux (révisé 2026-06-15)
+`forceLogout()` NE force PAS de retour à MainActivity. Au lieu : `authErrorMessage = "Votre session a expiré..."` puis `authErrorAlarm = true` puis `AppLogger.log("Auth", "ERREUR: $authErrorMessage")`. Bandeau permanent visible, sonnerie démarrée, bouton "Reconnexion" visible.
 - **Pourquoi** : un logout silencieux = l'utilisateur manque des alarmes sans savoir pourquoi. Mieux vaut une alerte bruyante qui le force à agir.
+- **Changement 2026-06-15 (INV-079)** : ce code path est désormais **très rare**. Le refresh token côté serveur (cf INV-079) est éternel sauf si révoqué — l'app peut rester éteinte des semaines et le refresh marchera au retour. `forceLogout()` ne se déclenche qu'en cas de révocation admin, suppression du user, ou backend indisponible > 1 cycle de refresh. Avant INV-079, la fenêtre était 24h (TTL JWT access).
+- **Bug ordre log fixé (2026-06-15)** : avant, `AppLogger.log("Auth", "ERREUR: ${authErrorMessage}")` était appelé AVANT l'assignation de `authErrorMessage`, donc loguait toujours "ERREUR: null". L'ordre est maintenant : assignation → set flag → log avec le message correct.
+- **Logs AppLogger ajoutés (INV-079)** : visibilité complète sur le path auth — `"Polling 401 → tentative refresh"`, `"Refresh OK"`, `"Refresh KO HTTP <code>"`, `"Refresh erreur reseau : <msg>"`, `"Refresh impossible : refresh_token absent"`. Le bouton "Envoyer les logs" expose maintenant exactement ce qui s'est passé sur l'auth.
 - **Couverture** : test17.
 
 ### INV-ANDROID-507 [M] ⚠️ Token valide en prefs au démarrage → direct au dashboard (pas de re-login)

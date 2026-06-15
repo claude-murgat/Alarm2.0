@@ -409,7 +409,7 @@ Sous-règles :
 
 **Hors scope** : édition du numéro côté app Android (login par nom only, pas de profil éditable) ; normalisation internationale avancée (libphonenumber) ; vérification de joignabilité réelle (DLR, cf note INV-067/INV-068).
 
-**Statut** : implémenté + 5 tests GREEN (session Claude 2026-06-15) — frontend `index.html` (`loadUsers`/`savePhone`/`addUser`/`noPhoneBadge`) + backend `UserCreate.phone_number`/`register`. Commit/PR à venir.
+**Statut** : implémenté + 5 tests GREEN (session Claude 2026-06-15) — PR #165. Frontend `index.html` (`loadUsers`/`savePhone`/`addUser`/`noPhoneBadge`) + backend `UserCreate.phone_number`/`register`.
 
 **Couverture** (E2E Playwright — `tests/test_frontend.py::TestUsersTab`) :
 - `test_users_table_has_phone_input_per_user` — chaque ligne a un `input.user-phone`.
@@ -438,17 +438,39 @@ Plus de 10 tentatives échouées en 60s pour le même username → 429.
 - **Code** : `backend/app/api/users.py:18-32` (`_check_rate_limit`, `RATE_LIMIT_MAX_FAILURES = 10`, `RATE_LIMIT_WINDOW = 60`), appelé ligne 62. Raise 429 au 11e échec.
 - **Couverture** (audit 2026-04-20) : E2E `tests/test_improvements.py::TestRateLimiting` — `test_login_rate_limited_after_many_failures` + `test_legitimate_login_still_works_after_rate_limit`.
 
-### INV-074 [C] ✅ Refresh token produit un nouveau token
-POST /auth/refresh avec token valide → nouveau token différent.
+### INV-074 [C] ✅ Refresh token produit un nouveau access token (mode legacy Bearer)
+POST /auth/refresh avec Bearer valide → nouveau access token différent.
 - **Pourquoi** : un refresh qui renverrait le token reçu en input ne sert à rien (pas de rotation TTL).
-- **Implémentation** : `create_access_token` (auth.py:28-37) inclut `"jti": str(uuid.uuid4())` dans le payload → chaque token a un UUID unique → tokens trivialement distincts à chaque appel, sans dépendre du timing `iat`.
+- **Implémentation** : `create_access_token` (auth.py:28-37) inclut `"jti": str(uuid.uuid4())` dans le payload → chaque token a un UUID unique → tokens trivialement distincts à chaque appel.
+- **Statut 2026-06-15** : mode conservé pour rétro-compat. Le mode canonique est INV-079 ci-dessous (refresh dans le body, sans Bearer requis). L'endpoint accepte les deux ; le body INV-079 gagne s'il est présent.
 - **Fix** : PR #92 (bot IA, 2026-05-13). Aucune modif prod ; verrouillage en régression via 2 tests.
-- **Couverture** : `tests/integration/test_auth_refresh.py` (tier 2) :
-  - `test_new_refresh_returns_distinct_token` (token_after != token_before)
-  - `test_new_token_is_usable` (le nouveau token authentifie GET /api/auth/me)
-- **Limites identifiées (issues follow-up)** :
-  - #96 [H] : path négatif (`/auth/refresh` avec token expiré ou signature invalide → 401)
-  - #97 [human-required] : clarifier que l'ancien token reste valide jusqu'à `exp` naturelle (JWT stateless, pas de denylist — choix architectural assumé)
+- **Couverture** : `tests/integration/test_auth_refresh.py` (tier 2) + `tests/test_e2e.py::TestRefreshTokenInv079::test_refresh_legacy_mode_bearer_still_works` (régression tier 3).
+
+### INV-079 [C] ⚠️ Refresh token persistant DB-backed, jamais expiré sauf révocation (2026-06-15)
+Pattern Gmail/OAuth2 : `/auth/login` renvoie un `refresh_token` (UUID4 opaque) **en plus** de l'access token JWT. Le SHA-256 du refresh est persisté dans une nouvelle table `refresh_tokens(id, user_id, token_hash UNIQUE, created_at, last_used_at, revoked)` et **n'expire jamais** sauf si `revoked=TRUE`. Le client utilise `POST /auth/refresh` **avec le refresh dans le body** (sans Authorization header — l'access JWT peut être expiré) et obtient un nouvel access valide 24h.
+- **Pourquoi** : avant INV-079, le seul moyen de renouveler l'access était d'envoyer le Bearer JWT lui-même (INV-074). Si l'app restait éteinte > 24h, le JWT expirait, le refresh échouait, l'utilisateur devait retaper son mdp. Pour les téléphones d'astreinte qui peuvent rester en veille plusieurs jours, c'était une friction inacceptable. Pattern Gmail : refresh token éternel côté serveur, access court côté client.
+- **Sécurité** : le refresh est un UUID4 opaque (pas un JWT), validé uniquement par lookup DB sur son **SHA-256** (le clair n'est JAMAIS persisté — une lecture de la DB ne donne pas de tokens réutilisables). Hash déterministe sans sel : inutile, le UUID4 a 122 bits d'entropie (pas de brute-force). Cela permet la **révocation** côté serveur (impossible avec JWT stateless). Si un tél est volé, admin peut faire `UPDATE refresh_tokens SET revoked=TRUE WHERE user_id=...` → tous les refresh du user sont rejetés à la prochaine utilisation, sans tourner le `SECRET_KEY` JWT (qui déconnecterait tout le monde).
+- **Pas de rotation V1** : un refresh donné peut être réutilisé indéfiniment (cf test `test_refresh_token_survives_multiple_uses`). La rotation à l'usage est une éventuelle V2.
+- **Implémentation** :
+  - Modèle `RefreshToken` (`backend/app/models.py`) — colonne `token_hash` (SHA-256), pas le clair
+  - Migration `_migrate_refresh_tokens` dans `run_migrations()` (idempotent, SQLite + PostgreSQL). La contrainte UNIQUE sur `token_hash` crée l'index ; seul `user_id` a un `CREATE INDEX` explicite.
+  - Helpers `_hash_refresh_token`, `create_refresh_token`, `validate_refresh_token`, `revoke_refresh_tokens_for_user` dans `auth.py` (le dernier pas encore branché à un endpoint, cf limites)
+  - `get_current_user_optional` (`auth.py`) : version tolérante de `get_current_user` qui retourne `None` sur Bearer absent/invalide au lieu de raise 401 — permet à `/auth/refresh` de basculer sur le mode body.
+  - `/api/auth/login` : ajout de `refresh_token` dans la `TokenResponse`
+  - `/api/auth/refresh` : accepte `RefreshRequest(refresh_token: str)` body OU Bearer (legacy INV-074). Body prioritaire si les deux sont fournis.
+- **Couverture** (`tests/test_e2e.py::TestRefreshTokenInv079`, tier 3) — 7 tests :
+  - `test_login_returns_refresh_token` (format UUID4 dans la response /login)
+  - `test_refresh_via_body_works_without_bearer` (mode canonique)
+  - `test_refresh_via_body_with_invalid_token_returns_401`
+  - `test_refresh_legacy_mode_bearer_still_works` (rétro-compat INV-074)
+  - `test_refresh_neither_body_nor_bearer_returns_401`
+  - `test_refresh_with_invalid_bearer_and_valid_body_returns_new_access` (cas réel : Bearer expiré + refresh valide → mode body prime)
+  - `test_refresh_token_survives_multiple_uses` (pas de rotation V1)
+- **Côté client (Android)** : cf INV-ANDROID-505/506 mis à jour. Refresh stocké dans `SharedPreferences("alarm_prefs").refresh_token` au login. `tryRefreshToken()` lit ce refresh et l'envoie en body via la nouvelle signature `ApiService.refreshToken(RefreshRequest)`.
+- **Limites identifiées (issues follow-up à ouvrir)** :
+  - [H] : pas de `/auth/logout` qui révoque le refresh côté serveur. Aujourd'hui le logout local clear les prefs uniquement — le refresh reste valide en DB. Un user qui logout+relogin a 2 refresh tokens valides en DB.
+  - [H] : pas de mécanisme de révocation depuis l'UI admin web (`UPDATE` SQL à la main).
+  - [M] : pas de purge périodique des refresh tokens `last_used_at < 90 jours` (croissance illimitée de la table).
 
 ### INV-075 [C] ⚠️ Token cross-node
 Un token émis par un noeud est accepté par tous (même SECRET_KEY).

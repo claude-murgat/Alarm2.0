@@ -253,6 +253,10 @@ class AlarmPollingService : Service() {
                         }
                     } else if (response.code() == 401) {
                         Log.w(TAG, "Token expiré (401) — tentative de refresh")
+                        com.alarm.critical.util.AppLogger.log(
+                            "Auth",
+                            "Polling 401 → tentative refresh via /auth/refresh (INV-082)"
+                        )
                         if (!tryRefreshToken()) {
                             Log.e(TAG, "Refresh échoué — déconnexion forcée")
                             forceLogout()
@@ -398,34 +402,68 @@ class AlarmPollingService : Service() {
     }
 
     private suspend fun tryRefreshToken(): Boolean {
+        val prefs = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
+        // INV-082 : lire le refresh_token persiste au login. Si absent (cas
+        // legacy : login pre-INV-082 ou apres un logout/clear), refresh
+        // impossible → retourne false → forceLogout() prendra le relais.
+        val refresh = prefs.getString("refresh_token", null)
+        if (refresh.isNullOrEmpty()) {
+            Log.w(TAG, "Refresh impossible : aucun refresh_token stocke (login pre-INV-082 ?)")
+            com.alarm.critical.util.AppLogger.log(
+                "Auth",
+                "Refresh impossible : refresh_token absent en SharedPreferences (INV-082)"
+            )
+            return false
+        }
         return try {
-            val response = ApiProvider.service.refreshToken("Bearer $token")
+            val response = ApiProvider.service.refreshToken(
+                com.alarm.critical.model.RefreshRequest(refresh_token = refresh)
+            )
             if (response.isSuccessful) {
                 val newToken = response.body()?.access_token
                 if (newToken != null) {
                     token = newToken
-                    // Sauvegarder le nouveau token dans SharedPreferences
-                    val prefs = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
                     prefs.edit().putString("token", newToken).apply()
                     Log.i(TAG, "Token renouvelé avec succès")
+                    com.alarm.critical.util.AppLogger.log(
+                        "Auth",
+                        "Refresh OK (INV-082) : nouveau access token stocke"
+                    )
                     true
-                } else false
+                } else {
+                    com.alarm.critical.util.AppLogger.log(
+                        "Auth",
+                        "Refresh 2xx mais body sans access_token (incoherence backend)"
+                    )
+                    false
+                }
             } else {
                 Log.w(TAG, "Refresh token échoué: ${response.code()}")
+                com.alarm.critical.util.AppLogger.log(
+                    "Auth",
+                    "Refresh KO HTTP ${response.code()} : refresh_token rejeté par /auth/refresh (revoque, expire, ou backend pre-INV-082)"
+                )
                 false
             }
         } catch (e: Exception) {
             Log.e(TAG, "Refresh token erreur: ${e.message}")
+            com.alarm.critical.util.AppLogger.log(
+                "Auth",
+                "Refresh erreur reseau : ${e.message}"
+            )
             false
         }
     }
 
     private fun forceLogout() {
         // Ne PAS faire de logout silencieux — déclencher une alarme sonore continue
-        // et afficher un message permanent compréhensible par un utilisateur lambda
-        authErrorAlarm = true
-        com.alarm.critical.util.AppLogger.log("Auth", "ERREUR: ${authErrorMessage}")
+        // et afficher un message permanent compréhensible par un utilisateur lambda.
+        // INV-082 : ce code path est très rare avec le refresh éternel — il ne
+        // se déclenche que sur revocation admin ou backend down très longtemps.
         authErrorMessage = "Votre session a expiré et n'a pas pu être renouvelée. Veuillez vous reconnecter."
+        authErrorAlarm = true
+        // Le log se fait APRES l'assignation du message (bug ordre fixe 2026-06-15).
+        com.alarm.critical.util.AppLogger.log("Auth", "ERREUR: $authErrorMessage")
         Log.e(TAG, "Échec du renouvellement de session — sonnerie d'alerte déclenchée")
     }
 
