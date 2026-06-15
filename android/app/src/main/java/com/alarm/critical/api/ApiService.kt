@@ -32,7 +32,7 @@ interface ApiService {
         @Query("days") days: Int = 10
     ): Response<List<AlarmResponse>>
 
-    // INV-082 : refresh via body (refresh_token UUID), sans Bearer header.
+    // INV-079 : refresh via body (refresh_token UUID), sans Bearer header.
     // C'est le seul mode utilisable quand l'access JWT est expire (au-dela
     // de 24h). Backend accepte aussi un Bearer valide en plus pour le mode
     // legacy mais on n'utilise plus que le body cote app.
