@@ -8,6 +8,7 @@ class UserCreate(BaseModel):
     name: str
     password: str
     is_admin: bool = False
+    phone_number: Optional[str] = None
 
     @field_validator("name")
     @classmethod
@@ -15,6 +16,15 @@ class UserCreate(BaseModel):
         if " " in v:
             raise ValueError("Le nom ne doit pas contenir d'espaces")
         return v.lower()
+
+    @field_validator("phone_number")
+    @classmethod
+    def _normalize_phone(cls, v: Optional[str]) -> Optional[str]:
+        # INV-069 : strip des espaces, "" -> None (le format est valide cote UI).
+        if v is None:
+            return None
+        v = v.replace(" ", "").strip()
+        return v or None
 
 
 class UserResponse(BaseModel):

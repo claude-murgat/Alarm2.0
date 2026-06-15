@@ -146,12 +146,13 @@
                     <div class="form-group"><label>Nom (sans espaces)</label><input id="newUserName" placeholder="nom"></div>
                     <div class="form-group"><label>Mot de passe</label><input id="newUserPassword" type="password" placeholder="Mot de passe"></div>
                     <div class="form-group"><label>Admin</label><select id="newUserAdmin"><option value="false">Non</option><option value="true">Oui</option></select></div>
+                    <div class="form-group"><label>Téléphone</label><input id="newUserPhone" type="tel" placeholder="+33612345678"></div>
                     <button class="btn-primary" onclick="addUser()">Ajouter</button>
                 </div>
             </div>
             <div class="card">
                 <h3>Utilisateurs</h3>
-                <table><thead><tr><th>ID</th><th>Nom</th><th>Admin</th><th>En ligne</th><th>Actions</th></tr></thead>
+                <table><thead><tr><th>ID</th><th>Nom</th><th>Admin</th><th>En ligne</th><th>Téléphone</th><th>Actions</th></tr></thead>
                 <tbody id="usersTable"></tbody></table>
             </div>
         </div>
@@ -599,7 +600,29 @@
                 <tr><td>${u.id}</td><td>${u.name}</td>
                 <td>${u.is_admin ? 'Oui' : 'Non'}</td>
                 <td><span class="badge ${u.is_online ? 'online' : 'offline'}">${u.is_online ? 'Oui' : 'Non'}</span></td>
+                <td>
+                    <input class="user-phone" id="phone_${u.id}" type="tel" value="${u.phone_number || ''}" placeholder="+33612345678" style="width:130px">
+                    <button class="btn-sm save-phone-btn" onclick="savePhone(${u.id})" style="margin-left:4px">Enregistrer</button>
+                    <div class="phone-error" id="phoneError_${u.id}" style="display:none;color:#ef4444;font-size:12px;margin-top:2px">Numéro invalide (ex: +33612345678)</div>
+                </td>
                 <td><button class="btn-danger btn-sm" onclick="deleteUser(${u.id})">Supprimer</button></td></tr>`).join('');
+        }
+
+        async function savePhone(id) {
+            const input = document.getElementById('phone_' + id);
+            const errEl = document.getElementById('phoneError_' + id);
+            if (errEl) errEl.style.display = 'none';
+            const raw = (input.value || '').replace(/\s+/g, '');
+            // INV-069 : valeur vide autorisee (efface -> NULL) ; sinon format requis.
+            if (raw !== '' && !/^\+?[0-9]{6,15}$/.test(raw)) {
+                if (errEl) errEl.style.display = 'block';
+                return;  // aucune requete envoyee
+            }
+            await api('/api/users/' + id, {
+                method: 'PATCH',
+                body: JSON.stringify({ phone_number: raw === '' ? null : raw }),
+            });
+            loadAll();
         }
 
         async function loadAlarms() {
@@ -676,6 +699,16 @@
             });
         }
 
+        function noPhoneBadge(userId) {
+            // INV-069 : badge si un membre de la chaine n'a pas de numero
+            // (sinon zappe silencieusement pour SMS/appel, cf INV-061).
+            const u = users.find(x => x.id === userId);
+            if (u && !u.phone_number) {
+                return ' <span class="no-phone-badge" style="background:#ef4444;color:#fff;font-size:11px;padding:1px 6px;border-radius:8px;margin-left:6px">pas de tél</span>';
+            }
+            return '';
+        }
+
         async function loadEscalation() {
             // Ne pas ecraser si l'utilisateur est en train d'editer
             if (editingEscalation) return;
@@ -696,7 +729,7 @@
                 chainEl.innerHTML = esc.map((e, i) => `
                     <div class="esc-item" draggable="true" data-user-id="${e.user_id}"
                          style="padding:8px 12px;margin:4px 0;background:#2a2a3e;border-radius:6px;cursor:grab;display:flex;justify-content:space-between;align-items:center;color:#e2e8f0">
-                        <span><strong>${i+1}.</strong> ${getUserName(e.user_id)}</span>
+                        <span><strong>${i+1}.</strong> ${getUserName(e.user_id)}${noPhoneBadge(e.user_id)}</span>
                         <span class="esc-remove" onclick="removeFromChain(${e.user_id})" style="cursor:pointer;color:#ef4444;font-size:1.2em;padding:0 4px">&times;</span>
                     </div>
                 `).join('') || '<div style="text-align:center;color:#64748b;padding:16px">Aucun utilisateur</div>';
@@ -869,10 +902,12 @@
         }
 
         async function addUser() {
+            const phoneRaw = (document.getElementById('newUserPhone').value || '').replace(/\s+/g, '');
             await api('/api/auth/register', { method: 'POST', body: JSON.stringify({
                 name: document.getElementById('newUserName').value,
                 password: document.getElementById('newUserPassword').value,
                 is_admin: document.getElementById('newUserAdmin').value === 'true',
+                phone_number: phoneRaw === '' ? null : phoneRaw,  // INV-069
             })});
             loadAll();
         }
