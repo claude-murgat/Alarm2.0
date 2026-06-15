@@ -98,9 +98,9 @@ ne doit jamais être figé par un test — le catalogue tranche.
 - **Login par nom uniquement** : lowercase, sans espaces, case-insensitive
 - **Une seule alarme active** a la fois (HTTP 409 si doublon)
 - **Rotation bloquee** en portrait sur l'app mobile
-- **Sonnerie continue** pour : alarme active, hors connexion (cf INV-ANDROID-308 : heartbeat HTTP perdu + aucun SMS `[ALARME-MURGAT-PING]` recu dans 5 min), echec refresh token (rare depuis INV-082, cf ci-dessous)
+- **Sonnerie continue** pour : alarme active, hors connexion (cf INV-ANDROID-308 : heartbeat HTTP perdu + aucun SMS `[ALARME-MURGAT-PING]` recu dans 5 min), echec refresh token (rare depuis INV-079, cf ci-dessous)
 - **Escalade cumulative** : tous les utilisateurs appeles continuent de sonner
-- **Auth Gmail-style** (INV-082, 2026-06-15) : `/login` renvoie access_token (JWT 24h) **et** refresh_token (UUID opaque persiste en DB, jamais expire sauf si `revoked=TRUE`). L'app stocke les deux en SharedPreferences. Quand l'access expire (24h), l'app envoie le refresh dans le body de `POST /auth/refresh` → nouveau access. **Le tel peut rester eteint des semaines, il se reconnecte au demarrage sans demander le mdp.** Revocation cote serveur possible (`UPDATE refresh_tokens SET revoked=TRUE`).
+- **Auth Gmail-style** (INV-079, 2026-06-15) : `/login` renvoie access_token (JWT 24h) **et** refresh_token (UUID opaque persiste en DB, jamais expire sauf si `revoked=TRUE`). L'app stocke les deux en SharedPreferences. Quand l'access expire (24h), l'app envoie le refresh dans le body de `POST /auth/refresh` → nouveau access. **Le tel peut rester eteint des semaines, il se reconnecte au demarrage sans demander le mdp.** Revocation cote serveur possible (`UPDATE refresh_tokens SET revoked=TRUE`).
 - **Logout supprime le token FCM** cote backend (plus de push apres deconnexion)
 - **Push FCM sur changement chaine** : notifie tous les utilisateurs de leur nouvelle position
 - **Statut "En attente"** pour les non-astreinte (pas de heartbeat actif, reveille par push)

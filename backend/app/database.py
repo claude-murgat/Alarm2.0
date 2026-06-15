@@ -63,7 +63,7 @@ def run_migrations(engine):
         # ── INV-085 : table quorum_state (singleton, persistance incident)
         _migrate_quorum_state(conn, is_sqlite)
 
-        # ── INV-082 : table refresh_tokens (auth Gmail-style, jamais expiré)
+        # ── INV-079 : table refresh_tokens (auth Gmail-style, jamais expiré)
         _migrate_refresh_tokens(conn, is_sqlite)
 
 
@@ -416,10 +416,12 @@ def get_db():
 
 
 def _migrate_refresh_tokens(conn, is_sqlite: bool):
-    """INV-082 : crée la table refresh_tokens (auth Gmail-style).
+    """INV-079 : crée la table refresh_tokens (auth Gmail-style).
 
-    Le refresh token est un UUID opaque persisté en DB, jamais expiré sauf
-    si `revoked=True`. Cf models.RefreshToken pour la docstring complète.
+    On stocke le SHA-256 du refresh token (jamais le clair), jamais expiré
+    sauf si `revoked=True`. Cf models.RefreshToken pour la docstring complète.
+    Note : la contrainte UNIQUE sur token_hash crée déjà un index — pas
+    besoin d'un CREATE INDEX explicite dessus (seul user_id en a besoin).
     """
     if is_sqlite:
         exists = conn.execute(
@@ -437,26 +439,24 @@ def _migrate_refresh_tokens(conn, is_sqlite: bool):
                 CREATE TABLE refresh_tokens (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                    token VARCHAR NOT NULL UNIQUE,
+                    token_hash VARCHAR NOT NULL UNIQUE,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     last_used_at TIMESTAMP,
                     revoked BOOLEAN NOT NULL DEFAULT FALSE
                 )
             """))
             conn.execute(text("CREATE INDEX idx_refresh_tokens_user_id ON refresh_tokens(user_id)"))
-            conn.execute(text("CREATE INDEX idx_refresh_tokens_token ON refresh_tokens(token)"))
         else:
             conn.execute(text("""
                 CREATE TABLE refresh_tokens (
                     id SERIAL PRIMARY KEY,
                     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                    token VARCHAR NOT NULL UNIQUE,
+                    token_hash VARCHAR NOT NULL UNIQUE,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     last_used_at TIMESTAMP,
                     revoked BOOLEAN NOT NULL DEFAULT FALSE
                 )
             """))
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id)"))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_refresh_tokens_token ON refresh_tokens(token)"))
         conn.commit()
-        logger.info("Migration: table refresh_tokens creee (INV-082)")
+        logger.info("Migration: table refresh_tokens creee (INV-079)")

@@ -1039,8 +1039,8 @@ class TestTokenAutoRenewal:
         assert "access_token" in r.json()
 
 
-class TestRefreshTokenInv082:
-    """INV-082 — Refresh token persistant en DB, jamais expiré sauf si révoqué.
+class TestRefreshTokenInv079:
+    """INV-079 — Refresh token persistant en DB, jamais expiré sauf si révoqué.
 
     Pattern Gmail/OAuth2 : le refresh token vit indéfiniment côté serveur,
     permet à un téléphone éteint plusieurs jours de se reconnecter au

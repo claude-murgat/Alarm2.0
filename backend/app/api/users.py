@@ -3,7 +3,7 @@ from collections import defaultdict
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from typing import List
+from typing import List, Optional
 from ..database import get_db
 from ..models import User, Alarm, EscalationConfig
 from ..schemas import UserCreate, UserResponse, LoginRequest, TokenResponse, RefreshRequest
@@ -13,7 +13,6 @@ from ..auth import (
     create_access_token,
     create_refresh_token,
     validate_refresh_token,
-    revoke_refresh_tokens_for_user,
     get_current_user,
     get_current_user_optional,
     get_current_admin,
@@ -81,7 +80,7 @@ def login(login_data: LoginRequest, db: Session = Depends(get_db)):
     # Login réussi : effacer l'historique de tentatives
     _login_failures.pop(login_data.name.lower(), None)
     token = create_access_token(user.id)
-    # INV-082 : émettre un refresh token persistant (UUID opaque) en plus du
+    # INV-079 : émettre un refresh token persistant (UUID opaque) en plus du
     # JWT access. Le client stocke les deux, utilise refresh pour renouveler.
     refresh = create_refresh_token(db, user.id)
 
@@ -168,15 +167,15 @@ def delete_user(
 
 @router.post("/refresh")
 def refresh_token(
-    payload: RefreshRequest = None,
-    current_user: User = Depends(get_current_user_optional),
+    payload: Optional[RefreshRequest] = None,
+    current_user: Optional[User] = Depends(get_current_user_optional),
     db: Session = Depends(get_db),
 ):
-    """INV-074 + INV-082 : refresh l'access token.
+    """INV-074 + INV-079 : refresh l'access token.
 
     Deux modes acceptés pendant la phase de transition :
 
-    1. **Mode INV-082 (recommandé, Gmail-style)** : body `{refresh_token: ...}`
+    1. **Mode INV-079 (recommandé, Gmail-style)** : body `{refresh_token: ...}`
        avec un UUID opaque persisté en DB. Valable indéfiniment sauf si
        révoqué. Cas d'usage : tél éteint plusieurs semaines, l'access JWT a
        expiré (24h), `Depends(get_current_user)` lève 401 sur l'access mort.
@@ -189,7 +188,7 @@ def refresh_token(
 
     Si AUCUN des deux n'est fourni → 401.
     """
-    # Mode INV-082 : refresh dans le body. Prioritaire car c'est le seul
+    # Mode INV-079 : refresh dans le body. Prioritaire car c'est le seul
     # mode utilisable quand l'access est expiré (le legacy nécessite un
     # Bearer valide via get_current_user, qui aura déjà raise 401).
     if payload is not None and payload.refresh_token:

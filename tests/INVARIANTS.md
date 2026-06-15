@@ -440,23 +440,23 @@ Plus de 10 tentatives échouées en 60s pour le même username → 429.
 POST /auth/refresh avec Bearer valide → nouveau access token différent.
 - **Pourquoi** : un refresh qui renverrait le token reçu en input ne sert à rien (pas de rotation TTL).
 - **Implémentation** : `create_access_token` (auth.py:28-37) inclut `"jti": str(uuid.uuid4())` dans le payload → chaque token a un UUID unique → tokens trivialement distincts à chaque appel.
-- **Statut 2026-06-15** : mode conservé pour rétro-compat. Le mode canonique est INV-082 ci-dessous (refresh dans le body, sans Bearer requis). L'endpoint accepte les deux ; le body INV-082 gagne s'il est présent.
+- **Statut 2026-06-15** : mode conservé pour rétro-compat. Le mode canonique est INV-079 ci-dessous (refresh dans le body, sans Bearer requis). L'endpoint accepte les deux ; le body INV-079 gagne s'il est présent.
 - **Fix** : PR #92 (bot IA, 2026-05-13). Aucune modif prod ; verrouillage en régression via 2 tests.
-- **Couverture** : `tests/integration/test_auth_refresh.py` (tier 2) + `tests/test_e2e.py::TestRefreshTokenInv082::test_refresh_legacy_mode_bearer_still_works` (régression tier 3).
+- **Couverture** : `tests/integration/test_auth_refresh.py` (tier 2) + `tests/test_e2e.py::TestRefreshTokenInv079::test_refresh_legacy_mode_bearer_still_works` (régression tier 3).
 
-### INV-082 [C] ⚠️ Refresh token persistant DB-backed, jamais expiré sauf révocation (2026-06-15)
-Pattern Gmail/OAuth2 : `/auth/login` renvoie un `refresh_token` (UUID4 opaque) **en plus** de l'access token JWT. Le refresh est persisté dans une nouvelle table `refresh_tokens(id, user_id, token UNIQUE, created_at, last_used_at, revoked)` et **n'expire jamais** sauf si `revoked=TRUE`. Le client utilise `POST /auth/refresh` **avec le refresh dans le body** (sans Authorization header — l'access JWT peut être expiré) et obtient un nouvel access valide 24h.
-- **Pourquoi** : avant INV-082, le seul moyen de renouveler l'access était d'envoyer le Bearer JWT lui-même (INV-074). Si l'app restait éteinte > 24h, le JWT expirait, le refresh échouait, l'utilisateur devait retaper son mdp. Pour les téléphones d'astreinte qui peuvent rester en veille plusieurs jours, c'était une friction inacceptable. Pattern Gmail : refresh token éternel côté serveur, access court côté client.
-- **Sécurité** : le refresh est un UUID4 opaque (pas un JWT), validé uniquement par lookup DB. Cela permet la **révocation** côté serveur (impossible avec JWT stateless). Si un tél est volé, admin peut faire `UPDATE refresh_tokens SET revoked=TRUE WHERE user_id=...` → tous les refresh du user sont rejetés à la prochaine utilisation, sans tourner le `SECRET_KEY` JWT (qui déconnecterait tout le monde).
+### INV-079 [C] ⚠️ Refresh token persistant DB-backed, jamais expiré sauf révocation (2026-06-15)
+Pattern Gmail/OAuth2 : `/auth/login` renvoie un `refresh_token` (UUID4 opaque) **en plus** de l'access token JWT. Le SHA-256 du refresh est persisté dans une nouvelle table `refresh_tokens(id, user_id, token_hash UNIQUE, created_at, last_used_at, revoked)` et **n'expire jamais** sauf si `revoked=TRUE`. Le client utilise `POST /auth/refresh` **avec le refresh dans le body** (sans Authorization header — l'access JWT peut être expiré) et obtient un nouvel access valide 24h.
+- **Pourquoi** : avant INV-079, le seul moyen de renouveler l'access était d'envoyer le Bearer JWT lui-même (INV-074). Si l'app restait éteinte > 24h, le JWT expirait, le refresh échouait, l'utilisateur devait retaper son mdp. Pour les téléphones d'astreinte qui peuvent rester en veille plusieurs jours, c'était une friction inacceptable. Pattern Gmail : refresh token éternel côté serveur, access court côté client.
+- **Sécurité** : le refresh est un UUID4 opaque (pas un JWT), validé uniquement par lookup DB sur son **SHA-256** (le clair n'est JAMAIS persisté — une lecture de la DB ne donne pas de tokens réutilisables). Hash déterministe sans sel : inutile, le UUID4 a 122 bits d'entropie (pas de brute-force). Cela permet la **révocation** côté serveur (impossible avec JWT stateless). Si un tél est volé, admin peut faire `UPDATE refresh_tokens SET revoked=TRUE WHERE user_id=...` → tous les refresh du user sont rejetés à la prochaine utilisation, sans tourner le `SECRET_KEY` JWT (qui déconnecterait tout le monde).
 - **Pas de rotation V1** : un refresh donné peut être réutilisé indéfiniment (cf test `test_refresh_token_survives_multiple_uses`). La rotation à l'usage est une éventuelle V2.
 - **Implémentation** :
-  - Modèle `RefreshToken` (`backend/app/models.py`)
-  - Migration `_migrate_refresh_tokens` dans `run_migrations()` (idempotent, SQLite + PostgreSQL)
-  - Helpers `create_refresh_token`, `validate_refresh_token`, `revoke_refresh_tokens_for_user` dans `auth.py`
+  - Modèle `RefreshToken` (`backend/app/models.py`) — colonne `token_hash` (SHA-256), pas le clair
+  - Migration `_migrate_refresh_tokens` dans `run_migrations()` (idempotent, SQLite + PostgreSQL). La contrainte UNIQUE sur `token_hash` crée l'index ; seul `user_id` a un `CREATE INDEX` explicite.
+  - Helpers `_hash_refresh_token`, `create_refresh_token`, `validate_refresh_token`, `revoke_refresh_tokens_for_user` dans `auth.py` (le dernier pas encore branché à un endpoint, cf limites)
   - `get_current_user_optional` (`auth.py`) : version tolérante de `get_current_user` qui retourne `None` sur Bearer absent/invalide au lieu de raise 401 — permet à `/auth/refresh` de basculer sur le mode body.
   - `/api/auth/login` : ajout de `refresh_token` dans la `TokenResponse`
   - `/api/auth/refresh` : accepte `RefreshRequest(refresh_token: str)` body OU Bearer (legacy INV-074). Body prioritaire si les deux sont fournis.
-- **Couverture** (`tests/test_e2e.py::TestRefreshTokenInv082`, tier 3) — 7 tests :
+- **Couverture** (`tests/test_e2e.py::TestRefreshTokenInv079`, tier 3) — 7 tests :
   - `test_login_returns_refresh_token` (format UUID4 dans la response /login)
   - `test_refresh_via_body_works_without_bearer` (mode canonique)
   - `test_refresh_via_body_with_invalid_token_returns_401`
