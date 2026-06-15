@@ -4,6 +4,29 @@ from typing import Literal, Optional
 import re
 
 
+# INV-069 §3 : format SIM7600 composable, 6 a 15 chiffres avec + optionnel.
+# Defense-in-depth : applique au boundary API en plus du JS frontend
+# (savePhone dans index.html) pour bloquer les appels directs au backend
+# (scripts admin, curl, autre UI) qui contourneraient la validation JS.
+# Un numero non composable injecte le canal SMS/appel (INV-061) muet sans
+# alerte serveur : le modem SIM7600 echoue silencieusement a la commande AT.
+_PHONE_RE = re.compile(r"^\+?[0-9]{6,15}$")
+
+
+def _normalize_phone_value(v: Optional[str]) -> Optional[str]:
+    if v is None:
+        return None
+    v = re.sub(r"\s+", "", v)
+    if not v:
+        return None
+    if not _PHONE_RE.match(v):
+        raise ValueError(
+            "Numero de telephone invalide (format requis : +xxxxxxxx ou "
+            "xxxxxxxx, 6 a 15 chiffres)"
+        )
+    return v
+
+
 class UserCreate(BaseModel):
     name: str
     password: str
@@ -20,11 +43,23 @@ class UserCreate(BaseModel):
     @field_validator("phone_number")
     @classmethod
     def _normalize_phone(cls, v: Optional[str]) -> Optional[str]:
-        # INV-069 : strip des espaces, "" -> None (le format est valide cote UI).
-        if v is None:
-            return None
-        v = v.replace(" ", "").strip()
-        return v or None
+        return _normalize_phone_value(v)
+
+
+class UserUpdate(BaseModel):
+    """PATCH /api/users/{id} — INV-069 §3 defense-in-depth.
+
+    Avant ce schema, l'endpoint declarait `payload: dict` sans validation
+    Pydantic et acceptait n'importe quel string en phone_number. Tout
+    nouveau champ editable doit etre ajoute ici (Optional) — l'absence du
+    champ dans le body est preservee via `model_fields_set` cote handler.
+    """
+    phone_number: Optional[str] = None
+
+    @field_validator("phone_number")
+    @classmethod
+    def _normalize_phone(cls, v: Optional[str]) -> Optional[str]:
+        return _normalize_phone_value(v)
 
 
 class UserResponse(BaseModel):
