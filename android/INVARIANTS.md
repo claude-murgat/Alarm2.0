@@ -164,6 +164,19 @@ Textes du bandeau :
 - **Statut** : code implémenté 2026-06-04 (cf `MainActivity.shareLogs()` + ligne `AppLogger.clear()` dans `DashboardActivity.logout()`).
 - **Manque** : aucun test ne vérifie la présence du bouton, l'envoi du share intent, ni le clear au logout. Tests Espresso à ajouter dans une PR follow-up.
 
+### INV-ANDROID-109 [H] ❌ Version de build dérivée automatiquement de git (anti-bump-manquant) — 2026-06-12
+`versionCode` et `versionName` du `defaultConfig` Gradle sont calculés au build time depuis git, pas hardcodés :
+- `versionCode = git rev-list --count HEAD` (nombre total de commits, monotone)
+- `versionName = "${baseVersion}.${gitCommitCount}-${gitShortSha}[-dirty]"` (ex: `1.0.188-b95d44b` ou `1.0.188-b95d44b-dirty` si l'arbre n'est pas propre)
+- Si git inaccessible (rare, build hors repo) : fallback `versionCode=1`, `versionName="1.0-unknown"`
+
+La version apparaît dans **toutes les exports `AppLogger.exportLogs()`** via l'en-tête (cf INV-ANDROID-107/108). Permet de tracer une session loguée à un commit exact.
+- **Pourquoi** : élimine la classe entière de bugs « j'ai oublié de bumper la version dans build.gradle » — chaque commit produit automatiquement une version distincte et traçable. Avant, `versionCode=1` et `versionName="1.0"` étaient hardcodés : deux APK construits à des moments différents avaient la même version, impossible de savoir lequel produisait les logs ou les remontées Crashlytics.
+- **Trade-off `-dirty`** : un build avec working tree non-commité hérite du sha du dernier commit + suffixe `-dirty`. Volontaire : on voit immédiatement qu'un APK ne correspond à aucun commit pushé (utile en debug local, à éviter en distribution).
+- **Pas d'effet sur la signature** : la build n'utilise toujours pas de signing config explicite ; les release-builds sont signés en post avec la debug-keystore (cf scripts/build_apk_release.sh à venir).
+- **Statut** : implémenté 2026-06-12 dans `android/app/build.gradle.kts` (`gitOutput()` helper + 3 `val`s en tête de fichier). Build local vérifié : versionCode=188, versionName="1.0.188-b95d44b-dirty".
+- **Manque** : pas de test (la valeur dépend de l'environnement git, difficile à fixer dans un test unitaire). Acceptable car la logique est triviale et le smoke-test « build l'APK et lis le manifest » suffit.
+
 ---
 
 ## 3. Acquittement
