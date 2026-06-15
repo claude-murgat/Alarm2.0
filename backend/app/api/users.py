@@ -3,11 +3,20 @@ from collections import defaultdict
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from typing import List
+from typing import List, Optional
 from ..database import get_db
 from ..models import User, Alarm, EscalationConfig
-from ..schemas import UserCreate, UserResponse, LoginRequest, TokenResponse
-from ..auth import hash_password, verify_password, create_access_token, get_current_user, get_current_admin
+from ..schemas import UserCreate, UserResponse, LoginRequest, TokenResponse, RefreshRequest
+from ..auth import (
+    hash_password,
+    verify_password,
+    create_access_token,
+    create_refresh_token,
+    validate_refresh_token,
+    get_current_user,
+    get_current_user_optional,
+    get_current_admin,
+)
 from ..events import log_event
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -71,6 +80,9 @@ def login(login_data: LoginRequest, db: Session = Depends(get_db)):
     # Login réussi : effacer l'historique de tentatives
     _login_failures.pop(login_data.name.lower(), None)
     token = create_access_token(user.id)
+    # INV-079 : émettre un refresh token persistant (UUID opaque) en plus du
+    # JWT access. Le client stocke les deux, utilise refresh pour renouveler.
+    refresh = create_refresh_token(db, user.id)
 
     # Calculer is_oncall + escalation_position
     from ..models import EscalationConfig
@@ -84,6 +96,7 @@ def login(login_data: LoginRequest, db: Session = Depends(get_db)):
     log_event("user_login", db=db, user_id=user.id, name=user.name)
     return TokenResponse(
         access_token=token,
+        refresh_token=refresh,
         user=UserResponse.model_validate(user),
         is_oncall=is_oncall,
         escalation_position=escalation_position,
@@ -153,8 +166,44 @@ def delete_user(
 
 
 @router.post("/refresh")
-def refresh_token(current_user: User = Depends(get_current_user)):
-    """Refresh the access token. Returns a new token with fresh expiry."""
+def refresh_token(
+    payload: Optional[RefreshRequest] = None,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    db: Session = Depends(get_db),
+):
+    """INV-074 + INV-079 : refresh l'access token.
+
+    Deux modes acceptés pendant la phase de transition :
+
+    1. **Mode INV-079 (recommandé, Gmail-style)** : body `{refresh_token: ...}`
+       avec un UUID opaque persisté en DB. Valable indéfiniment sauf si
+       révoqué. Cas d'usage : tél éteint plusieurs semaines, l'access JWT a
+       expiré (24h), `Depends(get_current_user)` lève 401 sur l'access mort.
+       → Le client tente alors un /refresh **sans** Authorization header,
+       avec le refresh dans le body, et récupère un nouveau access.
+
+    2. **Mode legacy (INV-074 historique)** : pas de body, juste un Bearer
+       valide. Renvoie un nouveau access. Conservé pour compat avec les
+       clients existants qui ne stockent pas encore le refresh.
+
+    Si AUCUN des deux n'est fourni → 401.
+    """
+    # Mode INV-079 : refresh dans le body. Prioritaire car c'est le seul
+    # mode utilisable quand l'access est expiré (le legacy nécessite un
+    # Bearer valide via get_current_user, qui aura déjà raise 401).
+    if payload is not None and payload.refresh_token:
+        user = validate_refresh_token(db, payload.refresh_token)
+        if user is None:
+            raise HTTPException(status_code=401, detail="refresh_token invalide ou révoqué")
+        new_token = create_access_token(user.id)
+        return {
+            "access_token": new_token,
+            "token_type": "bearer",
+        }
+
+    # Mode legacy INV-074 : Bearer valide via get_current_user_optional
+    if current_user is None:
+        raise HTTPException(status_code=401, detail="Bearer manquant ou invalide, et refresh_token absent du body")
     new_token = create_access_token(current_user.id)
     return {
         "access_token": new_token,

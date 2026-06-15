@@ -1039,6 +1039,106 @@ class TestTokenAutoRenewal:
         assert "access_token" in r.json()
 
 
+class TestRefreshTokenInv079:
+    """INV-079 — Refresh token persistant en DB, jamais expiré sauf si révoqué.
+
+    Pattern Gmail/OAuth2 : le refresh token vit indéfiniment côté serveur,
+    permet à un téléphone éteint plusieurs jours de se reconnecter au
+    démarrage sans demander le mot de passe.
+    """
+
+    def test_login_returns_refresh_token(self):
+        """Le /login doit renvoyer un access_token ET un refresh_token (UUID opaque)."""
+        r = requests.post(f"{API}/auth/login", json={
+            "name": USER1_NAME, "password": USER1_PASSWORD
+        })
+        assert r.status_code == 200
+        body = r.json()
+        assert "access_token" in body
+        assert "refresh_token" in body
+        rt = body["refresh_token"]
+        # Le refresh est un UUID4 (36 chars, format 8-4-4-4-12)
+        assert isinstance(rt, str)
+        assert len(rt) == 36
+        assert rt.count("-") == 4
+
+    def test_refresh_via_body_works_without_bearer(self):
+        """POST /auth/refresh avec refresh dans le body et SANS Authorization
+        header doit renvoyer un nouvel access. C'est le mode utilisé quand
+        l'access JWT est expiré (le client n'a aucun Bearer valide à envoyer).
+        """
+        login = requests.post(f"{API}/auth/login", json={
+            "name": USER1_NAME, "password": USER1_PASSWORD
+        }).json()
+        refresh = login["refresh_token"]
+        old_access = login["access_token"]
+
+        r = requests.post(f"{API}/auth/refresh", json={"refresh_token": refresh})
+        assert r.status_code == 200
+        new_access = r.json()["access_token"]
+        assert new_access != old_access  # JWT distinct via jti unique (cf INV-074)
+
+    def test_refresh_via_body_with_invalid_token_returns_401(self):
+        """Un refresh inconnu en DB → 401 (pas 500, pas 200)."""
+        r = requests.post(f"{API}/auth/refresh", json={"refresh_token": "this-uuid-does-not-exist-anywhere-1234"})
+        assert r.status_code == 401
+        assert "invalide" in r.json()["detail"].lower() or "révoqué" in r.json()["detail"].lower()
+
+    def test_refresh_legacy_mode_bearer_still_works(self):
+        """Régression : le mode legacy (Bearer valide, pas de body) doit
+        continuer à marcher pour la rétro-compat des clients qui ne stockent
+        pas encore le refresh.
+        """
+        login = requests.post(f"{API}/auth/login", json={
+            "name": USER1_NAME, "password": USER1_PASSWORD
+        }).json()
+        access = login["access_token"]
+        r = requests.post(f"{API}/auth/refresh", headers={"Authorization": f"Bearer {access}"})
+        assert r.status_code == 200
+        assert r.json()["access_token"] != access
+
+    def test_refresh_neither_body_nor_bearer_returns_401(self):
+        """Ni Bearer ni body → 401 (pas un crash 500)."""
+        r = requests.post(f"{API}/auth/refresh")
+        assert r.status_code == 401
+
+    def test_refresh_with_invalid_bearer_and_valid_body_returns_new_access(self):
+        """Si le client envoie un Bearer invalide MAIS un refresh valide en
+        body (cas typique : access expiré, l'app envoie quand même l'ancien
+        access mort en header), on doit accepter le body et renvoyer un
+        nouveau access. Le Bearer mort n'empêche pas le mode body.
+        """
+        login = requests.post(f"{API}/auth/login", json={
+            "name": USER1_NAME, "password": USER1_PASSWORD
+        }).json()
+        refresh = login["refresh_token"]
+        r = requests.post(
+            f"{API}/auth/refresh",
+            headers={"Authorization": "Bearer expired-or-garbage-token"},
+            json={"refresh_token": refresh},
+        )
+        assert r.status_code == 200
+        assert "access_token" in r.json()
+
+    def test_refresh_token_survives_multiple_uses(self):
+        """Le refresh n'est PAS à usage unique (pas de rotation en V1). On
+        peut l'utiliser plusieurs fois — chaque appel produit un nouveau
+        access, le refresh reste valide.
+        """
+        login = requests.post(f"{API}/auth/login", json={
+            "name": USER1_NAME, "password": USER1_PASSWORD
+        }).json()
+        refresh = login["refresh_token"]
+
+        accesses = set()
+        for _ in range(3):
+            r = requests.post(f"{API}/auth/refresh", json={"refresh_token": refresh})
+            assert r.status_code == 200
+            accesses.add(r.json()["access_token"])
+        # 3 access tokens tous distincts (jti unique)
+        assert len(accesses) == 3
+
+
 # ── #6 Persistence après crash Docker ─────────────────────────────────────────
 
 DOCKER = os.getenv("DOCKER_CMD", "docker")

@@ -393,6 +393,29 @@ Pendant fortifier la sonnerie d'isolation locale (cf `android/INVARIANTS.md` INV
 
 **Écart latent connu (audit 2026-04-20)** : `send_alarm` dans `alarms.py:84-89` ne passe pas `created_at=clock_now()` explicitement ; l'objet `Alarm` récupère sa valeur via le default SQLAlchemy `datetime.utcnow` (`models.py:38`). Non problématique tant que les tests créent l'alarme **avant** tout `advance-clock`, mais un futur test qui ferait `advance-clock` puis `POST /alarms/send` verrait un `created_at` en « temps réel ». À forcer en `clock_now()` lors de l'implémentation d'INV-018 (ce sera le bon moment, puisqu'on touchera au modèle `Alarm`).
 
+### INV-069 [H] 🐛 Saisie des numéros de téléphone des opérateurs (onglet Utilisateurs, web admin)
+
+**Contexte** : le backend **appelle déjà** (`CallQueue` → gateway SIM7600, `escalation.py::_enqueue_call`) et envoie des SMS (INV-060) à tout user disposant d'un `phone_number`. Le champ `User.phone_number` existe (`models.py:17`), est exposé dans `UserResponse` (`schemas.py:27`) et éditable via `PATCH /api/users/{id}` (`users.py:165`). **Mais aucun écran ne permet de le saisir** → le canal SMS/appel de l'escalade est inexploitable en pratique, faute de destination.
+
+**Invariant** : l'admin doit pouvoir saisir/éditer le numéro de chaque opérateur depuis le web, pour alimenter les canaux SMS/appel de l'escalade (INV-060/061/063).
+
+Sous-règles :
+1. **Tableau Utilisateurs** : chaque ligne expose un champ `input.user-phone` pré-rempli avec le `phone_number` courant + un bouton `.save-phone-btn`. Le clic envoie `PATCH /api/users/{id}` body `{"phone_number": <valeur>}` puis recharge.
+2. **Création** : le formulaire « Ajouter un utilisateur » a un champ `#newUserPhone` ; `addUser()` inclut `phone_number` dans le POST `/api/auth/register`. Nécessite l'ajout de `phone_number: Optional[str]` à `UserCreate` (`schemas.py`) et sa persistance dans `register()` (`users.py`).
+3. **Validation** : avant envoi, la valeur est débarrassée de ses espaces. Une valeur non vide doit matcher `^\+?[0-9]{6,15}$` (format composable par le modem SIM7600). Si invalide → message d'erreur visible (`.phone-error`) et **aucune requête** envoyée. Une valeur **vide est autorisée** (efface le numéro → NULL, cf INV-061 « pas de SMS/appel si NULL »).
+4. **Signalement** (onglet Escalade) : tout membre de la chaîne dont `phone_number` est vide affiche un badge `.no-phone-badge` (« pas de tél »), pour rendre visible le risque d'être silencieusement zappé pour SMS/appel (INV-061).
+
+**Pourquoi** : sans saisie, les numéros restent NULL et l'escalade ne contacte jamais personne par SMS/appel — le canal de secours (quand le push FCM ne réveille pas l'opérateur) est mort. Le badge (4) supprime l'angle mort « membre de la chaîne injoignable, sans alerte ».
+
+**Hors scope** : édition du numéro côté app Android (login par nom only, pas de profil éditable) ; normalisation internationale avancée (libphonenumber) ; vérification de joignabilité réelle (DLR, cf note INV-067/INV-068).
+
+**Couverture** (E2E Playwright — `tests/test_frontend.py::TestUsersTab`) :
+- `test_users_table_has_phone_input_per_user` — chaque ligne a un `input.user-phone`.
+- `test_save_phone_sends_patch_to_user_endpoint` — édition + save → `PATCH /api/users/{id}` avec `phone_number`.
+- `test_add_user_with_phone_appears_in_table` — création avec numéro → numéro persisté et réaffiché (valide aussi `UserCreate`/`register`).
+- `test_invalid_phone_shows_error_and_no_request` — numéro invalide → `.phone-error` visible, aucun PATCH.
+- `test_escalation_chain_flags_member_without_phone` — membre de chaîne sans numéro → badge `.no-phone-badge`.
+
 ---
 
 ## 7. Authentification et sécurité
@@ -413,17 +436,39 @@ Plus de 10 tentatives échouées en 60s pour le même username → 429.
 - **Code** : `backend/app/api/users.py:18-32` (`_check_rate_limit`, `RATE_LIMIT_MAX_FAILURES = 10`, `RATE_LIMIT_WINDOW = 60`), appelé ligne 62. Raise 429 au 11e échec.
 - **Couverture** (audit 2026-04-20) : E2E `tests/test_improvements.py::TestRateLimiting` — `test_login_rate_limited_after_many_failures` + `test_legitimate_login_still_works_after_rate_limit`.
 
-### INV-074 [C] ✅ Refresh token produit un nouveau token
-POST /auth/refresh avec token valide → nouveau token différent.
+### INV-074 [C] ✅ Refresh token produit un nouveau access token (mode legacy Bearer)
+POST /auth/refresh avec Bearer valide → nouveau access token différent.
 - **Pourquoi** : un refresh qui renverrait le token reçu en input ne sert à rien (pas de rotation TTL).
-- **Implémentation** : `create_access_token` (auth.py:28-37) inclut `"jti": str(uuid.uuid4())` dans le payload → chaque token a un UUID unique → tokens trivialement distincts à chaque appel, sans dépendre du timing `iat`.
+- **Implémentation** : `create_access_token` (auth.py:28-37) inclut `"jti": str(uuid.uuid4())` dans le payload → chaque token a un UUID unique → tokens trivialement distincts à chaque appel.
+- **Statut 2026-06-15** : mode conservé pour rétro-compat. Le mode canonique est INV-079 ci-dessous (refresh dans le body, sans Bearer requis). L'endpoint accepte les deux ; le body INV-079 gagne s'il est présent.
 - **Fix** : PR #92 (bot IA, 2026-05-13). Aucune modif prod ; verrouillage en régression via 2 tests.
-- **Couverture** : `tests/integration/test_auth_refresh.py` (tier 2) :
-  - `test_new_refresh_returns_distinct_token` (token_after != token_before)
-  - `test_new_token_is_usable` (le nouveau token authentifie GET /api/auth/me)
-- **Limites identifiées (issues follow-up)** :
-  - #96 [H] : path négatif (`/auth/refresh` avec token expiré ou signature invalide → 401)
-  - #97 [human-required] : clarifier que l'ancien token reste valide jusqu'à `exp` naturelle (JWT stateless, pas de denylist — choix architectural assumé)
+- **Couverture** : `tests/integration/test_auth_refresh.py` (tier 2) + `tests/test_e2e.py::TestRefreshTokenInv079::test_refresh_legacy_mode_bearer_still_works` (régression tier 3).
+
+### INV-079 [C] ⚠️ Refresh token persistant DB-backed, jamais expiré sauf révocation (2026-06-15)
+Pattern Gmail/OAuth2 : `/auth/login` renvoie un `refresh_token` (UUID4 opaque) **en plus** de l'access token JWT. Le SHA-256 du refresh est persisté dans une nouvelle table `refresh_tokens(id, user_id, token_hash UNIQUE, created_at, last_used_at, revoked)` et **n'expire jamais** sauf si `revoked=TRUE`. Le client utilise `POST /auth/refresh` **avec le refresh dans le body** (sans Authorization header — l'access JWT peut être expiré) et obtient un nouvel access valide 24h.
+- **Pourquoi** : avant INV-079, le seul moyen de renouveler l'access était d'envoyer le Bearer JWT lui-même (INV-074). Si l'app restait éteinte > 24h, le JWT expirait, le refresh échouait, l'utilisateur devait retaper son mdp. Pour les téléphones d'astreinte qui peuvent rester en veille plusieurs jours, c'était une friction inacceptable. Pattern Gmail : refresh token éternel côté serveur, access court côté client.
+- **Sécurité** : le refresh est un UUID4 opaque (pas un JWT), validé uniquement par lookup DB sur son **SHA-256** (le clair n'est JAMAIS persisté — une lecture de la DB ne donne pas de tokens réutilisables). Hash déterministe sans sel : inutile, le UUID4 a 122 bits d'entropie (pas de brute-force). Cela permet la **révocation** côté serveur (impossible avec JWT stateless). Si un tél est volé, admin peut faire `UPDATE refresh_tokens SET revoked=TRUE WHERE user_id=...` → tous les refresh du user sont rejetés à la prochaine utilisation, sans tourner le `SECRET_KEY` JWT (qui déconnecterait tout le monde).
+- **Pas de rotation V1** : un refresh donné peut être réutilisé indéfiniment (cf test `test_refresh_token_survives_multiple_uses`). La rotation à l'usage est une éventuelle V2.
+- **Implémentation** :
+  - Modèle `RefreshToken` (`backend/app/models.py`) — colonne `token_hash` (SHA-256), pas le clair
+  - Migration `_migrate_refresh_tokens` dans `run_migrations()` (idempotent, SQLite + PostgreSQL). La contrainte UNIQUE sur `token_hash` crée l'index ; seul `user_id` a un `CREATE INDEX` explicite.
+  - Helpers `_hash_refresh_token`, `create_refresh_token`, `validate_refresh_token`, `revoke_refresh_tokens_for_user` dans `auth.py` (le dernier pas encore branché à un endpoint, cf limites)
+  - `get_current_user_optional` (`auth.py`) : version tolérante de `get_current_user` qui retourne `None` sur Bearer absent/invalide au lieu de raise 401 — permet à `/auth/refresh` de basculer sur le mode body.
+  - `/api/auth/login` : ajout de `refresh_token` dans la `TokenResponse`
+  - `/api/auth/refresh` : accepte `RefreshRequest(refresh_token: str)` body OU Bearer (legacy INV-074). Body prioritaire si les deux sont fournis.
+- **Couverture** (`tests/test_e2e.py::TestRefreshTokenInv079`, tier 3) — 7 tests :
+  - `test_login_returns_refresh_token` (format UUID4 dans la response /login)
+  - `test_refresh_via_body_works_without_bearer` (mode canonique)
+  - `test_refresh_via_body_with_invalid_token_returns_401`
+  - `test_refresh_legacy_mode_bearer_still_works` (rétro-compat INV-074)
+  - `test_refresh_neither_body_nor_bearer_returns_401`
+  - `test_refresh_with_invalid_bearer_and_valid_body_returns_new_access` (cas réel : Bearer expiré + refresh valide → mode body prime)
+  - `test_refresh_token_survives_multiple_uses` (pas de rotation V1)
+- **Côté client (Android)** : cf INV-ANDROID-505/506 mis à jour. Refresh stocké dans `SharedPreferences("alarm_prefs").refresh_token` au login. `tryRefreshToken()` lit ce refresh et l'envoie en body via la nouvelle signature `ApiService.refreshToken(RefreshRequest)`.
+- **Limites identifiées (issues follow-up à ouvrir)** :
+  - [H] : pas de `/auth/logout` qui révoque le refresh côté serveur. Aujourd'hui le logout local clear les prefs uniquement — le refresh reste valide en DB. Un user qui logout+relogin a 2 refresh tokens valides en DB.
+  - [H] : pas de mécanisme de révocation depuis l'UI admin web (`UPDATE` SQL à la main).
+  - [M] : pas de purge périodique des refresh tokens `last_used_at < 90 jours` (croissance illimitée de la table).
 
 ### INV-075 [C] ⚠️ Token cross-node
 Un token émis par un noeud est accepté par tous (même SECRET_KEY).
