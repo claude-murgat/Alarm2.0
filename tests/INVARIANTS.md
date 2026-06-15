@@ -393,6 +393,31 @@ Pendant fortifier la sonnerie d'isolation locale (cf `android/INVARIANTS.md` INV
 
 **Écart latent connu (audit 2026-04-20)** : `send_alarm` dans `alarms.py:84-89` ne passe pas `created_at=clock_now()` explicitement ; l'objet `Alarm` récupère sa valeur via le default SQLAlchemy `datetime.utcnow` (`models.py:38`). Non problématique tant que les tests créent l'alarme **avant** tout `advance-clock`, mais un futur test qui ferait `advance-clock` puis `POST /alarms/send` verrait un `created_at` en « temps réel ». À forcer en `clock_now()` lors de l'implémentation d'INV-018 (ce sera le bon moment, puisqu'on touchera au modèle `Alarm`).
 
+### INV-069 [H] ✅ Saisie des numéros de téléphone des opérateurs (onglet Utilisateurs, web admin)
+
+**Contexte** : le backend **appelle déjà** (`CallQueue` → gateway SIM7600, `escalation.py::_enqueue_call`) et envoie des SMS (INV-060) à tout user disposant d'un `phone_number`. Le champ `User.phone_number` existe (`models.py:17`), est exposé dans `UserResponse` (`schemas.py:27`) et éditable via `PATCH /api/users/{id}` (`users.py:165`). **Mais aucun écran ne permet de le saisir** → le canal SMS/appel de l'escalade est inexploitable en pratique, faute de destination.
+
+**Invariant** : l'admin doit pouvoir saisir/éditer le numéro de chaque opérateur depuis le web, pour alimenter les canaux SMS/appel de l'escalade (INV-060/061/063).
+
+Sous-règles :
+1. **Tableau Utilisateurs** : chaque ligne expose un champ `input.user-phone` pré-rempli avec le `phone_number` courant + un bouton `.save-phone-btn`. Le clic envoie `PATCH /api/users/{id}` body `{"phone_number": <valeur>}` puis recharge.
+2. **Création** : le formulaire « Ajouter un utilisateur » a un champ `#newUserPhone` ; `addUser()` inclut `phone_number` dans le POST `/api/auth/register`. Nécessite l'ajout de `phone_number: Optional[str]` à `UserCreate` (`schemas.py`) et sa persistance dans `register()` (`users.py`).
+3. **Validation** : avant envoi, la valeur est débarrassée de ses espaces. Une valeur non vide doit matcher `^\+?[0-9]{6,15}$` (format composable par le modem SIM7600). Si invalide → message d'erreur visible (`.phone-error`) et **aucune requête** envoyée. Une valeur **vide est autorisée** (efface le numéro → NULL, cf INV-061 « pas de SMS/appel si NULL »).
+4. **Signalement** (onglet Escalade) : tout membre de la chaîne dont `phone_number` est vide affiche un badge `.no-phone-badge` (« pas de tél »), pour rendre visible le risque d'être silencieusement zappé pour SMS/appel (INV-061).
+
+**Pourquoi** : sans saisie, les numéros restent NULL et l'escalade ne contacte jamais personne par SMS/appel — le canal de secours (quand le push FCM ne réveille pas l'opérateur) est mort. Le badge (4) supprime l'angle mort « membre de la chaîne injoignable, sans alerte ».
+
+**Hors scope** : édition du numéro côté app Android (login par nom only, pas de profil éditable) ; normalisation internationale avancée (libphonenumber) ; vérification de joignabilité réelle (DLR, cf note INV-067/INV-068).
+
+**Statut** : implémenté + 5 tests GREEN (session Claude 2026-06-15) — frontend `index.html` (`loadUsers`/`savePhone`/`addUser`/`noPhoneBadge`) + backend `UserCreate.phone_number`/`register`. Commit/PR à venir.
+
+**Couverture** (E2E Playwright — `tests/test_frontend.py::TestUsersTab`) :
+- `test_users_table_has_phone_input_per_user` — chaque ligne a un `input.user-phone`.
+- `test_save_phone_sends_patch_to_user_endpoint` — édition + save → `PATCH /api/users/{id}` avec `phone_number`.
+- `test_add_user_with_phone_appears_in_table` — création avec numéro → numéro persisté et réaffiché (valide aussi `UserCreate`/`register`).
+- `test_invalid_phone_shows_error_and_no_request` — numéro invalide → `.phone-error` visible, aucun PATCH.
+- `test_escalation_chain_flags_member_without_phone` — membre de chaîne sans numéro → badge `.no-phone-badge`.
+
 ---
 
 ## 7. Authentification et sécurité
