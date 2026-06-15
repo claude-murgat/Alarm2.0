@@ -38,10 +38,23 @@ class LoginRequest(BaseModel):
 
 class TokenResponse(BaseModel):
     access_token: str
+    # INV-082 : refresh token persistant (UUID opaque, jamais expiré sauf si
+    # révoqué). Renvoyé UNIQUEMENT au login — le client doit le stocker en
+    # SharedPreferences pour pouvoir renouveler son access token au-delà de
+    # 24h sans demander le mot de passe.
+    # Optional pour rétro-compatibilité tests qui ne le valident pas encore.
+    refresh_token: Optional[str] = None
     token_type: str = "bearer"
     user: UserResponse
     is_oncall: bool = False
     escalation_position: Optional[int] = None
+
+
+class RefreshRequest(BaseModel):
+    """INV-082 : body de POST /auth/refresh, contient le refresh token opaque
+    (pas un JWT, juste un UUID4 stocké en DB).
+    """
+    refresh_token: str
 
 
 class FcmTokenRequest(BaseModel):

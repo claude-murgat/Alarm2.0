@@ -109,6 +109,10 @@ class MainActivity : AppCompatActivity() {
 
                         prefs.edit()
                             .putString("token", token)
+                            // INV-082 : stocker aussi le refresh_token. Si l'access
+                            // expire (24h), tryRefreshToken() utilise ce refresh pour
+                            // obtenir un nouveau access sans demander le mdp.
+                            .putString("refresh_token", tokenResponse.refresh_token)
                             .putString("user_name", tokenResponse.user.name)
                             .putInt("user_id", tokenResponse.user.id)
                             .putBoolean("is_oncall", isOncall)

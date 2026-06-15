@@ -228,3 +228,36 @@ class ConnectivityEvent(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     event = Column(String, nullable=False)  # 'went_online' | 'went_offline'
     ts = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+
+class RefreshToken(Base):
+    """INV-082 : refresh token persistant en DB, jamais expiré sauf si révoqué
+    (2026-06-15).
+
+    Pattern Gmail/OAuth2 : le refresh token vit indéfiniment côté serveur,
+    l'access token JWT garde son TTL court (24h) et est renouvelable via
+    POST /auth/refresh avec le refresh dans le body. Permet de laisser un
+    téléphone d'astreinte éteint plusieurs semaines puis se reconnecter
+    automatiquement au démarrage sans demander le mot de passe.
+
+    - `token`     : valeur opaque (UUID4) — utilisée comme bearer dans
+                    le body de /auth/refresh, jamais en header sur d'autres
+                    endpoints
+    - `revoked`   : flag de révocation (admin via UI ou logout). Une fois
+                    révoqué, `/auth/refresh` renvoie 401, le téléphone tombe
+                    en `forceLogout()` (cf INV-ANDROID-506)
+    - `last_used_at` : updaté à chaque refresh réussi — sert au monitoring
+                    et à une éventuelle purge "jamais utilisé depuis N mois"
+
+    Pas de FK ON DELETE CASCADE sur user_id (différé : si un user est
+    supprimé, ses refresh tokens deviennent orphelins et inutilisables —
+    leur user_id ne match plus aucune row, validate_refresh_token renvoie None).
+    En pratique on les retombe via la migration ou un cleanup périodique.
+    """
+    __tablename__ = "refresh_tokens"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    token = Column(String, unique=True, nullable=False, index=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    last_used_at = Column(DateTime, nullable=True)
+    revoked = Column(Boolean, nullable=False, default=False)
