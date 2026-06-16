@@ -138,6 +138,10 @@ services:
       - SMTP_PASS=${SMTP_PASS-}
       - SMTP_TIMEOUT=${SMTP_TIMEOUT:-10}
       - PEER_TEST_URLS=${PEER_TEST_URLS}
+      # INV-043 (révisé) : true UNIQUEMENT sur le nœud cloud edge (.env.prod.node3)
+      # → un replica forwarde le heartbeat au leader au lieu de 503. Défaut false
+      # (onsite + dev + CI gardent le 503 → l'app rotate, comportement failback).
+      - HEARTBEAT_PROXY_ON_REPLICA=${HEARTBEAT_PROXY_ON_REPLICA:-false}
       - NODE_NAME=${NODE_NAME}
       - GATEWAY_KEY=${GATEWAY_KEY:-changeme-in-prod}
       # INV-076 : safe-by-default false. Dev/CI override explicite via les

@@ -232,9 +232,12 @@ Tous les 30s, si `user.last_heartbeat < now - 60s` ET `is_online=True` → `is_o
 
 <!-- INV-042 déplacé en section 12 (meta / outils de test) -->
 
-### INV-043 [M] ⚠️ Heartbeat sur replica → 503
-Un heartbeat envoyé à un noeud replica renvoie 503 (l'app doit failover sur le primary).
-- **Pourquoi** : seul le primary écrit.
+### INV-043 [M] ⚠️ Heartbeat sur replica → 503, SAUF nœud edge cloud → proxy au leader (révisé 2026-06-16)
+Un heartbeat envoyé à un noeud replica renvoie **503** (l'app doit failover sur le primary) — **sauf** sur le nœud "edge" cloud (`HEARTBEAT_PROXY_ON_REPLICA=true`, uniquement `.env.prod.node3`) qui **forwarde** le heartbeat au leader via WireGuard (`_proxy_heartbeat_to_primary`) et renvoie son 200.
+- **Pourquoi** : seul le primary écrit → sur le LAN, le 503 fait rotater l'app vers le leader (cf INV-ANDROID-304/402, `test_failback.py`). **Mais** le nœud cloud est le **seul joignable par un téléphone externe/mobile** (les onsite sont sur LAN privé 172.16.x) : s'il est replica et renvoie 503, le tél d'astreinte en 4G ne peut PAS rotater vers le leader onsite injoignable → "connexion perdue" perpétuelle alors que le cluster est sain. Le proxy edge résout ça sans déplacer le leader (qui reste onsite, bon pour la gateway SMS).
+- **Anti-boucle** : le proxy ajoute le header `X-Heartbeat-Proxied: 1`. Un nœud qui reçoit un heartbeat déjà proxifié ne le re-proxifie PAS (il l'exécute s'il est leader, sinon 503). Évite replica→replica→… si plusieurs nœuds avaient le flag par erreur.
+- **Périmètre** : flag activé UNIQUEMENT sur `.env.prod.node3`. Onsite (node1/node2), dev, CI → flag absent/false → 503 inchangé, `test_failback.py` préservé.
+- **Couverture** : `tests/integration/test_heartbeat_proxy_inv043.py` (tier 2, 4 tests) : leader→200, replica+flag OFF→503, replica+flag ON→proxy 200, replica+flag ON+déjà-proxifié→503 (anti-boucle). + `test_failback.py` (tier 4) valide le 503 onsite inchangé.
 
 ---
 
