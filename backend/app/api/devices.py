@@ -2,7 +2,7 @@ import os
 import time as _time
 import urllib.request
 import json as _json
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from typing import List
@@ -18,15 +18,33 @@ router = APIRouter(prefix="/api/devices", tags=["devices"])
 
 _PEER_URLS = [u.strip() for u in os.getenv("PEER_TEST_URLS", "").split(",") if u.strip()]
 
+# INV-043 (révisé 2026-06-17) : un replica FORWARDE le heartbeat au leader (via
+# WireGuard) au lieu de renvoyer 503 — sur TOUS les nœuds (défaut true).
+# Raison : à terme, n'importe quel nœud peut être joignable depuis l'extérieur
+# (pas seulement le cloud). Un téléphone externe qui tombe sur un replica doit
+# pouvoir heartbeat même si les autres nœuds lui sont injoignables (LAN privé).
+# Si le cloud tombe et qu'un onsite devient le seul point d'entrée externe, il
+# doit relayer aussi → règle uniforme, pas de nœud privilégié.
+# 503 n'est plus renvoyé que si AUCUN leader n'est joignable (panne cluster).
+# Flag conservé comme kill-switch (HEARTBEAT_PROXY_ON_REPLICA=false → ancien
+# comportement 503, utilisé par les tests pour vérifier les deux chemins).
+_PROXY_ON_REPLICA = os.getenv("HEARTBEAT_PROXY_ON_REPLICA", "true").lower() == "true"
+
 
 def _proxy_heartbeat_to_primary(token: str):
-    """Forward le heartbeat vers un peer qui est primary (best-effort)."""
+    """Forward le heartbeat vers un peer qui est primary (best-effort).
+
+    Le header `X-Heartbeat-Proxied` est l'anti-boucle : un peer qui reçoit un
+    heartbeat déjà proxifié ne le re-proxifie PAS (cf endpoint heartbeat) — il
+    l'exécute s'il est leader, ou renvoie 503 sinon. Évite replica→replica→...
+    si plusieurs nœuds avaient le flag par erreur.
+    """
     import httpx
     for peer in _PEER_URLS:
         try:
             r = httpx.post(
                 f"{peer}/api/devices/heartbeat",
-                headers={"Authorization": f"Bearer {token}"},
+                headers={"Authorization": f"Bearer {token}", "X-Heartbeat-Proxied": "1"},
                 timeout=3.0,
             )
             if r.status_code == 200:
@@ -56,6 +74,7 @@ def register_device(
 
 @router.post("/heartbeat")
 def heartbeat(
+    request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(security),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -84,8 +103,19 @@ def heartbeat(
         except Exception:
             pass  # Erreur de décodage inattendue : laisser passer (ne pas bloquer)
 
-    # Si ce noeud est un replica, indiquer a l'app de switcher
+    # Si ce noeud est un replica :
     if not is_leader.is_set():
+        already_proxied = request.headers.get("X-Heartbeat-Proxied") == "1"
+        # Défaut : forwarder le heartbeat au leader via WG. Sans ça, un
+        # téléphone externe qui ne joint QUE ce nœud (les autres sur LAN privé,
+        # ou le cloud tombé) ne pourrait jamais heartbeat → "connexion perdue"
+        # perpétuelle malgré un cluster sain. Anti-boucle : on ne re-proxifie
+        # pas un heartbeat déjà proxifié (le peer suivant sera tenté).
+        if _PROXY_ON_REPLICA and not already_proxied:
+            return _proxy_heartbeat_to_primary(credentials.credentials)
+        # Flag désactivé (kill-switch) OU requête déjà proxifiée : 503 → l'app
+        # rotate vers le leader (INV-ANDROID-304). Aussi le cas "proxy a échoué,
+        # aucun leader joignable" remonté par _proxy_heartbeat_to_primary.
         raise HTTPException(status_code=503, detail="replica")
 
     was_offline = not current_user.is_online

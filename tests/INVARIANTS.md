@@ -232,9 +232,13 @@ Tous les 30s, si `user.last_heartbeat < now - 60s` ET `is_online=True` → `is_o
 
 <!-- INV-042 déplacé en section 12 (meta / outils de test) -->
 
-### INV-043 [M] ⚠️ Heartbeat sur replica → 503
-Un heartbeat envoyé à un noeud replica renvoie 503 (l'app doit failover sur le primary).
-- **Pourquoi** : seul le primary écrit.
+### INV-043 [M] ⚠️ Heartbeat sur replica → proxy au leader (200) ; 503 seulement si aucun leader joignable (révisé 2026-06-17)
+Un heartbeat envoyé à un noeud replica est **forwardé au leader** via WireGuard (`_proxy_heartbeat_to_primary`) qui exécute l'écriture et renvoie 200. Comportement **uniforme sur tous les nœuds** (`HEARTBEAT_PROXY_ON_REPLICA`, défaut **true**). Le 503 n'est renvoyé que si **aucun leader n'est joignable** (panne cluster / pas de quorum) ou si le flag kill-switch est mis à `false`.
+- **Pourquoi** : à terme **n'importe quel nœud peut être joignable depuis l'extérieur** (pas seulement le cloud). Un téléphone externe/mobile qui tombe sur un replica ne peut PAS rotater vers les autres nœuds (LAN privé, ou cloud tombé) → s'il recevait 503, "connexion perdue" perpétuelle alors que le cluster est sain. En relayant côté backend, **tout** nœud edge sait servir un client externe, même replica. Règle uniforme = pas de point de défaillance « seul le cloud sait relayer ». Le leader reste où Patroni l'a élu (souvent onsite, bon pour la gateway SMS) ; les replicas ne sont que des relais d'entrée.
+- **Anti-boucle** : le proxy ajoute le header `X-Heartbeat-Proxied: 1`. Un nœud qui reçoit un heartbeat déjà proxifié ne le re-proxifie PAS (il l'exécute s'il est leader, sinon 503). Le nœud d'entrée itère ses peers jusqu'au leader ; pas de récursion replica→replica.
+- **Évolution** : avant 2026-06-16, replica → 503 sec (l'app rotatait sur le LAN, cf INV-ANDROID-304). Étape intermédiaire 2026-06-16 : proxy activé uniquement sur le nœud cloud. Depuis 2026-06-17 : proxy par défaut partout (décision propriétaire — résilience à la chute du cloud + onsite bientôt joignables de l'extérieur).
+- **Kill-switch** : `HEARTBEAT_PROXY_ON_REPLICA=false` restaure le 503 sec (chemin testé). En dev/CI single-node le nœud est leader → proxy jamais déclenché.
+- **Couverture** : `tests/integration/test_heartbeat_proxy_inv043.py` (tier 2, 4 tests) : leader→200, replica+kill-switch→503, replica défaut→proxy 200, replica+déjà-proxifié→503 (anti-boucle). + `test_failback.py` (tier 4) valide la **continuité** des heartbeats à travers un failover (l'app garde le 200 via le nouveau leader, relayé ou direct), plus la "rotation vers le leader exact".
 
 ---
 

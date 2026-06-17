@@ -138,6 +138,12 @@ services:
       - SMTP_PASS=${SMTP_PASS-}
       - SMTP_TIMEOUT=${SMTP_TIMEOUT:-10}
       - PEER_TEST_URLS=${PEER_TEST_URLS}
+      # INV-043 (révisé 2026-06-17) : défaut true → un replica forwarde le
+      # heartbeat au leader (via WG) au lieu de 503, sur TOUS les nœuds. Permet
+      # à n'importe quel nœud edge externe de servir un téléphone même quand il
+      # est replica (résilience si le cloud tombe). false = kill-switch (ancien
+      # 503 + rotation app). En dev/CI single-node, le nœud est leader → sans effet.
+      - HEARTBEAT_PROXY_ON_REPLICA=${HEARTBEAT_PROXY_ON_REPLICA:-true}
       - NODE_NAME=${NODE_NAME}
       - GATEWAY_KEY=${GATEWAY_KEY:-changeme-in-prod}
       # INV-076 : safe-by-default false. Dev/CI override explicite via les
