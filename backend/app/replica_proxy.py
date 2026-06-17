@@ -27,6 +27,7 @@ Exclusions (endpoints qui gèrent EUX-MÊMES leur comportement replica) :
 - `/internal/*`            : endpoints node-to-node (gateway SMS/voix, alarms_internal).
   Ils ne commencent pas par `/api/` → déjà hors périmètre, jamais relayés.
 """
+import logging
 import os
 
 import httpx
@@ -35,6 +36,8 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from .leader_election import is_leader
+
+logger = logging.getLogger("replica_proxy")
 
 # Peers WireGuard (mêmes que le relai heartbeat) : les 2 autres backends.
 _PEER_URLS = [
@@ -55,8 +58,28 @@ _PROXIED_HEADER = "X-Write-Proxied"
 _DECLINED_HEADER = "X-Write-Proxy-Declined"
 
 # Chemins `/api/*` explicitement exclus du relai générique (cf docstring).
+# Le trailing slash évite qu'un hypothétique `/api/testbench` ou
+# `/api/deploymentsv2` matche par accident.
 _EXCLUDED_EXACT = frozenset({"/api/devices/heartbeat"})
-_EXCLUDED_PREFIXES = ("/api/test", "/api/deployments")
+_EXCLUDED_PREFIXES = ("/api/test/", "/api/deployments/")
+
+# Headers du leader à relayer tels quels au client (INV-044 : « la réponse du
+# leader est relayée telle quelle (200/401/429/…) »). Une PR future qui ajoute
+# rate limiting (Retry-After / 429), OAuth bearer challenge (WWW-Authenticate /
+# 401) ou un cookie de session sur un endpoint /api/* doit fonctionner sur les
+# replicas — sinon bug silencieux : auth/cookie/retry perdus dans le relai.
+# Tout ce qui n'est pas listé est rewrité par Starlette (Connection,
+# Transfer-Encoding, Content-Length) ou n'est jamais émis par les endpoints
+# applicatifs (pas de risque de fuite vers le client).
+_RELAYED_HEADERS = frozenset({
+    "content-type",
+    "www-authenticate",
+    "retry-after",
+    "set-cookie",
+    "cache-control",
+    "etag",
+    "x-correlation-id",
+})
 
 
 def _is_proxyable_write(request: Request) -> bool:
@@ -104,17 +127,30 @@ async def _proxy_write_to_primary(request: Request) -> Response:
                     headers=fwd_headers,
                     content=body,
                 )
-            except Exception:
-                continue  # peer injoignable → suivant
+            except Exception as e:
+                # Diagnostic SRE : sans ce log, un cluster où plusieurs peers
+                # sont injoignables passe sous le radar (le client voit juste
+                # 503 "no primary available" sans savoir qui a échoué).
+                logger.warning("peer %s unreachable: %s", peer, e)
+                continue
             # Ce peer est aussi un replica (il a refusé) → suivant.
             if r.status_code == 503 and r.headers.get(_DECLINED_HEADER) == "1":
                 continue
             # Réponse autoritative du leader → relayer telle quelle.
-            return Response(
+            response = Response(
                 content=r.content,
                 status_code=r.status_code,
                 media_type=r.headers.get("content-type"),
             )
+            # Conserver les headers métier du leader (Set-Cookie multi-valué,
+            # WWW-Authenticate sur 401, Retry-After sur 429, etc.). Sans ça
+            # toute évolution future (cookie de session, rate limit, OAuth
+            # bearer challenge) est silencieusement cassée sur les replicas.
+            for k, v in r.headers.multi_items():
+                lk = k.lower()
+                if lk in _RELAYED_HEADERS and lk != "content-type":
+                    response.headers.append(k, v)
+            return response
     # Aucun leader joignable (panne cluster / pas de quorum).
     return JSONResponse(
         status_code=503,
