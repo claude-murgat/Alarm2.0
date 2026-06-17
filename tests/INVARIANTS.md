@@ -346,6 +346,20 @@ SMS/Call avec `retries >= 3` n'apparaît plus dans `/internal/sms|calls/pending`
 - **Pourquoi** : éviter retry infini sur numéro invalide.
 - **Couverture** : E2E `TestSmsAndHealth::test_sms_excluded_after_max_retries`.
 
+### INV-124 [H] ✅ Corps du SMS d'alarme : instruction d'acquittement + lien supervision
+Le corps du SMS d'alarme métier (escalade, `_enqueue_sms_for_user`) doit (a) instruire
+l'opérateur d'acquitter en **répondant `1`** au SMS, et (b) contenir le **lien de supervision
+`https://supervision.charlesmurgat.com`**.
+- **Pourquoi** : la gateway sait recevoir l'ack par SMS (`SmsReceiverThread` : corps `1`/`ok`/`oui`/`ack`
+  → `POST /internal/alarms/active/ack-by-phone`, cf `gateway/modem_gateway.py`), **mais** le SMS
+  sortant ne le disait pas → l'opérateur qui ne connaît pas le système ne sait pas qu'il peut
+  acquitter par réponse SMS, et n'a aucun lien pour rejoindre la supervision. Décision propriétaire
+  2026-06-17. Ne concerne **pas** les SMS de ping isolation (INV-067, body `[ALARME-MURGAT-PING]`).
+- **Contrainte encodage** : rester en GSM-7 (pas d'accent dans la partie statique) pour ne pas
+  basculer en UCS-2 (160→70 car.) — préfixe `ALARME` et instruction `Repondez 1 pour acquitter`
+  sans accent. Dédoublonnage INV-062 intact (body déterministe par `severity`+`title`).
+- **Couverture** : E2E `TestSmsCallTimer::test_sms_body_has_ack_instruction_and_supervision_link`.
+
 ### INV-065 [C] ⚠️ Gateway key obligatoire
 `/internal/sms/*` et `/internal/calls/*` nécessitent header `X-Gateway-Key` valide.
 - **Pourquoi** : sécurité — ces endpoints exposent les numéros de tel.

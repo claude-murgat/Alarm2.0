@@ -254,6 +254,27 @@ class TestSmsCallTimer:
         calls_user1 = _wait_for_calls("+33600000001")
         assert len(calls_user1) >= 1, f"1 call attendu pour user1, got {len(calls_user1)}"
 
+    def test_sms_body_has_ack_instruction_and_supervision_link(self):
+        """INV-124 : le corps du SMS d'alarme doit dire d'acquitter en repondant
+        '1' ET contenir le lien de supervision. Sans ca, l'operateur ne sait pas
+        qu'il peut acquitter par reponse SMS (la gateway lit bien '1'/'ok' →
+        ack-by-phone, mais le SMS sortant ne le disait pas)."""
+        # Titre/severite sans chiffre '1' → le '1' du corps vient forcement de
+        # l'instruction d'acquittement, pas du titre.
+        _send_alarm("Body Ack Instruction Test", self.user1_id)
+        _advance_clock_all_nodes(3)
+        _refresh_all_heartbeats()
+
+        sms_user1 = _wait_for_sms("+33600000001")
+        assert len(sms_user1) >= 1, f"1 SMS attendu pour user1, got {len(sms_user1)}"
+        body = sms_user1[0]["body"]
+        assert "1" in body, \
+            f"Le SMS doit dire de repondre 1 pour acquitter, got: {body!r}"
+        assert "acquitter" in body.lower(), \
+            f"Le SMS doit mentionner l'acquittement, got: {body!r}"
+        assert "supervision.charlesmurgat.com" in body, \
+            f"Le SMS doit contenir le lien de supervision, got: {body!r}"
+
     def test_sms_call_delay_configurable(self):
         """Delai configurable a 5min : +3min → rien, +6min → SMS present."""
         admin_h = _admin_headers()
