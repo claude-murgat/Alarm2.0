@@ -1,0 +1,13 @@
+[Unit]
+Description=Alarm 2.0 - Watchdog modem SIM7600 (auto-recup + alerte email)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/alarm/modem-watchdog.py
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target
