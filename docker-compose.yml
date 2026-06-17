@@ -144,6 +144,14 @@ services:
       # est replica (résilience si le cloud tombe). false = kill-switch (ancien
       # 503 + rotation app). En dev/CI single-node, le nœud est leader → sans effet.
       - HEARTBEAT_PROXY_ON_REPLICA=${HEARTBEAT_PROXY_ON_REPLICA:-true}
+      # INV-044 (2026-06-17) : défaut true → un replica forwarde les écritures
+      # /api/* (login, config, users…) au leader via WG au lieu d'échouer en
+      # read-only. Permet à l'UI web servie par un nœud replica (ex: cloud OVH,
+      # seul joignable publiquement) de fonctionner quel que soit le primary →
+      # le leader Patroni peut rester sur un onsite. false = kill-switch (ancien
+      # comportement, écriture locale → 500 read-only). Dev/CI single-node :
+      # le nœud est leader → sans effet. Généralise INV-043 (heartbeat).
+      - WRITE_PROXY_ON_REPLICA=${WRITE_PROXY_ON_REPLICA:-true}
       - NODE_NAME=${NODE_NAME}
       - GATEWAY_KEY=${GATEWAY_KEY:-changeme-in-prod}
       # INV-076 : safe-by-default false. Dev/CI override explicite via les
