@@ -29,6 +29,7 @@ from config import (
 )
 from modem_detect import detect_modem_port, send_at_command
 from dtmf_decoder import DtmfDecoder
+from locks import at_lock  # RLock reentrant partage du port AT (cf locks.py)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,9 +38,6 @@ logging.basicConfig(
 logger = logging.getLogger("modem_gateway")
 
 GATEWAY_HEADERS = {"X-Gateway-Key": GATEWAY_KEY}
-
-# Lock partage pour l'acces serie au port AT
-at_lock = threading.Lock()
 
 
 # ── Helpers HTTP ─────────────────────────────────────────────────────────────
