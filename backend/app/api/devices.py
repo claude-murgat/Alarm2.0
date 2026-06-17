@@ -18,12 +18,17 @@ router = APIRouter(prefix="/api/devices", tags=["devices"])
 
 _PEER_URLS = [u.strip() for u in os.getenv("PEER_TEST_URLS", "").split(",") if u.strip()]
 
-# INV-043 (révisé 2026-06-16) : sur un nœud "edge" (le nœud cloud, seul
-# joignable par les téléphones externes/mobile), un replica FORWARDE le
-# heartbeat au leader au lieu de renvoyer 503. Activé via env UNIQUEMENT sur
-# le nœud cloud (node3). Les nœuds onsite gardent le 503 → l'app rotate vers
-# le leader sur le LAN (comportement failback préservé, cf test_failback.py).
-_PROXY_ON_REPLICA = os.getenv("HEARTBEAT_PROXY_ON_REPLICA", "false").lower() == "true"
+# INV-043 (révisé 2026-06-17) : un replica FORWARDE le heartbeat au leader (via
+# WireGuard) au lieu de renvoyer 503 — sur TOUS les nœuds (défaut true).
+# Raison : à terme, n'importe quel nœud peut être joignable depuis l'extérieur
+# (pas seulement le cloud). Un téléphone externe qui tombe sur un replica doit
+# pouvoir heartbeat même si les autres nœuds lui sont injoignables (LAN privé).
+# Si le cloud tombe et qu'un onsite devient le seul point d'entrée externe, il
+# doit relayer aussi → règle uniforme, pas de nœud privilégié.
+# 503 n'est plus renvoyé que si AUCUN leader n'est joignable (panne cluster).
+# Flag conservé comme kill-switch (HEARTBEAT_PROXY_ON_REPLICA=false → ancien
+# comportement 503, utilisé par les tests pour vérifier les deux chemins).
+_PROXY_ON_REPLICA = os.getenv("HEARTBEAT_PROXY_ON_REPLICA", "true").lower() == "true"
 
 
 def _proxy_heartbeat_to_primary(token: str):
@@ -101,15 +106,16 @@ def heartbeat(
     # Si ce noeud est un replica :
     if not is_leader.is_set():
         already_proxied = request.headers.get("X-Heartbeat-Proxied") == "1"
-        # Nœud edge cloud (HEARTBEAT_PROXY_ON_REPLICA=true) : forwarder le
-        # heartbeat au leader via WG. Sans ça, un téléphone externe qui ne
-        # joint QUE ce nœud (les onsite sont sur LAN privé) ne pourrait jamais
-        # heartbeat → "connexion perdue" perpétuelle malgré un cluster sain.
-        # Anti-boucle : on ne re-proxifie pas un heartbeat déjà proxifié.
+        # Défaut : forwarder le heartbeat au leader via WG. Sans ça, un
+        # téléphone externe qui ne joint QUE ce nœud (les autres sur LAN privé,
+        # ou le cloud tombé) ne pourrait jamais heartbeat → "connexion perdue"
+        # perpétuelle malgré un cluster sain. Anti-boucle : on ne re-proxifie
+        # pas un heartbeat déjà proxifié (le peer suivant sera tenté).
         if _PROXY_ON_REPLICA and not already_proxied:
             return _proxy_heartbeat_to_primary(credentials.credentials)
-        # Onsite (ou requête déjà proxifiée) : 503 → l'app rotate vers le
-        # leader sur le LAN (INV-043, comportement failback).
+        # Flag désactivé (kill-switch) OU requête déjà proxifiée : 503 → l'app
+        # rotate vers le leader (INV-ANDROID-304). Aussi le cas "proxy a échoué,
+        # aucun leader joignable" remonté par _proxy_heartbeat_to_primary.
         raise HTTPException(status_code=503, detail="replica")
 
     was_offline = not current_user.is_online

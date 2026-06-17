@@ -1,16 +1,13 @@
 """
-INV-043 (révisé 2026-06-16) — Heartbeat sur replica : proxy vers le leader
-sur le nœud edge cloud, 503 sinon (onsite/failback).
+INV-043 (révisé 2026-06-17) — Heartbeat sur replica : proxy vers le leader
+(défaut, tous nœuds) ; 503 seulement si kill-switch OFF ou aucun leader.
 
-Contexte : le nœud cloud (node3) est le seul joignable par les téléphones
-externes/mobile (les onsite sont sur LAN privé). Quand node3 est un replica
-Patroni, renvoyer 503 condamnait le tél d'astreinte en 4G à une "connexion
-perdue" perpétuelle (il ne peut pas rotater vers le leader onsite injoignable),
-alors que le cluster est sain.
-
-Fix : sur le nœud edge (HEARTBEAT_PROXY_ON_REPLICA=true), un replica forwarde
-le heartbeat au leader via WG. Les nœuds onsite gardent le 503 → l'app rotate
-sur le LAN (comportement failback préservé, cf test_failback.py).
+Contexte : un téléphone externe/mobile qui tombe sur un replica ne peut pas
+rotater vers les autres nœuds (LAN privé, ou cloud tombé). S'il recevait 503 →
+"connexion perdue" perpétuelle alors que le cluster est sain. Donc tout replica
+forwarde le heartbeat au leader via WG (`_proxy_heartbeat_to_primary`) et
+renvoie 200. Défaut `HEARTBEAT_PROXY_ON_REPLICA=true` sur tous les nœuds ;
+`false` = kill-switch restaurant l'ancien 503 (chemin testé ci-dessous).
 
 Tier 2 : TestClient + manipulation directe de `is_leader` (Event) et du flag.
 """
@@ -40,16 +37,16 @@ class TestHeartbeatProxyInv043:
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
 
-    def test_replica_without_proxy_returns_503(self, client, user1_headers, monkeypatch):
-        """Onsite (flag OFF) : replica → 503 pour que l'app rotate (INV-043 failback)."""
+    def test_replica_killswitch_off_returns_503(self, client, user1_headers, monkeypatch):
+        """Kill-switch (flag OFF) : replica → 503 (ancien comportement, l'app rotate)."""
         monkeypatch.setattr(devices, "_PROXY_ON_REPLICA", False)
         is_leader.clear()
         r = client.post("/api/devices/heartbeat", headers=user1_headers)
         assert r.status_code == 503
         assert r.json()["detail"] == "replica"
 
-    def test_replica_edge_proxies_to_leader(self, client, user1_headers, monkeypatch):
-        """Edge cloud (flag ON) : replica → forward au leader → 200."""
+    def test_replica_default_proxies_to_leader(self, client, user1_headers, monkeypatch):
+        """Défaut (flag ON, tous nœuds) : replica → forward au leader → 200."""
         monkeypatch.setattr(devices, "_PROXY_ON_REPLICA", True)
         called = {}
 

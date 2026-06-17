@@ -15,13 +15,16 @@ avec etcd + Patroni + backend, formant un consensus a 3 et exposant
 3 backends sur 8000/8001/8002. L'app Android (ApiClient.kt) rotate
 sur ces 3 URLs (PRIMARY/FALLBACK/FALLBACK_2) en cas d'echec consecutif.
 
-Ce que le test valide (INV-043 : "heartbeat sur replica -> 503, l'app
-doit failover sur le primary") :
+Ce que le test valide (INV-043 revise 2026-06-17 : "heartbeat sur replica ->
+proxy au leader (200), continuite des heartbeats a travers un failover") :
 - Stop le projet du leader Patroni courant
 - Patroni elit un nouveau leader parmi les 2 noeuds restants
-- Les backends sur replica continuent de renvoyer 503 (heartbeat)
-- L'ApiClient rotate jusqu'a trouver le nouveau leader (200 OK)
-- Les heartbeats reprennent sur le nouveau backend
+- Les backends survivants servent le heartbeat (le nouveau leader en direct,
+  OU un replica qui forwarde au nouveau leader via WG -> 200)
+- Les heartbeats reprennent sur un noeud survivant (peu importe lequel : la
+  garantie est la CONTINUITE, plus l'atterrissage sur l'URL exacte du leader)
+- L'app peut encore rotater si elle tape un noeud carrement down (connexion
+  refusee) ou si aucun leader n'est joignable (panne cluster -> 503)
 
 Hors scope tier 3 actuellement : `--ignore=tests/test_failback.py` dans
 pr.yml. Le test orchestre 3 emulateurs Android via ADB, or les runners CI
@@ -341,9 +344,10 @@ def emulators_connected(working_emulators, cluster_running):
 
     En 3-node Patroni, le leader peut etre node1/node2/node3 selon l'ordre
     d'election au boot (souvent node1 mais pas garanti). L'ApiClient demarre
-    sur PRIMARY_BACKEND_URL=8000 ; si node1 est replica, il rotate jusqu'au
-    leader (cf INV-043, 503 sur replica). On observe l'arrivee des heartbeats
-    sur N'IMPORTE QUEL des 3 backends via wait_users_heartbeating_any.
+    sur PRIMARY_BACKEND_URL=8000 ; meme si node1 est replica, le heartbeat
+    aboutit (forwarde au leader via WG, cf INV-043 revise). On observe
+    l'arrivee des heartbeats sur N'IMPORTE QUEL des 3 backends via
+    wait_users_heartbeating_any.
 
     Le `time.sleep(1)` apres `am force-stop` est un settling delay OS (plus
     de delais SQLite WAL pendant que Android nettoie le process), pas un
@@ -382,30 +386,31 @@ def emulators_connected(working_emulators, cluster_running):
 # --- Tests ---
 
 def test_failback_kill_leader(working_emulators, cluster_running, emulators_connected):
-    """Stop le projet du leader Patroni courant -> les apps doivent rotater
-    vers le nouveau leader elu parmi les 2 noeuds restants.
+    """Stop le projet du leader Patroni courant -> les apps doivent continuer
+    a heartbeater (sur le nouveau leader, en direct ou via proxy depuis un
+    replica survivant).
 
-    Materialise INV-043 ("heartbeat sur replica -> 503, l'app doit failover")
-    en condition Patroni 3-node reelle :
+    Materialise INV-043 revise ("heartbeat sur replica -> proxy au leader,
+    continuite a travers un failover") en condition Patroni 3-node reelle :
     1. Identifier le leader courant via /health (role=primary).
-    2. `docker compose -p <leader_project> down` (project entier — sinon Patroni
-       reste leader et les replicas continuent de renvoyer 503 a l'app, qui
-       boucle sans jamais trouver de noeud OK).
+    2. `docker compose -p <leader_project> stop` (project entier — sinon Patroni
+       reste leader et l'ancien leader continue de repondre).
     3. Patroni sur les 2 noeuds restants forme quorum a 2 (a partir de 3 etcd
        initiaux, perdre 1 garde majorite) et elit un nouveau leader.
-    4. Le backend du nouveau leader passe role=primary -> 200 sur /health
-       et /heartbeat.
-    5. L'ApiClient rotate (consecutiveFailures>=3 sur l'ancien leader) jusqu'a
-       atteindre le nouveau leader, observable via les heartbeats qui reprennent.
+    4. Le backend du nouveau leader passe role=primary ; les replicas survivants
+       forwardent le heartbeat vers lui (via WG) -> 200.
+    5. L'app peut devoir rotater une fois (l'ancien leader tape est down =
+       connexion refusee, consecutiveFailures>=3) mais des qu'elle atteint un
+       noeud survivant, le heartbeat repasse 200 (direct ou proxifie).
     """
     expected = len(working_emulators)
     initial_leader = cluster_running["leader_initial"]
     leader_node = node_for(initial_leader)
     print(f"\n[1] Leader Patroni initial : {leader_node['label']} ({initial_leader})")
 
-    # --- Stop le project du leader courant (down -v pour aussi virer etcd
-    #     et patroni, sinon patroni reste actif comme leader avec son etcd
-    #     et les replicas continuent de proxy-503 jusqu'a son retour).
+    # --- Stop le project du leader courant (project entier pour aussi virer
+    #     etcd et patroni, sinon patroni reste actif comme leader avec son etcd
+    #     et l'ancien leader continue de servir jusqu'a son retrait).
     other_nodes = [n for n in NODES if n["url"] != initial_leader]
     print(f"\n[2] Stop projet {leader_node['project']} entier (force election Patroni)...")
     docker("docker", "compose", "-p", leader_node["project"], "stop")
@@ -454,8 +459,16 @@ def test_failback_kill_leader(working_emulators, cluster_running, emulators_conn
 
     print(f"\n  FAILOVER OK : {n_hb}/{expected} apps sur {landed_url} "
           f"(leader Patroni : {new_leader})")
-    # Le landing doit etre le nouveau leader (les replicas renvoient 503).
-    assert landed_url == new_leader, (
-        f"Apps heartbeatent sur {landed_url} mais leader Patroni est {new_leader} : "
-        "incoherence INV-043 (heartbeat sur replica devrait renvoyer 503)."
+    # INV-043 (revise 2026-06-17) : un replica FORWARDE le heartbeat au leader
+    # (via WG) et renvoie 200 — il ne renvoie plus 503. Donc apres le failover,
+    # les apps peuvent heartbeater avec succes sur N'IMPORTE quel noeud survivant
+    # (le nouveau leader en direct, OU un replica qui proxy vers lui). La
+    # garantie de failback est la CONTINUITE des heartbeats (deja verifiee par
+    # n_hb >= expected ci-dessus), pas le fait d'atterrir sur l'URL exacte du
+    # leader. On n'exige donc plus landed_url == new_leader (ce serait l'ancien
+    # modele 503-rotation). On verifie juste que le landing est un noeud encore
+    # debout (pas l'ancien leader qu'on a stoppe).
+    assert landed_url != initial_leader, (
+        f"Apps heartbeatent sur {landed_url} = ancien leader stoppe : impossible, "
+        "le failover n'a pas eu lieu."
     )
