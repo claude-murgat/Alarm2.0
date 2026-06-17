@@ -19,6 +19,27 @@ pour la procédure complète et les explications.
 | `peers.md` | (doc seulement, pas de cible) | Index des public keys et plan d'adressage Wireguard |
 | `systemd/alarm-cd-pull.service` | `/etc/systemd/system/alarm-cd-pull.service` | Pull idempotent GHCR `:stable` (CD V1) |
 | `systemd/alarm-cd-pull.timer` | `/etc/systemd/system/alarm-cd-pull.timer` | Timer 5 min pour le pull (CD V1) |
+| `systemd/alarm-4g-standby.service` | `/etc/systemd/system/alarm-4g-standby.service` | Secours internet 4G en standby chaud (QMI, métrique 300) |
+| `systemd/alarm-modem-rat.service` | `/etc/systemd/system/alarm-modem-rat.service` | Force `CNMP=54` (WCDMA+LTE sans 2G) au boot — coexistence voix+data |
+| `systemd/alarm-modem-watchdog.service` | `/etc/systemd/system/alarm-modem-watchdog.service` | Watchdog modem : auto-récup d'un drop USB (PCI rescan) + alerte email |
+| `install.sh` | *(exécutable)* | **Installe toute la stack modem** : units ci-dessus + scripts `/opt/alarm/{4g-standby.sh,modem-set-rat.py,modem-watchdog.py}` (sources dans `scripts/`) + code gateway `→ /opt/alarm-gateway/` + groupe `dialout` + drop-in `modem_gateway.py` |
+
+## Stack modem on-site (gateway SMS/voix/contact + secours 4G + watchdog)
+
+Le SIM7600 porte 4 fonctions : **contact sec → alarme**, **SMS + appels vocaux** d'escalade,
+**secours internet 4G**, et un **watchdog** qui le récupère s'il drop du bus USB. Tout se
+déploie d'un coup, de façon idempotente, depuis un checkout du repo sur le nœud :
+
+```bash
+sudo bash infra/onsite/install.sh
+```
+
+Le script copie les units + scripts, déploie le code gateway (`modem_gateway.py`, le superset
+contact+voix+SMS — **pas** le legacy `sms_gateway.py`), ajoute `alarm-gateway` au groupe
+`dialout` (sinon `Permission denied` sur `/dev/ttyUSB*`), pose le drop-in systemd, et enable
+les services. Runbook complet : [`docs/FAILOVER_4G.md`](../../docs/FAILOVER_4G.md).
+Prérequis secrets (non posés par le script) : `GATEWAY_KEY` dans `/etc/alarm-gateway.env`,
+`SMTP_*` dans `/opt/alarm/.env.prod.{node<N>,secrets}` (alertes email du watchdog).
 
 ## Maintenance
 
