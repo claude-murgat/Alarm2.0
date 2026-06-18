@@ -90,6 +90,29 @@ DRY_CONTACT_NORMAL_VALUE = int(os.getenv("DRY_CONTACT_NORMAL_VALUE", "1"))
 # suffisant.
 DRY_CONTACT_POLL_SECONDS = float(os.getenv("DRY_CONTACT_POLL_SECONDS", "5"))
 
+# Source du contact sec : "modem" (GPIO SIM7600 via AT, historique) ou "host"
+# (microcontrôleur USB type Arduino qui pousse "DC:<0|1>"). Le mode "host"
+# DÉCOUPLE le contact-sec du modem : il reste lisible même quand le SIM7600
+# drop du bus USB (cf incidents 2026-06). Un GPIO du modem est un mauvais
+# endroit pour un input de sécurité (1,8 V, pulls imposés, couplé au circuit
+# d'allumage PWR). Défaut "modem" pour ne pas changer les déploiements existants.
+DRY_CONTACT_SOURCE = os.getenv("DRY_CONTACT_SOURCE", "modem").strip().lower()
+
+# Mode host : port série du µC. Vide = auto-détect (/dev/serial/by-id/*Arduino*
+# puis /dev/ttyACM*). Préférer le chemin by-id (stable) en prod.
+DRY_CONTACT_HOST_PORT = os.getenv("DRY_CONTACT_HOST_PORT", "")
+DRY_CONTACT_HOST_BAUD = int(os.getenv("DRY_CONTACT_HOST_BAUD", "115200"))
+
+# Mode host : fenêtre de fraîcheur. Si le µC se tait plus longtemps (débranché /
+# HS / firmware planté), la gateway cesse de reporter → le backend voit le
+# silence (INV-122) au lieu d'un état périmé. Le firmware émet ~1 Hz, donc 5 s
+# = 5 heartbeats manqués.
+DRY_CONTACT_LIVENESS_SECONDS = float(os.getenv("DRY_CONTACT_LIVENESS_SECONDS", "5"))
+
+# NB câblage host (Arduino UNO R4, INPUT_PULLUP) : contact NC entre une GPIO et
+# GND → fermé=LOW=0, ouvert/coupé=HIGH=1. Donc en mode host, mettre
+# DRY_CONTACT_NORMAL_VALUE=0 (l'inverse du mode modem).
+
 
 # Legacy (deprecated)
 GAMMU_CONFIG = os.getenv("GAMMU_CONFIG", "/etc/gammurc")
