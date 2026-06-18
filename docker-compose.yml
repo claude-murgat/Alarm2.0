@@ -21,6 +21,10 @@
 services:
   etcd:
     image: quay.io/coreos/etcd:v3.5.17
+    # Auto-recovery au boot/reboot : etcd reforme le quorum sans intervention.
+    # `unless-stopped` respecte un `docker compose stop` explicite (tests failover
+    # tier3/tier4) → le conteneur reste down quand on l'arrete volontairement.
+    restart: unless-stopped
     # extra_hosts : sur Linux (CI/VM), Docker Desktop n'existe pas → host.docker.internal
     # n'est pas resolu par defaut. host-gateway (Docker 20.10+) le resoud vers l'IP du
     # host. Sur Docker Desktop Windows, host.docker.internal est natif → cette ligne est
@@ -57,6 +61,10 @@ services:
     #   systemd (cf infra/onsite/systemd/alarm-cd-pull.*, PR 3 du plan §8).
     # Cf docs/CD_DESIGN.md §1 (Build) et Q-X2 (coexistence build local vs registry).
     image: ${REGISTRY:-ghcr.io/claude-murgat}/alarm-patroni:${IMAGE_TAG:-stable}
+    # Auto-recovery au boot/reboot : Patroni rejoint le cluster sans intervention
+    # (sinon, apres reboot, le conteneur reste `Exited` — il fallait `docker start`
+    # a la main). `unless-stopped` respecte le `docker compose stop` des tests failover.
+    restart: unless-stopped
     build:
       context: .
       dockerfile: Dockerfile.patroni
