@@ -1,0 +1,35 @@
+# /etc/wireguard/wg1.conf — Tunnel WireGuard « façade » vers le VPS OVH
+# Cf. docs/PROVISIONING_ONSITE.md + infra/onsite/peers.md (section Façade OVH).
+#
+# DISTINCT du mesh cluster (wg0) : ce tunnel-ci expose l'UI alarme PUBLIQUEMENT
+# via un VPS OVH à IP fixe (reverse-proxy Apache côté OVH, qui sert déjà d'autres
+# apps). Interface SÉPARÉE (wg1) — ne JAMAIS réutiliser wg0 (= mesh cluster, ça
+# le casserait). Les deux tunnels coexistent sans conflit (sous-réseaux disjoints
+# 10.99.0.0/24 vs 10.200.0.0/24).
+#
+# Adresses internes façade :
+#   10.200.0.5 = alarme1 (onsite-1)
+#   10.200.0.6 = alarme2 (onsite-2, cette machine)
+#
+# Roaming : aucun Endpoint déclaré côté OVH pour les onsite → le tunnel se
+# rétablit tout seul depuis une nouvelle IP publique (déménagement de site).
+# Côté onsite, PersistentKeepalive 25 s initie/maintient le handshake.
+#
+# Setup reproductible : scripts/wg-facade-setup.sh <10.200.0.X/24>
+# (génère la clé dans /etc/wireguard/wg1-privatekey, écrit ce fichier, active
+#  wg-quick@wg1, pose la règle ufw — sans jamais toucher wg0).
+
+[Interface]
+# Contenu de /etc/wireguard/wg1-privatekey (mode 600, jamais commit)
+PrivateKey = <PRIVATE_KEY_TO_FILL>
+Address = 10.200.0.6/24
+# MTU 1280 : WG sur 4G/cellulaire drop les gros paquets à 1420 (constaté 2026-06-18,
+# failover 4G). 1280 passe partout (fibre + cellulaire), sans effet de bord sur fibre.
+MTU = 1280
+
+[Peer]
+# VPS OVH façade (IP fixe, reverse-proxy)
+PublicKey = EO723NGhs9D1ZR7xPTVNUl+ZLAYYKxoQPNmXzuOWdz8=
+Endpoint = 51.77.222.190:51820
+AllowedIPs = 10.200.0.0/24
+PersistentKeepalive = 25
