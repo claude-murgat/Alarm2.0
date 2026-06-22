@@ -23,7 +23,9 @@ pour la procédure complète et les explications.
 | `systemd/alarm-4g-standby.service` | `/etc/systemd/system/alarm-4g-standby.service` | Secours internet 4G en standby chaud (QMI, métrique 300) |
 | `systemd/alarm-modem-rat.service` | `/etc/systemd/system/alarm-modem-rat.service` | Force `CNMP=54` (WCDMA+LTE sans 2G) au boot — coexistence voix+data |
 | `systemd/alarm-modem-watchdog.service` | `/etc/systemd/system/alarm-modem-watchdog.service` | Watchdog modem : auto-récup d'un drop USB (PCI rescan) + alerte email |
-| `install.sh` | *(exécutable)* | **Installe toute la stack modem** : units ci-dessus + scripts `/opt/alarm/{4g-standby.sh,modem-set-rat.py,modem-watchdog.py}` (sources dans `scripts/`) + code gateway `→ /opt/alarm-gateway/` + groupe `dialout` + drop-in `modem_gateway.py` |
+| `systemd/alarm-disk-check.service` | `/etc/systemd/system/alarm-disk-check.service` | Sonde remplissage disque (`/` + `/var/lib/docker`) → alerte email si seuil dépassé (oneshot, lancé par le timer) |
+| `systemd/alarm-disk-check.timer` | `/etc/systemd/system/alarm-disk-check.timer` | Timer 15 min de la sonde disque (garde-fou anti-saturation, cf incident WAL 2026-06-22) |
+| `install.sh` | *(exécutable)* | **Installe toute la stack modem + la supervision disque** : units ci-dessus + scripts `/opt/alarm/{4g-standby.sh,modem-set-rat.py,modem-watchdog.py,disk-check.sh,send-alert-email.py}` (sources dans `scripts/`) + code gateway `→ /opt/alarm-gateway/` + groupe `dialout` + drop-in `modem_gateway.py` |
 
 ## Stack modem on-site (gateway SMS/voix + secours 4G + watchdog)
 
@@ -43,6 +45,33 @@ contact+voix+SMS — **pas** le legacy `sms_gateway.py`), ajoute `alarm-gateway`
 les services. Runbook complet : [`docs/FAILOVER_4G.md`](../../docs/FAILOVER_4G.md).
 Prérequis secrets (non posés par le script) : `GATEWAY_KEY` dans `/etc/alarm-gateway.env`,
 `SMTP_*` dans `/opt/alarm/.env.prod.{node<N>,secrets}` (alertes email du watchdog).
+
+## Supervision disque (garde-fou anti-saturation)
+
+Le **2026-06-22** le cluster est tombé en entier (plus de leader Patroni, alarme
+incapable de sonner) parce que du **WAL a saturé les disques** de node1 (207 Go de WAL
+→ 100 %) et de node3 (cloud, 100 %) ; PostgreSQL ne redémarrait plus. Surtout, la panne
+est restée **silencieuse 2,5 jours** : *rien* ne surveillait le remplissage disque.
+
+`alarm-disk-check.timer` (15 min) lance [`scripts/disk-check.sh`](../../scripts/disk-check.sh),
+qui vérifie `/` et `/var/lib/docker` via `df` et envoie **un** email par épisode au-delà
+d'un seuil (**WARN ~85 %**, **CRIT ~92 %**), re-notifie un problème persistant au plus
+toutes les 6 h, puis un email de retour à la normale. L'envoi réutilise **exactement** la
+même voie SMTP que le watchdog modem — [`scripts/send-alert-email.py`](../../scripts/send-alert-email.py),
+mêmes secrets `/opt/alarm/.env.prod.*`. Aucune dépendance (bash + `df` + `python3` stdlib).
+
+Posé sur **les 3 nœuds** par `install.sh` (le timer est `enable --now` : une sonde
+read-only sans risque, et ne pas la démarrer reproduirait l'incident). **node3** (cloud,
+sans modem) n'a besoin que de la sonde + des `SMTP_*` dans `/opt/alarm/.env.prod.{node3,secrets}`
+— les avertissements modem de `install.sh` y sont attendus et sans effet.
+
+```bash
+sudo /opt/alarm/disk-check.sh --dry-run      # affiche les % et niveaux, n'envoie rien
+sudo /opt/alarm/disk-check.sh --test-email   # vérifie la chaîne SMTP de bout en bout
+```
+
+Seuils et chemins surchargeables par variables d'env (`DISK_WARN_PCENT`, `DISK_CRIT_PCENT`,
+`DISK_CHECK_PATHS`, `DISK_RENOTIFY_HOURS`) — cf en-tête du script.
 
 ## Exposition publique via VPS OVH (tunnel façade `wg1`)
 
