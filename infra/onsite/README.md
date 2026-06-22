@@ -25,10 +25,12 @@ pour la procédure complète et les explications.
 | `systemd/alarm-modem-watchdog.service` | `/etc/systemd/system/alarm-modem-watchdog.service` | Watchdog modem : auto-récup d'un drop USB (PCI rescan) + alerte email |
 | `install.sh` | *(exécutable)* | **Installe toute la stack modem** : units ci-dessus + scripts `/opt/alarm/{4g-standby.sh,modem-set-rat.py,modem-watchdog.py}` (sources dans `scripts/`) + code gateway `→ /opt/alarm-gateway/` + groupe `dialout` + drop-in `modem_gateway.py` |
 
-## Stack modem on-site (gateway SMS/voix/contact + secours 4G + watchdog)
+## Stack modem on-site (gateway SMS/voix + secours 4G + watchdog)
 
-Le SIM7600 porte 4 fonctions : **contact sec → alarme**, **SMS + appels vocaux** d'escalade,
-**secours internet 4G**, et un **watchdog** qui le récupère s'il drop du bus USB. Tout se
+Le SIM7600 porte 3 fonctions : **SMS + appels vocaux** d'escalade, **secours internet 4G**,
+et un **watchdog** qui le récupère s'il drop du bus USB. (Le **contact sec** est lu depuis
+2026-06-18 par un **Arduino UNO R4 sur USB**, `DRY_CONTACT_SOURCE=host` — **découplé du modem**
+pour qu'il survive à un drop USB ; cf INV-120 + `gateway/firmware/dry_contact_r4/`.) Tout se
 déploie d'un coup, de façon idempotente, depuis un checkout du repo sur le nœud :
 
 ```bash

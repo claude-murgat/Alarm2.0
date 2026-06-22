@@ -589,7 +589,7 @@ côté on-site → cluster en panne). Toujours :
 - [ ] Valider le cluster Patroni (replication, failover)
 
 ### Trous identifiés à compenser ultérieurement
-- [x] **Phase 2 — Waveshare SIM7600** : DÉPLOYÉE (2026-06) — gateway SMS/voix/**contact sec** (`modem_gateway.py`) + **secours internet 4G/LTE** (QMI, pas ECM) + **watchdog modem** (auto-récup drop USB + alerte email). Déploiement reproductible en une commande : `sudo bash infra/onsite/install.sh`. Runbook : [`FAILOVER_4G.md`](FAILOVER_4G.md). SIM réelle = Sosh (APN `orange`).
+- [x] **Phase 2 — Waveshare SIM7600** : DÉPLOYÉE (2026-06) — gateway SMS/voix (`modem_gateway.py`) + **secours internet 4G/LTE** (QMI, pas ECM) + **watchdog modem** (auto-récup drop USB + alerte email). Déploiement reproductible en une commande : `sudo bash infra/onsite/install.sh`. Runbook : [`FAILOVER_4G.md`](FAILOVER_4G.md). SIM réelle = Sosh (APN `orange`). **Contact sec** : lu depuis 2026-06-18 par un **Arduino UNO R4 sur USB** (`DRY_CONTACT_SOURCE=host`, firmware `gateway/firmware/dry_contact_r4/`), **découplé du modem** (cf INV-120) — auparavant sur GPIO 43 du modem, abandonné car couplé au circuit d'allumage PWR (un contact fermé empêchait le boot du module).
 - [ ] **Phase 3 — CD V1** : build GHCR, promotion `:stable`, pull-based via systemd timer, canary order, auto-rollback
 - [ ] **Phase 4 — CD V2** : auto-fix prod via bot IA (après ≥10 PRs propres consécutives du bot)
 - [ ] Layout LVM si la machine n'a pas été installée avec (réévaluer au prochain reset)
