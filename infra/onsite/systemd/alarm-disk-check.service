@@ -1,0 +1,21 @@
+# /etc/systemd/system/alarm-disk-check.service
+# Verifie le remplissage disque (/ + volume docker) et alerte par email au-dela
+# d'un seuil (cf scripts/disk-check.sh). Declenche par alarm-disk-check.timer
+# toutes les 15 min. Garde-fou pose apres l'incident WAL du 2026-06-22 (cluster
+# down, plus de leader Patroni, panne silencieuse 2,5 jours faute de supervision).
+# Pas de [Install] : ce oneshot est active uniquement par le timer, jamais au boot.
+[Unit]
+Description=Alarm 2.0 - Verification remplissage disque (alerte email si seuil depasse)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Cree /var/lib/alarm/disk-check/ (etat : dernier niveau alerte par fs, pour
+# n'envoyer qu'un email par episode). Persistent entre runs.
+StateDirectory=alarm/disk-check
+# Un df + un envoi SMTP : large marge avant kill.
+TimeoutStartSec=120
+ExecStart=/opt/alarm/disk-check.sh
+StandardOutput=journal
+StandardError=journal

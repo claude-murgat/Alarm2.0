@@ -346,6 +346,20 @@ SMS/Call avec `retries >= 3` n'apparaît plus dans `/internal/sms|calls/pending`
 - **Pourquoi** : éviter retry infini sur numéro invalide.
 - **Couverture** : E2E `TestSmsAndHealth::test_sms_excluded_after_max_retries`.
 
+### INV-124 [H] ✅ Corps du SMS d'alarme : instruction d'acquittement + lien supervision
+Le corps du SMS d'alarme métier (escalade, `_enqueue_sms_for_user`) doit (a) instruire
+l'opérateur d'acquitter en **répondant `1`** au SMS, et (b) contenir le **lien de supervision
+`https://supervision.charlesmurgat.com`**.
+- **Pourquoi** : la gateway sait recevoir l'ack par SMS (`SmsReceiverThread` : corps `1`/`ok`/`oui`/`ack`
+  → `POST /internal/alarms/active/ack-by-phone`, cf `gateway/modem_gateway.py`), **mais** le SMS
+  sortant ne le disait pas → l'opérateur qui ne connaît pas le système ne sait pas qu'il peut
+  acquitter par réponse SMS, et n'a aucun lien pour rejoindre la supervision. Décision propriétaire
+  2026-06-17. Ne concerne **pas** les SMS de ping isolation (INV-067, body `[ALARME-MURGAT-PING]`).
+- **Contrainte encodage** : rester en GSM-7 (pas d'accent dans la partie statique) pour ne pas
+  basculer en UCS-2 (160→70 car.) — préfixe `ALARME` et instruction `Repondez 1 pour acquitter`
+  sans accent. Dédoublonnage INV-062 intact (body déterministe par `severity`+`title`).
+- **Couverture** : E2E `TestSmsCallTimer::test_sms_body_has_ack_instruction_and_supervision_link`.
+
 ### INV-065 [C] ⚠️ Gateway key obligatoire
 `/internal/sms/*` et `/internal/calls/*` nécessitent header `X-Gateway-Key` valide.
 - **Pourquoi** : sécurité — ces endpoints exposent les numéros de tel.
@@ -720,20 +734,35 @@ original_created_at_inv018.py::test_inv018_gateway_report_state_alarm_sets_
 original_created_at` (adapté du V1, vérifie que `_create_gateway_alarm` fige
 bien `original_created_at` au moment du `POST /report-state`).
 
-**Câblage hardware retenu** (inchangé V1, validé empiriquement 2026-05-13
-sur node2) :
-- Mode GPIO sur HAT Waveshare SIM7600X, pin GPIO 43 du module
-  (silkscreen "IO43"). Câblage `3V3 ─── [contact NC] ─── IO43`, zéro
-  composant externe. Repos NC fermé → lit 1. Alarme NC ouvert → lit 0.
-- Côté gateway, lecture brute via `AT+CGGETV=43`, mapping `value == 1`
-  → `"closed"`, `value == 0` → `"open"`.
-- Mode ADC abandonné : maintenir ADC1 à GND >5 s freeze le firmware
-  modem (recovery uniquement via PWRKEY). GPIO 43 supporte les 2 états
-  sans corruption.
+**Source de lecture du contact** (`DRY_CONTACT_SOURCE`, cf `gateway/config.py`).
+Le protocole backend ci-dessus (`report-state`, réconciliation, OR fail-to-alarm)
+est **identique quelle que soit la source** — seul le mode de lecture côté gateway
+diffère.
+
+- **Mode `host` — RETENU EN PROD (onsite-2, depuis 2026-06-18)** : le contact NC est
+  lu par un **microcontrôleur USB (Arduino UNO R4)** branché sur le mini-PC, **pas par
+  le modem**. Câblage : contact NC entre une GPIO de l'Arduino et **GND** (`INPUT_PULLUP`,
+  zéro composant) → fermé = `DC:0`, ouvert/coupé = `DC:1`. Le firmware
+  (`gateway/firmware/dry_contact_r4/`) pousse `DC:<0|1>` sur l'USB-série ;
+  `HostDryContactMonitorThread` mappe via `raw_to_state` (`DRY_CONTACT_NORMAL_VALUE=0`)
+  et POST le même `report-state`. **Découple le contact-sec du SIM7600** : il reste
+  fonctionnel même quand le modem drop du bus USB (récurrent). Détection de vie : µC
+  muet > `DRY_CONTACT_LIVENESS_SECONDS` (5 s) → arrêt du report (backend voit le silence).
+  Validé bout-en-bout 2026-06-18 (Modbus PLC bit 101 → contact → Arduino → gateway →
+  alarme créée + auto-résolution).
+
+- **Mode `modem` — LEGACY (défaut historique, déconseillé)** : pin GPIO 43 du module
+  SIM7600 (silkscreen "IO43"), câblage `3V3 ─── [contact NC] ─── IO43`, lecture
+  `AT+CGGETV=43`, mapping `value == 1` → `"closed"`, `0` → `"open"`
+  (`DRY_CONTACT_NORMAL_VALUE=1`). **Abandonné en prod** : GPIO 1,8 V, pulls imposés, et
+  surtout **couplé au circuit d'allumage PWR** du modem (un contact fermé au cold-boot
+  empêche le module de démarrer — incidents 2026-06), + contact aveugle quand le modem
+  drop. Mode ADC déjà abandonné avant (ADC1 à GND >5 s freeze le firmware modem).
 
 ### INV-122 [H] ✅ Redondance hardware multi-gateway, agrégation OR fail-to-alarm
 Deux (ou plus) gateways onsite reçoivent le **même contact NC physiquement
-splitté** sur leurs IO43 respectifs. Le backend agrège leurs `state`
+splitté** sur leurs entrées respectives (Arduino en mode `host`, ou IO43 du
+modem en mode `modem` legacy). Le backend agrège leurs `state`
 reportés selon la politique **OR fail-to-alarm** :
 **au moins une** gateway alive reportant `"open"` → alarme active.
 

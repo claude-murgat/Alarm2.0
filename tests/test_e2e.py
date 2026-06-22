@@ -1138,6 +1138,51 @@ class TestRefreshTokenInv079:
         # 3 access tokens tous distincts (jti unique)
         assert len(accesses) == 3
 
+    def test_refresh_with_revoked_token_returns_401(self):
+        """INV-079 — Path révocation côté serveur : un refresh dont la ligne DB
+        a `revoked=TRUE` doit être rejeté en 401.
+
+        C'est le différenciateur clé du pattern Gmail-style vs JWT stateless :
+        on peut couper l'accès d'un téléphone volé en flippant un flag DB, sans
+        tourner SECRET_KEY (qui déconnecterait tout le monde).
+
+        Sensibilité mutation : si on retire le filtre
+        `RefreshToken.revoked == False` à `backend/app/auth.py:78`, ce test
+        passe en 200 (token toujours résolu malgré la révocation) — donc ce
+        test verrouille cette branche du code en régression.
+
+        Setup : login user1 → garde user.id ET refresh → POST
+        /api/test/revoke-user-refresh-tokens?user_id=... (wrapper de
+        `auth.revoke_refresh_tokens_for_user`) → POST /auth/refresh avec le
+        token désormais révoqué → attendu 401 avec un detail explicatif.
+        """
+        login = requests.post(f"{API}/auth/login", json={
+            "name": USER1_NAME, "password": USER1_PASSWORD
+        }).json()
+        refresh = login["refresh_token"]
+        user_id = login["user"]["id"]
+
+        # Sanity check : le refresh est valide avant révocation (sinon le test
+        # passerait 401 pour la mauvaise raison si /login bouge un jour).
+        pre = requests.post(f"{API}/auth/refresh", json={"refresh_token": refresh})
+        assert pre.status_code == 200, f"pré-révocation : refresh invalide ({pre.status_code} {pre.text})"
+
+        # Flip revoked=TRUE en DB via le wrapper test (cf INV-079 limite : pas
+        # de /auth/logout côté serveur, donc pas d'autre moyen depuis tier 3).
+        rev = requests.post(f"{API}/test/revoke-user-refresh-tokens", params={"user_id": user_id})
+        assert rev.status_code == 200, f"revoke endpoint a échoué : {rev.status_code} {rev.text}"
+        assert rev.json()["revoked"] >= 1, "aucun refresh token révoqué — état DB inattendu"
+
+        # Le refresh révoqué doit être rejeté.
+        r = requests.post(f"{API}/auth/refresh", json={"refresh_token": refresh})
+        assert r.status_code == 401, (
+            f"INV-079 violé : refresh token révoqué accepté par /auth/refresh "
+            f"({r.status_code} {r.text})"
+        )
+        assert "access_token" not in r.json(), (
+            "INV-079 violé : /auth/refresh a émis un access depuis un refresh révoqué"
+        )
+
 
 # ── #6 Persistence après crash Docker ─────────────────────────────────────────
 
