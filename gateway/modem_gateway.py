@@ -33,7 +33,7 @@ from config import (
 from modem_detect import detect_modem_port, send_at_command
 from dtmf_decoder import DtmfDecoder
 from locks import at_lock  # RLock reentrant partage du port AT (cf locks.py)
-from dry_contact import parse_dc_line, raw_to_state  # logique pure (cf dry_contact.py)
+from dry_contact import parse_dc_line, raw_to_state, decide_report  # logique pure (cf dry_contact.py)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -655,6 +655,7 @@ class HostDryContactMonitorThread(threading.Thread):
         latest_raw: int | None = None
         latest_ts = 0.0
         last_post = 0.0
+        silent_warned = False
         logger.info(f"HostDryContact : ouverture {port} @{self.baud}")
         with serial.Serial(port, self.baud, timeout=1.0) as ser:
             while self.running:
@@ -669,19 +670,22 @@ class HostDryContactMonitorThread(threading.Thread):
                     continue
                 last_post = now
 
-                fresh = latest_raw is not None and (now - latest_ts) <= self.liveness
-                if not fresh:
-                    if self._last_logged_state != "_silent":
+                state = decide_report(
+                    latest_raw, latest_ts, now, self.liveness, self.normal_value,
+                )
+                if state is None:
+                    if not silent_warned:
                         logger.warning(
                             f"HostDryContact ({self.gateway_id}) : µC muet >{self.liveness:.0f}s "
                             f"— arret du report (le backend voit le silence)"
                         )
-                        self._last_logged_state = "_silent"
+                        silent_warned = True
+                        self._last_logged_state = None  # recovery sera reloguee
                     continue
+                silent_warned = False
 
-                state = raw_to_state(latest_raw, self.normal_value)
                 if state != self._last_logged_state:
-                    if self._last_logged_state in (None, "_silent"):
+                    if self._last_logged_state is None:
                         logger.info(
                             f"HostDryContact ({self.gateway_id}) : etat raw={latest_raw} → {state}"
                         )

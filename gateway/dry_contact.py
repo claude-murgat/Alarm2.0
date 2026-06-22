@@ -40,3 +40,33 @@ def raw_to_state(raw: int, normal_value: int) -> str:
     Un fil coupé / contact ouvert donne l'autre valeur → 'open' → alarme
     (détection de sabotage conservée quel que soit le câblage)."""
     return "closed" if raw == normal_value else "open"
+
+
+def decide_report(
+    latest_raw: int | None,
+    latest_ts: float,
+    now: float,
+    liveness: float,
+    normal_value: int,
+) -> str | None:
+    """Décide si la gateway doit POSTer un état au backend, et lequel.
+
+    Sous-tend INV-122 (agrégation OR fail-to-alarm multi-gateway) côté gateway
+    hôte : une gateway dont le µC s'est tu doit cesser de reporter, pour que
+    le backend la sorte de `alive_gateways` au lieu de propager un état périmé.
+
+    Retourne :
+    - `None` si jamais reçu de sample (`latest_raw is None`) → pas de POST
+    - `None` si dernier sample plus vieux que `liveness` (µC muet) → pas de POST
+    - sinon `raw_to_state(latest_raw, normal_value)` (`'closed'` | `'open'`)
+
+    La borne haute de fraîcheur est inclusive (`now - latest_ts <= liveness`) :
+    un sample arrivé pile en limite est considéré frais — toute autre convention
+    crée des silences artificiels au backend pour les déploiements où la cadence
+    µC est proche de `liveness`.
+    """
+    if latest_raw is None:
+        return None
+    if now - latest_ts > liveness:
+        return None
+    return raw_to_state(latest_raw, normal_value)
