@@ -472,3 +472,123 @@ def test_failback_kill_leader(working_emulators, cluster_running, emulators_conn
         f"Apps heartbeatent sur {landed_url} = ancien leader stoppe : impossible, "
         "le failover n'a pas eu lieu."
     )
+
+
+@pytest.mark.failover
+@pytest.mark.chaos
+@pytest.mark.parametrize("service", ["patroni", "etcd"])
+def test_container_auto_recovery_after_crash(cluster_running, service):
+    """Verrouille en regression la restart policy `unless-stopped` sur les
+    conteneurs etcd + patroni ajoutee par PR #184 (issue #186 / INV-094 etendu).
+
+    Bug observe le 2026-06-18 : apres reboot d'un noeud onsite, etcd et patroni
+    restaient `Exited` (defaut `restart: no`) ; il fallait `docker start <c>` a
+    la main pour rejoindre le cluster. PR #184 a ajoute `restart: unless-stopped`
+    aux deux services. Sans ce test tier 4, aucune assertion CI ne previendrait
+    une regression future (ex. deploiement CD qui recree un conteneur sans la
+    politique). Sa presence ferme la boucle sur PR #184.
+
+    Comment on declenche le restart automatique :
+
+    On simule un crash inattendu via `docker exec --user root <c> kill -KILL 1`
+    (SIGKILL sur le process PID 1 = entrypoint = etcd ou patroni). Docker traite
+    ca comme un exit non-volontaire et applique la restart policy → le conteneur
+    redemarre seul.
+
+    Pourquoi pas `docker stop` ou `docker kill` depuis l'exterieur (comme suggere
+    dans le body de l'issue) ? Verification empirique : ces deux gestes sont
+    traites comme STOP MANUEL par `unless-stopped` ; le conteneur reste down.
+    C'est d'ailleurs ce qu'on veut pour les tests failover tier3/tier4 qui font
+    `docker compose stop` et comptent dessus pour laisser le noeud stoppe.
+    Seul un exit interne (kill PID 1 depuis l'interieur, OOM, segfault, host
+    reboot) declenche la restart policy.
+
+    Pourquoi parametrer sur patroni + etcd : les deux ont recu le meme fix dans
+    PR #184 (meme mecanisme), le bug initial portait sur patroni mais etcd avait
+    le meme defaut. Couverture symetrique pour le prix d'un.
+
+    Tier 4 uniquement (chaos marker) : manipule la stack Docker locale, exclu du
+    tier 3 par `--ignore=tests/test_failback.py` dans pr.yml.
+    """
+    # Restaurer baseline : si un test precedent (test_failback_kill_leader) a
+    # laisse un projet compose stoppe, on le remonte avant de cibler.
+    for n in NODES:
+        docker("docker", "compose", "-p", n["project"], "start")
+    for n in NODES:
+        assert wait_healthy(n["url"], 60), \
+            f"{n['label']} ({n['url']}) doit etre healthy avant le test"
+
+    # Cibler un noeud non-leader (perturbation minimale). Si pas de leader
+    # joignable (race rare), fallback sur NODES[0] : le test reste valide,
+    # on verifie une propriete locale au conteneur, pas une propriete cluster.
+    leader_url = find_leader(timeout=10.0)
+    target_node = next((n for n in NODES if n["url"] != leader_url), NODES[0])
+    container = f"{target_node['project']}-{service}-1"
+    print(f"\n[1] Cible : {container} (noeud non-leader)")
+
+    r = subprocess.run(
+        ["docker", "inspect", "-f", "{{.State.Status}}|{{.RestartCount}}", container],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert r.returncode == 0, f"docker inspect echoue : {r.stderr.strip()}"
+    status, count_str = r.stdout.strip().split("|")
+    initial_count = int(count_str)
+    assert status == "running", \
+        f"{container} doit etre Running avant le test (actuel : {status!r})"
+    print(f"  Etat initial : Running, RestartCount={initial_count}")
+
+    # Crash simule : kill PID 1 depuis l'interieur via root. `docker exec` peut
+    # renvoyer non-zero (le conteneur meurt pendant la commande) — on n'asserte
+    # pas dessus, on verifie l'effet (auto-restart) plus bas.
+    print(f"\n[2] Simule crash : docker exec --user root {container} kill -KILL 1")
+    subprocess.run(
+        ["docker", "exec", "--user", "root", container, "kill", "-KILL", "1"],
+        capture_output=True, text=True, timeout=15,
+    )
+
+    # Attendre Running + RestartCount > initial (max 60s, couvre le backoff
+    # exponentiel Docker meme si plusieurs restarts s'enchainent).
+    print(f"\n[3] Attente auto-restart (status=running ET RestartCount>{initial_count}, max 60s)...")
+    deadline = time.time() + 60.0
+    final_status, final_count = None, initial_count
+    while time.time() < deadline:
+        r = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Status}}|{{.RestartCount}}", container],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode == 0:
+            s, c = r.stdout.strip().split("|")
+            final_status, final_count = s, int(c)
+            if s == "running" and final_count > initial_count:
+                break
+        time.sleep(1)
+
+    assert final_status == "running", (
+        f"{container} pas Running apres 60s (status={final_status!r}). "
+        f"Le conteneur ne s'est PAS auto-redemarre apres crash. "
+        f"Verifier `restart: unless-stopped` sur service {service} dans docker-compose.yml."
+    )
+    assert final_count > initial_count, (
+        f"{container} status=running mais RestartCount={final_count} (initial={initial_count}). "
+        "Le kill -KILL 1 n'a pas declenche un restart par Docker — soit le kill n'a pas "
+        "atteint PID 1 (verifier l'entrypoint), soit la restart policy est inactive."
+    )
+    print(f"  → Auto-recovery OK : Running, RestartCount={final_count} (etait {initial_count})")
+
+    # Pour patroni : verifier le retour fonctionnel dans le cluster (role
+    # primary ou replica via /health du backend). Detecte un faux positif ou
+    # le conteneur tourne mais patroni n'arrive pas a se resync.
+    if service == "patroni":
+        print(f"\n[4] Verification role Patroni sur {target_node['label']} (max 60s)...")
+        deadline = time.time() + 60.0
+        role = None
+        while time.time() < deadline:
+            role = get_role(target_node["url"])
+            if role in ("primary", "replica"):
+                break
+            time.sleep(1)
+        assert role in ("primary", "replica"), (
+            f"Patroni sur {target_node['label']} n'a pas retrouve de role apres 60s "
+            f"(role={role!r}). Conteneur up mais Patroni n'a pas rejoint le cluster."
+        )
+        print(f"  → Patroni role={role}, cluster OK.")

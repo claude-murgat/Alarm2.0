@@ -13,6 +13,10 @@
 PrivateKey = <PRIVATE_KEY_TO_FILL>
 Address = 10.99.0.3/24
 ListenPort = 51820
+# MTU 1280 : indispensable pour que le mesh passe quand un onsite bascule sur le
+# secours 4G (WG-sur-cellulaire drop les gros paquets à 1420 — constaté 2026-06-18).
+# Sans effet de bord sur fibre. À mettre sur les 3 nœuds (les 2 bouts d'un tunnel).
+MTU = 1280
 # Sauvegarde la config quand on ajoute un peer dynamiquement
 SaveConfig = false
 
