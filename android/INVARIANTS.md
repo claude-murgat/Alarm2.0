@@ -279,6 +279,7 @@ Pas d'alerte si glitch réseau passager.
 ### INV-ANDROID-304 [M] ⚠️ Heartbeat 503 (replica) → flag needsUrlSwitch au poll suivant
 Cas spécial : `response.code() == 503` signifie "backend est un replica, pas le primary". Le heartbeat set `needsUrlSwitch=true` (volatile) — le poll suivant détecte le flag et fait `switchToNextUrl()` + delay 4s pour laisser le heartbeat revalider.
 - **Pourquoi** : suivre automatiquement le primary après failover Patroni côté backend. Le heartbeat ne doit PAS lui-même switcher (il suit passivement l'URL courante).
+- **Complément backend 2026-06-17 (cf INV-043 révisé)** : ce mécanisme de rotation est désormais surtout un filet de secours. Côté backend, **tout** nœud replica forwarde le heartbeat au leader (via WG) et renvoie 200 — sur tous les nœuds, pas seulement le cloud (résilience : si le cloud tombe et qu'un onsite devient le point d'entrée externe, il relaie aussi). Donc en pratique l'app ne voit quasiment plus de 503 sur le heartbeat : elle reçoit un 200 (direct si elle a tapé le leader, proxifié sinon). Le `needsUrlSwitch`/rotation ne se déclenche plus que dans le cas résiduel « le nœud tapé est carrément down (connexion refusée) » ou « aucun leader joignable → 503 » (panne cluster réelle).
 - **Manque** : test Espresso dédié au scénario 503 heartbeat (test22 couvre les 503 polling, pas heartbeat).
 
 ### INV-ANDROID-305 [C] ❌ SUPERSEDED (2026-06-03) — détection "no network at all" abandonnée

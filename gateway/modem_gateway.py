@@ -13,6 +13,7 @@ Demarrage : python modem_gateway.py
              python modem_gateway.py --port COM7  # override port
 """
 import argparse
+import glob
 import logging
 import threading
 import time
@@ -26,9 +27,13 @@ from config import (
     ALERT_COOLDOWN_SECONDS, HTTP_TIMEOUT_SECONDS, ALERT_RECIPIENTS,
     DRY_CONTACT_ENABLED, DRY_CONTACT_GPIO_PIN,
     DRY_CONTACT_NORMAL_VALUE, DRY_CONTACT_POLL_SECONDS,
+    DRY_CONTACT_SOURCE, DRY_CONTACT_HOST_PORT, DRY_CONTACT_HOST_BAUD,
+    DRY_CONTACT_LIVENESS_SECONDS,
 )
 from modem_detect import detect_modem_port, send_at_command
 from dtmf_decoder import DtmfDecoder
+from locks import at_lock  # RLock reentrant partage du port AT (cf locks.py)
+from dry_contact import parse_dc_line, raw_to_state, decide_report  # logique pure (cf dry_contact.py)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,9 +42,6 @@ logging.basicConfig(
 logger = logging.getLogger("modem_gateway")
 
 GATEWAY_HEADERS = {"X-Gateway-Key": GATEWAY_KEY}
-
-# Lock partage pour l'acces serie au port AT
-at_lock = threading.Lock()
 
 
 # ── Helpers HTTP ─────────────────────────────────────────────────────────────
@@ -454,7 +456,24 @@ class HealthMonitorThread(threading.Thread):
                 logger.error(f"Erreur alerte SMS → {recipient} : {e}")
 
 
-# ── Dry Contact Monitor Thread (INV-120) ─────────────────────────────────────
+# ── Dry Contact Monitor Threads (INV-120) ────────────────────────────────────
+
+def _report_dry_contact_state(gateway_id: str, state: str):
+    """POST /internal/alarms/report-state {gateway_id, state}. Erreurs HTTP
+    swallowed — le prochain poll retransmet (idempotent côté backend).
+    Partagé par les moniteurs modem et hôte."""
+    body = {"gateway_id": gateway_id, "state": state}
+    try:
+        result = _post_to_backend("/internal/alarms/report-state", json_data=body)
+        if result is None:
+            logger.debug(
+                f"DryContact report-state : backend injoignable (state={state}). Retry next poll."
+            )
+        else:
+            logger.debug(f"DryContact report-state : state={state} → {result}")
+    except Exception as e:
+        logger.error(f"DryContact report-state erreur : {e}")
+
 
 class DryContactMonitorThread(threading.Thread):
     """INV-120 V2 — surveille un contact sec NC câblé sur GPIO 43 du SIM7600.
@@ -523,7 +542,7 @@ class DryContactMonitorThread(threading.Thread):
                     time.sleep(self.poll_interval)
                     continue
 
-                state = "closed" if raw == self.normal_value else "open"
+                state = raw_to_state(raw, self.normal_value)
 
                 if state != self._last_logged_state:
                     if self._last_logged_state is None:
@@ -561,22 +580,122 @@ class DryContactMonitorThread(threading.Thread):
         return None
 
     def _report_state(self, state: str):
-        """POST /internal/alarms/report-state. Erreurs HTTP swallowed — le
-        prochain poll retransmet l'état (idempotent côté backend)."""
-        body = {"gateway_id": self.gateway_id, "state": state}
-        try:
-            result = _post_to_backend("/internal/alarms/report-state", json_data=body)
-            if result is None:
-                logger.debug(
-                    f"DryContact report-state : backend injoignable ou erreur HTTP "
-                    f"(state={state}). Retry au prochain poll."
+        _report_dry_contact_state(self.gateway_id, state)
+
+
+class HostDryContactMonitorThread(threading.Thread):
+    """INV-120 V2 — contact sec lu sur un microcontrôleur USB (Arduino), PAS le
+    modem. Découple le contact-sec du SIM7600 : il marche même modem HS (le
+    modem drop régulièrement → avant, contact aveugle en silence).
+
+    Le firmware (cf gateway/firmware/dry_contact_r4/) pousse des lignes
+    `DC:<0|1>` en continu (heartbeat ~1 Hz + sur changement). Mapping identique
+    au moniteur modem via `raw_to_state` : `raw == normal_value` → 'closed'.
+
+    Cadence : POST /internal/alarms/report-state toutes les `poll_seconds` avec
+    le dernier état connu, **tant qu'il est frais** (< `liveness_seconds`). Si le
+    µC se tait (débranché/HS) au-delà, on cesse de reporter → le backend voit le
+    silence (INV-122) au lieu d'un état périmé. Reconnexion auto si le port tombe.
+    """
+
+    def __init__(
+        self,
+        port: str,
+        baud: int,
+        gateway_id: str,
+        normal_value: int,
+        poll_seconds: float,
+        liveness_seconds: float,
+    ):
+        super().__init__(daemon=True, name="HostDryContactMonitor")
+        self.port = port
+        self.baud = baud
+        self.gateway_id = gateway_id
+        self.normal_value = normal_value
+        self.poll_interval = max(0.5, poll_seconds)
+        self.liveness = max(2.0, liveness_seconds)
+        self.running = True
+        self._last_logged_state: str | None = None
+
+    def _resolve_port(self) -> str | None:
+        """Port explicite, sinon auto-détect (by-id Arduino puis ttyACM*)."""
+        if self.port:
+            return self.port
+        for pat in (
+            "/dev/serial/by-id/*Arduino_UNO_R4*",
+            "/dev/serial/by-id/*Arduino*",
+            "/dev/ttyACM*",
+        ):
+            matches = sorted(glob.glob(pat))
+            if matches:
+                return matches[0]
+        return None
+
+    def run(self):
+        logger.info(
+            f"HostDryContactMonitorThread demarre (gateway_id={self.gateway_id}, "
+            f"port={self.port or 'auto'}, poll={self.poll_interval:.1f}s, "
+            f"normal_value={self.normal_value}, liveness={self.liveness:.0f}s)"
+        )
+        while self.running:
+            port = self._resolve_port()
+            if not port:
+                logger.warning(
+                    "HostDryContact : aucun port µC USB trouve (Arduino debranche ?). Retry 5s."
                 )
-            else:
-                logger.debug(
-                    f"DryContact report-state : state={state} → backend response={result}"
+                time.sleep(5.0)
+                continue
+            try:
+                self._serve(port)
+            except Exception as e:
+                logger.error(f"HostDryContact : erreur sur {port} : {e}. Reouverture dans 3s.")
+                time.sleep(3.0)
+
+    def _serve(self, port: str):
+        latest_raw: int | None = None
+        latest_ts = 0.0
+        last_post = 0.0
+        silent_warned = False
+        logger.info(f"HostDryContact : ouverture {port} @{self.baud}")
+        with serial.Serial(port, self.baud, timeout=1.0) as ser:
+            while self.running:
+                raw_line = ser.readline().decode(errors="replace")
+                v = parse_dc_line(raw_line)
+                now = time.monotonic()
+                if v is not None:
+                    latest_raw = v
+                    latest_ts = now
+
+                if now - last_post < self.poll_interval:
+                    continue
+                last_post = now
+
+                state = decide_report(
+                    latest_raw, latest_ts, now, self.liveness, self.normal_value,
                 )
-        except Exception as e:
-            logger.error(f"DryContact report-state erreur : {e}")
+                if state is None:
+                    if not silent_warned:
+                        logger.warning(
+                            f"HostDryContact ({self.gateway_id}) : µC muet >{self.liveness:.0f}s "
+                            f"— arret du report (le backend voit le silence)"
+                        )
+                        silent_warned = True
+                        self._last_logged_state = None  # recovery sera reloguee
+                    continue
+                silent_warned = False
+
+                if state != self._last_logged_state:
+                    if self._last_logged_state is None:
+                        logger.info(
+                            f"HostDryContact ({self.gateway_id}) : etat raw={latest_raw} → {state}"
+                        )
+                    else:
+                        logger.warning(
+                            f"HostDryContact ({self.gateway_id}) : transition "
+                            f"{self._last_logged_state} → {state} (raw={latest_raw})"
+                        )
+                    self._last_logged_state = state
+                _report_dry_contact_state(self.gateway_id, state)
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -634,19 +753,37 @@ def main():
 
     # INV-120 V2 — poll level-based contact sec NC (opt-in via DRY_CONTACT_ENABLED)
     if DRY_CONTACT_ENABLED:
-        threads.append(
-            DryContactMonitorThread(
-                ser=ser,
-                gateway_id=GATEWAY_ID,
-                gpio_pin=DRY_CONTACT_GPIO_PIN,
-                normal_value=DRY_CONTACT_NORMAL_VALUE,
-                poll_seconds=DRY_CONTACT_POLL_SECONDS,
+        if DRY_CONTACT_SOURCE == "host":
+            threads.append(
+                HostDryContactMonitorThread(
+                    port=DRY_CONTACT_HOST_PORT,
+                    baud=DRY_CONTACT_HOST_BAUD,
+                    gateway_id=GATEWAY_ID,
+                    normal_value=DRY_CONTACT_NORMAL_VALUE,
+                    poll_seconds=DRY_CONTACT_POLL_SECONDS,
+                    liveness_seconds=DRY_CONTACT_LIVENESS_SECONDS,
+                )
             )
-        )
-        logger.info(
-            f"Contact sec active : gateway_id={GATEWAY_ID}, GPIO pin{DRY_CONTACT_GPIO_PIN}, "
-            f"poll={DRY_CONTACT_POLL_SECONDS:.1f}s, normal_value={DRY_CONTACT_NORMAL_VALUE}"
-        )
+            logger.info(
+                f"Contact sec active (source=host) : gateway_id={GATEWAY_ID}, "
+                f"port={DRY_CONTACT_HOST_PORT or 'auto'}, poll={DRY_CONTACT_POLL_SECONDS:.1f}s, "
+                f"normal_value={DRY_CONTACT_NORMAL_VALUE}"
+            )
+        else:
+            threads.append(
+                DryContactMonitorThread(
+                    ser=ser,
+                    gateway_id=GATEWAY_ID,
+                    gpio_pin=DRY_CONTACT_GPIO_PIN,
+                    normal_value=DRY_CONTACT_NORMAL_VALUE,
+                    poll_seconds=DRY_CONTACT_POLL_SECONDS,
+                )
+            )
+            logger.info(
+                f"Contact sec active (source=modem) : gateway_id={GATEWAY_ID}, "
+                f"GPIO pin{DRY_CONTACT_GPIO_PIN}, poll={DRY_CONTACT_POLL_SECONDS:.1f}s, "
+                f"normal_value={DRY_CONTACT_NORMAL_VALUE}"
+            )
     else:
         logger.info("Contact sec desactive (DRY_CONTACT_ENABLED=false)")
 

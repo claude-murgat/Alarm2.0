@@ -136,7 +136,9 @@ Si tous OK : re-tag :stable, POST `kind=manual_override` `actor=github-actions:a
 
 **Philosophie "tout ce qui a passé CI est safe"** : le canary auto + soak 10 min + rollback auto (cf §4-5) absorbent le résidual risk. Le gate manuel V1.0 avait du sens quand canary était lui-même manuel — depuis V1.5 (PR #126, orchestrateur auto 3→2→1), il devient friction inutile.
 
-**Qui peut promouvoir** : implicitement, **tout merger sur master**. Le bot IA `alarm-murgat-bot[bot]` ne peut pas merger sans label `ai:approved` humain (cf `.github/workflows/ai-merge.yml`) → garantit que le bot ne déclenche pas indirectement la promo. Check `actor != bot` reste actif dans le workflow en défense en profondeur (cf §7).
+**Qui peut promouvoir** : implicitement, **tout merger sur master**. Le bot IA `alarm-murgat-bot[bot]` ne peut pas merger sans label `ai:approved` humain (cf `.github/workflows/ai-merge.yml`).
+
+> **Correctif 2026-06-16 (garde provenance)** — l'ancien check `actor != bot` (exit 1 si l'actor du run CI était le bot) partait d'une prémisse fausse : depuis que l'auto-merge est la norme, c'est le bot qui **effectue** le merge de *toutes* les PR (humaines incluses), donc il est l'`actor` de toutes. Le check bloquait donc **100 % des promos** (aucune promo `:stable` n'a abouti entre le 2026-06-12 et le 2026-06-16 — f4bcd55 #162, 770b023 #165, 3735beb #166 tous en échec sur ce seul step alors que CI/CD Build/Smoke étaient verts). La garde vérifie désormais la **provenance** plutôt que l'identité du merger : actor humain → promo ; actor bot **avec** `ai:approved` sur la PR du sha (preuve de sanction humaine, label persistant post-merge) → promo ; actor bot **sans** `ai:approved` → bloqué. La défense en profondeur de §7 est conservée (du code bot non revu n'atteint pas `:stable`), sans le faux positif.
 
 **Notification post-promo** : event SQL `manual_override` actor `github-actions:auto-promote` dans `deployment_events` (visible dans dashboard `/admin/deployments`) + step summary GH lisible. (V2 envisagé : email automatique, cf §7.)
 

@@ -589,7 +589,7 @@ côté on-site → cluster en panne). Toujours :
 - [ ] Valider le cluster Patroni (replication, failover)
 
 ### Trous identifiés à compenser ultérieurement
-- [ ] **Phase 2 — Waveshare SIM7600** : udev rules, ModemManager off (déjà fait), gateway Python, mode ECM 4G
+- [x] **Phase 2 — Waveshare SIM7600** : DÉPLOYÉE (2026-06) — gateway SMS/voix (`modem_gateway.py`) + **secours internet 4G/LTE** (QMI, pas ECM) + **watchdog modem** (auto-récup drop USB + alerte email). Déploiement reproductible en une commande : `sudo bash infra/onsite/install.sh`. Runbook : [`FAILOVER_4G.md`](FAILOVER_4G.md). SIM réelle = Sosh (APN `orange`). **Contact sec** : lu depuis 2026-06-18 par un **Arduino UNO R4 sur USB** (`DRY_CONTACT_SOURCE=host`, firmware `gateway/firmware/dry_contact_r4/`), **découplé du modem** (cf INV-120) — auparavant sur GPIO 43 du modem, abandonné car couplé au circuit d'allumage PWR (un contact fermé empêchait le boot du module).
 - [ ] **Phase 3 — CD V1** : build GHCR, promotion `:stable`, pull-based via systemd timer, canary order, auto-rollback
 - [ ] **Phase 4 — CD V2** : auto-fix prod via bot IA (après ≥10 PRs propres consécutives du bot)
 - [ ] Layout LVM si la machine n'a pas été installée avec (réévaluer au prochain reset)
@@ -616,6 +616,26 @@ de la nouvelle machine. Spécifiquement :
 - `alarm-bot.private-key.pem` (si runner self-hosted déployé sur cette machine — non en V1)
 
 Tout le reste (fichiers `infra/onsite/*`) est strictement réutilisable sans modification.
+
+### Stack modem (gateway SMS/voix/contact + secours 4G + watchdog)
+
+Une fois le nœud de base provisionné et le user `alarm-gateway` créé, déployer toute la
+stack modem en une commande idempotente depuis un checkout du repo sur la machine :
+
+```bash
+sudo bash infra/onsite/install.sh
+```
+
+Elle copie les units + scripts (`/opt/alarm/`), déploie le code gateway (`modem_gateway.py`)
+vers `/opt/alarm-gateway/`, ajoute `alarm-gateway` au groupe `dialout`, pose le drop-in
+systemd, et enable les services. Ensuite : poser les secrets `GATEWAY_KEY`
+(`/etc/alarm-gateway.env`, doit matcher le backend) et `SMTP_*`
+(`/opt/alarm/.env.prod.{node<N>,secrets}`, pour les alertes email du watchdog), puis
+`sudo systemctl restart alarm-sms-gateway`. Valider avec `sudo APN=orange bash
+scripts/smoketest-4g.sh`. Runbook complet : [`FAILOVER_4G.md`](FAILOVER_4G.md).
+
+> ⚠️ À ce jour seul **onsite-2** a une SIM7600 physique — la stack modem ne tourne que là.
+> La redondance 2 gateways (design INV-120 V2, OR fail-to-alarm) attend une 2e carte sur onsite-1.
 
 ---
 

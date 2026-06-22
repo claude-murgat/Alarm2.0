@@ -232,9 +232,21 @@ Tous les 30s, si `user.last_heartbeat < now - 60s` ET `is_online=True` → `is_o
 
 <!-- INV-042 déplacé en section 12 (meta / outils de test) -->
 
-### INV-043 [M] ⚠️ Heartbeat sur replica → 503
-Un heartbeat envoyé à un noeud replica renvoie 503 (l'app doit failover sur le primary).
-- **Pourquoi** : seul le primary écrit.
+### INV-043 [M] ⚠️ Heartbeat sur replica → proxy au leader (200) ; 503 seulement si aucun leader joignable (révisé 2026-06-17)
+Un heartbeat envoyé à un noeud replica est **forwardé au leader** via WireGuard (`_proxy_heartbeat_to_primary`) qui exécute l'écriture et renvoie 200. Comportement **uniforme sur tous les nœuds** (`HEARTBEAT_PROXY_ON_REPLICA`, défaut **true**). Le 503 n'est renvoyé que si **aucun leader n'est joignable** (panne cluster / pas de quorum) ou si le flag kill-switch est mis à `false`.
+- **Pourquoi** : à terme **n'importe quel nœud peut être joignable depuis l'extérieur** (pas seulement le cloud). Un téléphone externe/mobile qui tombe sur un replica ne peut PAS rotater vers les autres nœuds (LAN privé, ou cloud tombé) → s'il recevait 503, "connexion perdue" perpétuelle alors que le cluster est sain. En relayant côté backend, **tout** nœud edge sait servir un client externe, même replica. Règle uniforme = pas de point de défaillance « seul le cloud sait relayer ». Le leader reste où Patroni l'a élu (souvent onsite, bon pour la gateway SMS) ; les replicas ne sont que des relais d'entrée.
+- **Anti-boucle** : le proxy ajoute le header `X-Heartbeat-Proxied: 1`. Un nœud qui reçoit un heartbeat déjà proxifié ne le re-proxifie PAS (il l'exécute s'il est leader, sinon 503). Le nœud d'entrée itère ses peers jusqu'au leader ; pas de récursion replica→replica.
+- **Évolution** : avant 2026-06-16, replica → 503 sec (l'app rotatait sur le LAN, cf INV-ANDROID-304). Étape intermédiaire 2026-06-16 : proxy activé uniquement sur le nœud cloud. Depuis 2026-06-17 : proxy par défaut partout (décision propriétaire — résilience à la chute du cloud + onsite bientôt joignables de l'extérieur).
+- **Kill-switch** : `HEARTBEAT_PROXY_ON_REPLICA=false` restaure le 503 sec (chemin testé). En dev/CI single-node le nœud est leader → proxy jamais déclenché.
+- **Couverture** : `tests/integration/test_heartbeat_proxy_inv043.py` (tier 2, 4 tests) : leader→200, replica+kill-switch→503, replica défaut→proxy 200, replica+déjà-proxifié→503 (anti-boucle). + `test_failback.py` (tier 4) valide la **continuité** des heartbeats à travers un failover (l'app garde le 200 via le nouveau leader, relayé ou direct), plus la "rotation vers le leader exact".
+
+### INV-044 [M] ⚠️ Écriture `/api/*` reçue par un replica → proxy au leader (nouveau 2026-06-17)
+Toute requête **mutante** (`POST`/`PUT`/`PATCH`/`DELETE`) sur un chemin `/api/*` reçue par un nœud **replica** est **forwardée au leader** (via WireGuard, mêmes peers `PEER_TEST_URLS` que INV-043) qui exécute l'écriture ; la réponse du leader est **relayée telle quelle** (200/401/429/…). C'est la **généralisation de INV-043** (heartbeat) à **toutes les écritures applicatives**. Kill-switch `WRITE_PROXY_ON_REPLICA`, défaut **true** sur tous les nœuds.
+- **Pourquoi** : l'**interface web** est servie par un nœud **fixe** (souvent le cloud OVH, seul joignable publiquement) et **ne peut pas faire tourner les URLs** comme l'app mobile (INV-ANDROID-304). Si ce nœud est replica, `POST /api/auth/login` — qui **écrit** (refresh token persistant INV-079 + `log_event`) — échoue en `ReadOnlySqlTransaction` (500) → **impossible de se connecter**. En relayant côté backend, l'UI web (login, config escalade, CRUD users) fonctionne **quel que soit le primary**, ce qui permet de garder le leader Patroni sur un **onsite** (bon pour l'écriture via la gateway SMS) sans casser l'admin web depuis le cloud.
+- **Périmètre** : seuls les chemins `/api/*` sont relayés. **Exclus** (endpoints qui gèrent eux-mêmes leur comportement replica) : `/api/devices/heartbeat` (relai dédié INV-043, propre header anti-boucle `X-Heartbeat-Proxied`), `/api/deployments/*` (plumbing CD auth gateway-key : `POST /events` a son propre garde replica→503 et les scripts CD découvrent le leader via `discover_leader()`/`GET /health`), et `/api/test/*` (fan-out propre + désactivé en prod, INV-076). Les endpoints **node-to-node** sont sous `/internal/*` (gateway SMS/voix `/internal/sms` `/internal`, `alarms_internal` `/internal/alarms`) : ils ne commencent pas par `/api/` → **jamais relayés**, leur routage est géré en amont.
+- **Anti-boucle** : le proxy ajoute `X-Write-Proxied: 1`. Un replica qui reçoit une écriture **déjà proxifiée** ne la ré-exécute PAS (il n'est pas leader) ni ne la re-proxifie : il renvoie `503` + header `X-Write-Proxy-Declined: 1`, signal qui fait passer le nœud d'entrée au **peer suivant** jusqu'au leader. Pas de récursion replica→replica.
+- **Kill-switch** : `WRITE_PROXY_ON_REPLICA=false` restaure l'ancien comportement (l'écriture atteint l'endpoint local et échoue en read-only). En dev/CI single-node le nœud est leader → proxy jamais déclenché (aucun impact sur la suite de tests existante).
+- **Couverture** : `tests/integration/test_write_proxy_inv044.py` (tier 2) : leader→exécute local, replica défaut→proxy, replica déjà-proxifié→503+`X-Write-Proxy-Declined` (anti-boucle), kill-switch→pas de proxy, `/api/devices/heartbeat` exclu (INV-043 garde la main), `/api/deployments` exclu, GET non relayé.
 
 ---
 
@@ -333,6 +345,20 @@ Pas de Call identique (`to_number`, `alarm_id`) en état `called_at=NULL, retrie
 SMS/Call avec `retries >= 3` n'apparaît plus dans `/internal/sms|calls/pending`.
 - **Pourquoi** : éviter retry infini sur numéro invalide.
 - **Couverture** : E2E `TestSmsAndHealth::test_sms_excluded_after_max_retries`.
+
+### INV-124 [H] ✅ Corps du SMS d'alarme : instruction d'acquittement + lien supervision
+Le corps du SMS d'alarme métier (escalade, `_enqueue_sms_for_user`) doit (a) instruire
+l'opérateur d'acquitter en **répondant `1`** au SMS, et (b) contenir le **lien de supervision
+`https://supervision.charlesmurgat.com`**.
+- **Pourquoi** : la gateway sait recevoir l'ack par SMS (`SmsReceiverThread` : corps `1`/`ok`/`oui`/`ack`
+  → `POST /internal/alarms/active/ack-by-phone`, cf `gateway/modem_gateway.py`), **mais** le SMS
+  sortant ne le disait pas → l'opérateur qui ne connaît pas le système ne sait pas qu'il peut
+  acquitter par réponse SMS, et n'a aucun lien pour rejoindre la supervision. Décision propriétaire
+  2026-06-17. Ne concerne **pas** les SMS de ping isolation (INV-067, body `[ALARME-MURGAT-PING]`).
+- **Contrainte encodage** : rester en GSM-7 (pas d'accent dans la partie statique) pour ne pas
+  basculer en UCS-2 (160→70 car.) — préfixe `ALARME` et instruction `Repondez 1 pour acquitter`
+  sans accent. Dédoublonnage INV-062 intact (body déterministe par `severity`+`title`).
+- **Couverture** : E2E `TestSmsCallTimer::test_sms_body_has_ack_instruction_and_supervision_link`.
 
 ### INV-065 [C] ⚠️ Gateway key obligatoire
 `/internal/sms/*` et `/internal/calls/*` nécessitent header `X-Gateway-Key` valide.
@@ -708,20 +734,35 @@ original_created_at_inv018.py::test_inv018_gateway_report_state_alarm_sets_
 original_created_at` (adapté du V1, vérifie que `_create_gateway_alarm` fige
 bien `original_created_at` au moment du `POST /report-state`).
 
-**Câblage hardware retenu** (inchangé V1, validé empiriquement 2026-05-13
-sur node2) :
-- Mode GPIO sur HAT Waveshare SIM7600X, pin GPIO 43 du module
-  (silkscreen "IO43"). Câblage `3V3 ─── [contact NC] ─── IO43`, zéro
-  composant externe. Repos NC fermé → lit 1. Alarme NC ouvert → lit 0.
-- Côté gateway, lecture brute via `AT+CGGETV=43`, mapping `value == 1`
-  → `"closed"`, `value == 0` → `"open"`.
-- Mode ADC abandonné : maintenir ADC1 à GND >5 s freeze le firmware
-  modem (recovery uniquement via PWRKEY). GPIO 43 supporte les 2 états
-  sans corruption.
+**Source de lecture du contact** (`DRY_CONTACT_SOURCE`, cf `gateway/config.py`).
+Le protocole backend ci-dessus (`report-state`, réconciliation, OR fail-to-alarm)
+est **identique quelle que soit la source** — seul le mode de lecture côté gateway
+diffère.
+
+- **Mode `host` — RETENU EN PROD (onsite-2, depuis 2026-06-18)** : le contact NC est
+  lu par un **microcontrôleur USB (Arduino UNO R4)** branché sur le mini-PC, **pas par
+  le modem**. Câblage : contact NC entre une GPIO de l'Arduino et **GND** (`INPUT_PULLUP`,
+  zéro composant) → fermé = `DC:0`, ouvert/coupé = `DC:1`. Le firmware
+  (`gateway/firmware/dry_contact_r4/`) pousse `DC:<0|1>` sur l'USB-série ;
+  `HostDryContactMonitorThread` mappe via `raw_to_state` (`DRY_CONTACT_NORMAL_VALUE=0`)
+  et POST le même `report-state`. **Découple le contact-sec du SIM7600** : il reste
+  fonctionnel même quand le modem drop du bus USB (récurrent). Détection de vie : µC
+  muet > `DRY_CONTACT_LIVENESS_SECONDS` (5 s) → arrêt du report (backend voit le silence).
+  Validé bout-en-bout 2026-06-18 (Modbus PLC bit 101 → contact → Arduino → gateway →
+  alarme créée + auto-résolution).
+
+- **Mode `modem` — LEGACY (défaut historique, déconseillé)** : pin GPIO 43 du module
+  SIM7600 (silkscreen "IO43"), câblage `3V3 ─── [contact NC] ─── IO43`, lecture
+  `AT+CGGETV=43`, mapping `value == 1` → `"closed"`, `0` → `"open"`
+  (`DRY_CONTACT_NORMAL_VALUE=1`). **Abandonné en prod** : GPIO 1,8 V, pulls imposés, et
+  surtout **couplé au circuit d'allumage PWR** du modem (un contact fermé au cold-boot
+  empêche le module de démarrer — incidents 2026-06), + contact aveugle quand le modem
+  drop. Mode ADC déjà abandonné avant (ADC1 à GND >5 s freeze le firmware modem).
 
 ### INV-122 [H] ✅ Redondance hardware multi-gateway, agrégation OR fail-to-alarm
 Deux (ou plus) gateways onsite reçoivent le **même contact NC physiquement
-splitté** sur leurs IO43 respectifs. Le backend agrège leurs `state`
+splitté** sur leurs entrées respectives (Arduino en mode `host`, ou IO43 du
+modem en mode `modem` legacy). Le backend agrège leurs `state`
 reportés selon la politique **OR fail-to-alarm** :
 **au moins une** gateway alive reportant `"open"` → alarme active.
 
