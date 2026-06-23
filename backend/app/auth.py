@@ -1,5 +1,6 @@
 import os
 import uuid
+import hashlib
 from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -15,6 +16,10 @@ ACCESS_TOKEN_EXPIRE_HOURS = 24
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
+# INV-079 : security scheme tolérant pour /auth/refresh — accepte un header
+# Bearer absent OU expiré sans lever 401, ce qui permet à l'endpoint de
+# basculer sur le mode refresh_token-dans-le-body quand l'access est mort.
+security_optional = HTTPBearer(auto_error=False)
 
 
 def hash_password(password: str) -> str:
@@ -35,6 +40,70 @@ def create_access_token(user_id: int) -> str:
         "jti": str(uuid.uuid4()),
     }
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def _hash_refresh_token(raw: str) -> str:
+    """INV-079 : SHA-256 hex d'un refresh token brut. Déterministe sans sel
+    (le UUID4 a 122 bits d'entropie, pas de brute-force possible). Le hash
+    est ce qui est stocké en DB ; le brut n'existe qu'en transit + client.
+    """
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def create_refresh_token(db: Session, user_id: int) -> str:
+    """INV-079 : génère un refresh token UUID4 opaque, persiste son SHA-256
+    en DB, return la valeur BRUTE (à renvoyer au client une seule fois).
+
+    Le token n'est PAS un JWT — c'est un identifiant aléatoire dont la
+    légitimité est vérifiée uniquement par lookup DB (sur le hash). Cela
+    permet la révocation côté serveur (impossible avec un JWT stateless) et
+    garantit qu'un token compromis cesse de fonctionner dès qu'on flip
+    `revoked`. Le clair n'est jamais persisté (cf docstring du modèle).
+    """
+    from .models import RefreshToken
+    raw = str(uuid.uuid4())
+    db.add(RefreshToken(user_id=user_id, token_hash=_hash_refresh_token(raw)))
+    db.commit()
+    return raw
+
+
+def validate_refresh_token(db: Session, token: str) -> User | None:
+    """INV-079 : vérifie qu'un refresh token brut est valide (son hash existe,
+    non révoqué, user existe encore). Update `last_used_at` au passage.
+    Retourne le User associé ou None si invalide.
+    """
+    from .models import RefreshToken
+    rt = db.query(RefreshToken).filter(
+        RefreshToken.token_hash == _hash_refresh_token(token),
+        RefreshToken.revoked == False,  # noqa: E712 SQLAlchemy bool comparison
+    ).first()
+    if rt is None:
+        return None
+    user = db.query(User).filter(User.id == rt.user_id).first()
+    if user is None:
+        # Le user a été supprimé — invalider le refresh token au passage
+        rt.revoked = True
+        db.commit()
+        return None
+    rt.last_used_at = datetime.now(timezone.utc)
+    db.commit()
+    return user
+
+
+def revoke_refresh_tokens_for_user(db: Session, user_id: int) -> int:
+    """INV-079 : révoque tous les refresh tokens d'un user (logout, admin
+    de sécurité, suspicion de vol). Retourne le nombre de tokens affectés.
+
+    Pas encore appelé par un endpoint (cf follow-up /auth/logout dans la
+    spec INV-079) — fourni pour la révocation manuelle/scriptée et la V2.
+    """
+    from .models import RefreshToken
+    count = db.query(RefreshToken).filter(
+        RefreshToken.user_id == user_id,
+        RefreshToken.revoked == False,  # noqa: E712
+    ).update({"revoked": True})
+    db.commit()
+    return count
 
 
 def get_current_user(
@@ -64,3 +133,25 @@ def get_current_admin(
             detail="Accès réservé aux administrateurs",
         )
     return current_user
+
+
+def get_current_user_optional(
+    credentials: HTTPAuthorizationCredentials = Depends(security_optional),
+    db: Session = Depends(get_db),
+) -> User | None:
+    """INV-079 : version optionnelle de get_current_user qui retourne None
+    au lieu de raise 401 quand le Bearer est absent OU expiré OU invalide.
+
+    Usage : endpoint /auth/refresh qui doit accepter deux modes (Bearer
+    valide pour le legacy INV-074, OU refresh_token dans le body pour le
+    nouveau INV-079) sans qu'un Bearer expiré ne bloque l'accès au mode
+    body.
+    """
+    if credentials is None:
+        return None
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = int(payload.get("sub"))
+    except (JWTError, ValueError, TypeError):
+        return None
+    return db.query(User).filter(User.id == user_id).first()

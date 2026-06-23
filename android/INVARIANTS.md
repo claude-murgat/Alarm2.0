@@ -67,10 +67,12 @@ Quand le polling détecte une alarme active (`currentAlarm != null`, ID différe
 - **Couverture** : indirect (test03_acknowledgeShowsStatusAndRemainingTime vérifie que l'ack trigger stopAlarmSound via l'absence de sonnerie ensuite — mais l'absence n'est pas vérifiée directement).
 - **Manque** : test qui vérifie `soundManager.isPlaying() == true` après alarme affichée.
 
-### INV-ANDROID-003 [C] ⚠️ Volume forcé au maximum sur le stream alarme
-À chaque `startAlarmSound()`, `audioManager.setStreamVolume(STREAM_ALARM, maxVol, 0)` est appelé.
-- **Pourquoi** : si l'utilisateur a baissé son volume la veille, la sonnerie doit quand même être audible. Le stream ALARM est par design non affecté par le mode silencieux.
-- **Manque** : aucun test ne vérifie le volume du stream après déclenchement.
+### INV-ANDROID-003 [C] ⚠️ Volume forcé à 50% du maximum sur le stream alarme (révisé 2026-06-04)
+À chaque `startAlarmSound()`, `audioManager.setStreamVolume(STREAM_ALARM, (maxVol * 0.5f).toInt(), 0)` est appelé. Le même code sert pour la sonnerie alarme métier et pour la sonnerie « hors connexion » (cf INV-ANDROID-007).
+- **Pourquoi** : si l'utilisateur a baissé son volume la veille, la sonnerie doit quand même être audible. Le stream ALARM est par design non affecté par le mode silencieux. La cible 50% est un compromis entre audibilité (toujours réveille) et agressivité ergonomique (le 100% saturait à l'oreille sur les appareils d'astreinte testés Crosscall où max=15).
+- **Changement 2026-06-04** : valeur passée de `maxVol` à `(maxVol * 0.5f).toInt()`. Décision business propriétaire après retour terrain « trop fort, agressif au réveil ». 50% reste loin au-dessus du seuil de réveil.
+- **Effet de bord persistant** : `setStreamVolume` écrit la valeur dans le réglage système (pas juste le lecteur). Si l'utilisateur ajuste manuellement, la prochaine sonnerie rebascule à 50%. `stopAlarmSound()` ne restaure pas l'ancienne valeur (inchangé vs version max).
+- **Manque** : aucun test ne vérifie le volume du stream après déclenchement (manque préexistant, indépendant du changement de cible).
 
 ### INV-ANDROID-004 [C] ⚠️ Back button désactivé dans AlarmActivity
 `onBackPressed()` overridé vide → le bouton retour ne ferme pas l'activité. L'utilisateur doit acquitter (ou utiliser "Retour au dashboard" qui ne ferme que l'activité, pas l'alarme sous-jacente).
@@ -90,7 +92,7 @@ Après `acknowledgeAlarm` réussi depuis AlarmActivity : `stopPulseAnimations()`
 ### INV-ANDROID-007 [C] ⚠️ Sonnerie "connexion perdue" utilise aussi le stream ALARM
 Quand `heartbeatLostAlarm` ou `authErrorAlarm` passent true, `connectionLostSoundManager.startAlarmSound()` est démarré (même mécanisme que l'alarme standard).
 - **Pourquoi** : une perte de connexion prolongée = même criticité qu'une alarme (on ne recevra rien).
-- **Note 2026-05-26** : la condition d'armement de `heartbeatLostAlarm` a été resserrée (cf INV-ANDROID-302 — exige aussi `noNetwork` au sens INV-ANDROID-305). Le **canal sonore et son comportement sont inchangés** ; seule la **gâchette** devient plus restrictive. `authErrorAlarm` reste indépendant : la sonnerie sur erreur d'auth ne dépend PAS de l'état réseau (token expiré = action manuelle requise quelle que soit la connectivité).
+- **Note 2026-06-03** (révision) : la gâchette de `heartbeatLostAlarm` est définie par INV-ANDROID-308 (absence de SMS `[ALARME-MURGAT-PING]` pendant 5 min après perte heartbeat HTTP). Le **canal sonore et son comportement sont inchangés** — seule la condition d'armement évolue (l'ancienne formulation 2026-05-26 « heartbeat + noNetwork au sens INV-305 » est obsolète depuis le pivot INV-308). `authErrorAlarm` reste indépendant : la sonnerie sur erreur d'auth ne dépend PAS de l'état réseau (token expiré = action manuelle requise quelle que soit la connectivité).
 - **Couverture** : test09 vérifie l'affichage du bandeau, pas la sonnerie audio.
 - **Manque** : test qui vérifie l'état du MediaPlayer après `heartbeatLostAlarm=true`.
 
@@ -123,22 +125,23 @@ Calcul dans `updateStatus()` :
 - **Pourquoi** : comprendre pourquoi on ne reçoit (pas) d'alarme.
 - **Manque** : aucun test ne couvre l'état "En attente" spécifique au mode veille.
 
-### INV-ANDROID-104 [H] ⚠️ Alerte "Connexion perdue" : bandeau permanent, pas toast — découplé de la sonnerie depuis 2026-05-26
-Le bandeau "Connexion perdue avec le serveur" doit apparaître **dès que le heartbeat est perdu** (sans attendre la condition de sonnerie de INV-ANDROID-302). La sonnerie locale, elle, n'est armée que si le réseau est aussi totalement perdu.
+### INV-ANDROID-104 [H] ⚠️ Alerte "Connexion perdue" : bandeau permanent, pas toast — découplé de la sonnerie (révisé 2026-06-03 sur INV-308)
+Le bandeau "Connexion perdue avec le serveur" doit apparaître **dès que le heartbeat est perdu** (sans attendre la condition de sonnerie d'INV-ANDROID-308). La sonnerie locale, elle, n'est armée que si **aucun SMS `[ALARME-MURGAT-PING]` du backend** n'est arrivé dans les 5 min suivant la perte de heartbeat.
 
 2 drapeaux distincts dans `AlarmPollingService` :
 - `heartbeatLostVisual` (info) → `elapsed >= 120 000ms` depuis dernier heartbeat 2xx → bandeau VISIBLE, **pas de son**.
-- `heartbeatLostAlarm` (action) → `heartbeatLostVisual && noNetwork` (cf INV-305) → bandeau VISIBLE + sonnerie locale (INV-302).
+- `heartbeatLostAlarm` (action) → `heartbeatLostVisual && elapsed >= 5*60_000ms && lastPingReceivedElapsedMs < heartbeatLostSince` (cf INV-308) → bandeau VISIBLE + sonnerie locale.
 - `authErrorAlarm` (inchangé) → message personnalisé, bouton "Reconnexion" VISIBLE, sonnerie déclenchée (indépendant de l'état réseau, cf INV-007).
 
 Textes du bandeau :
-- `heartbeatLostVisual && !noNetwork` → "Serveur injoignable — vous recevrez les alarmes par SMS si nécessaire" (texte rassurant, pas de panique).
-- `heartbeatLostAlarm` (= heartbeat + noNetwork) → "Connexion perdue — déplacez-vous pour retrouver du réseau" (texte d'action, accompagné de la sonnerie).
+- `heartbeatLostVisual` sans condition de sonnerie atteinte → "Serveur injoignable — vous recevrez les alarmes par SMS si nécessaire" (texte rassurant, pas de panique). C'est aussi le texte pendant la fenêtre 5 min si au moins un SMS PING est arrivé après `heartbeatLostSince`.
+- `heartbeatLostAlarm` (5 min écoulées sans aucun SMS PING) → "Connexion perdue — déplacez-vous pour retrouver du réseau" (texte d'action, accompagné de la sonnerie).
 - `authErrorAlarm` → message personnalisé (ex: "Votre session a expiré..."), bouton "Reconnexion" VISIBLE.
 
 - **Pourquoi** : un toast qui disparaît en 3s = l'utilisateur ne le voit pas s'il n'a pas le téléphone en main. Un bandeau permanent force la lecture. Distinguer info-only vs action-required évite le cri-loup.
-- **Statut** : code implémenté 2026-05-27 (cf `AlarmPollingService.kt:31-50` pour les 2 drapeaux companion, `onHeartbeatFail()` pour l'armement, `DashboardActivity.kt:260+` pour le rendu 3-états).
-- **Couverture** : ⚠️ tests Espresso à étoffer (test09 actuel ne distingue pas encore les 2 textes). À ajouter dans une PR follow-up.
+- **Diagnostic cause d'échec (2026-06-15)** : `onHeartbeatFail(reason)` reçoit désormais la cause de l'échec (`"HTTP 401"`, `"HTTP 500"`, `"reseau KO (<msg>)"`) depuis l'appelant (`startHeartbeat`), qui l'extrait de `response.code()` ou `e.message`. Avant, `onHeartbeatFail()` était appelée sans argument → l'info était jetée, impossible de savoir pourquoi le heartbeat tombait (ex: heartbeat KO juste après un login réussi sur le même backend). La cause est loguée dans `AppLogger` sur **transition seulement** (1er échec, passage des 120s) **+ changement de cause** (ex: `HTTP 401 → reseau KO`), jamais à chaque tick — le heartbeat tape à 3s, logger chaque échec saturerait le buffer 500 entrées en ~25 min. La variable companion `lastHeartbeatFailReason` mémorise la dernière cause pour détecter les changements. Le 503 (replica) garde son comportement (`needsUrlSwitch`, pas d'armement de perte) mais est tracé une fois par transition.
+- **Statut** : architecture INV-308 (absence SMS) à implémenter — le code 2026-05-27 (drapeaux companion dans `AlarmPollingService.kt`) reste structurellement valable, seule la condition d'armement de `heartbeatLostAlarm` change (consulte `lastPingReceivedElapsedMs` au lieu de `NetworkAvailabilityMonitor.isNoNetwork`). Tracé cause d'échec ajouté 2026-06-15.
+- **Couverture** : ⚠️ tests Espresso à étoffer (test09 actuel ne distingue pas encore les 2 textes, ni le tracé de cause). À ajouter dans la PR d'implémentation INV-308.
 
 ### INV-ANDROID-105 [M] ⚠️ Historique affiché = 10 derniers jours filtrés sur resolved/acknowledged
 `getAlarmHistory(days=10)` appelé toutes les 10s, filtré côté client sur `status in {resolved, acknowledged}`. Affichage en liste chronologique avec timeline (dot + ligne) côté gauche.
@@ -154,6 +157,28 @@ Textes du bandeau :
 `helpFab.setOnClickListener { shareLogs() }` → `Intent.ACTION_SEND` MIME `text/plain` avec contenu `AppLogger.exportLogs(userName, version)`. Le contenu inclut un en-tête (user, version, device, Android, timestamp, count) + les 500 dernières entrées au format `[ts] tag: message`.
 - **Pourquoi** : debug à distance par l'équipe technique sans accès ADB. Mesure de résilience opérationnelle.
 - **Manque** : aucun test ne vérifie la présence du bouton ni l'envoi du share intent.
+
+### INV-ANDROID-108 [M] ❌ Bouton "Envoyer les logs" sur la page de login (pré-auth) + diagnostic login tracé — révisé 2026-06-15
+`shareLogsButton.setOnClickListener { shareLogs() }` sur `MainActivity` → mêmes `AppLogger.exportLogs(...)` + `Intent.ACTION_SEND` que INV-ANDROID-107. `user_name` = `"(non connecté)"` dans l'en-tête du export puisque la session n'a pas encore d'identité confirmée.
+- **Pourquoi** : INV-ANDROID-107 n'est accessible qu'une fois loggé. Si le login échoue (URL backend inaccessible, timeout réseau, mauvais credentials), l'opérateur ne pouvait pas exporter les logs depuis l'app — il fallait passer par ADB ou re-essayer indéfiniment. Le bouton login est explicitement conçu pour les diagnostics réseau au démarrage (rotation des URLs cluster, certificats, DNS).
+- **Tracé du flow login (2026-06-15)** : `MainActivity.login()` émet des events `AppLogger.log("Login", ...)` à chaque étape — tentative (user + URL courante), résultat de chaque essai (`HTTP <code>` ou `reseau KO (<msg>)`) y compris pendant la rotation des 3 URLs, succès (user/oncall/pos), ou échec définitif avec le code et le message affiché. Avant ce changement, aucune trace côté `AppLogger` : un login en échec (401, timeout, serveur down) n'apparaissait PAS dans l'export, rendant le bouton inutile pour diagnostiquer justement le cas qu'il vise.
+- **Message clair (2026-06-15)** : `loginErrorMessage(code)` traduit la cause en message lisible (`401` → "Identifiants incorrects (nom ou mot de passe)", `429` → "Trop de tentatives — réessayez dans 1 minute", `5xx` → "Serveur en erreur", `null`/réseau → "Serveur injoignable — vérifiez votre connexion réseau"). Remplace l'ancien `"Échec de connexion : 401"` cryptique. `ApiClient.currentBaseUrl()` ajouté pour exposer l'URL backend courante aux logs.
+- **Privacy (anti-fuite cross-user)** : `AppLogger.clear()` est appelé dans la procédure logout de `DashboardActivity` (cf code) **avant** de revenir à `MainActivity`. Garantit que le contenu de `AppLogger` au moment du clic « Envoyer les logs » sur l'écran de login ne contient QUE les events de la session courante (pré-login) ou ceux du démarrage app si pas de session précédente — jamais ceux d'un user A précédemment déconnecté.
+- **Statut** : code implémenté 2026-06-04, tracé login + messages clairs 2026-06-15 (cf `MainActivity.login()` / `loginErrorMessage()` / `shareLogs()` + `ApiClient.currentBaseUrl()` + `AppLogger.clear()` dans `DashboardActivity.logout()`).
+- **Manque** : aucun test ne vérifie la présence du bouton, l'envoi du share intent, le clear au logout, ni les events de login tracés. Tests Espresso à ajouter dans une PR follow-up.
+
+### INV-ANDROID-109 [H] ❌ Version de build dérivée automatiquement de git (anti-bump-manquant) — 2026-06-12
+`versionCode` et `versionName` du `defaultConfig` Gradle sont calculés au build time depuis git, pas hardcodés :
+- `versionCode = git rev-list --count HEAD` (nombre total de commits, monotone)
+- `versionName = "${baseVersion}.${gitCommitCount}-${gitShortSha}[-dirty]"` (ex: `1.0.188-b95d44b` ou `1.0.188-b95d44b-dirty` si l'arbre n'est pas propre)
+- Si git inaccessible (rare, build hors repo) : fallback `versionCode=1`, `versionName="1.0-unknown"`
+
+La version apparaît dans **toutes les exports `AppLogger.exportLogs()`** via l'en-tête (cf INV-ANDROID-107/108). Permet de tracer une session loguée à un commit exact.
+- **Pourquoi** : élimine la classe entière de bugs « j'ai oublié de bumper la version dans build.gradle » — chaque commit produit automatiquement une version distincte et traçable. Avant, `versionCode=1` et `versionName="1.0"` étaient hardcodés : deux APK construits à des moments différents avaient la même version, impossible de savoir lequel produisait les logs ou les remontées Crashlytics.
+- **Trade-off `-dirty`** : un build avec working tree non-commité hérite du sha du dernier commit + suffixe `-dirty`. Volontaire : on voit immédiatement qu'un APK ne correspond à aucun commit pushé (utile en debug local, à éviter en distribution).
+- **Pas d'effet sur la signature** : la build n'utilise toujours pas de signing config explicite ; les release-builds sont signés en post avec la debug-keystore (cf scripts/build_apk_release.sh à venir).
+- **Statut** : implémenté 2026-06-12 dans `android/app/build.gradle.kts` (`gitOutput()` helper + 3 `val`s en tête de fichier). Build local vérifié : versionCode=188, versionName="1.0.188-b95d44b-dirty".
+- **Manque** : pas de test (la valeur dépend de l'environnement git, difficile à fixer dans un test unitaire). Acceptable car la logique est triviale et le smoke-test « build l'APK et lis le manifest » suffit.
 
 ---
 
@@ -222,7 +247,11 @@ Champ `connectionStatus` sur DashboardActivity affiche ✅ ou ❌ selon `AlarmPo
 - **Pourquoi** : feedback immédiat de l'état réseau.
 - **Couverture** : test05 (OK), test06 (fail).
 
-### INV-ANDROID-302 [C] ⚠️ Sonnerie locale "hors connexion" : armée uniquement si perte heartbeat > 2 min ET réseau totalement perdu
+### INV-ANDROID-302 [C] ❌ SUPERSEDED (2026-06-03) — remplacé par INV-ANDROID-308 (absence de SMS ping)
+
+> **Pourquoi déprécié** : la détection "no network at all" via `NetworkAvailabilityMonitor` (INV-305) s'est avérée impossible à implémenter de façon fiable sur Android moderne (Crosscall Core-M6 / Android 15) — les APIs telephony.* sont redactées ou les callbacks ne tirent pas en mode avion. Le déclencheur business "l'opérateur est hors d'atteinte de tous les canaux" est désormais réalisé côté tél par l'absence de SMS `[ALARME-MURGAT-PING]` du backend dans les 5 min suivant la perte de heartbeat (cf INV-ANDROID-308 nouvelle version 2026-06-03). Le code Kotlin actuel reste en place comme fallback transitoire mais sera supprimé dans la même PR qui implémente INV-308 nouveau.
+
+### INV-ANDROID-302-LEGACY [C] ⚠️ (legacy, à supprimer) Sonnerie locale armée uniquement si perte heartbeat > 2 min ET réseau totalement perdu
 `heartbeatLossTimeoutMs = 120_000L` (configurable pour tests). Au-delà de ce délai depuis `heartbeatLostSince`, on évalue la connectivité réseau du téléphone (cf INV-ANDROID-305) :
 - **réseau présent** (data 4G/Wi-Fi disponible **OU** signal cellulaire voix/SMS disponible) → `heartbeatLostAlarm` reste `false`. Le bandeau visuel "Serveur injoignable" reste affiché via `heartbeatLostSince` (cf INV-ANDROID-104), mais **aucune sonnerie locale** n'est démarrée.
 - **réseau totalement perdu** (ni data **ni** signal cellulaire) → `heartbeatLostAlarm = true`, `connectionLostSoundManager.startAlarmSound()` démarre.
@@ -235,17 +264,29 @@ Le drapeau retombe à `false` dès que (a) un heartbeat repasse 2xx (cf INV-ANDR
   - `test_local_alarm_stops_when_network_returns` : à partir du cas précédent, restaurer data OU cellular → sonnerie s'arrête immédiatement, sans attendre un heartbeat 2xx.
 - **Dépendance** : INV-ANDROID-305 (définition formelle de "no network at all") et INV-ANDROID-007 (canal sonore réutilisé tel quel — seule la condition d'armement change).
 
-### INV-ANDROID-303 [H] ⚠️ Heartbeat qui revient avant timeout → reset, pas d'alerte
-Un `heartbeat.isSuccessful` reset `heartbeatLostSince=0L` et `heartbeatLostAlarm=false`. Pas d'alerte si glitch réseau passager.
+### INV-ANDROID-303 [H] ⚠️ Heartbeat qui revient avant timeout → reset complet, pas d'alerte
+Un `heartbeat.isSuccessful` reset l'intégralité de l'état "épisode hors connexion" :
+- `heartbeatLostSince = 0L`
+- `heartbeatLostAlarm = false`
+- `heartbeatLostVisual = false`
+- `lastPingReceivedElapsedMs = 0L` (cf INV-ANDROID-308 nouvelle version 2026-06-03)
+- `snoozeCount = 0`, `snoozeUntilElapsedMs = 0L` (cf INV-ANDROID-307)
+
+Pas d'alerte si glitch réseau passager.
 - **Pourquoi** : éviter les faux positifs sur passage sous tunnel / changement wifi/4G.
 - **Couverture** : test10.
 
 ### INV-ANDROID-304 [M] ⚠️ Heartbeat 503 (replica) → flag needsUrlSwitch au poll suivant
 Cas spécial : `response.code() == 503` signifie "backend est un replica, pas le primary". Le heartbeat set `needsUrlSwitch=true` (volatile) — le poll suivant détecte le flag et fait `switchToNextUrl()` + delay 4s pour laisser le heartbeat revalider.
 - **Pourquoi** : suivre automatiquement le primary après failover Patroni côté backend. Le heartbeat ne doit PAS lui-même switcher (il suit passivement l'URL courante).
+- **Complément backend 2026-06-17 (cf INV-043 révisé)** : ce mécanisme de rotation est désormais surtout un filet de secours. Côté backend, **tout** nœud replica forwarde le heartbeat au leader (via WG) et renvoie 200 — sur tous les nœuds, pas seulement le cloud (résilience : si le cloud tombe et qu'un onsite devient le point d'entrée externe, il relaie aussi). Donc en pratique l'app ne voit quasiment plus de 503 sur le heartbeat : elle reçoit un 200 (direct si elle a tapé le leader, proxifié sinon). Le `needsUrlSwitch`/rotation ne se déclenche plus que dans le cas résiduel « le nœud tapé est carrément down (connexion refusée) » ou « aucun leader joignable → 503 » (panne cluster réelle).
 - **Manque** : test Espresso dédié au scénario 503 heartbeat (test22 couvre les 503 polling, pas heartbeat).
 
-### INV-ANDROID-305 [C] ⚠️ Détection "réseau totalement perdu" = ni data ni signal cellulaire
+### INV-ANDROID-305 [C] ❌ SUPERSEDED (2026-06-03) — détection "no network at all" abandonnée
+
+> **Pourquoi déprécié** : APIs Android telephony.* (ServiceState, callback ServiceStateListener, polling serviceState) inutilisables sur ROMs modernes (Crosscall Android 15 : callback jamais tiré, état figé même en mode avion). Le test concret de joignabilité opérationnelle se fait désormais via la réception périodique de SMS `[ALARME-MURGAT-PING]` du backend (cf INV-ANDROID-308 nouvelle version 2026-06-03). Le code `NetworkAvailabilityMonitor.kt` reste en place comme fallback transitoire (utilisé par INV-302-LEGACY) mais sera supprimé dans la PR INV-308.
+
+### INV-ANDROID-305-LEGACY [C] ⚠️ (legacy, à supprimer) Détection "réseau totalement perdu" = ni data ni signal cellulaire
 Le téléphone est considéré "sans aucun réseau" si **les deux** conditions sont vraies simultanément :
 1. **Pas de data utilisable** : `ConnectivityManager.getActiveNetwork()` retourne `null`, **ou** le `NetworkCapabilities` du réseau actif ne contient pas `NET_CAPABILITY_INTERNET` + `NET_CAPABILITY_VALIDATED`. Couvre Wi-Fi et mobile data.
 2. **Pas de signal cellulaire voix/SMS** : `TelephonyManager.getServiceState().getState() != STATE_IN_SERVICE` (ou équivalent multi-SIM via `getServiceStateForSubscriber` ≥ API 30). Couvre la capacité du téléphone à envoyer/recevoir un SMS et à passer/recevoir un appel.
@@ -268,7 +309,11 @@ Permissions nécessaires (déjà au manifest pour la plupart) : `ACCESS_NETWORK_
   - `test_data_only_loss_is_not_no_network` : couper data, garder cellular → `noNetwork = false`.
   - `test_cellular_only_loss_is_not_no_network` : couper cellular (retirer SIM côté émulateur ou forcer via `cmd phone`), garder Wi-Fi → `noNetwork = false`.
 
-### INV-ANDROID-306 [H] ⚠️ Countdown graphique pré-sonnerie (fenêtre 2 min vers INV-302)
+### INV-ANDROID-306 [H] ❌ SUPERSEDED (2026-06-03) — countdown pré-sonnerie INV-302 sans objet
+
+> **Pourquoi déprécié** : la sonnerie INV-302 elle-même est déprécié (cf ci-dessus), donc le countdown pré-sonnerie n'a plus de cible. Avec la nouvelle INV-ANDROID-308 (absence SMS pendant 5 min), un countdown équivalent serait techniquement possible (compteur de la fenêtre 5 min après `heartbeatLostSince`) mais n'est PAS spécifié dans cette V1 — l'UX préfère un déclenchement direct sans préavis (l'opérateur de garde est censé être vigilant). À reconsidérer si retour terrain l'indique.
+
+### INV-ANDROID-306-LEGACY [H] ⚠️ (legacy, à supprimer) Countdown graphique pré-sonnerie (fenêtre 2 min vers INV-302)
 Quand `heartbeatLostSince > 0L` ET `NetworkAvailabilityMonitor.isNoNetwork == true` ET `heartbeatLostAlarm == false` (= heartbeat tombé, réseau totalement perdu, mais on est encore dans la fenêtre 2 min avant que la sonnerie INV-302 ne tape), `DashboardActivity` affiche dans le bandeau "Connexion perdue" :
 - un `ArcTimerView` (composant déjà utilisé pour le countdown ack, cf INV-ANDROID-203) initialisé avec `setTime(120, remainingSec)` — l'arc se vide en sens horaire.
 - un label texte "Aucun réseau — la sonnerie va se déclencher dans : Xm Ys", remis à jour à 1 Hz par la boucle `statusUpdateJob`.
@@ -283,12 +328,12 @@ Dès que le réseau revient (data OU cellular) ou que le heartbeat repasse 2xx, 
   - `test_arc_disappears_when_network_returns` : à partir du cas précédent, `_setStatesForTest(true, true)` → ArcTimerView GONE au prochain tick.
 
 ### INV-ANDROID-307 [H] ⚠️ Snooze 5 min de la sonnerie locale (max 3 par épisode)
-Quand la sonnerie INV-302 est active (`heartbeatLostAlarm == true`), un bouton "Faire taire 5 min (N restants)" est visible **uniquement si `snoozeCount < LOCAL_ALARM_SNOOZE_MAX_COUNT` (= 3)**. Au clic :
+Quand la sonnerie INV-ANDROID-308 est active (`heartbeatLostAlarm == true`), un bouton "Faire taire 5 min (N restants)" est visible **uniquement si `snoozeCount < LOCAL_ALARM_SNOOZE_MAX_COUNT` (= 3)**. Au clic :
 - `AlarmPollingService.snoozeLocalAlarm()` est appelée. Elle incrémente `snoozeCount`, arme `snoozeUntilElapsedMs = now + 5 min`, et set `heartbeatLostAlarm = false`.
 - La sonnerie s'arrête immédiatement (`connectionLostSoundManager?.stopAlarmSound()`).
-- Le bandeau reste visible avec un countdown 5 min (réutilise le même `connectionLostArcTimer` que INV-306) et le texte "Sonnerie en sourdine — reprise prévue dans : Xm Ys".
+- Le bandeau reste visible avec un countdown 5 min (composant `ArcTimerView` partagé avec INV-203) et le texte "Sonnerie en sourdine — reprise prévue dans : Xm Ys".
 
-À l'expiration du snooze, le prochain tick de `onHeartbeatFail` ré-arme `heartbeatLostAlarm` (= sonnerie redémarre) **si les conditions sont encore vraies** (`isNoNetwork` ET `elapsed >= timeout`). Si le réseau est revenu pendant le snooze, l'épisode est terminé et la sonnerie ne repart pas.
+À l'expiration du snooze, le prochain tick de `onHeartbeatFail` ré-arme `heartbeatLostAlarm` (= sonnerie redémarre) **si les conditions INV-308 sont encore vraies** (heartbeat HTTP toujours KO ET aucun SMS PING reçu après `heartbeatLostSince`). Si un heartbeat 2xx ou un SMS PING est arrivé pendant le snooze, l'épisode est désamorcé et la sonnerie ne repart pas.
 
 Le compteur `snoozeCount` se reset à 0 **uniquement** quand un heartbeat revient 2xx (= fin d'épisode). Tant que l'épisode dure, l'opérateur peut snoozer 3 fois maximum (3 × 5 min = 15 min de répit total), après quoi le bouton disparaît et la sonnerie reste active jusqu'à action externe (retour réseau ou logout).
 
@@ -298,7 +343,79 @@ Le compteur `snoozeCount` se reset à 0 **uniquement** quand un heartbeat revien
   - `test_snooze_silences_alarm_5min` : armer sonnerie, cliquer snooze → `MediaPlayer.isPlaying() == false`, label "Sonnerie en sourdine".
   - `test_snooze_quota_3_times_then_button_gone` : 3 snoozes consécutifs → 4e affichage du bandeau : bouton GONE.
   - `test_snooze_resets_on_heartbeat_2xx` : armer sonnerie, snoozer, heartbeat OK → `snoozeCount == 0`, `snoozeUntilElapsedMs == 0`. Un futur épisode rouvre 3 snoozes.
-- **Dépendance** : INV-ANDROID-302 (la sonnerie qu'on snooze), INV-ANDROID-306 (réutilise le même `ArcTimerView` pour le countdown 5 min de fin de snooze).
+- **Dépendance** : INV-ANDROID-308 (la sonnerie qu'on snooze, nouvelle version absence-de-SMS depuis 2026-06-03). Anciennement dépendait d'INV-302 et INV-306 (legacy).
+
+### INV-ANDROID-308 [C] 🐛 Sonnerie locale "hors connexion" : **absence** de SMS du backend pendant que le heartbeat HTTP est KO (canon, 2026-06-03)
+
+**Refonte 2026-06-03** : la version précédente (SMS WAKE déclenché par réception, mergée par #153) était logiquement morte-née (cf "Pourquoi le pivot" ci-dessous). Le déclencheur est **inversé** : la sonnerie part quand l'app **ne reçoit PAS** un SMS du backend dans une fenêtre de 5 min suivant la perte de heartbeat. Cette spec annule et remplace INV-308 #153.
+
+**Machine d'état métier** :
+
+| État | Côté tél | Action |
+|---|---|---|
+| Heartbeat HTTP 2xx récent (< 3 s, cf INV-ANDROID-300) | rien à surveiller | silence |
+| Heartbeat HTTP perdu (≥ 1 échec depuis dernier 2xx) **+** SMS `[ALARME-MURGAT-PING]` reçu **après** `heartbeatLostSince` dans la fenêtre 5 min | preuve que le canal SMS marche → l'opérateur est joignable autrement, le système peut le contacter | bandeau info uniquement (cf INV-ANDROID-104 réutilisé), pas de son |
+| Heartbeat HTTP perdu **+** aucun SMS `[ALARME-MURGAT-PING]` reçu dans les 5 min suivant `heartbeatLostSince` | les deux canaux sont morts (Internet ET SMS) → vraie isolation | **sonnerie locale armée**, bouton snooze visible (cf INV-ANDROID-307) |
+| Heartbeat HTTP repasse 2xx | fin d'épisode | reset complet — `heartbeatLostSince=0`, `lastPingReceivedElapsedMs=0`, sonnerie stop, `snoozeCount=0` |
+
+**Mécanisme détaillé** :
+1. Le tél maintient une variable `lastPingReceivedElapsedMs: Long` (timestamp `SystemClock.elapsedRealtime()` du dernier SMS ping reçu, `0L` à l'init).
+2. Un `BroadcastReceiver` static (manifest, perm `RECEIVE_SMS`) écoute `SMS_RECEIVED`. Quand un SMS matche le préfixe exact `[ALARME-MURGAT-PING]`, set `lastPingReceivedElapsedMs = elapsedRealtime()`. Pas de son déclenché ici.
+3. Dans `AlarmPollingService.onHeartbeatFail` (déjà existant), au moment où `heartbeatLostSince > 0L` et `elapsed >= 5*60_000ms`, on évalue : `lastPingReceivedElapsedMs >= heartbeatLostSince` ?
+   - Si **oui** (au moins un ping ≥ depuis la perte) → `heartbeatLostVisual = true` (bandeau info, cf INV-ANDROID-104), pas de sonnerie.
+   - Si **non** (aucun ping depuis la perte de heartbeat) → `heartbeatLostAlarm = true` (sonnerie armée).
+4. Snooze : inchangé (INV-ANDROID-307, 5 min × 3 max).
+5. Reset au heartbeat 2xx : `heartbeatLostSince=0`, `lastPingReceivedElapsedMs=0`, `heartbeatLostAlarm=false`, `heartbeatLostVisual=false`, `snoozeCount=0`.
+
+**Pourquoi le pivot (vs INV-308 #153 sens inverse)** :
+
+La version précédente (sonner quand on **reçoit** le SMS WAKE) était logiquement circulaire : si le tél peut recevoir un SMS, c'est qu'il est joignable par SMS — donc la sonnerie d'avertissement préventive est inutile (le canal SMS d'alarmes métier INV-060 marche aussi). Si le tél ne peut pas recevoir, le SMS WAKE n'arrive pas non plus → pas de sonnerie. Aucun cas business ne justifiait cette logique.
+
+Le pivot 2026-06-03 inverse le déclencheur : la sonnerie part sur **absence** de SMS, ce qui correspond à la situation business réelle « j'ai perdu mon heartbeat HTTP **et** je ne reçois plus de SMS du backend → je suis vraiment isolé ».
+
+**Coordination requise avec le backend (cf nouveau INV-067 dans tests/INVARIANTS.md §6)** :
+
+Dès qu'un opérateur d'astreinte (pos 1 chaîne) a un heartbeat HTTP > 30 s (≈ 1 cycle de watchdog INV-041 backend), le backend envoie immédiatement 1 SMS `[ALARME-MURGAT-PING] $timestamp` via la gateway SIM7600 au numéro du téléphone, et continue à en envoyer toutes les 2 min tant que le heartbeat reste KO. But : laisser au tél au moins 1 SMS qui arrive dans la fenêtre de 5 min après `heartbeatLostSince` côté client (marge de 2 min pour le routage SMSC).
+
+**Permissions Android requises** :
+- `RECEIVE_SMS` (runtime, dangerous) — demandée au login dans `MainActivity`. Si refusée, l'app ne peut pas confirmer la réception de pings → tombera systématiquement dans le cas sonnerie au moindre heartbeat KO. Onboarding doit expliquer cette dépendance.
+- `BROADCAST_SMS` sur le receiver (manifest) — empêche un broadcast forgé par une app tierce malveillante.
+
+**Format SMS attendu côté backend** :
+```
+[ALARME-MURGAT-PING] $iso_timestamp
+```
+Préfixe exact, pas de variation. Le timestamp est purement informatif (audit visible côté app Messages standard). Pas de signature en V1 — le préfixe seul est statistiquement suffisant pour éviter les faux positifs (un SMS tiers contenant cette chaîne exacte = probabilité quasi-nulle).
+
+**Cas particuliers et coexistence métier** :
+- **Tone Android sur réception SMS** : le tél d'astreinte fera son « ding » + vibration standard à chaque ping reçu (cf décision V1 du 2026-06-02). C'est même utile : feedback positif « le système me parle, tout va bien ». Setup manuel possible côté tél pour mute le contact gateway si trop intrusif (cf option (2) discutée le 2026-06-02).
+- **SMS d'alarme métier (INV-060)** : ils ne matchent **pas** le préfixe `[ALARME-MURGAT-PING]`. Ils sont traités par leur propre logique (notif + sonnerie d'alarme normale, cf INV-ANDROID-001/002). Aucune interférence avec la mécanique INV-308.
+- **Premier login de l'app** : `lastPingReceivedElapsedMs = elapsedRealtime()` au démarrage du service polling. Donne 5 min de grâce avant la 1re possibilité de sonnerie.
+- **Backend en panne (gateway down)** : aucun ping ne sort → après 5 min de heartbeat KO, le tél sonne. Faux positif acceptable (signal correct « le système ne me parle plus »), absorbé par le snooze INV-307.
+
+**Statut** : **🐛 spec à implémenter**. Le code mergé en PR #153 (sens inverse, "SMS WAKE on reception") a été **retiré** dans la même PR que cette spec (cf revert ci-après) — le code Android est revenu à l'état pré-#153, basé sur les heuristiques INV-302-LEGACY / INV-305-LEGACY. À implémenter à partir de cet état clean :
+- Nouveau `SmsPingReceiver` (BroadcastReceiver static, manifest, perm `RECEIVE_SMS`) matche `[ALARME-MURGAT-PING]` et set `lastPingReceivedElapsedMs`.
+- Nouvelle variable `lastPingReceivedElapsedMs: Long` dans `AlarmPollingService` (resettée sur heartbeat 2xx, cf INV-303).
+- `AlarmPollingService.onHeartbeatFail()` : remplacer la consultation de `NetworkAvailabilityMonitor.isNoNetwork` (INV-302-LEGACY) par `lastPingReceivedElapsedMs < heartbeatLostSince` (INV-308). Timer de la fenêtre 5 min au lieu de 2 min.
+- `DashboardActivity` : la branche bandeau existante (cas `INV302_SONNERIE` / `INV104_VISUAL_ONLY`) reste, mais les textes sont ajustés pour refléter le nouveau déclencheur (cf INV-104 révisée).
+- `NetworkAvailabilityMonitor.kt` (singleton legacy INV-305) et son init dans `AlarmPollingService` : à supprimer dans la même PR que l'implémentation INV-308 (ne sera plus consulté nulle part).
+- Catalogue : INV-302/305/306 (déjà ❌ SUPERSEDED dans cette PR doc) peuvent voir leurs corps LEGACY retirés une fois INV-308 implémenté + validé prod.
+
+**Tests à créer** (PR d'implémentation) :
+- `test_no_ping_after_heartbeat_lost_5min_arms_alarm` : forcer heartbeatLost depuis 5 min, aucun ping → `heartbeatLostAlarm == true`.
+- `test_ping_received_within_5min_after_lost_does_not_arm_alarm` : heartbeat KO, simuler SMS `[ALARME-MURGAT-PING]` à T+3 min → bandeau visible mais `heartbeatLostAlarm == false`.
+- `test_ping_received_before_heartbeat_lost_does_not_count` : SMS ping à T-1 min, puis heartbeat KO à T0, attendre 5 min sans nouveau ping → la sonnerie s'arme (les pings antérieurs à `heartbeatLostSince` ne comptent pas).
+- `test_heartbeat_2xx_resets_everything` : armer, snoozer, heartbeat OK → tous les drapeaux à zéro.
+- `test_snooze_quota_inchange` : snooze 3 fois → bouton GONE.
+
+**Dépendances** :
+- Backend : nouveau INV-067 [C] "envoi SMS ping pour pos 1 en heartbeat KO" (cf tests/INVARIANTS.md §6 ci-dessous). Sans cet invariant côté backend, l'app sonnera systématiquement au moindre heartbeat KO.
+- Gateway SIM7600 : capable d'envoyer (cf INV-060/061/062 réutilisés). Aucune modif.
+- INV-ANDROID-007 (canal sonore) : réutilisé tel quel.
+- INV-ANDROID-104 (bandeau visuel) : réutilisé pour le cas "ping reçu, pas de sonnerie".
+- INV-ANDROID-300 (heartbeat 3s) : inchangé, pilote la perte heartbeat.
+- INV-ANDROID-303 (heartbeat 2xx reset) : étendu pour aussi reset `lastPingReceivedElapsedMs` et le snooze SMS.
+- INV-ANDROID-307 (snooze 5 min × 3) : inchangé, applique sur la sonnerie de cette nouvelle INV-308.
 
 ---
 
@@ -360,10 +477,14 @@ Avant le `clear()`, `ApiProvider.service.deleteFcmToken(auth, FcmTokenDeleteRequ
 ### INV-ANDROID-505 [C] ⚠️ Refresh 2xx → nouveau token en prefs + en mémoire service
 Sur `refreshToken.isSuccessful`, `newToken = body.access_token` → `prefs.putString("token", newToken)` + `this.token = newToken`.
 - **Pourquoi** : polling/heartbeat suivants utilisent immédiatement le nouveau token, pas de 401 intermédiaire.
+- **Révision INV-079 (2026-06-15)** : `tryRefreshToken()` envoie maintenant le `refresh_token` (UUID opaque) dans le body de `POST /auth/refresh`, pas l'access expiré en header. Stocké dans `prefs.refresh_token` au login (cf INV-079). Le nouveau access reçu remplace l'ancien dans prefs+mémoire comme avant.
 
-### INV-ANDROID-506 [C] ⚠️ Refresh échoué → sonnerie locale + message permanent, PAS logout silencieux
-`forceLogout()` NE force PAS de retour à MainActivity. Au lieu : `authErrorAlarm=true`, `authErrorMessage="Votre session a expiré et n'a pas pu être renouvelée. Veuillez vous reconnecter."`, bandeau permanent visible, sonnerie démarrée, bouton "Reconnexion" visible.
+### INV-ANDROID-506 [C] ⚠️ Refresh échoué → sonnerie locale + message permanent, PAS logout silencieux (révisé 2026-06-15)
+`forceLogout()` NE force PAS de retour à MainActivity. Au lieu : `authErrorMessage = "Votre session a expiré..."` puis `authErrorAlarm = true` puis `AppLogger.log("Auth", "ERREUR: $authErrorMessage")`. Bandeau permanent visible, sonnerie démarrée, bouton "Reconnexion" visible.
 - **Pourquoi** : un logout silencieux = l'utilisateur manque des alarmes sans savoir pourquoi. Mieux vaut une alerte bruyante qui le force à agir.
+- **Changement 2026-06-15 (INV-079)** : ce code path est désormais **très rare**. Le refresh token côté serveur (cf INV-079) est éternel sauf si révoqué — l'app peut rester éteinte des semaines et le refresh marchera au retour. `forceLogout()` ne se déclenche qu'en cas de révocation admin, suppression du user, ou backend indisponible > 1 cycle de refresh. Avant INV-079, la fenêtre était 24h (TTL JWT access).
+- **Bug ordre log fixé (2026-06-15)** : avant, `AppLogger.log("Auth", "ERREUR: ${authErrorMessage}")` était appelé AVANT l'assignation de `authErrorMessage`, donc loguait toujours "ERREUR: null". L'ordre est maintenant : assignation → set flag → log avec le message correct.
+- **Logs AppLogger ajoutés (INV-079)** : visibilité complète sur le path auth — `"Polling 401 → tentative refresh"`, `"Refresh OK"`, `"Refresh KO HTTP <code>"`, `"Refresh erreur reseau : <msg>"`, `"Refresh impossible : refresh_token absent"`. Le bouton "Envoyer les logs" expose maintenant exactement ce qui s'est passé sur l'auth.
 - **Couverture** : test17.
 
 ### INV-ANDROID-507 [M] ⚠️ Token valide en prefs au démarrage → direct au dashboard (pas de re-login)

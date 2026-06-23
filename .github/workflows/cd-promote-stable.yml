@@ -20,10 +20,18 @@
 # digest distant dans les 5 min et fera le pull. L'orchestrateur (PR 9, V1.5)
 # lance auto le canary 3 -> 2 -> 1 dans les 15 min suivants.
 #
-# Securite : le bot IA `alarm-murgat-bot[bot]` ne peut pas merger sans label
-# `ai:approved` humain (cf .github/workflows/ai-merge.yml) -> garantit que le bot
-# ne declenche pas indirectement l'auto-promo. Check `actor != bot` reste actif
-# dans le workflow en defense en profondeur (cf §7 doc).
+# Securite (garde provenance) : §2 du doc dit "tout merger sur master peut
+# promouvoir". Le bot IA `alarm-murgat-bot[bot]` ne merge JAMAIS sans `ai:approved`
+# humain pose au prealable (cf ai-merge.yml) — mais c'est LUI qui effectue le merge
+# auto, donc il est l'`actor` de TOUTES les PR auto-mergees (humaines incluses).
+# L'ancien check `actor != bot` (exit 1) etait donc un faux positif qui bloquait
+# 100 % des promos depuis que l'auto-merge est la norme (cf bug : aucune promo
+# :stable depuis 2026-06-12). On verifie desormais la VRAIE invariante :
+#   - actor humain (non-bot)  -> sanctionne d'office (§2)               -> promo
+#   - actor = bot + PR du sha porte `ai:approved` -> sanction humaine   -> promo
+#   - actor = bot SANS `ai:approved` (regle merge future cassee)        -> bloque
+# La defense en profondeur (cf §7 doc - frontiere de blast-radius) est conservee :
+# du code bot non revu ne peut toujours pas atteindre :stable.
 
 name: CD Promote Stable
 
@@ -55,20 +63,41 @@ jobs:
     permissions:
       contents: read
       packages: write
-      actions: read   # pour lire les check-runs des tiers CI
+      actions: read          # pour lire les check-runs des tiers CI
+      pull-requests: read    # garde provenance : lire les labels de la PR du sha
     steps:
-      - name: Defense en profondeur — actor != bot
+      - name: Garde provenance — promotion sanctionnee (humain OU PR ai:approved)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # github.event.workflow_run.actor.login = celui qui a triggé CI.
-          # En theorie, le bot ne peut pas merger sans 'ai:approved' humain, donc
-          # il ne devrait jamais apparaitre ici. Mais on garde le check au cas où
-          # la regle merge change (cf §7 doc - frontiere de blast-radius).
+          set -uo pipefail
           ACTOR='${{ github.event.workflow_run.actor.login }}'
-          if [[ "$ACTOR" == "alarm-murgat-bot[bot]" || "$ACTOR" == "alarm-murgat-bot" ]]; then
-            echo "::error::alarm-murgat-bot ne peut pas declencher la promo :stable (cf docs/CD_DESIGN.md §7)"
-            exit 1
+          FULL='${{ github.event.workflow_run.head_sha }}'
+
+          # Cas 1 — merger HUMAIN (non-bot). §2 (V1.6) : "tout merger sur master
+          # peut promouvoir". Sanctionne d'office.
+          if [[ "$ACTOR" != "alarm-murgat-bot[bot]" && "$ACTOR" != "alarm-murgat-bot" ]]; then
+            echo "Actor humain ($ACTOR) — promotion autorisee."
+            exit 0
           fi
-          echo "Actor : $ACTOR — OK"
+
+          # Cas 2 — actor = bot. Le bot effectue le merge auto APRES qu'un humain a
+          # pose 'ai:approved' (cf ai-merge.yml). actor=bot n'implique donc PAS
+          # "non revu" : l'ancien check actor!=bot bloquait a tort toutes les PR
+          # auto-mergees. On verifie la provenance reelle : la PR associee au sha
+          # doit porter 'ai:approved' (preuve de sanction humaine). Defense en
+          # profondeur : un merge bot SANS 'ai:approved' (regle merge future
+          # cassee) ne porterait pas le label -> promo bloquee.
+          echo "Actor = bot ($ACTOR) — verification provenance 'ai:approved' sur $FULL"
+          LABELS=$(gh api "/repos/${{ github.repository }}/commits/${FULL}/pulls" \
+            --jq '.[].labels[].name' 2>/dev/null | sort -u || true)
+          echo "Labels des PR associees au sha : ${LABELS:-<aucune>}"
+          if printf '%s\n' "$LABELS" | grep -qx 'ai:approved'; then
+            echo "'ai:approved' present — sanction humaine confirmee, promotion autorisee."
+            exit 0
+          fi
+          echo "::error::Merge bot sans 'ai:approved' sur ce sha (provenance non sanctionnee) — promo :stable bloquee (defense en profondeur, cf docs/CD_DESIGN.md §2)"
+          exit 1
 
       - name: Normalize sha
         id: sha

@@ -232,15 +232,33 @@ Tous les 30s, si `user.last_heartbeat < now - 60s` ET `is_online=True` → `is_o
 
 <!-- INV-042 déplacé en section 12 (meta / outils de test) -->
 
-### INV-043 [M] ⚠️ Heartbeat sur replica → 503
-Un heartbeat envoyé à un noeud replica renvoie 503 (l'app doit failover sur le primary).
-- **Pourquoi** : seul le primary écrit.
+### INV-043 [M] ⚠️ Heartbeat sur replica → proxy au leader (200) ; 503 seulement si aucun leader joignable (révisé 2026-06-17)
+Un heartbeat envoyé à un noeud replica est **forwardé au leader** via WireGuard (`_proxy_heartbeat_to_primary`) qui exécute l'écriture et renvoie 200. Comportement **uniforme sur tous les nœuds** (`HEARTBEAT_PROXY_ON_REPLICA`, défaut **true**). Le 503 n'est renvoyé que si **aucun leader n'est joignable** (panne cluster / pas de quorum) ou si le flag kill-switch est mis à `false`.
+- **Pourquoi** : à terme **n'importe quel nœud peut être joignable depuis l'extérieur** (pas seulement le cloud). Un téléphone externe/mobile qui tombe sur un replica ne peut PAS rotater vers les autres nœuds (LAN privé, ou cloud tombé) → s'il recevait 503, "connexion perdue" perpétuelle alors que le cluster est sain. En relayant côté backend, **tout** nœud edge sait servir un client externe, même replica. Règle uniforme = pas de point de défaillance « seul le cloud sait relayer ». Le leader reste où Patroni l'a élu (souvent onsite, bon pour la gateway SMS) ; les replicas ne sont que des relais d'entrée.
+- **Anti-boucle** : le proxy ajoute le header `X-Heartbeat-Proxied: 1`. Un nœud qui reçoit un heartbeat déjà proxifié ne le re-proxifie PAS (il l'exécute s'il est leader, sinon 503). Le nœud d'entrée itère ses peers jusqu'au leader ; pas de récursion replica→replica.
+- **Évolution** : avant 2026-06-16, replica → 503 sec (l'app rotatait sur le LAN, cf INV-ANDROID-304). Étape intermédiaire 2026-06-16 : proxy activé uniquement sur le nœud cloud. Depuis 2026-06-17 : proxy par défaut partout (décision propriétaire — résilience à la chute du cloud + onsite bientôt joignables de l'extérieur).
+- **Kill-switch** : `HEARTBEAT_PROXY_ON_REPLICA=false` restaure le 503 sec (chemin testé). En dev/CI single-node le nœud est leader → proxy jamais déclenché.
+- **Couverture** : `tests/integration/test_heartbeat_proxy_inv043.py` (tier 2, 4 tests) : leader→200, replica+kill-switch→503, replica défaut→proxy 200, replica+déjà-proxifié→503 (anti-boucle). + `test_failback.py` (tier 4) valide la **continuité** des heartbeats à travers un failover (l'app garde le 200 via le nouveau leader, relayé ou direct), plus la "rotation vers le leader exact".
+
+### INV-044 [M] ⚠️ Écriture `/api/*` reçue par un replica → proxy au leader (nouveau 2026-06-17)
+Toute requête **mutante** (`POST`/`PUT`/`PATCH`/`DELETE`) sur un chemin `/api/*` reçue par un nœud **replica** est **forwardée au leader** (via WireGuard, mêmes peers `PEER_TEST_URLS` que INV-043) qui exécute l'écriture ; la réponse du leader est **relayée telle quelle** (200/401/429/…). C'est la **généralisation de INV-043** (heartbeat) à **toutes les écritures applicatives**. Kill-switch `WRITE_PROXY_ON_REPLICA`, défaut **true** sur tous les nœuds.
+- **Pourquoi** : l'**interface web** est servie par un nœud **fixe** (souvent le cloud OVH, seul joignable publiquement) et **ne peut pas faire tourner les URLs** comme l'app mobile (INV-ANDROID-304). Si ce nœud est replica, `POST /api/auth/login` — qui **écrit** (refresh token persistant INV-079 + `log_event`) — échoue en `ReadOnlySqlTransaction` (500) → **impossible de se connecter**. En relayant côté backend, l'UI web (login, config escalade, CRUD users) fonctionne **quel que soit le primary**, ce qui permet de garder le leader Patroni sur un **onsite** (bon pour l'écriture via la gateway SMS) sans casser l'admin web depuis le cloud.
+- **Périmètre** : seuls les chemins `/api/*` sont relayés. **Exclus** (endpoints qui gèrent eux-mêmes leur comportement replica) : `/api/devices/heartbeat` (relai dédié INV-043, propre header anti-boucle `X-Heartbeat-Proxied`), `/api/deployments/*` (plumbing CD auth gateway-key : `POST /events` a son propre garde replica→503 et les scripts CD découvrent le leader via `discover_leader()`/`GET /health`), et `/api/test/*` (fan-out propre + désactivé en prod, INV-076). Les endpoints **node-to-node** sont sous `/internal/*` (gateway SMS/voix `/internal/sms` `/internal`, `alarms_internal` `/internal/alarms`) : ils ne commencent pas par `/api/` → **jamais relayés**, leur routage est géré en amont.
+- **Anti-boucle** : le proxy ajoute `X-Write-Proxied: 1`. Un replica qui reçoit une écriture **déjà proxifiée** ne la ré-exécute PAS (il n'est pas leader) ni ne la re-proxifie : il renvoie `503` + header `X-Write-Proxy-Declined: 1`, signal qui fait passer le nœud d'entrée au **peer suivant** jusqu'au leader. Pas de récursion replica→replica.
+- **Kill-switch** : `WRITE_PROXY_ON_REPLICA=false` restaure l'ancien comportement (l'écriture atteint l'endpoint local et échoue en read-only). En dev/CI single-node le nœud est leader → proxy jamais déclenché (aucun impact sur la suite de tests existante).
+- **Couverture** : `tests/integration/test_write_proxy_inv044.py` (tier 2) : leader→exécute local, replica défaut→proxy, replica déjà-proxifié→503+`X-Write-Proxy-Declined` (anti-boucle), kill-switch→pas de proxy, `/api/devices/heartbeat` exclu (INV-043 garde la main), `/api/deployments` exclu, GET non relayé.
 
 ---
 
 ## 5. Astreinte (oncall)
 
-> **Changement de stratégie 2026-05-26** : la création automatique d'une alarme "oncall_offline" (INV-050) générait trop de faux positifs — un opérateur qui perd sa data (4G/Wi-Fi) mais garde son signal cellulaire (SMS + voix) est marqué offline alors qu'il reste joignable. Décision : **supprimer la création d'alarme** sur user pos 1 offline, et la **remplacer par un tracking statistique** des transitions online ↔ offline (cf nouveau INV-056). L'email "personne en ligne" (INV-053) reste, car il couvre un cas business différent (sortie de boucle quand le système ne sait plus à qui parler). Cohérent avec la décision client `INV-ANDROID-302/305` (la sonnerie locale "hors connexion" ne se déclenche que si le téléphone est totalement injoignable — data + cellulaire perdus).
+> **Changement de stratégie 2026-05-26** (révision 2026-06-03 — architecture client/serveur INV-308) : la création automatique d'une alarme "oncall_offline" (INV-050) générait trop de faux positifs — un opérateur qui perd sa data (4G/Wi-Fi) mais garde son signal cellulaire (SMS + voix) est marqué offline alors qu'il reste joignable. Décision : **supprimer la création d'alarme** sur user pos 1 offline, et la **remplacer par un tracking statistique** des transitions online ↔ offline (cf nouveau INV-056). L'email "personne en ligne" (INV-053) reste, car il couvre un cas business différent (sortie de boucle quand le système ne sait plus à qui parler).
+>
+> **Architecture client/serveur de la détection « hors connexion »** (révisée 2026-06-03) : la responsabilité de prévenir l'opérateur quand son téléphone perd contact avec le back se joue maintenant en deux étages couplés.
+> - **Étage backend (INV-067)** : dès que le heartbeat HTTP du pos 1 est KO depuis ≥ 30 s, le back envoie un SMS `[ALARME-MURGAT-PING] <iso_ts>` au pos 1, puis le rejoue toutes les 2 min tant que le heartbeat reste KO.
+> - **Étage client (INV-ANDROID-308)** : quand l'app constate `heartbeatLostSince` ≥ 5 min sans avoir reçu un seul de ces SMS pendant la fenêtre, elle déclenche une sonnerie locale + snooze 5 min × 3 max. Si un SMS PING arrive dans la fenêtre, seul un bandeau info s'affiche (pas de son) — le canal SMS prouve que l'opérateur est joignable hors-bande.
+>
+> L'ancienne référence `INV-ANDROID-302/305` (sonnerie sur perte de réseau total via callbacks `ConnectivityManager` + `TelephonyManager`) est marquée ❌ SUPERSEDED depuis cette révision : impossible à fiabiliser sur Crosscall Core-M6 / Android 15 (callbacks non émis, `ServiceState` rédigé). L'absence de SMS PING devient la **preuve indirecte** qu'au moins un des trois maillons (back, gateway SIM7600, opérateur cellulaire opérateur de garde) est cassé — sans avoir à interroger des APIs telephony non fiables.
 
 ### INV-050 [C] ❌ DEPRECATED (2026-05-26) — l'alarme oncall_offline n'est plus créée
 Avant : si user position 1 a `is_online=False` et `last_heartbeat < now - 15min` → création alarme `is_oncall_alarm=True`. **Cette logique est supprimée.**
@@ -328,10 +346,64 @@ SMS/Call avec `retries >= 3` n'apparaît plus dans `/internal/sms|calls/pending`
 - **Pourquoi** : éviter retry infini sur numéro invalide.
 - **Couverture** : E2E `TestSmsAndHealth::test_sms_excluded_after_max_retries`.
 
+### INV-124 [H] ✅ Corps du SMS d'alarme : instruction d'acquittement + lien supervision
+Le corps du SMS d'alarme métier (escalade, `_enqueue_sms_for_user`) doit (a) instruire
+l'opérateur d'acquitter en **répondant `1`** au SMS, et (b) contenir le **lien de supervision
+`https://supervision.charlesmurgat.com`**.
+- **Pourquoi** : la gateway sait recevoir l'ack par SMS (`SmsReceiverThread` : corps `1`/`ok`/`oui`/`ack`
+  → `POST /internal/alarms/active/ack-by-phone`, cf `gateway/modem_gateway.py`), **mais** le SMS
+  sortant ne le disait pas → l'opérateur qui ne connaît pas le système ne sait pas qu'il peut
+  acquitter par réponse SMS, et n'a aucun lien pour rejoindre la supervision. Décision propriétaire
+  2026-06-17. Ne concerne **pas** les SMS de ping isolation (INV-067, body `[ALARME-MURGAT-PING]`).
+- **Contrainte encodage** : rester en GSM-7 (pas d'accent dans la partie statique) pour ne pas
+  basculer en UCS-2 (160→70 car.) — préfixe `ALARME` et instruction `Repondez 1 pour acquitter`
+  sans accent. Dédoublonnage INV-062 intact (body déterministe par `severity`+`title`).
+- **Couverture** : E2E `TestSmsCallTimer::test_sms_body_has_ack_instruction_and_supervision_link`.
+
 ### INV-065 [C] ⚠️ Gateway key obligatoire
 `/internal/sms/*` et `/internal/calls/*` nécessitent header `X-Gateway-Key` valide.
 - **Pourquoi** : sécurité — ces endpoints exposent les numéros de tel.
 - **Couverture** : E2E `TestSmsAndHealth::test_sms_pending_requires_gateway_key` + `test_sms_pending_wrong_key_returns_401`.
+
+### INV-067 [C] 🐛 SMS ping périodique au pos 1 d'astreinte tant que son heartbeat est KO (2026-06-03)
+
+Pendant fortifier la sonnerie d'isolation locale (cf `android/INVARIANTS.md` INV-ANDROID-308 nouvelle version 2026-06-03), le backend doit envoyer un SMS `[ALARME-MURGAT-PING] $iso_timestamp` au numéro de téléphone du user en **position 1** de la chaîne d'escalade, **dès** que son heartbeat HTTP est KO depuis ≥ 30 s (≈ 1 cycle watchdog INV-041), puis **toutes les 2 minutes** tant que ce heartbeat reste KO.
+
+**Mécanisme** :
+1. À chaque tick d'`escalation_loop` (cf section 4) ou tick dédié, on consulte `User.last_heartbeat` du pos 1.
+2. Si `now - last_heartbeat >= 30s` ET pas de ping envoyé depuis ≥ 2 min (`SystemConfig.last_ping_sent_at_user_<id>` ou colonne `User.last_ping_sent_at`, à choisir), insertion dans `SmsQueue` :
+   - `to_number = pos1.phone_number`
+   - `body = f"[ALARME-MURGAT-PING] {clock_now().isoformat()}"`
+   - `alarm_id = NULL` (ce n'est pas un SMS d'alarme métier)
+   - `is_ping = TRUE` (nouvelle colonne ; permet anti-pollution stats SMS et filtrage côté `INV-060` qui ne doit PAS considérer ces SMS comme notifications d'alarme).
+3. La gateway SIM7600 envoie via son flux normal (cf INV-060).
+4. Le DLR (Delivery Report Orange/Sosh) est reçu côté gateway → upsert dans une table dédiée (`PingDeliveryReport(user_id, sent_at, delivered_at, status_code, retries)`) pour audit + diagnostic. Pas de logique métier sur le DLR côté backend dans cette V1 — la décision est entièrement côté app (réception SMS ou non).
+5. Quand `User.is_online` repasse `True` (heartbeat 2xx, cf INV-040), reset `last_ping_sent_at` à NULL.
+
+**Pourquoi** : sans cet envoi serveur, l'app Android ne peut PAS distinguer "isolation totale" de "backend juste down" — elle sonnera dès 5 min de heartbeat KO peu importe la cause. INV-067 garantit qu'un SMS atteint le tél (s'il est joignable par cellulaire) dans la fenêtre de 5 min côté client, ce qui désamorce la sonnerie locale dans tous les cas où l'opérateur reste joignable par SMS.
+
+**Marge de timing** : le client a un timeout de 5 min après `heartbeatLostSince`. Le backend tente d'envoyer dès 30 s + relance toutes les 2 min → au pire 1 ping dans la fenêtre [30s, 4min30s], le SMSC Orange peut prendre jusqu'à ~1 min en routage normal. Marge effective ≥ 30 s avant déclenchement.
+
+**Coût opérationnel** : zéro SMS en fonctionnement nominal (heartbeat OK). Pendant un épisode de heartbeat KO de durée D : `ceil(D / 2 min)` SMS. Pour le coût du forfait Sosh "SMS illimités" (~10€/mois) côté SIM gateway, marginal nul.
+
+**Coexistence avec INV-060 (SMS d'alarme métier)** :
+- INV-060 vise les notifications d'alarmes (`AlarmNotification` actives, déclenchées par escalade).
+- INV-067 vise les pings de joignabilité (aucun lien avec une alarme métier).
+- La colonne `SmsQueue.is_ping` (à ajouter) permet à la gateway de tracer les 2 flux. Le DLR d'un ping est stocké séparément (table `PingDeliveryReport`), pas dans `AlarmNotification.sms_sent`.
+- Aucune interférence avec INV-062 (anti-doublon SMS d'alarme) parce que les pings ont `alarm_id = NULL` et un body unique (timestamp ISO différent à chaque envoi).
+
+**Couverture à créer** (PR d'implémentation backend) :
+- Unit `test_send_ping_when_pos1_heartbeat_lost_for_30s` : forcer pos1 offline 31s → SmsQueue contient 1 ping avec body `[ALARME-MURGAT-PING] ...`.
+- Unit `test_no_ping_when_pos1_heartbeat_recent` : pos1 online → 0 ping inséré.
+- Unit `test_no_ping_to_pos2` : seul pos1 reçoit des pings (pas pos2, pos3, etc.). Choix business : seul l'opérateur **de garde** est censé être réveillé localement.
+- Unit `test_ping_interval_2min` : pos1 offline 5 min → exactement 2-3 pings (1 à 30s, 1 à 2m30s, 1 à 4m30s).
+- Integration `test_pos1_reconnects_clears_last_ping_sent_at` : heartbeat 2xx → `last_ping_sent_at` reset, futur épisode redémarre à zéro.
+- E2E `test_ping_visible_in_sms_queue_then_delivered` : nécessite Mailhog-like pour SMS ou la vraie gateway Mailhog.
+
+**Dépendances** :
+- `User.phone_number` doit être non-NULL pour pos 1 (sinon pas de destination — cf INV-061 réutilisé). Si NULL, log + skip + email direction technique 1× par épisode pour signaler le défaut de configuration.
+- `gateway/modem_gateway.py` : aucun changement direct, le flux d'envoi standard convient. Mais le delivery report (DLR) doit être capté et POSTé à un nouvel endpoint `/internal/sms/delivery-report` (auth `X-Gateway-Key`) pour audit + futur usage. À spécifier dans une INV-068 séparée si besoin (hors scope INV-067 V1).
+- INV-053 (email "personne en ligne") : non impacté, fonctionne en parallèle pour la chaîne entière. INV-067 est plus rapide à se déclencher (30s vs 15 min) et cible uniquement pos1, donc complémentaire.
 
 ### INV-066 [H] ✅ Toutes les références temporelles utilisent `clock_now()`, pas `datetime.utcnow()`
 **Contexte** : le backend a une horloge injectable (`clock.py`) pour que les tests puissent simuler "15 minutes se sont écoulées" en appelant `POST /api/test/advance-clock?minutes=15` au lieu d'attendre réellement 15 minutes. `clock_now()` retourne `datetime.utcnow() + offset`. En prod, l'offset est à 0, donc `clock_now() == datetime.utcnow()`.
@@ -346,6 +418,31 @@ SMS/Call avec `retries >= 3` n'apparaît plus dans `/internal/sms|calls/pending`
 **Couverture** : l'invariant est maintenant respecté dans tous les call sites. Pas de test unit dédié (la fonction pure ne voit que des snapshots avec dates déjà calculées), mais les tests E2E qui combinent advance_clock + création d'alarme valident implicitement.
 
 **Écart latent connu (audit 2026-04-20)** : `send_alarm` dans `alarms.py:84-89` ne passe pas `created_at=clock_now()` explicitement ; l'objet `Alarm` récupère sa valeur via le default SQLAlchemy `datetime.utcnow` (`models.py:38`). Non problématique tant que les tests créent l'alarme **avant** tout `advance-clock`, mais un futur test qui ferait `advance-clock` puis `POST /alarms/send` verrait un `created_at` en « temps réel ». À forcer en `clock_now()` lors de l'implémentation d'INV-018 (ce sera le bon moment, puisqu'on touchera au modèle `Alarm`).
+
+### INV-069 [H] ✅ Saisie des numéros de téléphone des opérateurs (onglet Utilisateurs, web admin)
+
+**Contexte** : le backend **appelle déjà** (`CallQueue` → gateway SIM7600, `escalation.py::_enqueue_call`) et envoie des SMS (INV-060) à tout user disposant d'un `phone_number`. Le champ `User.phone_number` existe (`models.py:17`), est exposé dans `UserResponse` (`schemas.py:27`) et éditable via `PATCH /api/users/{id}` (`users.py:165`). **Mais aucun écran ne permet de le saisir** → le canal SMS/appel de l'escalade est inexploitable en pratique, faute de destination.
+
+**Invariant** : l'admin doit pouvoir saisir/éditer le numéro de chaque opérateur depuis le web, pour alimenter les canaux SMS/appel de l'escalade (INV-060/061/063).
+
+Sous-règles :
+1. **Tableau Utilisateurs** : chaque ligne expose un champ `input.user-phone` pré-rempli avec le `phone_number` courant + un bouton `.save-phone-btn`. Le clic envoie `PATCH /api/users/{id}` body `{"phone_number": <valeur>}` puis recharge.
+2. **Création** : le formulaire « Ajouter un utilisateur » a un champ `#newUserPhone` ; `addUser()` inclut `phone_number` dans le POST `/api/auth/register`. Nécessite l'ajout de `phone_number: Optional[str]` à `UserCreate` (`schemas.py`) et sa persistance dans `register()` (`users.py`).
+3. **Validation** : avant envoi, la valeur est débarrassée de ses espaces. Une valeur non vide doit matcher `^\+?[0-9]{6,15}$` (format composable par le modem SIM7600). Si invalide → message d'erreur visible (`.phone-error`) et **aucune requête** envoyée. Une valeur **vide est autorisée** (efface le numéro → NULL, cf INV-061 « pas de SMS/appel si NULL »).
+4. **Signalement** (onglet Escalade) : tout membre de la chaîne dont `phone_number` est vide affiche un badge `.no-phone-badge` (« pas de tél »), pour rendre visible le risque d'être silencieusement zappé pour SMS/appel (INV-061).
+
+**Pourquoi** : sans saisie, les numéros restent NULL et l'escalade ne contacte jamais personne par SMS/appel — le canal de secours (quand le push FCM ne réveille pas l'opérateur) est mort. Le badge (4) supprime l'angle mort « membre de la chaîne injoignable, sans alerte ».
+
+**Hors scope** : édition du numéro côté app Android (login par nom only, pas de profil éditable) ; normalisation internationale avancée (libphonenumber) ; vérification de joignabilité réelle (DLR, cf note INV-067/INV-068).
+
+**Statut** : implémenté + 5 tests GREEN (session Claude 2026-06-15) — PR #165. Frontend `index.html` (`loadUsers`/`savePhone`/`addUser`/`noPhoneBadge`) + backend `UserCreate.phone_number`/`register`.
+
+**Couverture** (E2E Playwright — `tests/test_frontend.py::TestUsersTab`) :
+- `test_users_table_has_phone_input_per_user` — chaque ligne a un `input.user-phone`.
+- `test_save_phone_sends_patch_to_user_endpoint` — édition + save → `PATCH /api/users/{id}` avec `phone_number`.
+- `test_add_user_with_phone_appears_in_table` — création avec numéro → numéro persisté et réaffiché (valide aussi `UserCreate`/`register`).
+- `test_invalid_phone_shows_error_and_no_request` — numéro invalide → `.phone-error` visible, aucun PATCH.
+- `test_escalation_chain_flags_member_without_phone` — membre de chaîne sans numéro → badge `.no-phone-badge`.
 
 ---
 
@@ -367,17 +464,39 @@ Plus de 10 tentatives échouées en 60s pour le même username → 429.
 - **Code** : `backend/app/api/users.py:18-32` (`_check_rate_limit`, `RATE_LIMIT_MAX_FAILURES = 10`, `RATE_LIMIT_WINDOW = 60`), appelé ligne 62. Raise 429 au 11e échec.
 - **Couverture** (audit 2026-04-20) : E2E `tests/test_improvements.py::TestRateLimiting` — `test_login_rate_limited_after_many_failures` + `test_legitimate_login_still_works_after_rate_limit`.
 
-### INV-074 [C] ✅ Refresh token produit un nouveau token
-POST /auth/refresh avec token valide → nouveau token différent.
+### INV-074 [C] ✅ Refresh token produit un nouveau access token (mode legacy Bearer)
+POST /auth/refresh avec Bearer valide → nouveau access token différent.
 - **Pourquoi** : un refresh qui renverrait le token reçu en input ne sert à rien (pas de rotation TTL).
-- **Implémentation** : `create_access_token` (auth.py:28-37) inclut `"jti": str(uuid.uuid4())` dans le payload → chaque token a un UUID unique → tokens trivialement distincts à chaque appel, sans dépendre du timing `iat`.
+- **Implémentation** : `create_access_token` (auth.py:28-37) inclut `"jti": str(uuid.uuid4())` dans le payload → chaque token a un UUID unique → tokens trivialement distincts à chaque appel.
+- **Statut 2026-06-15** : mode conservé pour rétro-compat. Le mode canonique est INV-079 ci-dessous (refresh dans le body, sans Bearer requis). L'endpoint accepte les deux ; le body INV-079 gagne s'il est présent.
 - **Fix** : PR #92 (bot IA, 2026-05-13). Aucune modif prod ; verrouillage en régression via 2 tests.
-- **Couverture** : `tests/integration/test_auth_refresh.py` (tier 2) :
-  - `test_new_refresh_returns_distinct_token` (token_after != token_before)
-  - `test_new_token_is_usable` (le nouveau token authentifie GET /api/auth/me)
-- **Limites identifiées (issues follow-up)** :
-  - #96 [H] : path négatif (`/auth/refresh` avec token expiré ou signature invalide → 401)
-  - #97 [human-required] : clarifier que l'ancien token reste valide jusqu'à `exp` naturelle (JWT stateless, pas de denylist — choix architectural assumé)
+- **Couverture** : `tests/integration/test_auth_refresh.py` (tier 2) + `tests/test_e2e.py::TestRefreshTokenInv079::test_refresh_legacy_mode_bearer_still_works` (régression tier 3).
+
+### INV-079 [C] ⚠️ Refresh token persistant DB-backed, jamais expiré sauf révocation (2026-06-15)
+Pattern Gmail/OAuth2 : `/auth/login` renvoie un `refresh_token` (UUID4 opaque) **en plus** de l'access token JWT. Le SHA-256 du refresh est persisté dans une nouvelle table `refresh_tokens(id, user_id, token_hash UNIQUE, created_at, last_used_at, revoked)` et **n'expire jamais** sauf si `revoked=TRUE`. Le client utilise `POST /auth/refresh` **avec le refresh dans le body** (sans Authorization header — l'access JWT peut être expiré) et obtient un nouvel access valide 24h.
+- **Pourquoi** : avant INV-079, le seul moyen de renouveler l'access était d'envoyer le Bearer JWT lui-même (INV-074). Si l'app restait éteinte > 24h, le JWT expirait, le refresh échouait, l'utilisateur devait retaper son mdp. Pour les téléphones d'astreinte qui peuvent rester en veille plusieurs jours, c'était une friction inacceptable. Pattern Gmail : refresh token éternel côté serveur, access court côté client.
+- **Sécurité** : le refresh est un UUID4 opaque (pas un JWT), validé uniquement par lookup DB sur son **SHA-256** (le clair n'est JAMAIS persisté — une lecture de la DB ne donne pas de tokens réutilisables). Hash déterministe sans sel : inutile, le UUID4 a 122 bits d'entropie (pas de brute-force). Cela permet la **révocation** côté serveur (impossible avec JWT stateless). Si un tél est volé, admin peut faire `UPDATE refresh_tokens SET revoked=TRUE WHERE user_id=...` → tous les refresh du user sont rejetés à la prochaine utilisation, sans tourner le `SECRET_KEY` JWT (qui déconnecterait tout le monde).
+- **Pas de rotation V1** : un refresh donné peut être réutilisé indéfiniment (cf test `test_refresh_token_survives_multiple_uses`). La rotation à l'usage est une éventuelle V2.
+- **Implémentation** :
+  - Modèle `RefreshToken` (`backend/app/models.py`) — colonne `token_hash` (SHA-256), pas le clair
+  - Migration `_migrate_refresh_tokens` dans `run_migrations()` (idempotent, SQLite + PostgreSQL). La contrainte UNIQUE sur `token_hash` crée l'index ; seul `user_id` a un `CREATE INDEX` explicite.
+  - Helpers `_hash_refresh_token`, `create_refresh_token`, `validate_refresh_token`, `revoke_refresh_tokens_for_user` dans `auth.py` (le dernier pas encore branché à un endpoint, cf limites)
+  - `get_current_user_optional` (`auth.py`) : version tolérante de `get_current_user` qui retourne `None` sur Bearer absent/invalide au lieu de raise 401 — permet à `/auth/refresh` de basculer sur le mode body.
+  - `/api/auth/login` : ajout de `refresh_token` dans la `TokenResponse`
+  - `/api/auth/refresh` : accepte `RefreshRequest(refresh_token: str)` body OU Bearer (legacy INV-074). Body prioritaire si les deux sont fournis.
+- **Couverture** (`tests/test_e2e.py::TestRefreshTokenInv079`, tier 3) — 7 tests :
+  - `test_login_returns_refresh_token` (format UUID4 dans la response /login)
+  - `test_refresh_via_body_works_without_bearer` (mode canonique)
+  - `test_refresh_via_body_with_invalid_token_returns_401`
+  - `test_refresh_legacy_mode_bearer_still_works` (rétro-compat INV-074)
+  - `test_refresh_neither_body_nor_bearer_returns_401`
+  - `test_refresh_with_invalid_bearer_and_valid_body_returns_new_access` (cas réel : Bearer expiré + refresh valide → mode body prime)
+  - `test_refresh_token_survives_multiple_uses` (pas de rotation V1)
+- **Côté client (Android)** : cf INV-ANDROID-505/506 mis à jour. Refresh stocké dans `SharedPreferences("alarm_prefs").refresh_token` au login. `tryRefreshToken()` lit ce refresh et l'envoie en body via la nouvelle signature `ApiService.refreshToken(RefreshRequest)`.
+- **Limites identifiées (issues follow-up à ouvrir)** :
+  - [H] : pas de `/auth/logout` qui révoque le refresh côté serveur. Aujourd'hui le logout local clear les prefs uniquement — le refresh reste valide en DB. Un user qui logout+relogin a 2 refresh tokens valides en DB.
+  - [H] : pas de mécanisme de révocation depuis l'UI admin web (`UPDATE` SQL à la main).
+  - [M] : pas de purge périodique des refresh tokens `last_used_at < 90 jours` (croissance illimitée de la table).
 
 ### INV-075 [C] ⚠️ Token cross-node
 Un token émis par un noeud est accepté par tous (même SECRET_KEY).
@@ -615,20 +734,35 @@ original_created_at_inv018.py::test_inv018_gateway_report_state_alarm_sets_
 original_created_at` (adapté du V1, vérifie que `_create_gateway_alarm` fige
 bien `original_created_at` au moment du `POST /report-state`).
 
-**Câblage hardware retenu** (inchangé V1, validé empiriquement 2026-05-13
-sur node2) :
-- Mode GPIO sur HAT Waveshare SIM7600X, pin GPIO 43 du module
-  (silkscreen "IO43"). Câblage `3V3 ─── [contact NC] ─── IO43`, zéro
-  composant externe. Repos NC fermé → lit 1. Alarme NC ouvert → lit 0.
-- Côté gateway, lecture brute via `AT+CGGETV=43`, mapping `value == 1`
-  → `"closed"`, `value == 0` → `"open"`.
-- Mode ADC abandonné : maintenir ADC1 à GND >5 s freeze le firmware
-  modem (recovery uniquement via PWRKEY). GPIO 43 supporte les 2 états
-  sans corruption.
+**Source de lecture du contact** (`DRY_CONTACT_SOURCE`, cf `gateway/config.py`).
+Le protocole backend ci-dessus (`report-state`, réconciliation, OR fail-to-alarm)
+est **identique quelle que soit la source** — seul le mode de lecture côté gateway
+diffère.
+
+- **Mode `host` — RETENU EN PROD (onsite-2, depuis 2026-06-18)** : le contact NC est
+  lu par un **microcontrôleur USB (Arduino UNO R4)** branché sur le mini-PC, **pas par
+  le modem**. Câblage : contact NC entre une GPIO de l'Arduino et **GND** (`INPUT_PULLUP`,
+  zéro composant) → fermé = `DC:0`, ouvert/coupé = `DC:1`. Le firmware
+  (`gateway/firmware/dry_contact_r4/`) pousse `DC:<0|1>` sur l'USB-série ;
+  `HostDryContactMonitorThread` mappe via `raw_to_state` (`DRY_CONTACT_NORMAL_VALUE=0`)
+  et POST le même `report-state`. **Découple le contact-sec du SIM7600** : il reste
+  fonctionnel même quand le modem drop du bus USB (récurrent). Détection de vie : µC
+  muet > `DRY_CONTACT_LIVENESS_SECONDS` (5 s) → arrêt du report (backend voit le silence).
+  Validé bout-en-bout 2026-06-18 (Modbus PLC bit 101 → contact → Arduino → gateway →
+  alarme créée + auto-résolution).
+
+- **Mode `modem` — LEGACY (défaut historique, déconseillé)** : pin GPIO 43 du module
+  SIM7600 (silkscreen "IO43"), câblage `3V3 ─── [contact NC] ─── IO43`, lecture
+  `AT+CGGETV=43`, mapping `value == 1` → `"closed"`, `0` → `"open"`
+  (`DRY_CONTACT_NORMAL_VALUE=1`). **Abandonné en prod** : GPIO 1,8 V, pulls imposés, et
+  surtout **couplé au circuit d'allumage PWR** du modem (un contact fermé au cold-boot
+  empêche le module de démarrer — incidents 2026-06), + contact aveugle quand le modem
+  drop. Mode ADC déjà abandonné avant (ADC1 à GND >5 s freeze le firmware modem).
 
 ### INV-122 [H] ✅ Redondance hardware multi-gateway, agrégation OR fail-to-alarm
 Deux (ou plus) gateways onsite reçoivent le **même contact NC physiquement
-splitté** sur leurs IO43 respectifs. Le backend agrège leurs `state`
+splitté** sur leurs entrées respectives (Arduino en mode `host`, ou IO43 du
+modem en mode `modem` legacy). Le backend agrège leurs `state`
 reportés selon la politique **OR fail-to-alarm** :
 **au moins une** gateway alive reportant `"open"` → alarme active.
 

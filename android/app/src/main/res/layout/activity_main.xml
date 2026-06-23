@@ -66,4 +66,17 @@
         android:text=""
         android:textColor="#FF4444"
         android:layout_marginTop="16dp" />
+
+    <TextView
+        android:id="@+id/shareLogsButton"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Envoyer les logs de diagnostic"
+        android:textSize="13sp"
+        android:textColor="#888888"
+        android:padding="12dp"
+        android:layout_marginTop="48dp"
+        android:clickable="true"
+        android:focusable="true"
+        android:background="?android:attr/selectableItemBackground" />
 </LinearLayout>

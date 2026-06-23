@@ -48,7 +48,14 @@ class FakeApiService : ApiService {
         return loginResponse
     }
 
+    /** Si vrai, registerDevice() lance une RuntimeException — sert a tester
+     *  le branch catch (e: Exception) de MainActivity.login() (cf INV-ANDROID-108). */
+    var registerDeviceShouldThrow: Boolean = false
+
     override suspend fun registerDevice(auth: String, device: DeviceRegister): Response<Map<String, String>> {
+        if (registerDeviceShouldThrow) {
+            throw RuntimeException("simulated registerDevice failure")
+        }
         return Response.success(mapOf("status" to "ok"))
     }
 
@@ -76,10 +83,18 @@ class FakeApiService : ApiService {
         return alarmHistoryResponse
     }
 
-    var refreshTokenResponse: Response<TokenResponse>? = null  // null = use loginResponse
+    // INV-082 : signature mise a jour pour matcher ApiService.refreshToken
+    // qui prend maintenant un RefreshRequest body au lieu d'un Authorization
+    // header. Defaut : un access token "fake-refreshed-token" pour distinguer
+    // d'un login frais dans les tests.
+    var refreshTokenResponse: Response<RefreshResponse> = Response.success(
+        RefreshResponse(access_token = "fake-refreshed-token", token_type = "bearer")
+    )
+    var lastRefreshRequestPayload: RefreshRequest? = null
 
-    override suspend fun refreshToken(auth: String): Response<TokenResponse> {
-        return refreshTokenResponse ?: loginResponse
+    override suspend fun refreshToken(request: RefreshRequest): Response<RefreshResponse> {
+        lastRefreshRequestPayload = request
+        return refreshTokenResponse
     }
 
     // FCM token management

@@ -8,6 +8,7 @@ class UserCreate(BaseModel):
     name: str
     password: str
     is_admin: bool = False
+    phone_number: Optional[str] = None
 
     @field_validator("name")
     @classmethod
@@ -15,6 +16,15 @@ class UserCreate(BaseModel):
         if " " in v:
             raise ValueError("Le nom ne doit pas contenir d'espaces")
         return v.lower()
+
+    @field_validator("phone_number")
+    @classmethod
+    def _normalize_phone(cls, v: Optional[str]) -> Optional[str]:
+        # INV-069 : strip des espaces, "" -> None (le format est valide cote UI).
+        if v is None:
+            return None
+        v = v.replace(" ", "").strip()
+        return v or None
 
 
 class UserResponse(BaseModel):
@@ -38,10 +48,23 @@ class LoginRequest(BaseModel):
 
 class TokenResponse(BaseModel):
     access_token: str
+    # INV-079 : refresh token persistant (UUID opaque, jamais expiré sauf si
+    # révoqué). Renvoyé UNIQUEMENT au login — le client doit le stocker en
+    # SharedPreferences pour pouvoir renouveler son access token au-delà de
+    # 24h sans demander le mot de passe.
+    # Optional pour rétro-compatibilité tests qui ne le valident pas encore.
+    refresh_token: Optional[str] = None
     token_type: str = "bearer"
     user: UserResponse
     is_oncall: bool = False
     escalation_position: Optional[int] = None
+
+
+class RefreshRequest(BaseModel):
+    """INV-079 : body de POST /auth/refresh, contient le refresh token opaque
+    (pas un JWT, juste un UUID4 stocké en DB).
+    """
+    refresh_token: str
 
 
 class FcmTokenRequest(BaseModel):

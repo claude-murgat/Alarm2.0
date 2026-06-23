@@ -47,7 +47,7 @@ Sélection en lecture de `tests/INVARIANTS.md` + `android/INVARIANTS.md` qui con
 | INV-085 [C] 🐛 | backend | Perte quorum cluster → email direction technique. Un déploiement maladroit qui perd le quorum déclenche un email opérationnel ; à éviter |
 | INV-076 [C] ❌ | backend | `ENABLE_TEST_ENDPOINTS=false` en prod : la promotion `:stable` doit garantir que cette variable est bien `false` dans l'image qu'on promeut (ou plutôt dans le `.env.prod.nodeX`, qui est OK aujourd'hui — mais à valider à chaque promo) |
 | INV-094 [M] | backend | Persistance après restart : volumes `pg_data` et `etcd_data` doivent être préservés (le `docker compose down -v` est interdit pendant un déploiement — uniquement `up -d` sur l'image qui a changé) |
-| INV-ANDROID-302 [C] | android | Perte heartbeat > **2 min** → sonnerie locale chez tous les opérateurs. **Conséquence directe** : à tout moment du déploiement, **au moins 1 backend doit être joignable** par les apps Android. Donc pas de redémarrage simultané des 3 backends. |
+| INV-ANDROID-308 [C] | android | Perte heartbeat HTTP **+ absence de SMS `[ALARME-MURGAT-PING]` pendant 5 min** → sonnerie locale chez le pos 1 d'astreinte. **Conséquence directe** : à tout moment du déploiement, **au moins 1 backend doit pouvoir émettre un heartbeat OK ou un SMS PING** (cf INV-067 côté back). Une fenêtre courte (≤ quelques secondes) où les 3 backends sont down est tolérable ; un déploiement qui couperait les 3 simultanément > 5 min déclencherait la sonnerie. Cf aussi INV-ANDROID-302-LEGACY (ancienne règle 2 min basée sur callbacks réseau natifs, abandonnée — non fiable sur Crosscall Core-M6). |
 | INV-ANDROID-400 [C] | android | 3 échecs polling consécutifs (~9 s à 3 s polling) → `switchToNextUrl()`. Ce design **fonctionne avec un déploiement séquentiel** un nœud à la fois |
 | INV-ANDROID-402 [C] | android | Rotation circulaire sur 3 URLs (primary + 2 fallbacks). Le client tolère parfaitement qu'1/3 backends soit down |
 
@@ -136,7 +136,9 @@ Si tous OK : re-tag :stable, POST `kind=manual_override` `actor=github-actions:a
 
 **Philosophie "tout ce qui a passé CI est safe"** : le canary auto + soak 10 min + rollback auto (cf §4-5) absorbent le résidual risk. Le gate manuel V1.0 avait du sens quand canary était lui-même manuel — depuis V1.5 (PR #126, orchestrateur auto 3→2→1), il devient friction inutile.
 
-**Qui peut promouvoir** : implicitement, **tout merger sur master**. Le bot IA `alarm-murgat-bot[bot]` ne peut pas merger sans label `ai:approved` humain (cf `.github/workflows/ai-merge.yml`) → garantit que le bot ne déclenche pas indirectement la promo. Check `actor != bot` reste actif dans le workflow en défense en profondeur (cf §7).
+**Qui peut promouvoir** : implicitement, **tout merger sur master**. Le bot IA `alarm-murgat-bot[bot]` ne peut pas merger sans label `ai:approved` humain (cf `.github/workflows/ai-merge.yml`).
+
+> **Correctif 2026-06-16 (garde provenance)** — l'ancien check `actor != bot` (exit 1 si l'actor du run CI était le bot) partait d'une prémisse fausse : depuis que l'auto-merge est la norme, c'est le bot qui **effectue** le merge de *toutes* les PR (humaines incluses), donc il est l'`actor` de toutes. Le check bloquait donc **100 % des promos** (aucune promo `:stable` n'a abouti entre le 2026-06-12 et le 2026-06-16 — f4bcd55 #162, 770b023 #165, 3735beb #166 tous en échec sur ce seul step alors que CI/CD Build/Smoke étaient verts). La garde vérifie désormais la **provenance** plutôt que l'identité du merger : actor humain → promo ; actor bot **avec** `ai:approved` sur la PR du sha (preuve de sanction humaine, label persistant post-merge) → promo ; actor bot **sans** `ai:approved` → bloqué. La défense en profondeur de §7 est conservée (du code bot non revu n'atteint pas `:stable`), sans le faux positif.
 
 **Notification post-promo** : event SQL `manual_override` actor `github-actions:auto-promote` dans `deployment_events` (visible dans dashboard `/admin/deployments`) + step summary GH lisible. (V2 envisagé : email automatique, cf §7.)
 
@@ -480,7 +482,7 @@ Si la suite de tests ne détecte pas un bug logique, le mode urgence ne le déte
 
 **Fallback opérateur (dernière ligne)** :
 
-Si malgré le mode urgence le service reste cassé (rollback du hotfix s'est déclenché, ou Cond 1 reste vraie après expiration du cooldown 24 h), l'opérateur de garde — dont l'app Android sonne déjà localement via INV-ANDROID-302 — peut joindre l'admin par téléphone hors-bande (numéro perso non lié au système).
+Si malgré le mode urgence le service reste cassé (rollback du hotfix s'est déclenché, ou Cond 1 reste vraie après expiration du cooldown 24 h), l'opérateur de garde — dont l'app Android sonne déjà localement via INV-ANDROID-308 (absence de SMS PING pendant 5 min sur heartbeat HTTP KO) — peut joindre l'admin par téléphone hors-bande (numéro perso non lié au système).
 
 C'est intentionnellement **du bas-tech** :
 - Pas d'astreinte humaine de première ligne (le mode urgence absorbe le coup)
@@ -743,7 +745,7 @@ Pour considérer Phase 3 « livrée », tous ces points doivent être verts :
 4. ✅ 5 déploiements consécutifs sans rollback (= confiance baseline)
 5. ✅ 1 rollback déclenché volontairement (test de bout en bout) avec retour à l'état précédent en < 5 min, email reçu, event loggué
 6. ✅ Aucun déclenchement de INV-085 (perte quorum cluster) pendant les 5 déploiements
-7. ✅ Aucun déclenchement de INV-ANDROID-302 (heartbeat lost > 2 min côté apps) pendant les 5 déploiements
+7. ✅ Aucun déclenchement de INV-ANDROID-308 (heartbeat lost + absence de SMS PING pendant 5 min côté apps) pendant les 5 déploiements
 8. ✅ Dashboard `/admin/deployments` affiche l'historique correctement
 9. ✅ Procédure de rollback documentée (runbook, où aller chercher quoi)
 10. ✅ Question Q2.2 (staging) tranchée et appliquée
@@ -809,7 +811,7 @@ Pour considérer Phase 3 « livrée », tous ces points doivent être verts :
 
 ```
 [T+0]  03h12 — un bug bloquant se manifeste en prod (ex: /health 503 sur 2/3 backends)
-        → opérateurs astreinte commencent à recevoir sonnerie locale (INV-ANDROID-302)
+        → opérateur de garde commence à recevoir sonnerie locale après ~5 min sans heartbeat HTTP ni SMS PING (INV-ANDROID-308)
         → email INV-085 part vers direction technique
 
 [T+10] 03h22 — bot IA reçoit l'issue (issue auto-créée par alerting OU report manuel)

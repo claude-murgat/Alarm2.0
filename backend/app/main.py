@@ -26,6 +26,7 @@ from .escalation import escalation_loop
 from .quorum_monitor import quorum_monitor_loop
 from .watchdog import watchdog_loop
 from .leader_election import leader_election_loop, is_leader
+from .replica_proxy import ReplicaWriteProxyMiddleware
 from .database import DATABASE_URL
 
 setup_logging()
@@ -224,6 +225,10 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
         return response
 
 
+# INV-044 : un replica relaie les écritures /api/* au leader (web UI utilisable
+# quel que soit le primary). Ajouté AVANT CorrelationIdMiddleware pour que ce
+# dernier reste le plus externe et tague aussi les réponses relayées.
+app.add_middleware(ReplicaWriteProxyMiddleware)
 app.add_middleware(CorrelationIdMiddleware)
 
 # Register API routers
