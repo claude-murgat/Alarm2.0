@@ -1,14 +1,21 @@
 package com.alarm.critical
 
+import android.app.Activity
+import android.app.Instrumentation
 import android.content.Context
+import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ActivityInfo
+import android.media.AudioManager
+import android.media.RingtoneManager
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.espresso.Espresso.onView
 import androidx.test.espresso.IdlingRegistry
 import androidx.test.espresso.action.ViewActions.*
 import androidx.test.espresso.assertion.ViewAssertions.matches
+import androidx.test.espresso.intent.Intents
+import androidx.test.espresso.intent.matcher.IntentMatchers
 import androidx.test.espresso.matcher.ViewMatchers.*
 import androidx.test.espresso.matcher.ViewMatchers.Visibility
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -18,6 +25,8 @@ import androidx.test.uiautomator.UiDevice
 import android.os.Build
 import com.alarm.critical.api.ApiProvider
 import com.alarm.critical.model.AlarmResponse
+import com.alarm.critical.service.AlarmSoundManager
+import com.alarm.critical.util.AppLogger
 import org.junit.*
 import org.junit.Assert.*
 import org.junit.runner.RunWith
@@ -908,6 +917,205 @@ class AlarmE2ETest {
             "consecutiveFailures devrait être 0 après le switch",
             0, com.alarm.critical.api.ApiClient.consecutiveFailures
         )
+
+        scenario.close()
+    }
+
+    // ── 23. INV-ANDROID-003 : startAlarmSound() force STREAM_ALARM à 50% du max ───
+
+    @Test
+    fun test23_alarmSoundManagerSetsAlarmStreamVolumeToHalfOfMax() {
+        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_ALARM)
+
+        // Sur les appareils où STREAM_ALARM max <= 1, on ne peut pas distinguer
+        // 50% (= 0) de 0%, ni du 100% (= 1) — l'assertion serait ambigüe.
+        Assume.assumeTrue(
+            "STREAM_ALARM max=$maxVol — besoin >1 pour départager les mutants 0.5f→0.0f et 0.5f→1.0f",
+            maxVol > 1
+        )
+
+        // Si l'OS n'a aucune ringtone par défaut (TYPE_ALARM/RINGTONE/NOTIFICATION),
+        // MediaPlayer.setDataSource(null) lèvera une exception silencieusement avalée
+        // par AlarmSoundManager.startAlarmSound() — setStreamVolume ne sera jamais
+        // appelé. Skip plutôt que de faire échouer pour une raison hors-scope.
+        val defaultUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+            ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+            ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+        Assume.assumeTrue(
+            "Aucune ringtone par défaut sur cet appareil — MediaPlayer.prepare() échouera " +
+                "avant d'atteindre setStreamVolume. Hors scope du test volume.",
+            defaultUri != null
+        )
+
+        // Pré-condition : forcer le volume à une sentinelle (max) différente de la cible
+        // attendue (50%). Sans ça, un device qui serait déjà à 50% rendrait le test
+        // toujours vert quelle que soit l'implémentation — il ne prouverait rien (P2).
+        audioManager.setStreamVolume(AudioManager.STREAM_ALARM, maxVol, 0)
+
+        val soundManager = AlarmSoundManager(context)
+        try {
+            soundManager.startAlarmSound()
+
+            val actualVol = audioManager.getStreamVolume(AudioManager.STREAM_ALARM)
+            val expectedVol = (maxVol * 0.5f).toInt()
+
+            assertEquals(
+                "INV-ANDROID-003 : après startAlarmSound(), STREAM_ALARM doit valoir 50% du max.\n" +
+                    "  max=$maxVol, attendu=$expectedVol, observé=$actualVol.\n" +
+                    "  Tue les mutants survivants : 0.5f→1.0f (donnerait $maxVol), " +
+                    "0.5f→0.0f (donnerait 0).\n" +
+                    "  AlarmSoundManager est partagé entre soundManager (alarme métier) et " +
+                    "connectionLostSoundManager (INV-ANDROID-007, cf DashboardActivity.kt:47), " +
+                    "un seul test suffit donc à couvrir les deux usages.",
+                expectedVol, actualVol
+            )
+        } finally {
+            soundManager.stopAlarmSound()
+        }
+    }
+
+    // ── 24. INV-ANDROID-108 : bouton "Envoyer les logs" présent sur l'écran login ─
+
+    @Test
+    fun test24_loginScreenShareLogsFiresSendIntentWithDisconnectedHeader() {
+        // Prérequis : pas de token en prefs → MainActivity affiche le formulaire login
+        // (sinon onCreate goToDashboard et notre cible n'apparaît jamais).
+        context.getSharedPreferences("alarm_prefs", Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        AppLogger.clear()
+
+        Intents.init()
+        try {
+            // Empêcher le chooser de réellement s'ouvrir sur le device (sinon il bloque l'UI test).
+            Intents.intending(IntentMatchers.hasAction(Intent.ACTION_CHOOSER))
+                .respondWith(Instrumentation.ActivityResult(Activity.RESULT_OK, null))
+
+            val scenario = ActivityScenario.launch(MainActivity::class.java)
+
+            // (1) Présence du bouton sur l'écran de login (pré-auth)
+            onView(withId(R.id.shareLogsButton))
+                .check(matches(isDisplayed()))
+
+            // (2) Clic → émission d'un Intent SEND wrappé dans un chooser
+            onView(withId(R.id.shareLogsButton)).perform(click())
+
+            val chooserIntents = Intents.getIntents()
+                .filter { it.action == Intent.ACTION_CHOOSER }
+            assertFalse(
+                "INV-ANDROID-108 : le clic sur shareLogsButton doit émettre un Intent CHOOSER " +
+                    "(via Intent.createChooser). Aucun ACTION_CHOOSER capturé.",
+                chooserIntents.isEmpty()
+            )
+
+            val innerIntent = chooserIntents.first()
+                .getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
+            assertNotNull(
+                "INV-ANDROID-108 : le chooser doit envelopper un EXTRA_INTENT",
+                innerIntent
+            )
+            assertEquals(
+                "INV-ANDROID-108 : l'action interne doit être ACTION_SEND (partage)",
+                Intent.ACTION_SEND, innerIntent!!.action
+            )
+            assertEquals(
+                "INV-ANDROID-108 : MIME du share doit être text/plain",
+                "text/plain", innerIntent.type
+            )
+
+            // (3) En pré-auth, l'en-tête doit afficher "Utilisateur: (non connecté)".
+            //     Cible le mutant qui retirerait le fallback `?: "(non connecté)"`
+            //     ou qui remplacerait la chaine.
+            val extraText = innerIntent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
+            assertTrue(
+                "INV-ANDROID-108 : sans session, l'export doit contenir 'Utilisateur: (non connecté)' " +
+                    "(fallback de MainActivity.shareLogs() ligne 172).\n" +
+                    "EXTRA_TEXT observé :\n$extraText",
+                extraText.contains("(non connecté)")
+            )
+
+            scenario.close()
+        } finally {
+            Intents.release()
+        }
+    }
+
+    // ── 25. INV-ANDROID-108 anti-fuite cross-user : logout vide AppLogger ────────
+
+    @Test
+    fun test25_logoutClearsAppLoggerSoNextUserCannotSeePreviousLogsOnLoginShare() {
+        val secretTag = "USERA_LEAKCHECK_${System.nanoTime()}"
+
+        // Repartir d'un AppLogger propre pour ne PAS dépendre d'éventuels résidus de tests précédents.
+        AppLogger.clear()
+
+        fakeApi.myAlarmsResponses = mutableListOf(Response.success(emptyList()))
+        waitForPolls(1)
+
+        val scenario = launchDashboard()
+
+        // Vérifier qu'on est bien dans la session "user1" (configurée par @Before).
+        onView(withId(R.id.userNameText)).check(matches(withText("user1")))
+
+        // Simuler un event sensible loggé par la session de user A.
+        AppLogger.log(secretTag, "evenement sensible de la session A — ne doit JAMAIS fuiter")
+
+        unregisterAll()
+
+        // Déclencher la procédure logout côté production. Le bouton vit dans le NavigationDrawer
+        // (initialement fermé) — performClick() invoque directement le OnClickListener wireé en
+        // DashboardActivity ligne 133, ce qui exécute drawerLayout.close() puis performLogout().
+        // performLogout() doit appeler AppLogger.clear() (cf DashboardActivity.kt ligne 243)
+        // puis startActivity(MainActivity) + finish().
+        scenario.onActivity { activity ->
+            activity.findViewById<android.widget.LinearLayout>(R.id.drawerLogout).performClick()
+        }
+
+        // Maintenant on est de retour sur l'écran login (token effacé par performLogout).
+        // Espresso bascule automatiquement vers l'activité reprise.
+        onView(withId(R.id.shareLogsButton)).check(matches(isDisplayed()))
+
+        Intents.init()
+        try {
+            Intents.intending(IntentMatchers.hasAction(Intent.ACTION_CHOOSER))
+                .respondWith(Instrumentation.ActivityResult(Activity.RESULT_OK, null))
+
+            onView(withId(R.id.shareLogsButton)).perform(click())
+
+            val chooserIntents = Intents.getIntents()
+                .filter { it.action == Intent.ACTION_CHOOSER }
+            assertFalse(
+                "Un Intent ACTION_CHOOSER doit avoir été émis par le clic sur shareLogsButton",
+                chooserIntents.isEmpty()
+            )
+
+            val innerIntent = chooserIntents.first()
+                .getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
+            assertNotNull("Le chooser doit envelopper un EXTRA_INTENT", innerIntent)
+            assertEquals(Intent.ACTION_SEND, innerIntent!!.action)
+
+            val extraText = innerIntent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
+
+            // Sanity : l'export doit avoir été effectué (en-tête présent). Sans ça,
+            // un EXTRA_TEXT vide passerait trivialement l'assertFalse ci-dessous.
+            assertTrue(
+                "Sanity : l'export logs doit contenir l'en-tête '=== Alarme Murgat - Logs de diagnostic ==='. " +
+                    "EXTRA_TEXT observé :\n$extraText",
+                extraText.contains("Alarme Murgat - Logs de diagnostic")
+            )
+
+            assertFalse(
+                "INV-ANDROID-108 (anti-fuite cross-user) : après logout, AppLogger doit avoir été " +
+                    "vidé (cf DashboardActivity.performLogout ligne 243 — `AppLogger.clear()`). " +
+                    "L'export logs sur l'écran login NE doit PAS contenir les events de la session " +
+                    "précédente, sinon un user B peut lire les logs de user A.\n" +
+                    "  Tag fuite détecté : $secretTag\n" +
+                    "  Tue le mutant qui retirerait l'appel AppLogger.clear() de performLogout().",
+                extraText.contains(secretTag)
+            )
+        } finally {
+            Intents.release()
+        }
 
         scenario.close()
     }
