@@ -21,6 +21,10 @@
 services:
   etcd:
     image: quay.io/coreos/etcd:v3.5.17
+    # Auto-recovery au boot/reboot : etcd reforme le quorum sans intervention.
+    # `unless-stopped` respecte un `docker compose stop` explicite (tests failover
+    # tier3/tier4) → le conteneur reste down quand on l'arrete volontairement.
+    restart: unless-stopped
     # extra_hosts : sur Linux (CI/VM), Docker Desktop n'existe pas → host.docker.internal
     # n'est pas resolu par defaut. host-gateway (Docker 20.10+) le resoud vers l'IP du
     # host. Sur Docker Desktop Windows, host.docker.internal est natif → cette ligne est
@@ -57,6 +61,10 @@ services:
     #   systemd (cf infra/onsite/systemd/alarm-cd-pull.*, PR 3 du plan §8).
     # Cf docs/CD_DESIGN.md §1 (Build) et Q-X2 (coexistence build local vs registry).
     image: ${REGISTRY:-ghcr.io/claude-murgat}/alarm-patroni:${IMAGE_TAG:-stable}
+    # Auto-recovery au boot/reboot : Patroni rejoint le cluster sans intervention
+    # (sinon, apres reboot, le conteneur reste `Exited` — il fallait `docker start`
+    # a la main). `unless-stopped` respecte le `docker compose stop` des tests failover.
+    restart: unless-stopped
     build:
       context: .
       dockerfile: Dockerfile.patroni
@@ -138,6 +146,20 @@ services:
       - SMTP_PASS=${SMTP_PASS-}
       - SMTP_TIMEOUT=${SMTP_TIMEOUT:-10}
       - PEER_TEST_URLS=${PEER_TEST_URLS}
+      # INV-043 (révisé 2026-06-17) : défaut true → un replica forwarde le
+      # heartbeat au leader (via WG) au lieu de 503, sur TOUS les nœuds. Permet
+      # à n'importe quel nœud edge externe de servir un téléphone même quand il
+      # est replica (résilience si le cloud tombe). false = kill-switch (ancien
+      # 503 + rotation app). En dev/CI single-node, le nœud est leader → sans effet.
+      - HEARTBEAT_PROXY_ON_REPLICA=${HEARTBEAT_PROXY_ON_REPLICA:-true}
+      # INV-044 (2026-06-17) : défaut true → un replica forwarde les écritures
+      # /api/* (login, config, users…) au leader via WG au lieu d'échouer en
+      # read-only. Permet à l'UI web servie par un nœud replica (ex: cloud OVH,
+      # seul joignable publiquement) de fonctionner quel que soit le primary →
+      # le leader Patroni peut rester sur un onsite. false = kill-switch (ancien
+      # comportement, écriture locale → 500 read-only). Dev/CI single-node :
+      # le nœud est leader → sans effet. Généralise INV-043 (heartbeat).
+      - WRITE_PROXY_ON_REPLICA=${WRITE_PROXY_ON_REPLICA:-true}
       - NODE_NAME=${NODE_NAME}
       - GATEWAY_KEY=${GATEWAY_KEY:-changeme-in-prod}
       # INV-076 : safe-by-default false. Dev/CI override explicite via les

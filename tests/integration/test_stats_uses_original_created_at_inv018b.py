@@ -71,10 +71,13 @@ def _force_alarm_state(
     acknowledged_at: datetime | None = None,
     updated_at: datetime | None = None,
     escalation_count: int | None = None,
+    original_created_at: datetime | None = None,
 ):
     """Manipule directement les champs d'une alarme via SessionLocal pour mettre
     en scene les scenarios d'escalade tardive / resolution. N'affecte JAMAIS
-    `original_created_at` (immuable par contrat INV-018)."""
+    `original_created_at` (immuable par contrat INV-018) — SAUF si le test
+    fournit explicitement `original_created_at` pour staging d'une alarme
+    "nee a tel moment passe" (e.g. dimanche pour test hors_heures L127)."""
     from backend.app.database import SessionLocal
     from backend.app.models import Alarm
     db = SessionLocal()
@@ -91,6 +94,8 @@ def _force_alarm_state(
             alarm.updated_at = updated_at
         if escalation_count is not None:
             alarm.escalation_count = escalation_count
+        if original_created_at is not None:
+            alarm.original_created_at = original_created_at
         db.commit()
     finally:
         db.close()
@@ -296,4 +301,106 @@ def test_inv018b_kpi_period_filter_uses_original_created_at(client, admin_header
         f"l'original_created_at), l'alarme doit apparaitre. Got "
         f"total_alarms={kpi_wide.get('total_alarms')}. Si 0 : la mise en scene "
         f"de l'escalade tardive a echoue."
+    )
+
+
+def test_inv018b_kpi_hors_heures_filter_uses_original_created_at(client, admin_headers):
+    """INV-018b stats : filtre `hors_heures_only=True` doit s'appliquer sur
+    `original_created_at` (L127), pas sur `created_at` (reset par escalade).
+
+    Issue #141 : trou de couverture identifie en post-mortem de PR #139.
+    Les 3 tests existants exercent L113 (filtre periode), L124 (bucketing) et
+    L150 (MTTR), mais aucun ne passe `hors_heures_only=True`. Un mutant qui
+    reverte UNIQUEMENT L127 a `a.created_at` survivrait en tier 2.
+
+    Scenario :
+      - original_created_at = dimanche 14:00 (weekend → hors heures ouvrees)
+      - created_at = mercredi 10:00 (lun-ven 8-12h → heures ouvrees)
+        Simule le reset operee par escalation_loop quand l'alarme escalade
+        plusieurs jours apres son declenchement initial.
+
+    Avec hors_heures_only=True :
+      - Fix (L127 = original_created_at) : dimanche → hors heures → INCLUSE
+      - Bug (L127 = created_at)         : mercredi 10h → heures ouvrees → EXCLUSE
+
+    Verifie aussi (cross-check) qu'avec hors_heures_only=False l'alarme
+    apparait dans le meme bucket — preuve que c'est bien le filtre L127 qui
+    tranche, pas le bucketing L124 ni le filtre periode L113.
+    """
+    _reset_alarms(client, admin_headers)
+    _reset_clock(client)
+
+    user1_id = _user_id(client, admin_headers, "user1")
+    user1_headers = {"Authorization": f"Bearer {_login(client, 'user1', 'user123')}"}
+
+    alarm_id = _create_alarm(client, user1_headers, user1_id, "INV-018b stats hors_heures")
+
+    # Construit deux timestamps stables, independants du jour ou tourne le test :
+    #   sunday_dt  = un dimanche 14:00, au moins 14 jours dans le passe
+    #   wed_dt     = le mercredi suivant ce dimanche (sunday + 3 jours), 10:00
+    # Les deux restent dans la fenetre weeks=8 (8*7=56 jours).
+    from backend.app.clock import now as clock_now
+    now_dt = clock_now()
+    anchor = now_dt - timedelta(days=14)
+    # Python weekday(): lundi=0..dimanche=6. Recule jusqu'au dimanche <= anchor.
+    days_back_to_sunday = (anchor.weekday() + 1) % 7
+    sunday_dt = (anchor - timedelta(days=days_back_to_sunday)).replace(
+        hour=14, minute=0, second=0, microsecond=0
+    )
+    wed_dt = (sunday_dt + timedelta(days=3)).replace(
+        hour=10, minute=0, second=0, microsecond=0
+    )
+
+    # Sanity de l'echafaudage : sinon le test prouverait n'importe quoi
+    # (ex : si sunday_dt tombe par accident un jour ferie un mercredi 10h apres
+    # un decalage, _est_hors_heures_ouvrees pourrait inverser le verdict).
+    from backend.app.api.stats import _est_hors_heures_ouvrees
+    assert _est_hors_heures_ouvrees(sunday_dt), (
+        f"sanity : sunday_dt={sunday_dt} doit etre hors heures ouvrees"
+    )
+    assert not _est_hors_heures_ouvrees(wed_dt), (
+        f"sanity : wed_dt={wed_dt} doit etre dans heures ouvrees "
+        f"(mercredi 10h, hors jour ferie). Si jour ferie tombe : ajuster "
+        f"l'offset (anchor) pour eviter la collision."
+    )
+
+    _force_alarm_state(
+        alarm_id,
+        original_created_at=sunday_dt,
+        created_at=wed_dt,
+    )
+
+    # Cas 1 : hors_heures_only=True → L127 applique le filtre
+    r = client.get(
+        "/api/stats/kpi",
+        params={"weeks": 8, "hors_heures_only": True},
+        headers=admin_headers,
+    )
+    assert r.status_code == 200, r.text
+    kpi_filtered = r.json()
+    total_filtered = sum(w["total"] for w in kpi_filtered["weeks"])
+    assert total_filtered >= 1, (
+        f"INV-018b #141 [L] L127 : alarme avec original_created_at=dimanche "
+        f"({sunday_dt}, hors heures) doit etre incluse avec hors_heures_only=True. "
+        f"Got total sur 8 buckets={total_filtered}. "
+        f"Si 0 : le filtre L127 utilise `a.created_at` (mercredi 10h, heures "
+        f"ouvrees, reset par escalade) au lieu de `a.original_created_at`. "
+        f"Voir backend/app/api/stats.py L127."
+    )
+
+    # Cas 2 (cross-check) : hors_heures_only=False → meme alarme apparait
+    # → prouve que c'est bien le filtre hors_heures (L127) qui tranche,
+    # pas un autre filtre amont (periode L113 ou bucketing L124).
+    r = client.get(
+        "/api/stats/kpi",
+        params={"weeks": 8, "hors_heures_only": False},
+        headers=admin_headers,
+    )
+    assert r.status_code == 200, r.text
+    kpi_unfiltered = r.json()
+    total_unfiltered = sum(w["total"] for w in kpi_unfiltered["weeks"])
+    assert total_unfiltered >= 1, (
+        f"sanity : sans filtre hors_heures, l'alarme staged doit apparaitre. "
+        f"Got total={total_unfiltered}. Si 0 : echec de la mise en scene "
+        f"(timestamps hors fenetre weeks=8 ?) — pas une preuve de L127."
     )
