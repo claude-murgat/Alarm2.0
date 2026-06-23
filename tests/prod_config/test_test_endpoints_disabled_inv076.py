@@ -27,7 +27,11 @@ pytestmark = pytest.mark.integration  # tier 2 (TestClient + SQLite), comme inte
 def _discover_test_api_routes():
     """Introspecte l'app FastAPI pour decouvrir TOUTES les routes `/api/test/*`.
 
-    Renvoie une liste de tuples `(method, path)` triee, deduplique HEAD/OPTIONS.
+    Renvoie `(routes, query_params_by_path)` ou :
+    - `routes` : liste de tuples `(method, path)` triee, deduplique HEAD/OPTIONS ;
+    - `query_params_by_path` : dict `path -> [noms des query params declares]`,
+      utilise pour forger une requete qui PASSE la validation Pydantic et
+      atteint le guard `_require_test_endpoints()` en tete de handler.
 
     Pourquoi introspection plutot qu'une liste hardcodee : si un dev ajoute
     `@router.get("/api/test/nouveau-endpoint")` mais OUBLIE le
@@ -38,10 +42,20 @@ def _discover_test_api_routes():
     qui retire le guard de l'un de ces 15 ne tuait personne -> trou de
     couverture mutation-aware.
 
+    Pourquoi capturer aussi les query params : un endpoint avec un query param
+    REQUIS (ex: `revoke-user-refresh-tokens` -> `user_id: int = Query(...)`)
+    renvoie 422 AVANT d'entrer dans le handler si on ne fournit pas le param.
+    Or 422 ne prouve RIEN pour INV-076 : l'endpoint renvoie 422 que
+    ENABLE_TEST_ENDPOINTS soit true OU false (la validation court-circuite le
+    guard dans les deux cas). Pour que le 404 (flag=false) soit distinguable
+    du 200 (flag=true), il faut d'abord franchir la validation -> on fournit
+    une valeur factice a chaque query param declare (cf test ci-dessous).
+
     Cf issue #140 (hardening mutation-proof INV-076).
     """
     from backend.app.main import app
     routes = []
+    query_params_by_path = {}
     for route in app.routes:
         methods = getattr(route, "methods", None)
         if not methods:
@@ -49,12 +63,16 @@ def _discover_test_api_routes():
         path = getattr(route, "path", "")
         if not path.startswith("/api/test/"):
             continue
+        dependant = getattr(route, "dependant", None)
+        query_params_by_path[path] = [
+            qp.name for qp in getattr(dependant, "query_params", [])
+        ]
         for method in methods - {"HEAD", "OPTIONS"}:
             routes.append((method, path))
-    return sorted(routes)
+    return sorted(routes), query_params_by_path
 
 
-_TEST_API_ROUTES = _discover_test_api_routes()
+_TEST_API_ROUTES, _QUERY_PARAMS_BY_PATH = _discover_test_api_routes()
 
 
 def test_test_api_route_count_meta_at_least_21():
@@ -90,17 +108,25 @@ def test_test_endpoint_returns_404_when_disabled(client, method, path):
     de l'endpoint correspondant, OU le mecanisme de chargement de la variable
     a regresse. C'est un VECTEUR D'ATTAQUE direct en prod (cf docstring module).
 
-    Couverture mutation-aware [C] : 21 routes introspectees = 21 mutants tues
-    (un par handler). Cf `_discover_test_api_routes` ci-dessus.
+    Couverture mutation-aware [C] : toutes les routes introspectees = autant
+    de mutants tues (un par handler). Cf `_discover_test_api_routes` ci-dessus.
     """
-    # `json={}` est inoffensif pour les endpoints sans body et necessaire pour
-    # les endpoints qui declarent `payload: dict` (insert-sms, insert-call) :
-    # sans body, FastAPI renvoie 422 AVANT d'entrer dans le handler -> le
-    # guard `_require_test_endpoints()` ne serait jamais teste sur ces routes.
+    # Forger une requete qui FRANCHIT la validation Pydantic pour atteindre le
+    # guard `_require_test_endpoints()` (1ere ligne de chaque handler) :
+    #  - query params : valeur factice "1" pour CHAQUE param declare. Sinon un
+    #    param requis (ex: revoke-user-refresh-tokens `user_id: int = Query(...)`)
+    #    -> 422 avant le guard. "1" est coercible en int/float/bool/str, donc
+    #    valide pour tous les types scalaires utilises par ces endpoints ;
+    #    fournir une valeur a un param OPTIONNEL est inoffensif.
+    #  - `json={}` : inoffensif pour les endpoints sans body, necessaire pour
+    #    ceux qui declarent `payload: dict` (insert-sms, insert-call).
+    # Le guard renvoyant 404 AVANT toute logiqe metier, ces valeurs factices
+    # n'ont aucun effet de bord quand ENABLE_TEST_ENDPOINTS=false.
+    params = {name: "1" for name in _QUERY_PARAMS_BY_PATH.get(path, [])}
     if method == "GET":
-        r = client.get(path)
+        r = client.get(path, params=params)
     elif method == "POST":
-        r = client.post(path, json={})
+        r = client.post(path, params=params, json={})
     else:  # pragma: no cover
         raise ValueError(f"method non geree: {method}")
 
@@ -109,8 +135,9 @@ def test_test_endpoint_returns_404_when_disabled(client, method, path):
         f"ENABLE_TEST_ENDPOINTS=false. Got {r.status_code} : {r.text[:200]}. "
         f"Si 200 : le guard `_require_test_endpoints()` est manquant sur ce "
         f"handler → VULNERABILITE PROD (endpoint dangereux exposé). "
-        f"Si 422 : body Pydantic invalide a court-circuite le guard "
-        f"(envoyer un body plus tolerant)."
+        f"Si 422 : la validation Pydantic a court-circuite le guard (un nouveau "
+        f"param requis n'est pas couvert par `_QUERY_PARAMS_BY_PATH` / `json={{}}` "
+        f"— adapter la generation de requete dans `_discover_test_api_routes`)."
     )
 
 
