@@ -1,0 +1,21 @@
+# /etc/systemd/system/alarm-disk-check.timer
+# Declenche alarm-disk-check.service toutes les 15 min sur les 3 noeuds.
+# Garde-fou contre une saturation disque silencieuse (cf incident WAL 2026-06-22).
+[Unit]
+Description=Timer verification remplissage disque (15 min)
+
+[Timer]
+# 1er run : 5 min apres boot (laisser docker/wg0 monter avant de juger /var/lib/docker).
+OnBootSec=5min
+# Ensuite : toutes les 15 min.
+OnUnitActiveSec=15min
+# Jitter +/- 60s : evite que les 3 noeuds frappent le SMTP a la meme seconde.
+RandomizedDelaySec=60s
+# Persistent=true : rattraper au boot si la machine etait eteinte au run prevu
+# (important apres une coupure courant — exactement le genre d'evenement qui
+# precede un disque qui se remplit).
+Persistent=true
+Unit=alarm-disk-check.service
+
+[Install]
+WantedBy=timers.target

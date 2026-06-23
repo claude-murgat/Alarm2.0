@@ -98,8 +98,9 @@ ne doit jamais être figé par un test — le catalogue tranche.
 - **Login par nom uniquement** : lowercase, sans espaces, case-insensitive
 - **Une seule alarme active** a la fois (HTTP 409 si doublon)
 - **Rotation bloquee** en portrait sur l'app mobile
-- **Sonnerie continue** pour : alarme active, hors connexion (cf INV-ANDROID-308 : heartbeat HTTP perdu + aucun SMS `[ALARME-MURGAT-PING]` recu dans 5 min), echec refresh token
+- **Sonnerie continue** pour : alarme active, hors connexion (cf INV-ANDROID-308 : heartbeat HTTP perdu + aucun SMS `[ALARME-MURGAT-PING]` recu dans 5 min), echec refresh token (rare depuis INV-079, cf ci-dessous)
 - **Escalade cumulative** : tous les utilisateurs appeles continuent de sonner
+- **Auth Gmail-style** (INV-079, 2026-06-15) : `/login` renvoie access_token (JWT 24h) **et** refresh_token (UUID opaque persiste en DB, jamais expire sauf si `revoked=TRUE`). L'app stocke les deux en SharedPreferences. Quand l'access expire (24h), l'app envoie le refresh dans le body de `POST /auth/refresh` → nouveau access. **Le tel peut rester eteint des semaines, il se reconnecte au demarrage sans demander le mdp.** Revocation cote serveur possible (`UPDATE refresh_tokens SET revoked=TRUE`).
 - **Logout supprime le token FCM** cote backend (plus de push apres deconnexion)
 - **Push FCM sur changement chaine** : notifie tous les utilisateurs de leur nouvelle position
 - **Statut "En attente"** pour les non-astreinte (pas de heartbeat actif, reveille par push)
@@ -156,11 +157,30 @@ adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 adb shell pm clear com.alarm.critical  # reset donnees
 adb shell am start -n com.alarm.critical/.MainActivity
 
+# Verifier la version du build (versionName auto-derive de git, cf INV-ANDROID-109)
+/opt/android-sdk/build-tools/34.0.0/aapt dump badging \
+  android/app/build/outputs/apk/debug/app-debug.apk | grep versionName
+# Affiche par ex : versionName='1.0.188-b95d44b' (-dirty si arbre modifie)
+
 # Emulateur avec reseau fonctionnel
 # Utiliser AVD "alarm_explore" (alarm_test a le reseau casse)
 # URLs emulateur : 10.0.2.2 (build.gradle.kts)
 # URLs telephone physique : changer en IP reseau (ex: 172.16.2.191)
 ```
+
+### Versioning Android (INV-ANDROID-109)
+**Le `versionCode` et `versionName` sont auto-derives de git** dans
+`android/app/build.gradle.kts`. Aucun bump manuel a faire — chaque commit
+produit automatiquement une version unique tracable au sha. La version
+apparait dans l'export `AppLogger.exportLogs()` (en-tete) et dans le
+manifest APK.
+
+Format : `1.0.<commit_count>-<short_sha>[-dirty]`.
+
+Cela rend impossible la classe de bugs "j'ai oublie de bumper la
+version" : si tu modifies le code, ton APK aura un sha different,
+donc une version different. Pour un test propre, garde le working
+tree propre (pas de `-dirty`) en committant avant build.
 
 ## Bot IA contributeur (alarm-murgat-bot)
 

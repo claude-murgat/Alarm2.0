@@ -83,4 +83,7 @@ object ApiClient {
         connectionPool.evictAll()
         Log.w(TAG, "Failover: URL[$prev]=${BACKEND_URLS[prev]} -> URL[$currentUrlIndex]=${BACKEND_URLS[currentUrlIndex]}")
     }
+
+    /** URL backend courante (pour les logs de diagnostic, cf INV-ANDROID-108). */
+    fun currentBaseUrl(): String = BACKEND_URLS[currentUrlIndex]
 }

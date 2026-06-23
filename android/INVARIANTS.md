@@ -139,8 +139,9 @@ Textes du bandeau :
 - `authErrorAlarm` → message personnalisé (ex: "Votre session a expiré..."), bouton "Reconnexion" VISIBLE.
 
 - **Pourquoi** : un toast qui disparaît en 3s = l'utilisateur ne le voit pas s'il n'a pas le téléphone en main. Un bandeau permanent force la lecture. Distinguer info-only vs action-required évite le cri-loup.
-- **Statut** : architecture INV-308 (absence SMS) à implémenter — le code 2026-05-27 (drapeaux companion dans `AlarmPollingService.kt`) reste structurellement valable, seule la condition d'armement de `heartbeatLostAlarm` change (consulte `lastPingReceivedElapsedMs` au lieu de `NetworkAvailabilityMonitor.isNoNetwork`).
-- **Couverture** : ⚠️ tests Espresso à étoffer (test09 actuel ne distingue pas encore les 2 textes). À ajouter dans la PR d'implémentation INV-308.
+- **Diagnostic cause d'échec (2026-06-15)** : `onHeartbeatFail(reason)` reçoit désormais la cause de l'échec (`"HTTP 401"`, `"HTTP 500"`, `"reseau KO (<msg>)"`) depuis l'appelant (`startHeartbeat`), qui l'extrait de `response.code()` ou `e.message`. Avant, `onHeartbeatFail()` était appelée sans argument → l'info était jetée, impossible de savoir pourquoi le heartbeat tombait (ex: heartbeat KO juste après un login réussi sur le même backend). La cause est loguée dans `AppLogger` sur **transition seulement** (1er échec, passage des 120s) **+ changement de cause** (ex: `HTTP 401 → reseau KO`), jamais à chaque tick — le heartbeat tape à 3s, logger chaque échec saturerait le buffer 500 entrées en ~25 min. La variable companion `lastHeartbeatFailReason` mémorise la dernière cause pour détecter les changements. Le 503 (replica) garde son comportement (`needsUrlSwitch`, pas d'armement de perte) mais est tracé une fois par transition.
+- **Statut** : architecture INV-308 (absence SMS) à implémenter — le code 2026-05-27 (drapeaux companion dans `AlarmPollingService.kt`) reste structurellement valable, seule la condition d'armement de `heartbeatLostAlarm` change (consulte `lastPingReceivedElapsedMs` au lieu de `NetworkAvailabilityMonitor.isNoNetwork`). Tracé cause d'échec ajouté 2026-06-15.
+- **Couverture** : ⚠️ tests Espresso à étoffer (test09 actuel ne distingue pas encore les 2 textes, ni le tracé de cause). À ajouter dans la PR d'implémentation INV-308.
 
 ### INV-ANDROID-105 [M] ⚠️ Historique affiché = 10 derniers jours filtrés sur resolved/acknowledged
 `getAlarmHistory(days=10)` appelé toutes les 10s, filtré côté client sur `status in {resolved, acknowledged}`. Affichage en liste chronologique avec timeline (dot + ligne) côté gauche.
@@ -157,12 +158,27 @@ Textes du bandeau :
 - **Pourquoi** : debug à distance par l'équipe technique sans accès ADB. Mesure de résilience opérationnelle.
 - **Manque** : aucun test ne vérifie la présence du bouton ni l'envoi du share intent.
 
-### INV-ANDROID-108 [M] ❌ Bouton "Envoyer les logs" sur la page de login (pré-auth) — révisé 2026-06-04
+### INV-ANDROID-108 [M] ❌ Bouton "Envoyer les logs" sur la page de login (pré-auth) + diagnostic login tracé — révisé 2026-06-15
 `shareLogsButton.setOnClickListener { shareLogs() }` sur `MainActivity` → mêmes `AppLogger.exportLogs(...)` + `Intent.ACTION_SEND` que INV-ANDROID-107. `user_name` = `"(non connecté)"` dans l'en-tête du export puisque la session n'a pas encore d'identité confirmée.
 - **Pourquoi** : INV-ANDROID-107 n'est accessible qu'une fois loggé. Si le login échoue (URL backend inaccessible, timeout réseau, mauvais credentials), l'opérateur ne pouvait pas exporter les logs depuis l'app — il fallait passer par ADB ou re-essayer indéfiniment. Le bouton login est explicitement conçu pour les diagnostics réseau au démarrage (rotation des URLs cluster, certificats, DNS).
+- **Tracé du flow login (2026-06-15)** : `MainActivity.login()` émet des events `AppLogger.log("Login", ...)` à chaque étape — tentative (user + URL courante), résultat de chaque essai (`HTTP <code>` ou `reseau KO (<msg>)`) y compris pendant la rotation des 3 URLs, succès (user/oncall/pos), ou échec définitif avec le code et le message affiché. Avant ce changement, aucune trace côté `AppLogger` : un login en échec (401, timeout, serveur down) n'apparaissait PAS dans l'export, rendant le bouton inutile pour diagnostiquer justement le cas qu'il vise.
+- **Message clair (2026-06-15)** : `loginErrorMessage(code)` traduit la cause en message lisible (`401` → "Identifiants incorrects (nom ou mot de passe)", `429` → "Trop de tentatives — réessayez dans 1 minute", `5xx` → "Serveur en erreur", `null`/réseau → "Serveur injoignable — vérifiez votre connexion réseau"). Remplace l'ancien `"Échec de connexion : 401"` cryptique. `ApiClient.currentBaseUrl()` ajouté pour exposer l'URL backend courante aux logs.
 - **Privacy (anti-fuite cross-user)** : `AppLogger.clear()` est appelé dans la procédure logout de `DashboardActivity` (cf code) **avant** de revenir à `MainActivity`. Garantit que le contenu de `AppLogger` au moment du clic « Envoyer les logs » sur l'écran de login ne contient QUE les events de la session courante (pré-login) ou ceux du démarrage app si pas de session précédente — jamais ceux d'un user A précédemment déconnecté.
-- **Statut** : code implémenté 2026-06-04 (cf `MainActivity.shareLogs()` + ligne `AppLogger.clear()` dans `DashboardActivity.logout()`).
-- **Manque** : aucun test ne vérifie la présence du bouton, l'envoi du share intent, ni le clear au logout. Tests Espresso à ajouter dans une PR follow-up.
+- **Statut** : code implémenté 2026-06-04, tracé login + messages clairs 2026-06-15 (cf `MainActivity.login()` / `loginErrorMessage()` / `shareLogs()` + `ApiClient.currentBaseUrl()` + `AppLogger.clear()` dans `DashboardActivity.logout()`).
+- **Manque** : aucun test ne vérifie la présence du bouton, l'envoi du share intent, le clear au logout, ni les events de login tracés. Tests Espresso à ajouter dans une PR follow-up.
+
+### INV-ANDROID-109 [H] ❌ Version de build dérivée automatiquement de git (anti-bump-manquant) — 2026-06-12
+`versionCode` et `versionName` du `defaultConfig` Gradle sont calculés au build time depuis git, pas hardcodés :
+- `versionCode = git rev-list --count HEAD` (nombre total de commits, monotone)
+- `versionName = "${baseVersion}.${gitCommitCount}-${gitShortSha}[-dirty]"` (ex: `1.0.188-b95d44b` ou `1.0.188-b95d44b-dirty` si l'arbre n'est pas propre)
+- Si git inaccessible (rare, build hors repo) : fallback `versionCode=1`, `versionName="1.0-unknown"`
+
+La version apparaît dans **toutes les exports `AppLogger.exportLogs()`** via l'en-tête (cf INV-ANDROID-107/108). Permet de tracer une session loguée à un commit exact.
+- **Pourquoi** : élimine la classe entière de bugs « j'ai oublié de bumper la version dans build.gradle » — chaque commit produit automatiquement une version distincte et traçable. Avant, `versionCode=1` et `versionName="1.0"` étaient hardcodés : deux APK construits à des moments différents avaient la même version, impossible de savoir lequel produisait les logs ou les remontées Crashlytics.
+- **Trade-off `-dirty`** : un build avec working tree non-commité hérite du sha du dernier commit + suffixe `-dirty`. Volontaire : on voit immédiatement qu'un APK ne correspond à aucun commit pushé (utile en debug local, à éviter en distribution).
+- **Pas d'effet sur la signature** : la build n'utilise toujours pas de signing config explicite ; les release-builds sont signés en post avec la debug-keystore (cf scripts/build_apk_release.sh à venir).
+- **Statut** : implémenté 2026-06-12 dans `android/app/build.gradle.kts` (`gitOutput()` helper + 3 `val`s en tête de fichier). Build local vérifié : versionCode=188, versionName="1.0.188-b95d44b-dirty".
+- **Manque** : pas de test (la valeur dépend de l'environnement git, difficile à fixer dans un test unitaire). Acceptable car la logique est triviale et le smoke-test « build l'APK et lis le manifest » suffit.
 
 ---
 
@@ -263,6 +279,7 @@ Pas d'alerte si glitch réseau passager.
 ### INV-ANDROID-304 [M] ⚠️ Heartbeat 503 (replica) → flag needsUrlSwitch au poll suivant
 Cas spécial : `response.code() == 503` signifie "backend est un replica, pas le primary". Le heartbeat set `needsUrlSwitch=true` (volatile) — le poll suivant détecte le flag et fait `switchToNextUrl()` + delay 4s pour laisser le heartbeat revalider.
 - **Pourquoi** : suivre automatiquement le primary après failover Patroni côté backend. Le heartbeat ne doit PAS lui-même switcher (il suit passivement l'URL courante).
+- **Complément backend 2026-06-17 (cf INV-043 révisé)** : ce mécanisme de rotation est désormais surtout un filet de secours. Côté backend, **tout** nœud replica forwarde le heartbeat au leader (via WG) et renvoie 200 — sur tous les nœuds, pas seulement le cloud (résilience : si le cloud tombe et qu'un onsite devient le point d'entrée externe, il relaie aussi). Donc en pratique l'app ne voit quasiment plus de 503 sur le heartbeat : elle reçoit un 200 (direct si elle a tapé le leader, proxifié sinon). Le `needsUrlSwitch`/rotation ne se déclenche plus que dans le cas résiduel « le nœud tapé est carrément down (connexion refusée) » ou « aucun leader joignable → 503 » (panne cluster réelle).
 - **Manque** : test Espresso dédié au scénario 503 heartbeat (test22 couvre les 503 polling, pas heartbeat).
 
 ### INV-ANDROID-305 [C] ❌ SUPERSEDED (2026-06-03) — détection "no network at all" abandonnée
@@ -460,10 +477,14 @@ Avant le `clear()`, `ApiProvider.service.deleteFcmToken(auth, FcmTokenDeleteRequ
 ### INV-ANDROID-505 [C] ⚠️ Refresh 2xx → nouveau token en prefs + en mémoire service
 Sur `refreshToken.isSuccessful`, `newToken = body.access_token` → `prefs.putString("token", newToken)` + `this.token = newToken`.
 - **Pourquoi** : polling/heartbeat suivants utilisent immédiatement le nouveau token, pas de 401 intermédiaire.
+- **Révision INV-079 (2026-06-15)** : `tryRefreshToken()` envoie maintenant le `refresh_token` (UUID opaque) dans le body de `POST /auth/refresh`, pas l'access expiré en header. Stocké dans `prefs.refresh_token` au login (cf INV-079). Le nouveau access reçu remplace l'ancien dans prefs+mémoire comme avant.
 
-### INV-ANDROID-506 [C] ⚠️ Refresh échoué → sonnerie locale + message permanent, PAS logout silencieux
-`forceLogout()` NE force PAS de retour à MainActivity. Au lieu : `authErrorAlarm=true`, `authErrorMessage="Votre session a expiré et n'a pas pu être renouvelée. Veuillez vous reconnecter."`, bandeau permanent visible, sonnerie démarrée, bouton "Reconnexion" visible.
+### INV-ANDROID-506 [C] ⚠️ Refresh échoué → sonnerie locale + message permanent, PAS logout silencieux (révisé 2026-06-15)
+`forceLogout()` NE force PAS de retour à MainActivity. Au lieu : `authErrorMessage = "Votre session a expiré..."` puis `authErrorAlarm = true` puis `AppLogger.log("Auth", "ERREUR: $authErrorMessage")`. Bandeau permanent visible, sonnerie démarrée, bouton "Reconnexion" visible.
 - **Pourquoi** : un logout silencieux = l'utilisateur manque des alarmes sans savoir pourquoi. Mieux vaut une alerte bruyante qui le force à agir.
+- **Changement 2026-06-15 (INV-079)** : ce code path est désormais **très rare**. Le refresh token côté serveur (cf INV-079) est éternel sauf si révoqué — l'app peut rester éteinte des semaines et le refresh marchera au retour. `forceLogout()` ne se déclenche qu'en cas de révocation admin, suppression du user, ou backend indisponible > 1 cycle de refresh. Avant INV-079, la fenêtre était 24h (TTL JWT access).
+- **Bug ordre log fixé (2026-06-15)** : avant, `AppLogger.log("Auth", "ERREUR: ${authErrorMessage}")` était appelé AVANT l'assignation de `authErrorMessage`, donc loguait toujours "ERREUR: null". L'ordre est maintenant : assignation → set flag → log avec le message correct.
+- **Logs AppLogger ajoutés (INV-079)** : visibilité complète sur le path auth — `"Polling 401 → tentative refresh"`, `"Refresh OK"`, `"Refresh KO HTTP <code>"`, `"Refresh erreur reseau : <msg>"`, `"Refresh impossible : refresh_token absent"`. Le bouton "Envoyer les logs" expose maintenant exactement ce qui s'est passé sur l'auth.
 - **Couverture** : test17.
 
 ### INV-ANDROID-507 [M] ⚠️ Token valide en prefs au démarrage → direct au dashboard (pas de re-login)

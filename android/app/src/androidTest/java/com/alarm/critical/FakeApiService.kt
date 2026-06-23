@@ -76,10 +76,18 @@ class FakeApiService : ApiService {
         return alarmHistoryResponse
     }
 
-    var refreshTokenResponse: Response<TokenResponse>? = null  // null = use loginResponse
+    // INV-082 : signature mise a jour pour matcher ApiService.refreshToken
+    // qui prend maintenant un RefreshRequest body au lieu d'un Authorization
+    // header. Defaut : un access token "fake-refreshed-token" pour distinguer
+    // d'un login frais dans les tests.
+    var refreshTokenResponse: Response<RefreshResponse> = Response.success(
+        RefreshResponse(access_token = "fake-refreshed-token", token_type = "bearer")
+    )
+    var lastRefreshRequestPayload: RefreshRequest? = null
 
-    override suspend fun refreshToken(auth: String): Response<TokenResponse> {
-        return refreshTokenResponse ?: loginResponse
+    override suspend fun refreshToken(request: RefreshRequest): Response<RefreshResponse> {
+        lastRefreshRequestPayload = request
+        return refreshTokenResponse
     }
 
     // FCM token management

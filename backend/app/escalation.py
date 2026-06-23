@@ -91,7 +91,13 @@ def _enqueue_sms_for_user(db: Session, user: User, alarm: Alarm):
     Guard anti-doublon : ne crée pas de SMS si un identique non-envoyé existe déjà."""
     if not user.phone_number:
         return
-    body = f"ALARME {alarm.severity.upper()}: {alarm.title}"
+    # INV-124 : instruire l'acquittement par reponse SMS "1" + lien supervision.
+    # Sans accent dans la partie statique → reste en GSM-7 (evite UCS-2 / 70 car.).
+    # La gateway (SmsReceiverThread) acquitte sur reception d'un SMS "1"/"ok"/"oui"/"ack".
+    body = (
+        f"ALARME {alarm.severity.upper()}: {alarm.title}\n"
+        f"Repondez 1 pour acquitter ou https://supervision.charlesmurgat.com"
+    )
     existing = (
         db.query(SmsQueue)
         .filter(

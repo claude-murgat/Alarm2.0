@@ -153,6 +153,113 @@ class TestUsersTab:
                 f"L'utilisateur '{name}' doit apparaitre dans l'onglet Utilisateurs"
             )
 
+    # --- INV-069 : saisie des numeros de telephone des operateurs ---
+
+    def test_users_table_has_phone_input_per_user(self, dashboard: Page):
+        """INV-069 : chaque ligne du tableau Utilisateurs expose un champ tel editable."""
+        dashboard.locator(".tab:text('Utilisateurs')").click()
+        dashboard.wait_for_timeout(2000)
+
+        inputs = dashboard.locator("#usersTable input.user-phone")
+        count = inputs.count()
+        assert count >= 3, (
+            f"Chaque utilisateur doit avoir un champ de saisie du numero "
+            f"(input.user-phone), got {count}"
+        )
+
+    def test_save_phone_sends_patch_to_user_endpoint(self, dashboard: Page, primary_url):
+        """INV-069 : saisir un numero + Enregistrer envoie PATCH /api/users/{id}
+        avec {phone_number}."""
+        dashboard.locator(".tab:text('Utilisateurs')").click()
+        dashboard.wait_for_timeout(2000)
+
+        admin_row = dashboard.locator("#usersTable tr", has_text="admin")
+        admin_row.locator("input.user-phone").fill("+33612345678")
+
+        with dashboard.expect_request(
+            lambda r: "/api/users/" in r.url and r.method == "PATCH"
+        ) as req_info:
+            admin_row.locator(".save-phone-btn").click()
+
+        body = req_info.value.post_data_json
+        assert body.get("phone_number") == "+33612345678", (
+            f"Le PATCH doit contenir le numero saisi, got {body}"
+        )
+
+    def test_add_user_with_phone_appears_in_table(self, dashboard: Page, primary_url):
+        """INV-069 : creer un user avec un numero le persiste et le reaffiche.
+        Couvre aussi l'ajout de phone_number a UserCreate/register."""
+        unique = f"optel{int(time.time() * 1000) % 1000000}"
+        phone = "+33698765432"
+
+        dashboard.locator(".tab:text('Utilisateurs')").click()
+        dashboard.wait_for_timeout(1000)
+        dashboard.locator("#newUserName").fill(unique)
+        dashboard.locator("#newUserPassword").fill("pass1234")
+        dashboard.locator("#newUserPhone").fill(phone)
+        dashboard.locator("button[onclick='addUser()']").click()
+        dashboard.wait_for_timeout(2000)
+
+        try:
+            table_text = dashboard.locator("#usersTable").inner_text()
+            assert unique in table_text, f"Le user cree '{unique}' doit apparaitre"
+
+            phone_values = dashboard.locator(
+                "#usersTable input.user-phone"
+            ).evaluate_all("els => els.map(e => e.value)")
+            assert phone in phone_values, (
+                f"Le numero saisi a la creation doit etre persiste et reaffiche, "
+                f"valeurs={phone_values}"
+            )
+        finally:
+            # Cleanup : reset_all ne supprime pas les users, on retire le user cree.
+            tok = requests.post(
+                f"{primary_url}/api/auth/login",
+                json={"name": "admin", "password": "admin123"}, timeout=5,
+            ).json()["access_token"]
+            hdr = {"Authorization": f"Bearer {tok}"}
+            for u in requests.get(
+                f"{primary_url}/api/users/", headers=hdr, timeout=5
+            ).json():
+                if u["name"] == unique:
+                    requests.delete(
+                        f"{primary_url}/api/users/{u['id']}", headers=hdr, timeout=5
+                    )
+
+    def test_invalid_phone_shows_error_and_no_request(self, dashboard: Page):
+        """INV-069 : un numero invalide affiche une erreur et n'envoie aucun PATCH."""
+        dashboard.locator(".tab:text('Utilisateurs')").click()
+        dashboard.wait_for_timeout(2000)
+
+        patch_calls = []
+        dashboard.on(
+            "request",
+            lambda r: patch_calls.append(r.url)
+            if ("/api/users/" in r.url and r.method == "PATCH") else None,
+        )
+
+        admin_row = dashboard.locator("#usersTable tr", has_text="admin")
+        admin_row.locator("input.user-phone").fill("12ab!!")
+        admin_row.locator(".save-phone-btn").click()
+        dashboard.wait_for_timeout(1000)
+
+        assert len(patch_calls) == 0, (
+            f"Un numero invalide ne doit declencher aucun PATCH, got {patch_calls}"
+        )
+        expect(admin_row.locator(".phone-error")).to_be_visible()
+
+    def test_escalation_chain_flags_member_without_phone(self, dashboard: Page):
+        """INV-069 : un membre de la chaine d'escalade sans numero affiche un badge."""
+        # Les users seed (user1/user2) n'ont pas de numero -> badge attendu.
+        dashboard.locator(".tab:text('Escalade')").click()
+        dashboard.wait_for_timeout(1500)
+
+        badges = dashboard.locator("#escalationChain .no-phone-badge")
+        assert badges.count() >= 1, (
+            "Un membre de la chaine sans numero doit afficher un badge 'pas de tel' "
+            "(.no-phone-badge)"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Escalade — Drag-and-drop
