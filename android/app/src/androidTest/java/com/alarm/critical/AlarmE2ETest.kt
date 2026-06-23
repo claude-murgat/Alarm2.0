@@ -27,6 +27,16 @@ import com.alarm.critical.api.ApiProvider
 import com.alarm.critical.model.AlarmResponse
 import com.alarm.critical.service.AlarmSoundManager
 import com.alarm.critical.util.AppLogger
+import android.view.View
+import androidx.test.espresso.intent.Intents.intended
+import androidx.test.espresso.intent.Intents.intending
+import androidx.test.espresso.intent.matcher.IntentMatchers.hasAction
+import androidx.test.espresso.intent.matcher.IntentMatchers.hasExtra
+import androidx.test.espresso.intent.matcher.IntentMatchers.hasType
+import org.hamcrest.Matchers.allOf
+import org.hamcrest.Matchers.containsString
+import org.hamcrest.Matchers.equalTo
+import org.hamcrest.Matchers.not
 import org.junit.*
 import org.junit.Assert.*
 import org.junit.runner.RunWith
@@ -1117,6 +1127,159 @@ class AlarmE2ETest {
             Intents.release()
         }
 
+        scenario.close()
+    }
+
+    // ── 26. INV-ANDROID-107 — helpFab du Dashboard partage AppLogger.exportLogs(..) ──
+
+    @Test
+    fun test26_dashboardHelpFabSharesAppLoggerViaIntent() {
+        // INV-ANDROID-107 : le bouton aide flottant (helpFab) doit emettre un
+        // Intent.ACTION_SEND MIME text/plain dont EXTRA_TEXT contient le
+        // contenu de AppLogger.exportLogs(userName, version).
+        AppLogger.clear()
+        AppLogger.log("Test", "marker-INV107-dashboard")
+
+        fakeApi.myAlarmsResponses = mutableListOf(Response.success(emptyList()))
+        waitForPolls(2)
+
+        val scenario = launchDashboard()
+        // S'assurer que le helpFab est bien affiche avant de cliquer.
+        onView(withId(R.id.helpFab))
+            .check(matches(withEffectiveVisibility(Visibility.VISIBLE)))
+
+        Intents.init()
+        try {
+            // Stub : intercepter le chooser et retourner un resultat OK sans
+            // ouvrir reellement le dialog systeme (test isole, pas d'app
+            // de messagerie installee dans l'emulateur).
+            intending(hasAction(Intent.ACTION_CHOOSER)).respondWith(
+                Instrumentation.ActivityResult(Activity.RESULT_OK, null)
+            )
+
+            onView(withId(R.id.helpFab)).perform(click())
+
+            // Verifier la presence d'un chooser contenant un Intent.ACTION_SEND
+            // text/plain avec notre marker dans EXTRA_TEXT.
+            intended(
+                allOf(
+                    hasAction(Intent.ACTION_CHOOSER),
+                    hasExtra(
+                        equalTo(Intent.EXTRA_INTENT),
+                        allOf(
+                            hasAction(Intent.ACTION_SEND),
+                            hasType("text/plain"),
+                            hasExtra(
+                                equalTo(Intent.EXTRA_TEXT),
+                                containsString("marker-INV107-dashboard")
+                            )
+                        )
+                    )
+                )
+            )
+        } finally {
+            Intents.release()
+        }
+
+        scenario.close()
+    }
+
+    // ── 27. INV-ANDROID-108 — tracé du flow login dans AppLogger ──
+
+    @Test
+    fun test27_loginTracesFlowEventsToAppLogger() {
+        // INV-ANDROID-108 (partie tracé) : MainActivity.login() doit emettre
+        // des events AppLogger.log("Login", ...) couvrant Tentative, Essai 1,
+        // Succes (ou Echec definitif / Exception inattendue selon le cas).
+        // Sans ce tracé, le bouton "Envoyer les logs" est inutile pour
+        // diagnostiquer justement les login KO qu'il vise.
+        context.getSharedPreferences("alarm_prefs", Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        AppLogger.clear()
+
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+
+        // Login pre-rempli en debug, sinon on saisit les credentials.
+        onView(withId(R.id.nameInput))
+            .perform(clearText(), typeText("user1"), closeSoftKeyboard())
+        onView(withId(R.id.passwordInput))
+            .perform(clearText(), typeText("user123"), closeSoftKeyboard())
+        onView(withId(R.id.loginButton)).perform(click())
+
+        // Attendre que le polling demarre cote dashboard → garantit que le
+        // login coroutine a deroule entierement (incluant les AppLogger.log).
+        fakeApi.resetCallCount()
+        waitForPolls(1)
+
+        val dump = AppLogger.exportLogs("user1", "test")
+
+        // Les 3 traces minimales d'un login OK : tentative + essai 1 + succes.
+        // Pour le diagnostic terrain (login KO), on a aussi Echec definitif et
+        // Exception inattendue dans d'autres tests (cf test28).
+        assertTrue(
+            "AppLogger doit tracer 'Tentative' au debut du login. Dump:\n$dump",
+            dump.contains("Login: Tentative")
+        )
+        assertTrue(
+            "AppLogger doit tracer 'Essai 1' (premier essai d'URL). Dump:\n$dump",
+            dump.contains("Login: Essai 1")
+        )
+        assertTrue(
+            "AppLogger doit tracer 'Succes' (login reussi). Dump:\n$dump",
+            dump.contains("Login: Succes")
+        )
+
+        scenario.close()
+    }
+
+    // ── 28. INV-ANDROID-108 — exception inattendue affiche un message clair ──
+
+    @Test
+    fun test28_loginUnexpectedExceptionShowsCleanMessageNotRaw() {
+        // Cosmétique [L] de l'issue : le branch catch (e: Exception) de
+        // MainActivity.login() doit afficher loginErrorMessage(null)
+        // ("Serveur injoignable — vérifiez votre connexion réseau") plutot
+        // que "Erreur de connexion : ${e.message}" brut (incoherence UX vs
+        // les autres cas 401/429/5xx/réseau qui passent deja par
+        // loginErrorMessage).
+        context.getSharedPreferences("alarm_prefs", Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        AppLogger.clear()
+
+        // Login renvoie 200 → on entre dans la branche "succes". Puis
+        // registerDevice() throw → on tombe dans le catch (e: Exception).
+        fakeApi.registerDeviceShouldThrow = true
+
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+
+        onView(withId(R.id.nameInput))
+            .perform(clearText(), typeText("user1"), closeSoftKeyboard())
+        onView(withId(R.id.passwordInput))
+            .perform(clearText(), typeText("user123"), closeSoftKeyboard())
+        onView(withId(R.id.loginButton)).perform(click())
+
+        // L'exception est levee dans la coroutine ; on attend qu'Espresso
+        // ait fini ses postes Main avant de checker statusText.
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        Thread.sleep(2000)
+
+        // statusText doit afficher le message clair, PAS l'exception brute.
+        // (le message exact vient de MainActivity.loginErrorMessage(null))
+        onView(withId(R.id.statusText))
+            .check(matches(withText("Serveur injoignable — vérifiez votre connexion réseau")))
+        // Sanity : le prefixe brut "Erreur de connexion :" ne doit pas fuir.
+        onView(withId(R.id.statusText))
+            .check(matches(not(withSubstring("Erreur de connexion :"))))
+
+        // Le tracé "Exception inattendue" doit apparaitre dans AppLogger
+        // (cf INV-ANDROID-108 — diagnostic disponible meme dans ce cas rare).
+        val dump = AppLogger.exportLogs("user1", "test")
+        assertTrue(
+            "AppLogger doit tracer 'Exception inattendue'. Dump:\n$dump",
+            dump.contains("Login: Exception inattendue")
+        )
+
+        fakeApi.registerDeviceShouldThrow = false
         scenario.close()
     }
 }

@@ -177,7 +177,9 @@ class MainActivity : AppCompatActivity() {
                 } catch (e: Exception) {
                     AppLogger.log("Login", "Exception inattendue : ${e.message}")
                     runOnUiThread {
-                        statusText.text = "Erreur de connexion : ${e.message}"
+                        // Coherence UX : meme message clair que pour un reseau KO,
+                        // pas l'exception brute (cf INV-ANDROID-108).
+                        statusText.text = loginErrorMessage(null)
                         loginButton.isEnabled = true
                     }
                 }
