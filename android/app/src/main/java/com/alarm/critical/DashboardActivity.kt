@@ -52,6 +52,10 @@ class DashboardActivity : AppCompatActivity() {
     private var pulseAnimator: ObjectAnimator? = null
     private var lastCardState: String = "calm"
 
+    // INV-ANDROID-306/307 : track le dernier cas affiche du bandeau "Connexion perdue"
+    // pour ne logger qu'aux TRANSITIONS (eviter spam 1 ligne/seconde).
+    private var lastBandeauCase: String? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_dashboard)
@@ -73,6 +77,17 @@ class DashboardActivity : AppCompatActivity() {
         val userName = prefs.getString("user_name", "Utilisateur") ?: "Utilisateur"
 
         AppLogger.log("Dashboard", "Ouvert (user=$userName)")
+
+        // INV-ANDROID-305 : snapshot initial de l'etat reseau pour aider au diagnostic.
+        run {
+            val nm = com.alarm.critical.util.NetworkAvailabilityMonitor
+            AppLogger.log(
+                "Dashboard",
+                "Snapshot reseau initial : data=${nm.dataAvailable} cell=${nm.cellularInService} " +
+                    "isNoNetwork=${nm.isNoNetwork}. Si cell=true et que tu n'as pas autorise " +
+                    "READ_PHONE_STATE, le check cellular est en fail open (cf logs Network)."
+            )
+        }
 
         // Header : nom + initiale
         findViewById<TextView>(R.id.userNameText).text = userName
@@ -222,6 +237,10 @@ class DashboardActivity : AppCompatActivity() {
         }
 
         prefs.edit().clear().apply()
+        // Vider les logs collectes pendant la session, sinon un user suivant
+        // qui clique "Envoyer les logs" sur l'ecran de login (cf INV-ANDROID-108)
+        // exporterait les events de la session precedente — fuite cross-user.
+        AppLogger.clear()
         stopPollingService()
         soundManager?.stopAlarmSound()
         connectionLostSoundManager?.stopAlarmSound()
@@ -288,6 +307,37 @@ class DashboardActivity : AppCompatActivity() {
             connectionLostArcTimer.visibility = View.GONE
             connectionLostCountdownLabel.visibility = View.GONE
             snoozeButton.visibility = View.GONE
+
+            // INV-ANDROID-306/307 : log la transition entre cas pour pouvoir diagnostiquer
+            // depuis l'export "Envoyer les logs". 1 ligne par transition, pas a chaque tick.
+            val bandeauCase: String = when {
+                AlarmPollingService.authErrorAlarm -> "AUTH_ERROR"
+                AlarmPollingService.heartbeatLostAlarm -> "INV302_SONNERIE"
+                snoozeActive -> "INV307_SNOOZE"
+                AlarmPollingService.heartbeatLostVisual -> "INV104_VISUAL_ONLY"
+                AlarmPollingService.heartbeatLostSince > 0L && noNetwork -> "INV306_COUNTDOWN_PRE_ALARM"
+                AlarmPollingService.heartbeatLostSince > 0L && !noNetwork -> "HEARTBEAT_LOST_BUT_NETWORK_OK_HIDDEN"
+                else -> "HIDDEN"
+            }
+            if (bandeauCase != lastBandeauCase) {
+                val data = com.alarm.critical.util.NetworkAvailabilityMonitor.dataAvailable
+                val cell = com.alarm.critical.util.NetworkAvailabilityMonitor.cellularInService
+                val elapsedSec = if (AlarmPollingService.heartbeatLostSince > 0L)
+                    (now - AlarmPollingService.heartbeatLostSince) / 1000L else 0L
+                com.alarm.critical.util.AppLogger.log(
+                    "Bandeau",
+                    "transition $lastBandeauCase -> $bandeauCase " +
+                        "data=$data cell=$cell isNoNetwork=$noNetwork " +
+                        "heartbeatLostSince=${AlarmPollingService.heartbeatLostSince}ms " +
+                        "(elapsed ${elapsedSec}s) " +
+                        "hbVisual=${AlarmPollingService.heartbeatLostVisual} " +
+                        "hbAlarm=${AlarmPollingService.heartbeatLostAlarm} " +
+                        "snoozeCount=${AlarmPollingService.snoozeCount}/" +
+                        "${AlarmPollingService.LOCAL_ALARM_SNOOZE_MAX_COUNT} " +
+                        "snoozeActive=$snoozeActive"
+                )
+                lastBandeauCase = bandeauCase
+            }
 
             if (AlarmPollingService.authErrorAlarm) {
                 connectionLostAlert.text = AlarmPollingService.authErrorMessage ?: "Session expiree"

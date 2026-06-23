@@ -55,7 +55,14 @@ object NetworkAvailabilityMonitor {
 
     @Synchronized
     fun init(context: Context) {
-        if (initialized) return
+        if (initialized) {
+            AppLogger.log(
+                "Network",
+                "init() ignore (deja initialise) dataAvailable=$dataAvailable " +
+                    "cellularInService=$cellularInService isNoNetwork=$isNoNetwork"
+            )
+            return
+        }
         val appCtx = context.applicationContext
 
         // --- Data (Wi-Fi / cellular data) -----------------------------------
@@ -64,22 +71,44 @@ object NetworkAvailabilityMonitor {
 
         // État initial (sync, juste pour ne pas démarrer "no network" si on a déjà du data)
         dataAvailable = _computeDataAvailable(cm)
+        AppLogger.log("Network", "init() data initial dataAvailable=$dataAvailable")
 
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
+                val prev = dataAvailable
                 dataAvailable = _computeDataAvailable(cm)
+                AppLogger.log(
+                    "Network",
+                    "data onAvailable network=$network dataAvailable=$prev->$dataAvailable " +
+                        "isNoNetwork=$isNoNetwork"
+                )
             }
             override fun onLost(network: Network) {
+                val prev = dataAvailable
                 dataAvailable = _computeDataAvailable(cm)
+                AppLogger.log(
+                    "Network",
+                    "data onLost network=$network dataAvailable=$prev->$dataAvailable " +
+                        "isNoNetwork=$isNoNetwork"
+                )
             }
             override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
                 // VALIDATED peut changer après captive portal accept
+                val prev = dataAvailable
                 dataAvailable = _computeDataAvailable(cm)
+                if (prev != dataAvailable) {
+                    AppLogger.log(
+                        "Network",
+                        "data onCapabilitiesChanged dataAvailable=$prev->$dataAvailable " +
+                            "isNoNetwork=$isNoNetwork"
+                    )
+                }
             }
         }
         networkCallback = cb
         try {
             cm.registerDefaultNetworkCallback(cb)
+            AppLogger.log("Network", "registerDefaultNetworkCallback OK")
         } catch (e: SecurityException) {
             // ACCESS_NETWORK_STATE manquante en théorie (install-time, donc rare)
             AppLogger.log("Network", "registerDefaultNetworkCallback denied: ${e.message}")
@@ -93,13 +122,20 @@ object NetworkAvailabilityMonitor {
             appCtx, Manifest.permission.READ_PHONE_STATE
         ) == PackageManager.PERMISSION_GRANTED
 
+        AppLogger.log(
+            "Network",
+            "perm READ_PHONE_STATE granted=$hasReadPhoneState tm=${tm != null} " +
+                "sdk=${Build.VERSION.SDK_INT}"
+        )
+
         if (tm == null || !hasReadPhoneState) {
             // Fail open : on suppose cellulaire dispo (conservateur).
             cellularInService = true
             AppLogger.log(
                 "Network",
-                "TelephonyManager indisponible ou READ_PHONE_STATE refusee — " +
-                "cellularInService=true par defaut (fail open INV-305)"
+                "FAIL OPEN cellularInService=true (TelephonyManager indispo ou perm refusee) " +
+                    "→ isNoNetwork=$isNoNetwork (toujours false), sonnerie INV-302 ne s'armera JAMAIS. " +
+                    "Pour activer le check cellular : accorder READ_PHONE_STATE dans les parametres de l'app."
             )
             initialized = true
             return
@@ -107,17 +143,30 @@ object NetworkAvailabilityMonitor {
 
         // Init avec l'état courant si disponible
         cellularInService = _isInServiceFrom(tm)
+        AppLogger.log(
+            "Network",
+            "init() cellular initial cellularInService=$cellularInService " +
+                "isNoNetwork=$isNoNetwork"
+        )
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val tcb = object : TelephonyCallback(),
                 TelephonyCallback.ServiceStateListener {
                 override fun onServiceStateChanged(serviceState: ServiceState) {
+                    val prev = cellularInService
                     cellularInService = serviceState.state == ServiceState.STATE_IN_SERVICE
+                    AppLogger.log(
+                        "Network",
+                        "cellular onServiceStateChanged " +
+                            "state=${serviceState.state} (IN_SERVICE=${ServiceState.STATE_IN_SERVICE}) " +
+                            "cellularInService=$prev->$cellularInService isNoNetwork=$isNoNetwork"
+                    )
                 }
             }
             telephonyCallback = tcb
             try {
                 tm.registerTelephonyCallback(appCtx.mainExecutor, tcb)
+                AppLogger.log("Network", "registerTelephonyCallback OK (API 31+)")
             } catch (e: SecurityException) {
                 AppLogger.log("Network", "registerTelephonyCallback denied: ${e.message}")
             }
@@ -126,13 +175,21 @@ object NetworkAvailabilityMonitor {
             val psl = object : PhoneStateListener() {
                 @Suppress("OVERRIDE_DEPRECATION")
                 override fun onServiceStateChanged(serviceState: ServiceState?) {
+                    val prev = cellularInService
                     cellularInService = serviceState?.state == ServiceState.STATE_IN_SERVICE
+                    AppLogger.log(
+                        "Network",
+                        "cellular onServiceStateChanged (legacy) " +
+                            "state=${serviceState?.state} cellularInService=$prev->$cellularInService " +
+                            "isNoNetwork=$isNoNetwork"
+                    )
                 }
             }
             phoneStateListener = psl
             try {
                 @Suppress("DEPRECATION")
                 tm.listen(psl, PhoneStateListener.LISTEN_SERVICE_STATE)
+                AppLogger.log("Network", "listen LISTEN_SERVICE_STATE OK (legacy)")
             } catch (e: SecurityException) {
                 AppLogger.log("Network", "listen LISTEN_SERVICE_STATE denied: ${e.message}")
             }

@@ -172,3 +172,58 @@ def test_init_db_schema_swallows_replica_readonly_error(monkeypatch, caplog, cli
         f"tracer le cas sur les replicas Patroni. Logs vus : "
         f"{[r.getMessage() for r in caplog.records]}"
     )
+
+
+def test_init_db_schema_reraises_non_readonly_operational_error(monkeypatch, client):
+    """Issue #148 / INV-056 : verrouille la branche `else: raise` du try/except.
+
+    Le swallow installé pour le cas replica read-only (cf test précédent) ne
+    doit JAMAIS masquer une `OperationalError` due à une vraie panne DB
+    (connexion fermée, timeout réseau, DSN invalide, etc.). Si on swallow
+    tout, un node primary qui n'arrive pas à parler à Postgres bootera
+    silencieusement, escalade et watchdog démarreront sur un schéma absent,
+    et tout INSERT lèvera ensuite des 500 en boucle.
+
+    Pourquoi un test plutôt qu'un mutant : `backend/app/main.py` n'est PAS
+    dans le scope `mutmut` nightly (cf `.github/workflows/mutation-testing.yml`
+    → `backend/app/logic/` uniquement). Un mutant `else: pass` ne serait
+    jamais évalué et passerait silencieusement → fausse confiance sur la
+    robustesse du boot replica.
+
+    Pattern de simulation : `OperationalError("server closed the connection",
+    {}, Exception("connection lost"))` — message sans "read-only" ni
+    "ReadOnlySqlTransaction", donc le `if` du handler match `False` et on
+    tombe dans `else: raise`.
+
+    Verrouillage en régression : code déjà conforme (cf main.py l.103-104,
+    `else: raise`). Sabotage mental local pour prouver P2 : remplacer
+    `else: raise` par `else: pass` → ce test FAIL (aucune exception levée),
+    les 3 tests précédents restent verts. Restoration → tout repasse vert.
+    """
+    from sqlalchemy.exc import OperationalError
+    from backend.app import main as main_mod
+
+    def fake_create_all(*args, **kwargs):
+        # Cas typique : Patroni a fait basculer le primary pendant le boot,
+        # la connexion TCP est tombée. Le message ne contient PAS "read-only"
+        # — c'est une vraie erreur infra qui doit remonter au lifespan.
+        raise OperationalError(
+            "SELECT 1",
+            {},
+            Exception("server closed the connection unexpectedly"),
+        )
+
+    monkeypatch.setattr(main_mod.Base.metadata, "create_all", fake_create_all)
+
+    engine = _fresh_engine()
+
+    with pytest.raises(OperationalError) as exc_info:
+        main_mod._init_db_schema(engine)
+
+    # Preuve que c'est bien NOTRE exception qui a propagé (pas une autre
+    # OperationalError accidentelle déclenchée par le teardown).
+    assert "server closed the connection" in str(exc_info.value), (
+        f"INV-056 / issue #148 : l'OperationalError non read-only DOIT être "
+        f"re-raise telle quelle (else: raise dans _init_db_schema). "
+        f"Exception vue : {exc_info.value!r}"
+    )

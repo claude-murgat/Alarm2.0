@@ -228,3 +228,38 @@ class ConnectivityEvent(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     event = Column(String, nullable=False)  # 'went_online' | 'went_offline'
     ts = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+
+class RefreshToken(Base):
+    """INV-079 : refresh token persistant en DB, jamais expiré sauf si révoqué
+    (2026-06-15).
+
+    Pattern Gmail/OAuth2 : le refresh token vit indéfiniment côté serveur,
+    l'access token JWT garde son TTL court (24h) et est renouvelable via
+    POST /auth/refresh avec le refresh dans le body. Permet de laisser un
+    téléphone d'astreinte éteint plusieurs semaines puis se reconnecter
+    automatiquement au démarrage sans demander le mot de passe.
+
+    - `token_hash` : SHA-256 hex du UUID4 brut. On ne stocke JAMAIS le token
+                    en clair : une lecture de la DB (injection, fuite de backup,
+                    accès replica) ne donne pas de tokens réutilisables. Le UUID
+                    brut n'existe qu'en transit (response /login) et côté client
+                    (SharedPreferences). Hash déterministe sans sel — inutile
+                    car le UUID4 a 122 bits d'entropie (pas de brute-force).
+    - `revoked`   : flag de révocation (admin via UI ou logout). Une fois
+                    révoqué, `/auth/refresh` renvoie 401, le téléphone tombe
+                    en `forceLogout()` (cf INV-ANDROID-506)
+    - `last_used_at` : updaté à chaque refresh réussi — sert au monitoring
+                    et à une éventuelle purge "jamais utilisé depuis N mois"
+
+    FK ON DELETE CASCADE sur user_id : si un user est supprimé, ses refresh
+    tokens partent avec. Filet supplémentaire dans validate_refresh_token qui
+    revoke si le user n'existe plus.
+    """
+    __tablename__ = "refresh_tokens"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    token_hash = Column(String, unique=True, nullable=False, index=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    last_used_at = Column(DateTime, nullable=True)
+    revoked = Column(Boolean, nullable=False, default=False)

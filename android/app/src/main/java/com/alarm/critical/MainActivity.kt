@@ -19,6 +19,7 @@ import com.alarm.critical.model.DeviceRegister
 import com.alarm.critical.model.FcmTokenRequest
 import com.alarm.critical.model.LoginRequest
 import com.alarm.critical.service.AlarmPollingService
+import com.alarm.critical.util.AppLogger
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
@@ -62,6 +63,9 @@ class MainActivity : AppCompatActivity() {
         val passwordInput = findViewById<EditText>(R.id.passwordInput)
         val loginButton = findViewById<Button>(R.id.loginButton)
         val statusText = findViewById<TextView>(R.id.statusText)
+        val shareLogsButton = findViewById<TextView>(R.id.shareLogsButton)
+
+        shareLogsButton.setOnClickListener { shareLogs() }
 
         // Pré-rempli uniquement en mode debug (jamais en production)
         if (BuildConfig.DEBUG) {
@@ -80,16 +84,30 @@ class MainActivity : AppCompatActivity() {
 
             loginButton.isEnabled = false
             statusText.text = "Connexion en cours..."
+            AppLogger.log("Login", "Tentative user=$name url=${ApiClient.currentBaseUrl()}")
 
             lifecycleScope.launch {
+                // Mémorise la dernière cause d'échec pour un message clair + log.
+                var lastCode: Int? = null
+                var lastNetworkError: String? = null
                 try {
                     // Trouver un backend qui repond avant de tenter le login
-                    var response = try { ApiProvider.service.login(LoginRequest(name, password)) } catch (e: Exception) { null }
+                    var response = try {
+                        ApiProvider.service.login(LoginRequest(name, password))
+                    } catch (e: Exception) { lastNetworkError = e.message; null }
+                    lastCode = response?.code()
+                    AppLogger.log("Login", "Essai 1 url=${ApiClient.currentBaseUrl()} → " +
+                        (response?.let { "HTTP ${it.code()}" } ?: "reseau KO ($lastNetworkError)"))
                     if (response == null || !response.isSuccessful) {
                         // L'URL courante ne marche pas — essayer les autres
                         for (i in 0 until 3) {
                             ApiClient.switchToNextUrl()
-                            response = try { ApiProvider.service.login(LoginRequest(name, password)) } catch (e: Exception) { null }
+                            response = try {
+                                ApiProvider.service.login(LoginRequest(name, password))
+                            } catch (e: Exception) { lastNetworkError = e.message; null }
+                            lastCode = response?.code()
+                            AppLogger.log("Login", "Essai ${i + 2} url=${ApiClient.currentBaseUrl()} → " +
+                                (response?.let { "HTTP ${it.code()}" } ?: "reseau KO ($lastNetworkError)"))
                             if (response != null && response.isSuccessful) break
                         }
                     }
@@ -106,6 +124,10 @@ class MainActivity : AppCompatActivity() {
 
                         prefs.edit()
                             .putString("token", token)
+                            // INV-082 : stocker aussi le refresh_token. Si l'access
+                            // expire (24h), tryRefreshToken() utilise ce refresh pour
+                            // obtenir un nouveau access sans demander le mdp.
+                            .putString("refresh_token", tokenResponse.refresh_token)
                             .putString("user_name", tokenResponse.user.name)
                             .putInt("user_id", tokenResponse.user.id)
                             .putBoolean("is_oncall", isOncall)
@@ -135,6 +157,7 @@ class MainActivity : AppCompatActivity() {
                             Log.e("MainActivity", "FCM token registration failed: ${e.message}")
                         }
 
+                        AppLogger.log("Login", "Succes user=${tokenResponse.user.name} oncall=$isOncall pos=$escalationPosition")
                         if (isOncall) {
                             // Mode astreinte : demarrer le foreground service
                             goToDashboard(token)
@@ -143,14 +166,20 @@ class MainActivity : AppCompatActivity() {
                             goToDashboard(token)
                         }
                     } else {
+                        val msg = loginErrorMessage(lastCode)
+                        AppLogger.log("Login", "Echec definitif : " +
+                            (lastCode?.let { "HTTP $it" } ?: "reseau KO ($lastNetworkError)") + " → \"$msg\"")
                         runOnUiThread {
-                            statusText.text = "Échec de connexion : ${response?.code() ?: "aucun serveur disponible"}"
+                            statusText.text = msg
                             loginButton.isEnabled = true
                         }
                     }
                 } catch (e: Exception) {
+                    AppLogger.log("Login", "Exception inattendue : ${e.message}")
                     runOnUiThread {
-                        statusText.text = "Erreur de connexion : ${e.message}"
+                        // Coherence UX : meme message clair que pour un reseau KO,
+                        // pas l'exception brute (cf INV-ANDROID-108).
+                        statusText.text = loginErrorMessage(null)
                         loginButton.isEnabled = true
                     }
                 }
@@ -158,11 +187,34 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** Message clair selon la cause d'échec login. `code` null = pas de réponse
+     *  HTTP du tout (réseau KO / serveur injoignable). */
+    private fun loginErrorMessage(code: Int?): String = when {
+        code == 401 -> "Identifiants incorrects (nom ou mot de passe)"
+        code == 429 -> "Trop de tentatives — réessayez dans 1 minute"
+        code != null && code in 500..599 -> "Serveur en erreur (HTTP $code) — réessayez plus tard"
+        code == null -> "Serveur injoignable — vérifiez votre connexion réseau"
+        else -> "Échec de connexion (HTTP $code)"
+    }
+
     private fun goToDashboard(token: String) {
         val intent = Intent(this, DashboardActivity::class.java)
         intent.putExtra("token", token)
         startActivity(intent)
         finish()
+    }
+
+    private fun shareLogs() {
+        val userName = prefs.getString("user_name", null) ?: "(non connecté)"
+        val version = try { packageManager.getPackageInfo(packageName, 0).versionName } catch (_: Exception) { "?" }
+        val logs = AppLogger.exportLogs(userName, version ?: "?")
+
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, "Alarme Murgat - Logs de diagnostic (login)")
+            putExtra(Intent.EXTRA_TEXT, logs)
+        }
+        startActivity(Intent.createChooser(intent, "Envoyer les logs via..."))
     }
 
     companion object {

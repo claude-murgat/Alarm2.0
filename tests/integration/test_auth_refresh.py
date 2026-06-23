@@ -151,3 +151,61 @@ def test_refresh_rejects_bad_signature_token(client):
     assert "access_token" not in r.json(), (
         "INV-074 viole : /auth/refresh a re-emis un token a partir d'un token mal signe"
     )
+
+
+def test_login_does_not_persist_clear_refresh_in_db(client):
+    """INV-079 — Le refresh token brut (UUID4 renvoye au client) ne doit JAMAIS
+    etre persiste tel quel en DB. La colonne `refresh_tokens.token_hash` doit
+    contenir le SHA-256 du clair, pas le clair.
+
+    Pourquoi c'est critique : une fuite de la DB (injection, backup vole,
+    acces lecture replica) ne doit pas donner d'access reutilisables. Le clair
+    n'existe qu'en transit (response /login) + cote client (SharedPreferences
+    Android). La docstring du modele (models.py:243-248) et du helper
+    (auth.py:46-50) promet explicitement cette garantie ; aucun test ne la
+    verifiait.
+
+    Sensibilite mutation : si `create_refresh_token` faisait
+    `db.add(RefreshToken(..., token_hash=raw))` (au lieu de
+    `token_hash=_hash_refresh_token(raw)`), ce test passerait RED (hash == raw).
+
+    On lit directement la DB partagee avec le TestClient (cf integration
+    conftest qui colle DATABASE_URL sur un fichier SQLite temp).
+    """
+    import hashlib
+    from backend.app.database import SessionLocal
+    from backend.app.models import RefreshToken
+
+    login = client.post(
+        "/api/auth/login", json={"name": "admin", "password": "admin123"}
+    )
+    assert login.status_code == 200, f"login failed: {login.status_code} {login.text}"
+    body = login.json()
+    raw_refresh = body["refresh_token"]
+    user_id = body["user"]["id"]
+    expected_hash = hashlib.sha256(raw_refresh.encode("utf-8")).hexdigest()
+
+    with SessionLocal() as session:
+        rows = (
+            session.query(RefreshToken.token_hash)
+            .filter(RefreshToken.user_id == user_id)
+            .all()
+        )
+
+    persisted_hashes = [r[0] for r in rows]
+    assert persisted_hashes, "Aucune ligne refresh_tokens persistee apres /login"
+    # Aucune ligne ne contient le clair (defense en profondeur si plusieurs
+    # tokens du user existent — un seul corrompu suffirait a violer la spec).
+    for h in persisted_hashes:
+        assert h != raw_refresh, (
+            "INV-079 viole : le refresh token brut est persiste en DB tel quel "
+            "(violation de la garantie 'le clair n'est JAMAIS persiste')"
+        )
+    # Au moins un hash doit etre celui du token retourne. Si la fonction de
+    # hash etait remplacee par une autre (md5, sha1, identite), ce check
+    # attraperait la regression — et garantit qu'on ne se contente pas de
+    # 'pas == clair' (un None ou une chaine vide passerait sinon).
+    assert expected_hash in persisted_hashes, (
+        f"INV-079 viole : SHA-256({raw_refresh[:8]}...) absent de la DB. "
+        f"Hashes trouves : {[h[:12]+'...' for h in persisted_hashes]}"
+    )
