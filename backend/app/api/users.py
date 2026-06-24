@@ -6,7 +6,7 @@ from sqlalchemy import func
 from typing import List, Optional
 from ..database import get_db
 from ..models import User, Alarm, EscalationConfig
-from ..schemas import UserCreate, UserResponse, LoginRequest, TokenResponse, RefreshRequest
+from ..schemas import UserCreate, UserUpdate, UserResponse, LoginRequest, TokenResponse, RefreshRequest
 from ..auth import (
     hash_password,
     verify_password,
@@ -215,12 +215,17 @@ def refresh_token(
 @users_router.patch("/{user_id}", response_model=UserResponse)
 def update_user(
     user_id: int,
-    payload: dict,
+    payload: UserUpdate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Met à jour les champs d'un utilisateur (ex: phone_number).
-    Un utilisateur peut modifier son propre profil. Modifier un autre profil requiert admin."""
+    Un utilisateur peut modifier son propre profil. Modifier un autre profil requiert admin.
+
+    INV-069 §3 : la validation regex de phone_number est portee par
+    `UserUpdate` (schemas.py) — un format non composable par le modem
+    SIM7600 -> 422 avant toucher la DB.
+    """
     if user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(
             status_code=403,
@@ -229,8 +234,10 @@ def update_user(
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
-    if "phone_number" in payload:
-        user.phone_number = payload["phone_number"]
+    # `model_fields_set` distingue "champ absent du body" de "champ envoye
+    # avec None" (intent: efface vers NULL, cf INV-061).
+    if "phone_number" in payload.model_fields_set:
+        user.phone_number = payload.phone_number
     db.commit()
     db.refresh(user)
     return user

@@ -486,6 +486,17 @@ def clear_loop_stall():
     return {"status": "ok"}
 
 
+@router.post("/revoke-user-refresh-tokens")
+def revoke_user_refresh_tokens(user_id: int = Query(...), db: Session = Depends(get_db)):
+    """INV-079 test helper : flip `revoked=TRUE` sur tous les refresh tokens
+    d'un user, pour exercer la branche `RefreshToken.revoked == False` du filtre
+    dans `auth.validate_refresh_token`. Pas de `/auth/logout` côté serveur en
+    V1 (cf follow-ups INV-079) → ce wrapper est le seul moyen depuis tier 3."""
+    _require_test_endpoints()
+    from ..auth import revoke_refresh_tokens_for_user
+    return {"revoked": revoke_refresh_tokens_for_user(db, user_id)}
+
+
 # Snapshot des valeurs SMTP initiales (env + socket default timeout) au premier
 # configure-smtp. Permet à restore-smtp de revenir à l'état boot — utilisé pour
 # tester le bug #105 (SMTP synchrone qui bloque l'event loop).

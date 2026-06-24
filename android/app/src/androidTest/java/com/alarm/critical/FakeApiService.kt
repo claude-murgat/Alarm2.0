@@ -48,7 +48,14 @@ class FakeApiService : ApiService {
         return loginResponse
     }
 
+    /** Si vrai, registerDevice() lance une RuntimeException — sert a tester
+     *  le branch catch (e: Exception) de MainActivity.login() (cf INV-ANDROID-108). */
+    var registerDeviceShouldThrow: Boolean = false
+
     override suspend fun registerDevice(auth: String, device: DeviceRegister): Response<Map<String, String>> {
+        if (registerDeviceShouldThrow) {
+            throw RuntimeException("simulated registerDevice failure")
+        }
         return Response.success(mapOf("status" to "ok"))
     }
 
