@@ -262,7 +262,7 @@ class AlarmPollingService : Service() {
                         Log.w(TAG, "Token expiré (401) — tentative de refresh")
                         com.alarm.critical.util.AppLogger.log(
                             "Auth",
-                            "Polling 401 → tentative refresh via /auth/refresh (INV-082)"
+                            "Polling 401 → tentative refresh via /auth/refresh (INV-079)"
                         )
                         if (!tryRefreshToken()) {
                             Log.e(TAG, "Refresh échoué — déconnexion forcée")
@@ -428,15 +428,15 @@ class AlarmPollingService : Service() {
 
     private suspend fun tryRefreshToken(): Boolean {
         val prefs = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
-        // INV-082 : lire le refresh_token persiste au login. Si absent (cas
-        // legacy : login pre-INV-082 ou apres un logout/clear), refresh
+        // INV-079 : lire le refresh_token persiste au login. Si absent (cas
+        // legacy : login pre-INV-079 ou apres un logout/clear), refresh
         // impossible → retourne false → forceLogout() prendra le relais.
         val refresh = prefs.getString("refresh_token", null)
         if (refresh.isNullOrEmpty()) {
-            Log.w(TAG, "Refresh impossible : aucun refresh_token stocke (login pre-INV-082 ?)")
+            Log.w(TAG, "Refresh impossible : aucun refresh_token stocke (login pre-INV-079 ?)")
             com.alarm.critical.util.AppLogger.log(
                 "Auth",
-                "Refresh impossible : refresh_token absent en SharedPreferences (INV-082)"
+                "Refresh impossible : refresh_token absent en SharedPreferences (INV-079)"
             )
             return false
         }
@@ -452,7 +452,7 @@ class AlarmPollingService : Service() {
                     Log.i(TAG, "Token renouvelé avec succès")
                     com.alarm.critical.util.AppLogger.log(
                         "Auth",
-                        "Refresh OK (INV-082) : nouveau access token stocke"
+                        "Refresh OK (INV-079) : nouveau access token stocke"
                     )
                     true
                 } else {
@@ -466,7 +466,7 @@ class AlarmPollingService : Service() {
                 Log.w(TAG, "Refresh token échoué: ${response.code()}")
                 com.alarm.critical.util.AppLogger.log(
                     "Auth",
-                    "Refresh KO HTTP ${response.code()} : refresh_token rejeté par /auth/refresh (revoque, expire, ou backend pre-INV-082)"
+                    "Refresh KO HTTP ${response.code()} : refresh_token rejeté par /auth/refresh (revoque, expire, ou backend pre-INV-079)"
                 )
                 false
             }
@@ -483,7 +483,7 @@ class AlarmPollingService : Service() {
     private fun forceLogout() {
         // Ne PAS faire de logout silencieux — déclencher une alarme sonore continue
         // et afficher un message permanent compréhensible par un utilisateur lambda.
-        // INV-082 : ce code path est très rare avec le refresh éternel — il ne
+        // INV-079 : ce code path est très rare avec le refresh éternel — il ne
         // se déclenche que sur revocation admin ou backend down très longtemps.
         authErrorMessage = "Votre session a expiré et n'a pas pu être renouvelée. Veuillez vous reconnecter."
         authErrorAlarm = true

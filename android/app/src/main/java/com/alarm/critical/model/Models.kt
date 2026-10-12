@@ -4,8 +4,8 @@ data class LoginRequest(val name: String, val password: String)
 
 data class TokenResponse(
     val access_token: String,
-    // INV-082 : refresh token persistant (UUID opaque). Renvoyé par /login,
-    // null sur les anciens backends pré-INV-082. Le client doit le stocker
+    // INV-079 : refresh token persistant (UUID opaque). Renvoyé par /login,
+    // null sur les anciens backends pré-INV-079. Le client doit le stocker
     // en SharedPreferences pour pouvoir renouveler l'access au-delà de 24h
     // sans demander le mot de passe.
     val refresh_token: String? = null,
@@ -15,10 +15,10 @@ data class TokenResponse(
     val escalation_position: Int? = null
 )
 
-// INV-082 : body de POST /auth/refresh (mode sans Bearer header)
+// INV-079 : body de POST /auth/refresh (mode sans Bearer header)
 data class RefreshRequest(val refresh_token: String)
 
-// INV-082 : reponse minimaliste de /auth/refresh (pas user, pas escalation_position)
+// INV-079 : reponse minimaliste de /auth/refresh (pas user, pas escalation_position)
 data class RefreshResponse(
     val access_token: String,
     val token_type: String = "bearer"
