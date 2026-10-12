@@ -46,9 +46,33 @@ jobs:
 
       - name: SDK Android (platform 34 + build-tools 34)
         run: |
-          set -eux
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager "platforms;android-34" "build-tools;34.0.0" > /dev/null
+          set -eu
+          : "${ANDROID_HOME:?ANDROID_HOME non defini sur ce runner}"
+          # `sdkmanager` n'est PAS sur le PATH des runners ubuntu-latest (constate :
+          # `sdkmanager: command not found`, exit 127). Il vit sous
+          # $ANDROID_HOME/cmdline-tools/<version>/bin. On le localise au lieu de le
+          # supposer, et on affiche d'abord ce qui est REELLEMENT installe : l'image
+          # ubuntu-latest embarque deja des platforms/build-tools, donc le cas normal
+          # est de n'avoir rien a installer.
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "platforms   : $(ls "$ANDROID_HOME/platforms" 2>/dev/null | tr '\n' ' ')"
+          echo "build-tools : $(ls "$ANDROID_HOME/build-tools" 2>/dev/null | tr '\n' ' ')"
+
+          if [ -d "$ANDROID_HOME/platforms/android-34" ] \
+             && ls "$ANDROID_HOME/build-tools" 2>/dev/null | grep -q '^34\.'; then
+            echo "platform 34 et build-tools 34 deja presents — rien a installer."
+            exit 0
+          fi
+
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager 2>/dev/null \
+                       | sort -V | tail -1)
+          if [ -z "$SDKMANAGER" ]; then
+            echo "::error::platform 34 ou build-tools 34 manquante, et sdkmanager introuvable sous $ANDROID_HOME/cmdline-tools."
+            exit 1
+          fi
+          echo "sdkmanager : $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-34" "build-tools;34.0.0" > /dev/null
 
       - name: google-services.json (secret — jamais un stub)
         env:
