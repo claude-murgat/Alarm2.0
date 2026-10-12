@@ -64,18 +64,44 @@ android {
         buildConfigField("String", "FALLBACK_BACKEND_URL_2", "\"http://10.0.2.2:8002/\"")
     }
 
+    // Signature release — cf .github/workflows/android-release.yml.
+    // Les 4 variables viennent des secrets GitHub pendant le job de release.
+    // En local elles sont absentes : aucun signingConfig n'est cree et
+    // `assembleRelease` produit un APK unsigned, exactement comme avant.
+    // Le workflow verifie la signature avec apksigner avant de publier, donc un
+    // secret manquant fait echouer la release au lieu de livrer un APK que
+    // personne ne peut installer.
+    val releaseKeystore: String? = System.getenv("ANDROID_KEYSTORE_PATH")
+
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = file(releaseKeystore)
+                storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("ANDROID_KEY_ALIAS")
+                keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            // null si les variables d'env ne sont pas la (build local) -> unsigned.
+            signingConfig = signingConfigs.findByName("release")
             // Cluster prod (cf .env.prod.node{1,2,3} + docs/PROVISIONING_ONSITE.md §22bis).
             // Ordre cloud-first : NODE3 OVH est le seul backend joignable hors LAN site
             // (UFW onsite-1/-2 limite l'accès à 172.16.0.0/16). En 4G ou WiFi externe,
             // les onsite ne répondent pas — donc primary = cloud évite ~6s de timeout
             // au démarrage. Sur LAN site, le failover circulaire (INV-ANDROID-402)
             // bascule sur les onsite si le cloud devient injoignable.
+            // IP LAN onsite mises a jour 2026-10-12 : le demenagement de juin a fait
+            // passer les onsite de 172.16.1.120/.121 a 192.168.1.50/.51. Les deux
+            // anciennes adresses ne repondaient plus (port 8000 ferme), donc une
+            // release embarquait 2 replis morts sur 3. Verifie par /health live.
             buildConfigField("String", "PRIMARY_BACKEND_URL", "\"http://51.210.105.102:8000/\"")
-            buildConfigField("String", "FALLBACK_BACKEND_URL", "\"http://172.16.1.121:8000/\"")
-            buildConfigField("String", "FALLBACK_BACKEND_URL_2", "\"http://172.16.1.120:8000/\"")
+            buildConfigField("String", "FALLBACK_BACKEND_URL", "\"http://192.168.1.50:8000/\"")
+            buildConfigField("String", "FALLBACK_BACKEND_URL_2", "\"http://192.168.1.51:8000/\"")
         }
     }
 
