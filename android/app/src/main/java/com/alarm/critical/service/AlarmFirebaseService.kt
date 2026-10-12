@@ -30,12 +30,7 @@ class AlarmFirebaseService : FirebaseMessagingService() {
             // Mise a jour de la position dans la chaine d'escalade
             val position = data["escalation_position"]?.toIntOrNull() ?: -1
             val isOncall = data["is_oncall"] == "true"
-            val prefs = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
-            prefs.edit()
-                .putInt("escalation_position", position)
-                .putBoolean("is_oncall", isOncall)
-                .apply()
-            Log.w(TAG, "Escalation updated: position=$position, is_oncall=$isOncall")
+            AlarmWakeUpHandler.onEscalationPushReceived(applicationContext, position, isOncall)
             return
         }
 
