@@ -15,7 +15,14 @@
 
 services:
   gh-runner:
-    image: myoung34/github-runner:2.333.1
+    # Version EPINGLEE + DISABLE_AUTO_UPDATE=true ci-dessous : le runner ne peut pas se
+    # mettre a jour seul. GitHub refuse de livrer des jobs aux runners trop anciens
+    # ("Runner version vX is deprecated and cannot receive messages"), donc ce pin est
+    # une bombe a retardement qu'il faut bumper a la main.
+    # 2.333.1 -> 2.338.0 le 2026-10-12 : les 4 runners bouclaient en restart depuis le
+    # 2026-10-05, tier 3 ne demarrait plus et chaque boucle laissait une registration
+    # ephemere morte derriere elle (5001 runners offline accumules cote repo).
+    image: myoung34/github-runner:2.338.0
     restart: always
     environment:
       REPO_URL: https://github.com/${GH_OWNER}/${GH_REPO}
