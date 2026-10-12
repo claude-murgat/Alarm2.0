@@ -392,6 +392,83 @@ class TestEscalationDelay:
 
 
 # ---------------------------------------------------------------------------
+# Autorefresh 5s : ne doit jamais ecraser une saisie non enregistree
+# (bug terrain 2026-10-12 : email d'alerte impossible a saisir, numero de
+# telephone qui "saute" dans l'onglet Utilisateurs)
+# ---------------------------------------------------------------------------
+
+class TestAutorefreshKeepsUnsavedInput:
+
+    def _type_then_leave_field(self, page: Page, selector: str, text: str):
+        """Saisit puis quitte le champ SANS enregistrer, et laisse passer plus
+        d'un cycle d'autorefresh (5s). Le focus est retire expres : l'utilisateur
+        peut cliquer ailleurs avant d'appuyer sur Enregistrer."""
+        page.locator(selector).fill(text)
+        page.locator("h1").first.click()
+        page.wait_for_timeout(6000)
+
+    def test_alert_email_survives_autorefresh(self, dashboard: Page):
+        dashboard.locator(".tab:text('Escalade')").click()
+        dashboard.wait_for_timeout(1000)
+
+        self._type_then_leave_field(dashboard, "#alertEmail", "astreinte@exemple.com")
+
+        assert dashboard.locator("#alertEmail").input_value() == "astreinte@exemple.com", (
+            "L'autorefresh a ecrase l'email d'alerte en cours de saisie"
+        )
+
+    def test_escalation_delay_survives_autorefresh(self, dashboard: Page):
+        dashboard.locator(".tab:text('Escalade')").click()
+        dashboard.wait_for_timeout(1000)
+
+        self._type_then_leave_field(dashboard, "#escalationDelay", "7")
+
+        assert dashboard.locator("#escalationDelay").input_value() == "7", (
+            "L'autorefresh a ecrase le delai d'escalade en cours de saisie"
+        )
+
+    def test_user_phone_survives_autorefresh(self, dashboard: Page):
+        dashboard.locator(".tab:text('Utilisateurs')").click()
+        dashboard.wait_for_timeout(2000)
+
+        selector = "#usersTable tr:has-text('admin') input.user-phone"
+        self._type_then_leave_field(dashboard, selector, "+33611223344")
+
+        assert dashboard.locator(selector).input_value() == "+33611223344", (
+            "L'autorefresh a ecrase le numero de telephone en cours de saisie"
+        )
+
+    def test_autorefresh_resumes_after_phone_saved(self, dashboard: Page, primary_url):
+        """Une fois le numero enregistre, le tableau doit de nouveau suivre le
+        serveur (sinon la protection ci-dessus le figerait pour toujours)."""
+        dashboard.locator(".tab:text('Utilisateurs')").click()
+        dashboard.wait_for_timeout(2000)
+
+        admin_row = dashboard.locator("#usersTable tr", has_text="admin")
+        admin_row.locator("input.user-phone").fill("+33611223344")
+        admin_row.locator(".save-phone-btn").click()
+        dashboard.wait_for_timeout(1000)
+
+        # Changement fait hors de la page (autre admin) sur user2
+        token = requests.post(f"{primary_url}/api/auth/login",
+                              json={"name": "admin", "password": "admin123"},
+                              timeout=5).json()["access_token"]
+        hdr = {"Authorization": f"Bearer {token}"}
+        user2 = next(u for u in requests.get(f"{primary_url}/api/users/",
+                                             headers=hdr, timeout=5).json()
+                     if u["name"] == "user2")
+        requests.patch(f"{primary_url}/api/users/{user2['id']}", headers=hdr,
+                       json={"phone_number": "+33655667788"}, timeout=5)
+
+        dashboard.wait_for_timeout(6000)
+        user2_phone = dashboard.locator(
+            "#usersTable tr:has-text('user2') input.user-phone").input_value()
+        assert user2_phone == "+33655667788", (
+            f"Apres enregistrement, l'autorefresh doit reprendre, got {user2_phone!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Alarmes
 # ---------------------------------------------------------------------------
 
