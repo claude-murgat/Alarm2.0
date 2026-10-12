@@ -8,13 +8,27 @@ restent sur leurs machines respectives uniquement (`/etc/wireguard/privatekey` m
 | IP Wireguard | Rôle | Hostname | Endpoint réseau |
 |---|---|---|---|
 | `10.99.0.1` | NODE3 cloud (hors-site) | _hostname OVH_ | `51.210.105.102:51820` |
-| `10.99.0.2` | NODE1 onsite-1 (1ère baie) | onsite-1.alarm.local | `172.16.1.121:51820` |
-| `10.99.0.3` | NODE2 onsite-2 (2ème baie) | onsite-2.alarm.local | `172.16.1.120:51820` |
+| `10.99.0.2` | NODE1 onsite-1 (1ère baie) | onsite-1.alarm.local | `192.168.1.50:51820` |
+| `10.99.0.3` | NODE2 onsite-2 (2ème baie) | onsite-2.alarm.local | `192.168.1.51:51820` |
 
-> **NAT** : les onsite sortent via l'IP publique `31.204.85.180` du router site (mappings ports
+> **Déménagement de site (2026-06)** : les onsite sont passés du LAN `172.16.0.0/16`
+> (endpoints `172.16.1.120/.121`) au LAN `192.168.1.0/24`. IP désormais **statiques et
+> persistantes** (`/etc/network/interfaces`) : onsite-1 = `192.168.1.50`, onsite-2 =
+> `192.168.1.51`, passerelle `192.168.1.1`. Les `Endpoint =` du peer onsite↔onsite dans
+> `wg0.conf` ont été repointés en conséquence (le lien direct LAN ne montait plus sinon —
+> le relais cloud NODE3, lui, n'a jamais été affecté grâce au roaming).
+
+> **NAT** : les onsite sortent via l'IP publique du router site (mappings ports
 > dynamiques). NODE3 voit donc les onsite sur cet endpoint NAT'd, pas leur IP LAN. Côté
 > NODE3, **pas d'`Endpoint =`** déclaré pour les onsite (apprentissage par PersistentKeepalive
 > initié depuis les onsite, toutes les 25 s).
+>
+> L'IP publique du site **change au déménagement** — c'est attendu, pas un signal de
+> compromission. Historique vérifié par RDAP : `31.204.85.180` (ancien site) →
+> `185.163.139.150` (depuis 2026-06). Les deux sont des lignes xDSL du **même FAI**
+> (`srvc.fr`, maintainer `MNT-SRVC`), seul le bloc d'abonné diffère. Avant de conclure à un
+> endpoint hostile sur un `wg show`, **résoudre l'IP** (`dig -x`, RDAP) : le roaming
+> WireGuard fait apparaître la nouvelle IP sans aucune modification de config.
 
 ## Public keys
 
@@ -33,6 +47,8 @@ restent sur leurs machines respectives uniquement (`/etc/wireguard/privatekey` m
 | 2026-05-09 | onsite-2 (10.99.0.3) | NODE3 (10.99.0.1) | 16.6 ms | via Internet, NAT'd, PersistentKeepalive 25s |
 | 2026-05-09 | NODE3 (10.99.0.1) | onsite-1 (10.99.0.2) | 16.6 ms | retour bidirectionnel OK |
 | 2026-05-09 | NODE3 (10.99.0.1) | onsite-2 (10.99.0.3) | 16.6 ms | retour bidirectionnel OK |
+| 2026-06-19 | onsite-1 (10.99.0.2) | onsite-2 (10.99.0.3) | 0.75 ms | LAN direct **rétabli** après déménagement — endpoints repointés `172.16.1.x` → `192.168.1.5x` |
+| 2026-06-19 | onsite-2 (10.99.0.3) | onsite-1 (10.99.0.2) | 0.99 ms | retour bidirectionnel OK (nouveau LAN) |
 
 ## Procédure d'ajout d'un peer
 

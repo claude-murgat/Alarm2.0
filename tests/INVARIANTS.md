@@ -623,6 +623,42 @@ Docker restart → alarmes et users conservés (volume pgdata).
 Si primary crash pendant `POST /alarms/send` → soit l'alarme est commitée (visible partout), soit pas (pas de demi-alarme). Pas d'état intermédiaire observable.
 - **🐛 Non testé**.
 
+### INV-125 [H] ✅ Bring-up refusé si etcd/PG/Patroni seraient exposés hors du mesh
+Le bring-up d'un nœud doit **échouer avant** `docker compose up` si la valeur de
+`ADVERTISE_HOST` ferait publier etcd (`2379`/`2380`), PostgreSQL (`5432`) et Patroni
+REST (`8008`) sur toutes les interfaces **alors que la machine porte au moins une
+adresse IPv4 publiquement routable**.
+
+Trois cas refusés : `ADVERTISE_HOST` absent/vide/wildcard (`0.0.0.0`, `::`, `*`),
+égal à une adresse publiquement routable, ou non littéral (nom d'hôte — invérifiable
+sans résolution DNS, donc *fail closed*).
+
+Un cas toujours autorisé : **aucune adresse publiquement routable sur la machine**
+(CI/dev mono-host, onsite derrière NAT). Le garde-fou ne doit jamais refuser ce
+cas, sinon il casse la CI, qui lance 3 nœuds sur un host sans `ADVERTISE_HOST`.
+
+- **Pourquoi** : les règles iptables de Docker court-circuitent UFW — un port publié
+  sur `0.0.0.0` reste joignable depuis Internet alors que `ufw status` l'affiche fermé.
+  Les trois surfaces sont **non authentifiées** : l'API etcd v3 n'a aucune auth (prise
+  de contrôle du DCS), PostgreSQL utilise des identifiants présents dans le repo, et
+  `/switchover`, `/failover`, `/restart` de Patroni ne demandent rien. Exposition
+  constatée sur le nœud cloud jusqu'au **2026-06-29**. Depuis le correctif de bind
+  mesh-only, la seule chose qui ferme ces ports est la présence d'`ADVERTISE_HOST`
+  dans un fichier d'env **hors repo** : un `.env` qui l'oublie retombe sur le défaut
+  et republie tout **en silence**, sans rien dans les logs.
+- **Portée IPv4 seulement** : le défaut `0.0.0.0` du compose ne publie que sur IPv4,
+  donc une IPv6 publique sur la machine n'est pas une exposition et ne doit pas
+  bloquer le bring-up.
+- **Couverture** : `tests/unit/test_bind_exposure.py` (logique pure
+  `backend/app/logic/bind_exposure.py` + code de sortie du CLI). Le CLI
+  `scripts/check-bind-exposure.py` est appelé par `scripts/start-prod-node.sh`.
+- **Convention mutation** : les littéraux de `message=` portent `# pragma: no mutate`.
+  mutmut emballe un littéral entier (`"texte"` → `"XXtexteXX"`), donc une assertion
+  par sous-chaîne ne peut pas tuer ces mutants — il faudrait comparer la prose au
+  caractère, ce qui rendrait les tests cassants à chaque reformulation. Ce qui est
+  testé est le contenu **opératoire** du message : l'adresse qui expose la machine.
+  Même traitement que `frozen=True` sur les dataclasses de verdict (cf INV-085).
+
 ---
 
 ## 10. Observabilité et audit

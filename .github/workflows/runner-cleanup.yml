@@ -1,0 +1,335 @@
+# Purge des registrations de runners self-hosted "offline".
+#
+# POURQUOI (incident 2026-10-05 -> 2026-10-12)
+# --------------------------------------------
+# Les runners `alarm-ci` (4 replicas Docker, cf infra/runner/docker-compose.runner.yml)
+# tournent en `EPHEMERAL=true` : GitHub supprime la registration a la fin de chaque job.
+# Ce nettoyage automatique est donc suffisant... tant qu'un job tourne.
+#
+# Mais la version du runner est EPINGLEE (`DISABLE_AUTO_UPDATE=true`). Quand la version
+# epinglee devient deprecated, GitHub refuse de livrer des jobs ("Runner version vX is
+# deprecated and cannot receive messages"). Les conteneurs partent alors en restart-loop
+# (`restart: always`), et chaque iteration enregistre un runner ephemere qui meurt AVANT
+# son premier job : le nettoyage post-job ne se declenche jamais et la registration morte
+# reste. 5001 registrations accumulees en 7 jours, contre un plafond dur de 10 000 par
+# repo. Au plafond, plus aucun runner ne peut s'enregistrer -> CI morte, et le symptome
+# ("mon runner ne demarre pas") ne pointe pas du tout vers la cause.
+#
+# Le pin de version doit etre bumpe a la main : c'est structurellement une bombe a
+# retardement, la prochaine occurrence est une question de "quand", pas de "si". Ce
+# workflow ne corrige pas le pin, il borne les degats : avec un passage quotidien, la
+# pile ne peut plus grandir sans surveillance pendant une semaine.
+#
+# SECURITE (exigence critique)
+# ----------------------------
+# Ne JAMAIS supprimer un runner `online` : ce sont les 4 replicas vivants, potentiellement
+# au milieu d'un job. Deux filets :
+#   1. Filtre strict `.status=="offline" and .busy==false` au listing.
+#   2. Re-verification du statut juste avant chaque DELETE — le listing est perime des
+#      qu'il est lu (les registrations churnent en permanence, et le reaper de GitHub
+#      peut en supprimer une sous nos pieds). La course est traitee comme un cas normal,
+#      pas comme une erreur.
+# Le nom ne discrimine rien : les registrations mortes portent le meme prefixe
+# `alarm-runner` que les vivantes. Seul le statut distingue.
+#
+# Supprimer la registration d'un replica vivant mais momentanement deconnecte (reboot du
+# host) est inoffensif : elle est ephemere, le conteneur en recree une en se reconnectant.
+#
+# BUDGET API
+# ----------
+# Le token d'installation est plafonne a 5000 req/h, et ce quota est PARTAGE avec tous les
+# workflows de l'App (ai-bot, ai-merge...). Une grosse pile = des milliers de suppressions
+# possibles. Trois bornes :
+#   - cap de suppressions par run (`max_deletions`, defaut 500 -> ~1000 appels),
+#   - arret propre si le quota restant passe sous MIN_RATE_REMAINING (1000), pour ne
+#     jamais affamer la CI elle-meme,
+#   - pagination interrompue des que le cap est atteint (inutile de lire 51 pages pour
+#     en traiter 5). Le reliquat part au run suivant.
+# Cout mesure : ~2 appels par suppression (re-verification + DELETE) + 1 par page lue,
+# soit ~1000 appels au cap par defaut -> il reste ~4000 de marge.
+#
+# CE QUE CE WORKFLOW NE FAIT PAS
+# ------------------------------
+# Il ne repare pas la cause (le pin perime se bumpe a la main). Pendant un incident
+# actif, la boucle produisait ~715 registrations/jour : a 500/jour purgees, le solde
+# reste positif (~+215/jour). L'interet n'est donc pas de vider la pile a tout prix
+# mais de (a) empecher l'accumulation SILENCIEUSE jusqu'au plafond — le time-to-cap
+# passe de ~14 jours a ~46 jours — et (b) crier dans le job summary des que la pile
+# depasse le bruit normal, puisque c'est le signe que les runners bouclent.
+# Pour vider une grosse pile d'un coup : `workflow_dispatch` avec un max_deletions
+# plus haut, ou plusieurs runs manuels d'affilee.
+#
+# RUNNER : `ubuntu-latest` OBLIGATOIRE, jamais `alarm-ci`. Tout l'interet est de
+# fonctionner quand les runners self-hosted sont casses et bouclent.
+#
+# AUTH : App `alarm-murgat-bot` via les secrets existants ALARM_BOT_APP_ID /
+# ALARM_BOT_PRIVATE_KEY (meme pattern que .github/workflows/ai-bot.yml). Supprimer un
+# runner exige la permission `administration: write`, que l'App possede deja — c'est la
+# meme permission qui lui sert a emettre les registration-tokens des 4 replicas
+# (cf infra/runner/README.md). Aucun nouveau secret a creer.
+
+name: Runner Cleanup (nightly)
+
+on:
+  schedule:
+    # 03:17 UTC. Minute volontairement decalee : les crons a :00 sont les plus charges
+    # chez GitHub et subissent le plus de retard. Pas de collision avec
+    # mutation-testing.yml (02:00) ni ai-bot-cron.yml (toutes les 4h a :00).
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      max_deletions:
+        description: "Max de registrations supprimees sur ce run (budget API)"
+        required: false
+        default: "500"
+      dry_run:
+        description: "true = liste les candidats sans rien supprimer"
+        required: false
+        default: "false"
+
+concurrency:
+  # Un seul passage a la fois : deux runs concurrents se marcheraient dessus (chacun
+  # verrait les candidats de l'autre) et doubleraient la consommation de quota.
+  group: runner-cleanup
+  cancel-in-progress: false
+
+jobs:
+  purge:
+    name: Purge offline runner registrations
+    # NE PAS basculer sur self-hosted/alarm-ci — cf en-tete.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - name: Generate installation token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.ALARM_BOT_APP_ID }}
+          private-key: ${{ secrets.ALARM_BOT_PRIVATE_KEY }}
+          # Seule permission necessaire : lister et supprimer les runners self-hosted.
+          # Le token est reduit a ce scope uniquement (pas de contents/issues/PR ici).
+          permission-administration: write
+
+      - name: Purge offline runners
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # Pas de checkout (gain de temps) : gh ne peut pas inferer le repo via .git.
+          REPO: ${{ github.repository }}
+          MAX_DELETIONS: ${{ github.event.inputs.max_deletions || '500' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          set -euo pipefail
+
+          # Quota sous lequel on s'arrete, pour laisser de la marge aux autres
+          # workflows de l'App (meme bucket de 5000/h).
+          MIN_RATE_REMAINING=1000
+          # Pause entre deux mutations : GitHub recommande >=1s entre requetes
+          # mutatives pour ne pas declencher les secondary rate limits.
+          SLEEP_BETWEEN_DELETES=1
+          # Garde-fou pagination : 100 pages = 10 000 runners = le plafond repo.
+          MAX_PAGES=100
+
+          # /rate_limit ne compte pas dans le quota core : l'interroger est gratuit.
+          # En cas d'echec de l'appel lui-meme on ne bloque pas (return 0).
+          budget_remaining() {
+            gh api /rate_limit --jq '.resources.core.remaining' 2>/dev/null || echo "unknown"
+          }
+
+          REMAINING=$(budget_remaining)
+          echo "Quota API core restant au demarrage : $REMAINING"
+          if [ "$REMAINING" != "unknown" ] && [ "$REMAINING" -lt "$MIN_RATE_REMAINING" ]; then
+            echo "::warning::Quota API restant ($REMAINING) < $MIN_RATE_REMAINING — purge reportee au prochain run"
+            {
+              echo "### Runner cleanup — reporte"
+              echo ""
+              echo "Quota API trop bas au demarrage (\`$REMAINING\` < \`$MIN_RATE_REMAINING\`)."
+              echo "Aucune suppression tentee, pour ne pas affamer les autres workflows."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # ----------------------------------------------------------------------
+          # Phase 1 — collecte des candidats (arret des que le cap est atteint)
+          # ----------------------------------------------------------------------
+          CANDIDATES=()
+          TOTAL_COUNT="unknown"
+          PAGES_READ=0
+          page=1
+
+          while [ "${#CANDIDATES[@]}" -lt "$MAX_DELETIONS" ] && [ "$page" -le "$MAX_PAGES" ]; do
+            if ! RESP=$(gh api -H "Accept: application/vnd.github+json" \
+                  "/repos/$REPO/actions/runners?per_page=100&page=$page" 2>&1); then
+              if [ "$page" -eq 1 ]; then
+                echo "::error::Listing des runners impossible : $RESP"
+                exit 1
+              fi
+              # Echec sur une page >1 : on traite ce qu'on a deja collecte.
+              echo "::warning::Listing interrompu page $page ($RESP) — traitement du lot partiel"
+              break
+            fi
+
+            PAGES_READ=$((PAGES_READ + 1))
+
+            if [ "$TOTAL_COUNT" = "unknown" ]; then
+              TOTAL_COUNT=$(jq -r '.total_count' <<<"$RESP")
+              echo "Registrations totales cote repo : $TOTAL_COUNT (plafond dur : 10000)"
+            fi
+
+            PAGE_LEN=$(jq -r '.runners | length' <<<"$RESP")
+            [ "$PAGE_LEN" -eq 0 ] && break
+
+            while read -r id; do
+              [ -n "$id" ] && CANDIDATES+=("$id")
+            done < <(jq -r '.runners[] | select(.status=="offline" and .busy==false) | .id' <<<"$RESP")
+
+            # Derniere page atteinte.
+            [ "$PAGE_LEN" -lt 100 ] && break
+            page=$((page + 1))
+          done
+
+          # Une page ajoute jusqu'a 100 candidats d'un coup : la boucle ci-dessus peut
+          # donc depasser le cap avant de s'arreter. On tronque pour que le budget API
+          # soit reellement borne par max_deletions (sinon jusqu'a +99 suppressions,
+          # donc +198 appels non budgetes). Le reliquat part au run suivant.
+          if [ "${#CANDIDATES[@]}" -gt "$MAX_DELETIONS" ]; then
+            CANDIDATES=("${CANDIDATES[@]:0:$MAX_DELETIONS}")
+          fi
+
+          FOUND=${#CANDIDATES[@]}
+          echo "Candidats offline retenus : $FOUND (cap du run : $MAX_DELETIONS, pages lues : $PAGES_READ)"
+
+          if [ "$FOUND" -eq 0 ]; then
+            echo "Rien a purger."
+            {
+              echo "### Runner cleanup — rien a faire"
+              echo ""
+              echo "- Registrations totales : \`$TOTAL_COUNT\`"
+              echo "- Candidats \`offline\` : \`0\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # ----------------------------------------------------------------------
+          # Phase 2 — suppression, avec re-verification du statut avant chaque DELETE
+          # ----------------------------------------------------------------------
+          DELETED=0       # supprimes
+          VANISHED=0      # disparus entre le listing et nous (404) — course normale
+          SKIPPED=0       # repasses online/busy depuis le listing — on n'y touche pas
+          FAILED=0        # vraies erreurs API
+          STOPPED_BUDGET=false
+          processed=0
+
+          for id in "${CANDIDATES[@]}"; do
+            # Verification du quota toutes les 50 unites traitees.
+            if [ "$processed" -gt 0 ] && [ $((processed % 50)) -eq 0 ]; then
+              REMAINING=$(budget_remaining)
+              if [ "$REMAINING" != "unknown" ] && [ "$REMAINING" -lt "$MIN_RATE_REMAINING" ]; then
+                echo "::warning::Quota API restant ($REMAINING) < $MIN_RATE_REMAINING — arret propre apres $processed candidats"
+                STOPPED_BUDGET=true
+                break
+              fi
+            fi
+            processed=$((processed + 1))
+
+            # Re-verification obligatoire : le listing est perime. Un runner redevenu
+            # online (ou passe busy) ne doit JAMAIS etre supprime.
+            if ! CUR=$(gh api -H "Accept: application/vnd.github+json" \
+                  "/repos/$REPO/actions/runners/$id" 2>&1); then
+              if grep -q "404" <<<"$CUR"; then
+                VANISHED=$((VANISHED + 1))
+                continue
+              fi
+              echo "::warning::Re-verification impossible pour le runner $id : $CUR"
+              FAILED=$((FAILED + 1))
+              continue
+            fi
+
+            CUR_STATUS=$(jq -r '.status' <<<"$CUR")
+            CUR_BUSY=$(jq -r '.busy' <<<"$CUR")
+            CUR_NAME=$(jq -r '.name' <<<"$CUR")
+
+            if [ "$CUR_STATUS" != "offline" ] || [ "$CUR_BUSY" != "false" ]; then
+              echo "  conserve: id=$id name=$CUR_NAME status=$CUR_STATUS busy=$CUR_BUSY (revenu vivant depuis le listing)"
+              SKIPPED=$((SKIPPED + 1))
+              continue
+            fi
+
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "  DRY-RUN  : id=$id name=$CUR_NAME serait supprime"
+              DELETED=$((DELETED + 1))
+              continue
+            fi
+
+            if ERR=$(gh api --silent -X DELETE \
+                  -H "Accept: application/vnd.github+json" \
+                  "/repos/$REPO/actions/runners/$id" 2>&1); then
+              echo "  supprime : id=$id name=$CUR_NAME"
+              DELETED=$((DELETED + 1))
+            elif grep -q "404" <<<"$ERR"; then
+              # Supprime par le reaper GitHub entre notre GET et notre DELETE.
+              VANISHED=$((VANISHED + 1))
+            else
+              echo "::warning::Suppression echouee pour le runner $id : $ERR"
+              FAILED=$((FAILED + 1))
+            fi
+
+            sleep "$SLEEP_BETWEEN_DELETES"
+          done
+
+          # ----------------------------------------------------------------------
+          # Rapport
+          # ----------------------------------------------------------------------
+          REMAINING=$(budget_remaining)
+          echo ""
+          echo "Bilan : supprimes=$DELETED disparus=$VANISHED conserves=$SKIPPED echecs=$FAILED"
+          echo "Quota API core restant : $REMAINING"
+
+          {
+            echo "### Runner cleanup"
+            echo ""
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "> **DRY-RUN** — aucune suppression reellement effectuee."
+              echo ""
+            fi
+            echo "| Metrique | Valeur |"
+            echo "|---|---|"
+            echo "| Registrations totales (avant) | \`$TOTAL_COUNT\` / 10000 |"
+            echo "| Candidats \`offline\` retenus | \`$FOUND\` (cap \`$MAX_DELETIONS\`) |"
+            echo "| Supprimes | \`$DELETED\` |"
+            echo "| Disparus avant suppression (course) | \`$VANISHED\` |"
+            echo "| Conserves (redevenus online/busy) | \`$SKIPPED\` |"
+            echo "| Echecs API | \`$FAILED\` |"
+            echo "| Quota API restant | \`$REMAINING\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Une pile importante n'est pas qu'un probleme de menage : c'est le symptome
+          # que les runners bouclent, donc que le pin de version est perime et que la
+          # CI self-hosted est probablement a l'arret. On le dit fort.
+          if [ "$TOTAL_COUNT" != "unknown" ] && [ "$TOTAL_COUNT" -gt 200 ]; then
+            echo "::warning::$TOTAL_COUNT registrations (plafond 10000) : signe d'un restart-loop des runners. Verifier le pin de version dans infra/runner/docker-compose.runner.yml et les logs des conteneurs."
+            {
+              echo ""
+              echo "> :warning: **$TOTAL_COUNT registrations** — au-dela du bruit normal."
+              echo "> Les 4 replicas bouclent probablement en restart. Verifier le pin de"
+              echo "> version dans \`infra/runner/docker-compose.runner.yml\` (symptome :"
+              echo "> \`Runner version vX is deprecated and cannot receive messages\`)."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "$STOPPED_BUDGET" = "true" ]; then
+            {
+              echo ""
+              echo "> Arret anticipe sur budget API. Le reliquat sera traite au prochain run."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Les courses (404) et les runners revenus online sont des cas normaux, pas des
+          # erreurs. En revanche 0 suppression reussie alors que tout echoue = probleme
+          # structurel (permission de l'App, App desinstallee) : il faut que ca casse.
+          if [ "$FAILED" -gt 0 ] && [ "$DELETED" -eq 0 ]; then
+            echo "::error::Aucune suppression reussie et $FAILED echecs API — verifier la permission administration:write de l'App alarm-murgat-bot"
+            exit 1
+          fi
