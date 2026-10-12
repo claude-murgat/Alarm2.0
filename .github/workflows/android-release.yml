@@ -20,6 +20,13 @@ permissions:
   # Necessaire pour creer la Release et y attacher l'APK.
   contents: write
 
+# Deux pushs rapides du meme tag lanceraient deux publications en parallele
+# qui se marchent dessus (issue #200). On les serialise, sans annuler celle
+# en cours : une release a moitie publiee est pire qu'une release en retard.
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release-apk:
     name: Build + publication de l'APK signe
@@ -183,7 +190,18 @@ jobs:
           # Idempotent : un re-run du workflow sur le meme tag remplace l APK
           # au lieu d echouer sur "release already exists".
           if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            # Tag deplace sur un autre commit : le nom de l APK contient le sha,
+            # donc --clobber ne remplace pas l ancien. On retire les APK
+            # precedents pour qu un seul reste telechargeable.
+            # Filtre dans jq et pas grep : un grep sans resultat sort en 1 et
+            # ferait echouer le step (bash -eo pipefail).
+            gh release view "$GITHUB_REF_NAME" --json assets \
+              --jq ".assets[].name | select(endswith(\".apk\") and . != \"$APK\")" \
+              | while read -r OLD; do gh release delete-asset "$GITHUB_REF_NAME" "$OLD" --yes; done
             gh release upload "$GITHUB_REF_NAME" "$APK" --clobber
+            # Les notes (version, commit, versionCode) doivent decrire l APK
+            # attache, pas celui de la premiere publication (issue #199).
+            gh release edit "$GITHUB_REF_NAME" --notes-file release-notes.md
           else
             gh release create "$GITHUB_REF_NAME" "$APK" \
               --title "Alarme Murgat $GITHUB_REF_NAME" \
