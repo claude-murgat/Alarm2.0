@@ -27,6 +27,7 @@ import com.alarm.critical.api.ApiProvider
 import com.alarm.critical.model.AlarmResponse
 import com.alarm.critical.service.AlarmSoundManager
 import com.alarm.critical.util.AppLogger
+import com.alarm.critical.view.ArcTimerView
 import android.view.View
 import androidx.test.espresso.intent.Intents.intended
 import androidx.test.espresso.intent.Intents.intending
@@ -244,10 +245,11 @@ class AlarmE2ETest {
             .check(matches(isDisplayed()))
         onView(withId(R.id.ackStatusText))
             .check(matches(withSubstring("Acquittée")))
-        onView(withId(R.id.ackRemainingTime))
+        // INV-ANDROID-202 : le temps restant d'ack est rendu par un ArcTimerView,
+        // plus par un TextView. Le texte existe toujours mais est dessine au centre
+        // de l'arc, donc inatteignable par withSubstring.
+        onView(withId(R.id.ackArcTimer))
             .check(matches(isDisplayed()))
-        onView(withId(R.id.ackRemainingTime))
-            .check(matches(withSubstring("min")))
 
         assertNotNull("acknowledgeAlarm non appelé", fakeApi.acknowledgeCalledWith)
         assertEquals(42, fakeApi.acknowledgeCalledWith!!.second)
@@ -292,8 +294,8 @@ class AlarmE2ETest {
 
         val scenario = launchDashboard()
 
-        onView(withId(R.id.connectionStatus))
-            .check(matches(withSubstring("\u2705")))
+        onView(withId(R.id.systemStatus))
+            .check(matches(withSubstring("Connecte")))
 
         scenario.close()
     }
@@ -309,8 +311,8 @@ class AlarmE2ETest {
 
         val scenario = launchDashboard()
 
-        onView(withId(R.id.connectionStatus))
-            .check(matches(withSubstring("\u274C")))
+        onView(withId(R.id.systemStatus))
+            .check(matches(withSubstring("Deconnecte")))
 
         scenario.close()
     }
@@ -532,8 +534,12 @@ class AlarmE2ETest {
 
         unregisterAll()
 
-        // Cliquer déconnexion
-        onView(withId(R.id.logoutButton)).perform(click())
+        // Cliquer deconnexion. Le bouton vit dans le NavigationDrawer (ferme) :
+        // performClick() invoque directement le listener, meme idiome que
+        // test_logoutClearsAppLogger plus bas dans ce fichier.
+        scenario.onActivity { activity ->
+            activity.findViewById<android.widget.LinearLayout>(R.id.drawerLogout).performClick()
+        }
 
         // On est sur l'écran de login
         onView(withId(R.id.loginButton)).check(matches(isDisplayed()))
@@ -755,11 +761,9 @@ class AlarmE2ETest {
         onView(withId(R.id.dashboardAckButton))
             .check(matches(withEffectiveVisibility(Visibility.GONE)))
 
-        // Temps restant visible
-        onView(withId(R.id.ackRemainingTime))
+        // Temps restant visible (ArcTimerView, cf INV-ANDROID-202)
+        onView(withId(R.id.ackArcTimer))
             .check(matches(withEffectiveVisibility(Visibility.VISIBLE)))
-        onView(withId(R.id.ackRemainingTime))
-            .check(matches(withSubstring("min")))
 
         scenario.close()
     }
@@ -799,8 +803,15 @@ class AlarmE2ETest {
         fakeApi.resetCallCount()
         waitForPolls(2)
 
-        onView(withId(R.id.ackRemainingTime))
-            .check(matches(withSubstring("30 min")))
+        // `check` passe par la synchronisation d'Espresso (attente de l'idle) ; une
+        // lecture directe via scenario.onActivity est une course avec le rendu du
+        // poll et lit encore la valeur precedente.
+        onView(withId(R.id.ackArcTimer)).check { view, _ ->
+            assertEquals(
+                "l'arc doit refleter les 1800 s du serveur",
+                1800, (view as ArcTimerView).remainingSeconds
+            )
+        }
         unregisterAll()
 
         // Phase 3 : après un moment, 1740s restantes (29 min)
@@ -812,8 +823,15 @@ class AlarmE2ETest {
         fakeApi.resetCallCount()
         waitForPolls(2)
 
-        onView(withId(R.id.ackRemainingTime))
-            .check(matches(withSubstring("29 min")))
+        // `check` passe par la synchronisation d'Espresso (attente de l'idle) ; une
+        // lecture directe via scenario.onActivity est une course avec le rendu du
+        // poll et lit encore la valeur precedente.
+        onView(withId(R.id.ackArcTimer)).check { view, _ ->
+            assertEquals(
+                "l'arc doit suivre la descente a 1740 s",
+                1740, (view as ArcTimerView).remainingSeconds
+            )
+        }
 
         scenario.close()
     }
