@@ -67,6 +67,27 @@ if ! grep -q "^ADVERTISE_HOST=" "$ENV_FILE"; then
   exit 1
 fi
 
+# Pre-requis 2bis : INV-125 — refuser le bring-up si etcd (2379/2380), PostgreSQL
+# (5432) et Patroni REST (8008) seraient publies sur une IP publiquement
+# routable. Ces trois surfaces sont non authentifiees, et UFW n'y change rien :
+# les regles iptables de Docker le court-circuitent, un port publie reste
+# joignable depuis Internet alors que `ufw status` l'affiche ferme.
+#
+# Le pre-requis 2 ci-dessus ne verifie que la PRESENCE de la cle ; il passe pour
+# `ADVERTISE_HOST=` (vide) ou `ADVERTISE_HOST=0.0.0.0`, qui rebindent tout sur
+# 0.0.0.0 en silence. Sur une machine sans IP publique (onsite derriere NAT,
+# CI/dev mono-host) le check est un no-op.
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "ERREUR : python3 absent — exposition reseau non verifiable (INV-125)."
+  echo "  Installer python3, ou verifier a la main que ADVERTISE_HOST pointe sur"
+  echo "  l'IP WireGuard du nœud avant de lancer docker compose."
+  exit 1
+fi
+if ! python3 "$(dirname "$0")/check-bind-exposure.py" --env-file "$ENV_FILE"; then
+  echo "Bring-up annule : corriger ADVERTISE_HOST dans $ENV_FILE puis retenter."
+  exit 1
+fi
+
 # Pre-requis 3 : interface Wireguard UP
 # Sans wg0 UP, les peers etcd/patroni ne s'atteignent pas via 10.99.0.X.
 # `ip -br a show wg0` sort "wg0 UNKNOWN ..." quand l'interface est up (UNKNOWN
