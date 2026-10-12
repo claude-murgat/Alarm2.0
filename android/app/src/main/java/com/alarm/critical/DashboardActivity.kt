@@ -416,6 +416,9 @@ class DashboardActivity : AppCompatActivity() {
 
             // ========== BADGE DE GARDE (rafraichi depuis prefs, mis a jour par FCM) ==========
             updateGuardBadge()
+            // Le texte du tiroir lit les memes prefs : sans cet appel il restait
+            // celui du dernier onCreate, donc faux apres un push d'escalade.
+            updateDrawerGuardStatus()
 
             // ========== CARTE ALARME HERO ==========
             val alarm = AlarmPollingService.currentAlarm

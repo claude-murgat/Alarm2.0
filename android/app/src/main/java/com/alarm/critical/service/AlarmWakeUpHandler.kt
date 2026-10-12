@@ -41,4 +41,44 @@ object AlarmWakeUpHandler {
             Log.d(TAG, "Service already running, FCM push ignored")
         }
     }
+
+    /**
+     * Appele quand un push FCM `escalation_update` arrive (INV-ANDROID-601).
+     *
+     * Met a jour le cache local ET reconcilie le heartbeat. Sans la seconde
+     * partie, la nouvelle position restait dans les prefs sans que personne ne
+     * l'applique : `DashboardActivity` ne demarre le service que dans son
+     * `onCreate`, donc un user promu en position 1 restait sans heartbeat
+     * jusqu'a une relance de l'app, et le serveur le croyait hors ligne.
+     */
+    fun onEscalationPushReceived(context: Context, position: Int, isOncall: Boolean) {
+        val prefs = context.getSharedPreferences("alarm_prefs", Context.MODE_PRIVATE)
+        prefs.edit()
+            .putInt("escalation_position", position)
+            .putBoolean("is_oncall", isOncall)
+            .apply()
+        Log.w(TAG, "Escalation push: position=$position, is_oncall=$isOncall")
+
+        if (isOncall) {
+            val token = prefs.getString("token", null)
+            if (token == null) {
+                Log.w(TAG, "Escalation push: no saved token, cannot start heartbeat")
+                return
+            }
+            // Meme garde qu'INV-ANDROID-602 : ne pas redemarrer un service sain.
+            if (!AlarmPollingService.isRunning) {
+                val intent = Intent(context, AlarmPollingService::class.java).apply {
+                    putExtra(AlarmPollingService.EXTRA_TOKEN, token)
+                }
+                ContextCompat.startForegroundService(context, intent)
+                Log.w(TAG, "Heartbeat started: now on call at position $position")
+            }
+        } else if (!prefs.getBoolean("started_by_fcm", false)) {
+            // Plus de garde -> on coupe le heartbeat. Exception : si le service a
+            // ete demarre par un push d'ALARME (started_by_fcm), il doit survivre
+            // jusqu'a l'acquittement, sinon on fait taire une alarme en cours.
+            context.stopService(Intent(context, AlarmPollingService::class.java))
+            Log.w(TAG, "Heartbeat stopped: no longer on call (position $position)")
+        }
+    }
 }
