@@ -500,10 +500,42 @@ MainActivity : `savedToken != null → goToDashboard(savedToken)` + `return` (sk
 - **Pourquoi** : les users NON-astreinte ne maintiennent pas le foreground service actif (économie batterie). FCM haute priorité les réveille quand une alarme tombe sur leur position dans la chaîne.
 - **Manque** : aucun test n'injecte un push FCM et vérifie le démarrage du service. Testable via `AlarmWakeUpHandler` en isolation (pas Firebase).
 
-### INV-ANDROID-601 [H] ⚠️ FCM type=escalation_update met à jour escalation_position + is_oncall en prefs
-`if (msgType == "escalation_update")` → `prefs.putInt("escalation_position", position).putBoolean("is_oncall", isOncall)`, early return (pas de démarrage service).
-- **Pourquoi** : quand un admin modifie la chaîne d'escalade, le backend envoie un push FCM à chaque user affecté pour qu'ils voient leur nouvelle position **sans relancer l'app**. Le badge se met à jour au prochain tick de `updateStatus()` (1Hz).
-- **Manque** : aucun test ne simule la réception de ce push.
+### INV-ANDROID-601 [H] ⚠️ FCM type=escalation_update met à jour les prefs **et** réconcilie le heartbeat
+`if (msgType == "escalation_update")` → délègue à
+`AlarmWakeUpHandler.onEscalationPushReceived(context, position, isOncall)`, qui :
+1. écrit `escalation_position` et `is_oncall` en prefs ;
+2. **si `isOncall`** et qu'un token est stocké et que le service ne tourne pas déjà
+   (même garde qu'INV-ANDROID-602) → `startForegroundService(AlarmPollingService)` ;
+3. **sinon** → `stopService(AlarmPollingService)`, **sauf si `started_by_fcm`** est
+   vrai : un service démarré par un push d'alarme doit survivre jusqu'à
+   l'acquittement, sinon on fait taire une alarme en cours.
+
+- **Pourquoi** : quand un admin modifie la chaîne, le backend pousse à chaque user
+  **présent dans la nouvelle chaîne** sa position, pour qu'il la voie **sans relancer
+  l'app**. Le point 2 est la correction du 2026-10-12 : avant, le push écrivait les
+  prefs et s'arrêtait là (« early return, pas de démarrage service »). Or
+  `DashboardActivity` ne démarre le heartbeat que dans son `onCreate` — un user promu
+  en position 1 restait donc **sans heartbeat jusqu'à une relance de l'app**, et le
+  serveur le croyait hors ligne. C'est le point 2 qui rend vraie la promesse « sans
+  relancer l'app » pour la partie fonctionnelle, pas seulement pour l'affichage.
+- **Affichage** : `updateGuardBadge()` **et** `updateDrawerGuardStatus()` sont appelés
+  dans le tick 1 Hz d'`updateStatus()`. Le second y a été ajouté le 2026-10-12 : il
+  n'était appelé que dans `onCreate`, donc le texte du tiroir restait faux après un
+  push (le badge, lui, était bien rafraîchi).
+- **Trou connu** : un user **retiré** de la chaîne ne reçoit **aucun** push (le backend
+  n'itère que sur `user_ids`, cf `backend/app/api/config.py:204`). Son app garde donc
+  `is_oncall` à sa valeur précédente et continue d'envoyer un heartbeat comme si elle
+  était de garde, jusqu'au prochain login. À traiter côté backend (pousser aussi aux
+  users retirés), pas côté app.
+- **Couverture** : `AlarmEscalationPushTest` (androidTest, 3 cas) — transitions de prefs
+  sur promotion, rétrogradation, et promotion sans token stocké. **Écrit mais jamais
+  exécuté** : le source set `androidTest` ne compile pas sur `master` (cassure antérieure,
+  11 erreurs — ID de vues disparus dans `AlarmE2ETest.kt`, dérive de signature
+  `getAlarmHistory` dans `FakeApiService.kt`). Vérifié : le fichier compile seul, une fois
+  les deux fichiers cassés mis de côté. Non couvert par un test : le démarrage/arrêt
+  effectif du foreground service (demande un device + permission de notification) et la
+  garde `started_by_fcm` — le handler ne touche pas cette préf, donc elle n'est pas
+  observable par ce biais.
 
 ### INV-ANDROID-602 [H] ⚠️ FCM push reçu alors que service déjà running → ignoré
 `if (!AlarmPollingService.isRunning) { start }` → sinon juste un log. Le polling en cours captera l'alarme au prochain tick (3s max).
