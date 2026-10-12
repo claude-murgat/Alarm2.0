@@ -22,13 +22,22 @@ from __future__ import annotations
 import ipaddress
 from dataclasses import dataclass
 
+# Les litteraux de `message=` portent `# pragma: no mutate`. mutmut emballe un
+# litteral entier (`"texte"` -> `"XXtexteXX"`), donc une assertion par sous-chaine
+# ne peut pas tuer ces mutants : il faudrait comparer la prose au caractere, ce qui
+# rendrait les tests cassants a chaque reformulation. Ce qui est teste est le
+# contenu OPERATOIRE du message — l'adresse qui expose la machine, via `exposed`
+# (cf tests/unit/test_bind_exposure.py). Convention INV-125.
+
 # Valeurs non-IP qui font publier Docker sur toutes les interfaces. Les formes
 # litterales (`0.0.0.0`, `::`, `::0`, `[::]`, `0.0.0.0/0`) sont reconnues par
 # `is_unspecified` plutot qu'enumerees ici.
 NON_IP_WILDCARD_HOSTS = frozenset({"", "*"})
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True)  # pragma: no mutate (INV-125 — frozen=False est equivalent :
+# aucun code ne mute ce verdict, il est construit puis lu. Meme traitement que
+# ClusterSnapshot dans quorum_detection.py (INV-085).
 class BindExposureVerdict:
     safe: bool
     reason: str
@@ -39,7 +48,11 @@ class BindExposureVerdict:
 
 def _normalize(address: str) -> str:
     """Retire la forme CIDR (`51.210.105.102/32`) et les crochets IPv6."""
-    return (address or "").strip().split("/")[0].strip("[]").strip()
+    # pragma no mutate x2 : `or ""` et le set de `strip` sont inobservables depuis
+    # l'API publique. Une entree falsy n'est jamais publiquement routable (elle
+    # echoue dans ip_address quel que soit le remplacement), et aucune adresse
+    # reelle ne porte de caractere parasite en bord de chaine.
+    return (address or "").strip().split("/")[0].strip("[]").strip()  # pragma: no mutate
 
 
 def is_publicly_routable(address: str) -> bool:
@@ -95,9 +108,9 @@ def evaluate_bind_exposure(advertise_host, host_addresses) -> BindExposureVerdic
             advertise_host=host,
             public_addresses=(),
             message=(
-                "Aucune adresse publiquement routable sur cette machine "
-                "(CI/dev mono-host, ou nœud derriere NAT) : publier etcd/PG/"
-                "Patroni sur toutes les interfaces n'expose rien a Internet."
+                "Aucune adresse publiquement routable sur cette machine "  # pragma: no mutate
+                "(CI/dev mono-host, ou nœud derriere NAT) : publier etcd/PG/"  # pragma: no mutate
+                "Patroni sur toutes les interfaces n'expose rien a Internet."  # pragma: no mutate
             ),
         )
 
@@ -110,11 +123,11 @@ def evaluate_bind_exposure(advertise_host, host_addresses) -> BindExposureVerdic
             advertise_host=host,
             public_addresses=public,
             message=(
-                f"ADVERTISE_HOST={host!r} fait publier etcd (2379/2380), "
-                f"PostgreSQL (5432) et Patroni REST (8008) sur TOUTES les "
-                f"interfaces, dont l'adresse publique {exposed}. Ces trois "
-                f"surfaces sont non authentifiees. Renseigner l'IP WireGuard "
-                f"du nœud (ex: ADVERTISE_HOST=10.99.0.1)."
+                f"ADVERTISE_HOST={host!r} fait publier etcd (2379/2380), "  # pragma: no mutate
+                f"PostgreSQL (5432) et Patroni REST (8008) sur TOUTES les "  # pragma: no mutate
+                f"interfaces, dont l'adresse publique {exposed}. Ces trois "  # pragma: no mutate
+                f"surfaces sont non authentifiees. Renseigner l'IP WireGuard "  # pragma: no mutate
+                f"du nœud (ex: ADVERTISE_HOST=10.99.0.1)."  # pragma: no mutate
             ),
         )
 
@@ -125,9 +138,9 @@ def evaluate_bind_exposure(advertise_host, host_addresses) -> BindExposureVerdic
             advertise_host=host,
             public_addresses=public,
             message=(
-                f"ADVERTISE_HOST={host!r} est une adresse publiquement routable "
-                f"— etcd/PG/Patroni seraient publies directement sur Internet. "
-                f"Renseigner l'IP WireGuard du nœud (ex: 10.99.0.1)."
+                f"ADVERTISE_HOST={host!r} est une adresse publiquement routable "  # pragma: no mutate
+                f"— etcd/PG/Patroni seraient publies directement sur Internet. "  # pragma: no mutate
+                f"Renseigner l'IP WireGuard du nœud (ex: 10.99.0.1)."  # pragma: no mutate
             ),
         )
 
@@ -138,11 +151,11 @@ def evaluate_bind_exposure(advertise_host, host_addresses) -> BindExposureVerdic
             advertise_host=host,
             public_addresses=public,
             message=(
-                f"ADVERTISE_HOST={host!r} n'est pas une IP litterale : "
-                f"impossible de verifier sans resolution DNS alors que cette "
-                f"machine porte l'adresse publique {exposed}. En prod "
-                f"cross-machine, ADVERTISE_HOST doit etre l'IP mesh WireGuard "
-                f"litterale du nœud."
+                f"ADVERTISE_HOST={host!r} n'est pas une IP litterale : "  # pragma: no mutate
+                f"impossible de verifier sans resolution DNS alors que cette "  # pragma: no mutate
+                f"machine porte l'adresse publique {exposed}. En prod "  # pragma: no mutate
+                f"cross-machine, ADVERTISE_HOST doit etre l'IP mesh WireGuard "  # pragma: no mutate
+                f"litterale du nœud."  # pragma: no mutate
             ),
         )
 
@@ -152,7 +165,7 @@ def evaluate_bind_exposure(advertise_host, host_addresses) -> BindExposureVerdic
         advertise_host=host,
         public_addresses=public,
         message=(
-            f"ADVERTISE_HOST={host} n'est pas routable : etcd/PG/Patroni "
-            f"restent injoignables depuis l'adresse publique {exposed}."
+            f"ADVERTISE_HOST={host} n'est pas routable : etcd/PG/Patroni "  # pragma: no mutate
+            f"restent injoignables depuis l'adresse publique {exposed}."  # pragma: no mutate
         ),
     )

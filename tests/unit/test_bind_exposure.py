@@ -44,7 +44,14 @@ _cli = _load_script("alarm_check_bind_exposure", "scripts/check-bind-exposure.py
 
 # Nœud cloud OVH (node3) : IP publique directe + IP mesh WG + bridge Docker.
 # Forme CIDR volontaire — c'est ce que crache `ip -o -4 addr show`.
-PUBLIC_HOST = ["127.0.0.1/8", "51.210.105.102/32", "10.99.0.1/24", "172.17.0.1/16"]
+PUBLIC_HOST = ["127.0.0.1/8", "51.210.105.102/32", "10.99.0.1/24",
+               "51.77.222.190/32", "172.17.0.1/16"]
+
+# DEUX adresses publiques volontairement (node3 + le VPS facade) : avec une seule,
+# le separateur de `", ".join(public)` serait inobservable et un mutant qui le
+# remplace survivrait. La forme attendue ci-dessous verifie aussi que `exposed`
+# est bien construit — un mutant qui le met a None ferait apparaitre "None".
+EXPOSED = "51.210.105.102, 51.77.222.190"
 
 # Onsite derriere NAT (LAN 172.16.1.0/24) ou runner CI : aucune IP routable.
 # Contient volontairement une entree vide et une entree non-IP : une ligne
@@ -69,6 +76,7 @@ def test_wildcard_bind_on_publicly_routable_machine_is_refused(advertise_host):
     assert verdict.reason == "wildcard-bind"
     # L'operateur doit savoir QUELLE adresse l'expose.
     assert "51.210.105.102" in verdict.public_addresses
+    assert EXPOSED in verdict.message
 
 
 @pytest.mark.parametrize("advertise_host", ["10.99.0.1", "10.99.0.2", "192.168.1.5",
@@ -83,6 +91,7 @@ def test_non_routable_bind_on_publicly_routable_machine_is_allowed(advertise_hos
 
     assert verdict.safe is True
     assert verdict.reason == "mesh-bind"
+    assert EXPOSED in verdict.message
 
 
 @pytest.mark.parametrize("advertise_host", [None, "", "0.0.0.0", "::",
@@ -118,6 +127,8 @@ def test_routable_or_unverifiable_bind_on_public_machine_is_refused(advertise_ho
 
     assert verdict.safe is False
     assert verdict.reason == expected_reason
+    if expected_reason == "non-literal-advertise-host":
+        assert EXPOSED in verdict.message
 
 
 @pytest.mark.parametrize("advertise_host,addresses,expected_code", [
