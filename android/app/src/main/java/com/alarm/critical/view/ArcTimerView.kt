@@ -20,7 +20,11 @@ class ArcTimerView @JvmOverloads constructor(
 ) : View(context, attrs, defStyleAttr) {
 
     private var maxSeconds: Int = 1800  // 30 min par defaut
-    private var remainingSeconds: Int = 1800
+    // Lisible depuis les tests (INV-ANDROID-202/INV-ANDROID-203) : le compte a
+    // rebours n'est plus un TextView, son etat n'est donc plus assertable via
+    // withSubstring. Ecriture toujours reservee a setTime().
+    var remainingSeconds: Int = 1800
+        private set
     private var centerText: String = "30 min"
 
     private val bgArcPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {

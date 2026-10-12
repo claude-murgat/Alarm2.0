@@ -79,7 +79,9 @@ class FakeApiService : ApiService {
         return acknowledgeResponse
     }
 
-    override suspend fun getAlarmHistory(auth: String): Response<List<AlarmResponse>> {
+    // `days` ajoute a ApiService (GET /api/alarms/?days=N). Ignore ici : le fake
+    // rend `alarmHistoryResponse` tel quel, le filtrage est teste cote backend.
+    override suspend fun getAlarmHistory(auth: String, days: Int): Response<List<AlarmResponse>> {
         return alarmHistoryResponse
     }
 

@@ -242,10 +242,28 @@ Si `alarm == null && isAcknowledged` → `alarmGoneDuringAck=true`, carte passe 
 - **Pourquoi** : le watchdog backend marque offline à 60s (INV-041 backend) → 3s laisse 20 tentatives avant de basculer offline.
 - **Couverture** : test05, test06 (via IdlingResource sur 2 heartbeats).
 
-### INV-ANDROID-301 [H] ⚠️ Icône connexion : ✅ si heartbeat 2xx, ❌ sinon
-Champ `connectionStatus` sur DashboardActivity affiche ✅ ou ❌ selon `AlarmPollingService.lastHeartbeatOk`.
-- **Pourquoi** : feedback immédiat de l'état réseau.
-- **Couverture** : test05 (OK), test06 (fail).
+### INV-ANDROID-301 [H] ⚠️ Indicateur de connexion à trois états
+Champ **`systemStatus`** sur DashboardActivity, puce colorée + libellé, mis à jour
+dans le tick 1 Hz d'`updateStatus()` :
+
+| Condition | Libellé | Couleur |
+|---|---|---|
+| `isRunning && lastHeartbeatOk` | `● Connecte au serveur` | vert |
+| `!isRunning && !is_oncall` | `● En attente` | orange |
+| sinon | `● Deconnecte` | rouge |
+
+- **Pourquoi** : feedback immédiat de l'état réseau. Le troisième état, « En attente »,
+  traduit la décision produit « les non-astreinte ne maintiennent pas le foreground
+  service, ils sont réveillés par push » (cf INV-ANDROID-600) : sans lui, un user hors
+  astreinte voyait « Déconnecté » en permanence alors que tout va bien.
+- **Révision 2026-10-12** : cet invariant décrivait un champ `connectionStatus`
+  affichant les emoji ✅ / ❌. Ni le champ ni les emoji n'existent plus — le tableau de
+  bord a été refondu (carte hero, ArcTimerView, tiroir) sans que le catalogue suive.
+  Les tests test05/test06 référençaient donc un `R.id` disparu et **ne compilaient
+  plus**. Ils assertent maintenant le libellé de `systemStatus`, ce qui conserve la
+  substance de l'invariant (2xx → connecté, échec → déconnecté).
+- **Couverture** : test05 (heartbeat OK → `Connecte`), test06 (heartbeat 500 →
+  `Deconnecte`). L'état « En attente » n'est pas couvert.
 
 ### INV-ANDROID-302 [C] ❌ SUPERSEDED (2026-06-03) — remplacé par INV-ANDROID-308 (absence de SMS ping)
 
