@@ -32,8 +32,12 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "${ETCD_CLIENT_PORT}:2379"
-      - "${ETCD_PEER_PORT}:2380"
+      # Bind sur l'IP mesh WG (ADVERTISE_HOST), pas 0.0.0.0 : etcd ne doit JAMAIS etre
+      # joignable hors du mesh. L'API etcd v3 n'a aucune authentification -> port publie
+      # sur l'IP publique = prise de controle du DCS. Expose par erreur jusqu'au 2026-06-29
+      # (les regles iptables de Docker court-circuitent UFW, cf PR de ce correctif).
+      - "${ADVERTISE_HOST:-0.0.0.0}:${ETCD_CLIENT_PORT}:2379"
+      - "${ADVERTISE_HOST:-0.0.0.0}:${ETCD_PEER_PORT}:2380"
     environment:
       ETCD_NAME: ${NODE_NAME}
       ETCD_DATA_DIR: /etcd-data
@@ -71,8 +75,11 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "${PG_PORT}:5432"
-      - "${PATRONI_PORT}:8008"
+      # Bind mesh-only (idem etcd). 5432 = PostgreSQL avec des identifiants presents dans
+      # le repo ; 8008 = REST Patroni dont /switchover, /failover et /restart ne demandent
+      # aucune authentification. Ni l'un ni l'autre ne doit sortir du mesh WG.
+      - "${ADVERTISE_HOST:-0.0.0.0}:${PG_PORT}:5432"
+      - "${ADVERTISE_HOST:-0.0.0.0}:${PATRONI_PORT}:8008"
     environment:
       PATRONI_NAME: ${NODE_NAME}
       PATRONI_ETCD3_HOSTS: ${ETCD_HOSTS}
