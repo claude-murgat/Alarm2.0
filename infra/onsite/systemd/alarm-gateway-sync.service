@@ -1,0 +1,20 @@
+# /etc/systemd/system/alarm-gateway-sync.service
+# Deploie le code gateway promu en :stable (issue #183). Cf scripts/alarm-gateway-sync.sh.
+# Installe sur les 3 noeuds ; ne fait rien la ou il n'y a pas de gateway.
+[Unit]
+Description=Deploiement auto du code gateway (image alarm-gateway:stable)
+Documentation=https://github.com/claude-murgat/Alarm2.0/blob/master/docs/CD_DESIGN.md
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# root : ecrit dans /opt/alarm-gateway (owner alarm-gateway), pip install,
+# restart de alarm-sms-gateway. Aucune entree sudoers necessaire.
+User=root
+StateDirectory=alarm/cd
+# pip install eventuel + attente sante gateway (2 x 180 s si rollback).
+TimeoutStartSec=900
+ExecStart=/usr/local/bin/alarm-gateway-sync
+StandardOutput=journal
+StandardError=journal

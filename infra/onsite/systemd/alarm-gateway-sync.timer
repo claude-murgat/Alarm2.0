@@ -1,0 +1,14 @@
+# /etc/systemd/system/alarm-gateway-sync.timer
+[Unit]
+Description=Timer du deploiement auto du code gateway
+
+[Timer]
+# Decale de alarm-cd-pull (5 min apres boot) pour trouver l'image deja tiree.
+OnBootSec=7min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30s
+Persistent=true
+Unit=alarm-gateway-sync.service
+
+[Install]
+WantedBy=timers.target

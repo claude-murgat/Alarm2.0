@@ -17,7 +17,8 @@ set -euo pipefail
 
 REGISTRY="${REGISTRY:-ghcr.io/claude-murgat}"
 TAG="${TAG:-stable}"
-IMAGES=("alarm-backend" "alarm-patroni")
+# alarm-gateway : code gateway deploye par alarm-gateway-sync (pas un container).
+IMAGES=("alarm-backend" "alarm-patroni" "alarm-gateway")
 # /run/alarm-cd-pull/ est cree par systemd (RuntimeDirectory= dans
 # alarm-cd-pull.service) avec owner alarm:alarm. Ne marche que si lance via
 # systemd ou si le repertoire est pre-cree manuellement.
