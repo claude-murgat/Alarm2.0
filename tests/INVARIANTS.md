@@ -219,6 +219,11 @@ Le champ calculé `ack_remaining_seconds ≈ (suspended_until - now).total_secon
 - **Pourquoi** : UI countdown.
 - **Couverture** : E2E `TestAckedAlarmVisibility::test_ack_remaining_seconds_in_response` (1800 → 1200 après +10min).
 
+### INV-034 [C] ✅ `/mine` : alarmes à acquitter en tête de liste
+`GET /api/alarms/mine` renvoie d'abord les alarmes non acquittées (`active`/`escalated`), la plus récente en premier, puis les `acknowledged`.
+- **Pourquoi** : l'app Android affiche et fait acquitter le **premier** élément. Une alarme acquittée (suspendue 30 min) ne bloque pas une nouvelle (INV-001) ; sans ce tri, la nouvelle restait derrière l'ancienne et n'était jamais acquittable. Incident prod 2026-10-13 : #526 escaladée sans possibilité d'ACK, #525 acquittée en tête. Règle validée par le propriétaire le 2026-10-13 (tranche la question ouverte `android/INVARIANTS.md` §6 « 2e alarme pendant la 1ère »).
+- **Couverture** : E2E `TestAckedAlarmVisibility::test_unacked_alarm_listed_before_acked_one` (RED avant le fix).
+
 ---
 
 ## 4. Heartbeat et watchdog

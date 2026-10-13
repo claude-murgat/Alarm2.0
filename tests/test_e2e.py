@@ -1718,6 +1718,31 @@ class TestAckedAlarmVisibility:
         assert alarms[0]["status"] == "acknowledged"
         assert alarms[0]["ack_remaining_seconds"] is not None
 
+    def test_unacked_alarm_listed_before_acked_one(self):
+        """Une nouvelle alarme créée pendant la suspension d'une alarme acquittée
+        doit sortir EN PREMIER de /mine : l'app affiche (et fait acquitter) le
+        premier élément. Incident prod 2026-10-13 : alarme #526 jamais
+        acquittable car #525 (acquittée) restait en tête de liste."""
+        admin_h = _admin_headers()
+        first = requests.post(f"{API}/alarms/send", headers=admin_h, json={
+            "title": "Premiere", "message": "m", "severity": "critical",
+            "assigned_user_id": self.user1_id,
+        }).json()["id"]
+        requests.post(f"{API}/alarms/{first}/ack", headers=self.headers1)
+
+        r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
+            "title": "Seconde", "message": "m", "severity": "critical",
+            "assigned_user_id": self.user1_id,
+        })
+        assert r.status_code == 200, f"INV-001 : une alarme acquittée ne bloque pas une nouvelle, got {r.status_code}"
+        second = r.json()["id"]
+
+        alarms = requests.get(f"{API}/alarms/mine", headers=self.headers1).json()
+        assert [a["id"] for a in alarms] == [second, first], (
+            f"L'alarme à acquitter doit être en tête de /mine, got "
+            f"{[(a['id'], a['status']) for a in alarms]}"
+        )
+
 
 # ── SMS queue + /health ──────────────────────────────────────────────────────
 
