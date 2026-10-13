@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Icone app : cloche d'alarme contenant les vagues et le poisson du logo
+     Charles Murgat (couleurs #00A2E5 / #31C2DE), ondes d'alerte rouges.
+     Contenu essentiel dans la zone sure 66dp des icones adaptatives. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Ondes d'alerte -->
+    <path android:pathData="M32,34 Q27.5,41 30,49" android:strokeColor="#FF4D4F"
+        android:strokeWidth="3.6" android:strokeLineCap="round" />
+    <path android:pathData="M27,30 Q21,40 24.5,51" android:strokeColor="#FF4D4F"
+        android:strokeAlpha="0.75" android:strokeWidth="3.6" android:strokeLineCap="round" />
+    <path android:pathData="M76,34 Q80.5,41 78,49" android:strokeColor="#FF4D4F"
+        android:strokeWidth="3.6" android:strokeLineCap="round" />
+    <path android:pathData="M81,30 Q87,40 83.5,51" android:strokeColor="#FF4D4F"
+        android:strokeAlpha="0.75" android:strokeWidth="3.6" android:strokeLineCap="round" />
+
+    <!-- Cloche -->
+    <path android:pathData="M50.4,28 a3.6,3.6 0 1,0 7.2,0 a3.6,3.6 0 1,0 -7.2,0" android:fillColor="#FFFFFF" />
+    <path android:pathData="M54,30 C41,30 36.5,41 36.5,51 L36.5,61 L31,69 L77,69 L71.5,61 L71.5,51 C71.5,41 67,30 54,30 Z"
+        android:fillColor="#FFFFFF" />
+
+    <!-- Eau et poisson, decoupes a la forme de la cloche -->
+    <group>
+        <clip-path android:pathData="M54,30 C41,30 36.5,41 36.5,51 L36.5,61 L31,69 L77,69 L71.5,61 L71.5,51 C71.5,41 67,30 54,30 Z" />
+        <path android:pathData="M28,55 Q34,50 40,55 T52,55 T64,55 T76,55 T88,55" android:strokeColor="#00A2E5"
+            android:strokeWidth="4.2" />
+        <path android:pathData="M28,63 Q34,58 40,63 T52,63 T64,63 T76,63 T88,63 L88,80 L28,80 Z" android:fillColor="#31C2DE" />
+        <path android:pathData="M44,44 C47,38.5 56,38 61,43.5 L66,39.5 L65,44.5 L66,49.5 L61,45.5 C56,51 47,50 44,44 Z"
+            android:fillColor="#00A2E5" />
+        <path android:pathData="M47.1,43.2 a1.5,1.5 0 1,0 3,0 a1.5,1.5 0 1,0 -3,0" android:fillColor="#FFFFFF" />
+    </group>
+
+    <!-- Battant -->
+    <path android:pathData="M49.4,74 a4.6,4.6 0 1,0 9.2,0 a4.6,4.6 0 1,0 -9.2,0" android:fillColor="#FF4D4F" />
+</vector>
