@@ -351,6 +351,16 @@ SMS/Call avec `retries >= 3` n'apparaît plus dans `/internal/sms|calls/pending`
 - **Pourquoi** : éviter retry infini sur numéro invalide.
 - **Couverture** : E2E `TestSmsAndHealth::test_sms_excluded_after_max_retries`.
 
+### INV-126 [C] ✅ Gateway : modem muet → sortie pour relance systemd et re-détection du port
+Si le keepalive `AT` (toutes les 60 s) échoue `MAX_AT_FAILURES` = 2 fois de suite, la gateway sort (code 1) ; systemd (`Restart=always`) la relance et `detect_modem_port` retrouve le port AT. Un échec isolé ne suffit pas.
+- **Pourquoi** : incident onsite-2 du 2026-09-12 07:11 au 2026-10-13. Le SIM7600 s'est ré-énuméré sur l'USB (`ttyUSB4` disparu, AT passé sur `ttyUSB3`). La gateway a gardé l'ancien port pendant un mois (`Input/output error` chaque seconde, 45 212 logs « tentative de reconnexion » sans reconnexion). Le watchdog modem ne voyait rien : le modem était bien présent sur l'USB. Résultat : **aucun SMS ni appel réellement émis pendant un mois**, sans alerte. Règle validée par le propriétaire le 2026-10-13.
+- **Couverture** : Unit `test_gateway_modem_health.py::TestKeepaliveExit`.
+
+### INV-127 [H] ✅ Gateway : appel non émis → résultat `error`, jamais `no_answer`
+Un appel n'est compté « passé » que si le modem répond `OK` à `ATD<numéro>;`. Toute autre réponse, **y compris vide** (port série mort : `send_at_command` avale l'erreur et renvoie `""`), donne le résultat `error`.
+- **Pourquoi** : pendant l'incident INV-126, les appels étaient enregistrés `no_answer` alors qu'aucun téléphone n'avait sonné. L'opérateur croyait à un défaut de décroché au lieu d'une panne totale du canal. Règle validée par le propriétaire le 2026-10-13.
+- **Couverture** : Unit `test_gateway_modem_health.py::TestCallWasDialed`.
+
 ### INV-124 [H] ✅ Corps du SMS d'alarme : instruction d'acquittement + lien supervision
 Le corps du SMS d'alarme métier (escalade, `_enqueue_sms_for_user`) doit (a) instruire
 l'opérateur d'acquitter en **répondant `1`** au SMS, et (b) contenir le **lien de supervision
