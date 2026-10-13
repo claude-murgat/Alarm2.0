@@ -34,6 +34,7 @@ from modem_detect import detect_modem_port, send_at_command
 from dtmf_decoder import DtmfDecoder
 from locks import at_lock  # RLock reentrant partage du port AT (cf locks.py)
 from dry_contact import parse_dc_line, raw_to_state, decide_report  # logique pure (cf dry_contact.py)
+from modem_health import MAX_AT_FAILURES, at_failures_after, call_was_dialed  # logique pure (cf modem_health.py)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -217,7 +218,8 @@ class CallSenderThread(threading.Thread):
             with at_lock:
                 # Appeler
                 r = send_at_command(self.ser, f"ATD{to_number};", timeout=5)
-                if "ERROR" in r:
+                # Reponse vide = port serie mort : ne pas maquiller en no_answer.
+                if not call_was_dialed(r):
                     return "error"
 
                 # Attendre la reponse (polling AT+CLCC pendant 30s)
@@ -796,14 +798,24 @@ def main():
     logger.info(f"Health check toutes les {HEALTH_CHECK_INTERVAL_SECONDS}s")
 
     # Boucle principale (keepalive)
+    at_failures = 0
     try:
         while True:
             time.sleep(60)
             # Verifier que le modem repond toujours
             with at_lock:
                 r = send_at_command(ser, "AT", timeout=3)
-                if "OK" not in r:
-                    logger.error("Modem ne repond plus a AT — tentative de reconnexion")
+            at_failures = at_failures_after(r, at_failures)
+            if at_failures >= MAX_AT_FAILURES:
+                # Le port a pu changer (modem re-enumere sur l'USB) : on sort, systemd
+                # (Restart=always) relance la gateway qui re-detecte le bon port.
+                logger.critical(
+                    f"Modem muet sur {at_failures} keepalives AT — arret pour relance "
+                    f"systemd et re-detection du port"
+                )
+                return 1
+            if at_failures:
+                logger.error("Modem ne repond pas a AT — nouvel essai dans 60s")
     except KeyboardInterrupt:
         logger.info("Arret demande (Ctrl+C)")
     finally:
