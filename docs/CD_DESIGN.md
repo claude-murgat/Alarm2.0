@@ -190,6 +190,15 @@ done
 
 **Lock file** `/run/alarm-cd-pull.lock` (`flock`) pour éviter (a) deux pulls concurrents, (b) un pull en plein milieu d'un `start-prod-node.sh` manuel.
 
+**Code gateway (issue #183, 2026-10-13)** : la gateway modem tourne hors Docker (`/opt/alarm-gateway`, unit `alarm-sms-gateway`). Son code suit pourtant le même circuit : image porteuse `alarm-gateway` (`gateway/Dockerfile`, jamais exécutée) construite par `cd-build`, promue en `:stable` avec les deux autres et tirée par `alarm-cd-pull`. Le timer root `alarm-gateway-sync` (5 min, décalé de 2 min) détecte un nouvel `Id` d'image, extrait `/gateway/*.py`, fait `pip install` si `requirements.txt` a changé, sauvegarde l'ancien code dans `/var/lib/alarm/cd/gateway-prev/`, installe et redémarre la gateway. Sans « Gateway operationnelle » dans le journal sous 180 s, il restaure l'ancien code. Pas de canary pour la gateway : un seul nœud en a une (onsite-2). Le timer ne fait rien sur un nœud sans unit `alarm-sms-gateway`.
+
+Installation initiale, une fois par nœud (sudo interactif) :
+```bash
+sudo install -m 755 /opt/alarm/scripts/alarm-gateway-sync.sh /usr/local/bin/alarm-gateway-sync
+sudo install -m 644 /opt/alarm/infra/onsite/systemd/alarm-gateway-sync.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now alarm-gateway-sync.timer
+```
+
 **Pourquoi 5 min et pas 1 min** : 1 min augmente la charge GHCR API et n'apporte rien (la promo `:stable` est manuelle, pas une course de seconde). 5 min est une fenêtre acceptable entre promo et propagation. Si plus rapide est demandé, le workflow de promo peut **trigger** le pull via webhook (à instrumenter en V2).
 
 ### Alternatives considérées

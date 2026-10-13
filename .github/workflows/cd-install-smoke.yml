@@ -34,6 +34,9 @@ on:
       - 'infra/onsite/systemd/alarm-cd-pull.*'
       - 'infra/onsite/systemd/alarm-cd-orchestrate.*'
       - 'infra/onsite/sudoers/alarm-cd'
+      - 'scripts/alarm-gateway-sync.sh'
+      - 'infra/onsite/systemd/alarm-gateway-sync.*'
+      - 'gateway/**'
       - '.github/workflows/cd-install-smoke.yml'
   push:
     branches: [master]
@@ -43,6 +46,9 @@ on:
       - 'infra/onsite/systemd/alarm-cd-pull.*'
       - 'infra/onsite/systemd/alarm-cd-orchestrate.*'
       - 'infra/onsite/sudoers/alarm-cd'
+      - 'scripts/alarm-gateway-sync.sh'
+      - 'infra/onsite/systemd/alarm-gateway-sync.*'
+      - 'gateway/**'
       - '.github/workflows/cd-install-smoke.yml'
 
 jobs:
@@ -314,3 +320,70 @@ jobs:
             echo "RuntimeDirectory= / StateDirectory= / EnvironmentFile= presents,"
             echo "timer livre disable par defaut (opt-in V1.5)."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  gateway-sync:
+    # Issue #183 : deploiement auto du code gateway. Bout en bout sur une vraie
+    # gateway simulee (unit systemd factice qui n'annonce "Gateway operationnelle"
+    # que si le code n'est pas marque BROKEN).
+    name: alarm-gateway-sync (deploiement auto gateway)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      IMG: ghcr.io/claude-murgat/alarm-gateway:stable
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install script + units, image :stable locale
+        run: |
+          sudo install -m 755 scripts/alarm-gateway-sync.sh /usr/local/bin/alarm-gateway-sync
+          sudo install -m 644 infra/onsite/systemd/alarm-gateway-sync.service /etc/systemd/system/
+          sudo install -m 644 infra/onsite/systemd/alarm-gateway-sync.timer /etc/systemd/system/
+          sudo systemctl daemon-reload
+          sudo systemd-analyze verify /etc/systemd/system/alarm-gateway-sync.service /etc/systemd/system/alarm-gateway-sync.timer
+          docker build -t "$IMG" gateway/
+
+      - name: Noeud sans gateway -> ne fait rien
+        run: |
+          sudo systemctl start alarm-gateway-sync.service
+          test ! -f /var/lib/alarm/cd/gateway-image-id
+
+      - name: Simuler une gateway installee (ancien code)
+        run: |
+          sudo useradd --system alarm-gateway
+          sudo install -d -o alarm-gateway -g alarm-gateway -m 750 /opt/alarm-gateway
+          echo "# ancien code" | sudo tee /opt/alarm-gateway/modem_gateway.py >/dev/null
+          sudo tee /etc/systemd/system/alarm-sms-gateway.service >/dev/null <<'UNIT'
+          [Service]
+          ExecStart=/bin/sh -c 'grep -q BROKEN /opt/alarm-gateway/modem_gateway.py || echo "Gateway operationnelle"; exec sleep infinity'
+          UNIT
+          # requirements deja installes : on teste le deploiement, pas pip.
+          sudo install -D -m 644 gateway/requirements.txt /var/lib/alarm/cd/gateway-requirements.txt
+          sudo systemctl daemon-reload
+          sudo systemctl start alarm-sms-gateway.service
+
+      - name: Nouveau code -> installe, proprietaire conserve, gateway relancee
+        run: |
+          sudo systemctl start alarm-gateway-sync.service
+          for f in gateway/*.py; do sudo cmp "$f" "/opt/alarm-gateway/$(basename "$f")"; done
+          test "$(sudo stat -c %U /opt/alarm-gateway/modem_gateway.py)" = alarm-gateway
+          test "$(sudo cat /var/lib/alarm/cd/gateway-image-id)" = "$(docker image inspect "$IMG" -f '{{.Id}}')"
+          sudo grep -q "ancien code" /var/lib/alarm/cd/gateway-prev/modem_gateway.py
+          systemctl is-active alarm-sms-gateway.service
+
+      - name: Idempotent -> pas de 2e redemarrage
+        run: |
+          BEFORE=$(systemctl show alarm-sms-gateway -p ExecMainPID --value)
+          sudo systemctl start alarm-gateway-sync.service
+          test "$BEFORE" = "$(systemctl show alarm-sms-gateway -p ExecMainPID --value)"
+
+      - name: Code casse -> rollback vers l'ancien code, pas de boucle
+        run: |
+          BAD=$(mktemp -d); cp gateway/* "$BAD/" 2>/dev/null || true
+          echo "# BROKEN" >> "$BAD/modem_gateway.py"
+          docker build -t "$IMG" -f gateway/Dockerfile "$BAD"
+          sudo env HEALTH_TIMEOUT=15 /usr/local/bin/alarm-gateway-sync
+          sudo cmp gateway/modem_gateway.py /opt/alarm-gateway/modem_gateway.py
+          test "$(sudo cat /var/lib/alarm/cd/gateway-image-id)" = "$(docker image inspect "$IMG" -f '{{.Id}}')"
+          systemctl is-active alarm-sms-gateway.service
+          sudo journalctl -u alarm-gateway-sync --no-pager | tail -5 || true

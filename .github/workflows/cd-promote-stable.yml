@@ -205,7 +205,7 @@ jobs:
       - name: Verify :sha-<short> images exist on GHCR
         run: |
           SHORT='${{ steps.sha.outputs.short }}'
-          for IMG in alarm-backend alarm-patroni; do
+          for IMG in alarm-backend alarm-patroni alarm-gateway; do
             REF="${REGISTRY}/${IMAGE_OWNER}/${IMG}:sha-${SHORT}"
             if ! docker buildx imagetools inspect "$REF" >/dev/null 2>&1; then
               echo "::error::Image $REF absente sur GHCR (cd-build aurait du tourner et publier)"
@@ -217,7 +217,7 @@ jobs:
       - name: Re-tag :stable
         run: |
           SHORT='${{ steps.sha.outputs.short }}'
-          for IMG in alarm-backend alarm-patroni; do
+          for IMG in alarm-backend alarm-patroni alarm-gateway; do
             SRC="${REGISTRY}/${IMAGE_OWNER}/${IMG}:sha-${SHORT}"
             DST="${REGISTRY}/${IMAGE_OWNER}/${IMG}:stable"
             echo "Re-tag $SRC -> $DST"
@@ -238,7 +238,7 @@ jobs:
             echo "::warning::CD_GATEWAY_KEY secret manquant — pas de POST event (promo loggee uniquement dans GH run summary)"
             exit 0
           fi
-          for IMG in alarm-backend alarm-patroni; do
+          for IMG in alarm-backend alarm-patroni alarm-gateway; do
             curl -fsS --max-time 15 -X POST "$CD_API_BASE/api/deployments/events" \
               -H "X-Gateway-Key: $CD_GATEWAY_KEY" \
               -H "Content-Type: application/json" \
@@ -266,6 +266,7 @@ jobs:
             echo "### Images re-taggees"
             echo "- \`${REGISTRY}/${IMAGE_OWNER}/alarm-backend:stable\` -> \`sha-$SHORT\`"
             echo "- \`${REGISTRY}/${IMAGE_OWNER}/alarm-patroni:stable\` -> \`sha-$SHORT\`"
+            echo "- \`${REGISTRY}/${IMAGE_OWNER}/alarm-gateway:stable\` -> \`sha-$SHORT\`"
             echo ""
             echo "### Etape suivante (automatique V1.5)"
             echo "- Timer pull (5 min) sur les 3 noeuds detecte le nouveau digest et pull"

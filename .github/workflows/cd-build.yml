@@ -56,6 +56,9 @@ jobs:
           - image: alarm-patroni
             context: .
             dockerfile: ./Dockerfile.patroni
+          - image: alarm-gateway
+            context: ./gateway
+            dockerfile: ./gateway/Dockerfile
     steps:
       - name: Checkout
         uses: actions/checkout@v4
