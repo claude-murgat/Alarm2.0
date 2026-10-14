@@ -60,3 +60,48 @@ class TestKeepaliveExit:
         for _ in range(_mh.MAX_AT_FAILURES):
             failures = _mh.at_failures_after("", failures)
         assert failures >= _mh.MAX_AT_FAILURES
+
+
+# --- INV-128 / INV-129 : etat reseau du modem (reponses AT reelles d'onsite-2) ---
+
+CPSI_LTE = ("+CPSI: LTE,Online,208-01,0x0262,11174659,41,EUTRAN-BAND20,6400,3,3,"
+            "-160,-1157,-826,9\nOK")
+CPSI_NONE = "+CPSI: NO SERVICE,Online\nOK"
+
+
+class TestParseNetwork:
+    """Lecture de AT+CREG? / AT+CPSI? / AT+CSQ, telles que renvoyees par le SIM7600."""
+
+    def test_lte_registered(self):
+        st = _mh.parse_network("+CREG: 0,1\nOK", CPSI_LTE, "+CSQ: 15,99\nOK")
+        assert st == {"registered": True, "tech": "LTE", "rsrp": -115.7, "csq": 15}
+
+    def test_roaming_counts_as_registered(self):
+        assert _mh.parse_network("+CREG: 0,5\nOK", CPSI_LTE, "+CSQ: 15,99\nOK")["registered"] is True
+
+    @pytest.mark.parametrize("creg", ["+CREG: 0,0\nOK", "+CREG: 0,2\nOK", ""])
+    def test_not_registered(self, creg):
+        st = _mh.parse_network(creg, CPSI_NONE, "+CSQ: 99,99\nOK")
+        assert st == {"registered": False, "tech": None, "rsrp": None, "csq": 0}
+
+    def test_csq_99_means_unknown_zero(self):
+        assert _mh.parse_network("+CREG: 0,1\nOK", CPSI_LTE, "+CSQ: 99,99\nOK")["csq"] == 0
+
+    def test_wcdma_has_no_rsrp(self):
+        cpsi = "+CPSI: WCDMA,Online,208-01,0x2905,23481260,WCDMA 900,505,3000,0,20.0,107,65532,11,500\nOK"
+        st = _mh.parse_network("+CREG: 0,1\nOK", cpsi, "+CSQ: 18,99\nOK")
+        assert st == {"registered": True, "tech": "WCDMA", "rsrp": None, "csq": 18}
+
+
+class TestReregisterDue:
+    """INV-128 : apres 5 keepalives (≈5 min) sans reseau, UNE tentative de
+    reinscription (radio coupee/rallumee) par episode."""
+
+    def test_not_before_threshold(self):
+        assert _mh.reregister_due(_mh.UNREGISTERED_CHECKS_BEFORE_RECOVERY - 1, tried=False) is False
+
+    def test_at_threshold(self):
+        assert _mh.reregister_due(_mh.UNREGISTERED_CHECKS_BEFORE_RECOVERY, tried=False) is True
+
+    def test_only_once_per_episode(self):
+        assert _mh.reregister_due(_mh.UNREGISTERED_CHECKS_BEFORE_RECOVERY + 3, tried=True) is False
