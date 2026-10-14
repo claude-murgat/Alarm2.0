@@ -1743,6 +1743,45 @@ class TestAckedAlarmVisibility:
             f"{[(a['id'], a['status']) for a in alarms]}"
         )
 
+    def _send_and_ack(self, title):
+        alarm_id = requests.post(f"{API}/alarms/send", headers=_admin_headers(), json={
+            "title": title, "message": "m", "severity": "critical",
+            "assigned_user_id": self.user1_id,
+        }).json()["id"]
+        requests.post(f"{API}/alarms/{alarm_id}/ack", headers=self.headers1)
+        return alarm_id
+
+    def _mine_ids(self):
+        return [a["id"] for a in requests.get(f"{API}/alarms/mine", headers=self.headers1).json()]
+
+    def _three_acked_then_oldest_reactivated(self):
+        """A (t0), B (t5), C (t10) acquittées ; à t31 seule A sort de suspension
+        (INV-001 respecté : une seule non acquittée) et son timer created_at est
+        remis à t31, alors que son original_created_at reste t0."""
+        a = self._send_and_ack("Ordre A")
+        _advance_clock_all_nodes(5)
+        b = self._send_and_ack("Ordre B")
+        _advance_clock_all_nodes(5)
+        c = self._send_and_ack("Ordre C")
+        _advance_clock_all_nodes(21)
+        requests.post(f"{API}/devices/heartbeat", headers=self.headers1)
+        time.sleep(12)  # un tick de la boucle d'escalade (expiration de l'ack de A)
+        return a, b, c
+
+    def test_mine_unacked_first_then_acked_most_recent_first(self):
+        """INV-034 : la non acquittée en tête même si plus ancienne, puis les
+        acquittées de la plus récente à la plus ancienne. Tue les mutants
+        « sans critère status » ([C, B, A]) et « .asc() » ([A, B, C])."""
+        a, b, c = self._three_acked_then_oldest_reactivated()
+        assert self._mine_ids() == [a, c, b]
+
+    def test_mine_orders_by_original_created_at(self):
+        """INV-018b : /mine trie sur original_created_at, pas sur le timer
+        created_at (remis à zéro par l'expiration d'ack / l'escalade)."""
+        a, b, c = self._three_acked_then_oldest_reactivated()
+        requests.post(f"{API}/alarms/{a}/ack", headers=self.headers1)
+        assert self._mine_ids() == [c, b, a]
+
 
 # ── SMS queue + /health ──────────────────────────────────────────────────────
 
