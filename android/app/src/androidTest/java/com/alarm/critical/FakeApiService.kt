@@ -34,6 +34,11 @@ class FakeApiService : ApiService {
 
     var alarmHistoryResponse: Response<List<AlarmResponse>> = Response.success(emptyList())
 
+    // INV-ANDROID-606 : chaine d'escalade (defaut : user1 = id 1 en position 1)
+    var escalationChainResponse: Response<List<EscalationEntry>> = Response.success(
+        listOf(EscalationEntry(position = 1, user_id = 1))
+    )
+
     // INV-ANDROID-110 : etat du modem gateway (defaut : inconnu)
     var modemStatusResponse: Response<ModemStatusResponse> = Response.success(
         ModemStatusResponse("unknown", 0, null, null, null)
@@ -80,6 +85,8 @@ class FakeApiService : ApiService {
     }
 
     override suspend fun getModemStatus(auth: String): Response<ModemStatusResponse> = modemStatusResponse
+
+    override suspend fun getEscalationChain(): Response<List<EscalationEntry>> = escalationChainResponse
 
     override suspend fun acknowledgeAlarm(auth: String, alarmId: Int): Response<AlarmResponse> {
         acknowledgeCalledWith = Pair(auth, alarmId)

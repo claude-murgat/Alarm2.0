@@ -180,6 +180,11 @@ La version apparaît dans **toutes les exports `AppLogger.exportLogs()`** via l'
 - **Statut** : implémenté 2026-06-12 dans `android/app/build.gradle.kts` (`gitOutput()` helper + 3 `val`s en tête de fichier). Build local vérifié : versionCode=188, versionName="1.0.188-b95d44b-dirty".
 - **Manque** : pas de test (la valeur dépend de l'environnement git, difficile à fixer dans un test unitaire). Acceptable car la logique est triviale et le smoke-test « build l'APK et lis le manifest » suffit.
 
+### INV-ANDROID-111 [M] ✅ Les notifications portent l'icône de l'app, pas une icône Android générique — 2026-10-14
+Toutes les notifications construites par l'app utilisent `R.drawable.ic_stat_alarm` : une silhouette monochrome de l'icône de l'app (cloche et poisson), comme l'impose Android pour les petites icônes. Les push FCM affichés par le système utilisent la même icône via `com.google.firebase.messaging.default_notification_icon`, avec la couleur `#00A2E5`.
+- **Pourquoi** : demande du propriétaire le 2026-10-14. Avant, l'icône était `android.R.drawable.ic_dialog_alert`.
+- **Couverture** : Espresso `AlarmResilienceTest::notification_du_service_utilise_l_icone_de_l_app`.
+
 ### INV-ANDROID-110 [H] ✅ Icône de signal 4G du modem gateway dans la barre du dashboard — 2026-10-14
 `DashboardActivity` affiche `R.id.modemSignal` (`SignalBarsView`, 4 barres) à droite du nom. L'icône est alimentée par `GET /api/system/modem-status` (INV-129 backend), lu à chaque cycle de polling (3 s) dans `AlarmPollingService.modemStatus`.
 - `state = ok` : barres vertes (orange à 1 barre), pulsation lente.
@@ -452,6 +457,13 @@ Préfixe exact, pas de variation. Le timestamp est purement informatif (audit vi
 
 ---
 
+### INV-ANDROID-309 [C] ✅ Veille (Doze) sur Wi-Fi : CPU et Wi-Fi maintenus éveillés pendant la surveillance — 2026-10-14
+Tant que `AlarmPollingService` tourne, il tient un `PARTIAL_WAKE_LOCK` et un `WifiLock` (`FULL_LOW_LATENCY`, ou `FULL_HIGH_PERF` avant l'API 29). Le dashboard demande **une fois** l'exemption d'optimisation de batterie (`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, pref `battery_optimization_asked`).
+- **Pourquoi** : bug terrain 2026-10-14. En veille sur Wi-Fi, Doze retardait les heartbeats (toutes les 3 s) au-delà du délai serveur de 60 s (`watchdog_timeout_seconds`, gardé à 60 s par décision du propriétaire). Le 13/10, timo a ainsi alterné une vingtaine de fois entre hors ligne et en ligne. Le surcoût batterie est accepté par le propriétaire le 2026-10-14.
+- **Couverture** : Espresso `AlarmResilienceTest::service_garde_le_cpu_et_le_wifi_eveilles`. Le dialogue système n'est pas testé, car il ouvre une activité système.
+
+---
+
 ## 5. Failover backend
 
 ### INV-ANDROID-400 [C] ⚠️ 3 échecs consécutifs de polling → switchToNextUrl()
@@ -584,6 +596,11 @@ Dans la boucle polling, si `alarms.isEmpty() && startedByFcm && !isOncall` → `
 - **Pourquoi** : équilibre batterie / résilience. L'incident est fini, le user retourne en "dormance", FCM le réveillera au prochain.
 - **Manque** : aucun test Espresso (testable via `AlarmPollingService` avec mock polling).
 
+### INV-ANDROID-606 [C] ✅ Statut d'astreinte relu depuis la chaîne à chaque retour dans l'app — 2026-10-14
+`DashboardActivity.onResume()` lit `GET /api/config/escalation` (public). La position de l'utilisateur (`user_id` en prefs) est appliquée par `AlarmWakeUpHandler.onEscalationPushReceived(position, position == 1)` : prefs mises à jour, heartbeat démarré ou arrêté.
+- **Pourquoi** : le push `escalation_update` (INV-ANDROID-601) peut se perdre, par exemple à cause d'un token FCM périmé (l'admin avait 9 tokens enregistrés le 2026-10-14). L'app restait alors en veille, sans heartbeat, jusqu'à une reconnexion.
+- **Couverture** : Espresso `AlarmResilienceTest::ouverture_app_reprend_l_astreinte_depuis_la_chaine`, `::ouverture_app_retrograde_si_plus_en_position_1`.
+
 ### INV-ANDROID-605 [L] ⚠️ Token FCM enregistré au login (DashboardActivity) et re-confirmé au onCreate
 Double registration : `MainActivity.login()` et `DashboardActivity.onCreate()` appellent `registerFcmToken`. Idempotent côté backend (upsert par `device_id`).
 - **Pourquoi** : robustesse. Si la première registration a foiré (réseau), le dashboard réessaye.
@@ -611,12 +628,12 @@ DashboardActivity `onCreate` : si `SDK >= TIRAMISU` et non grantée, `requestPer
 - **Pourquoi** : sans cette permission, aucune notification ne sort → full-screen intent ignoré → AlarmActivity non lancée par le service → alarme manquée.
 - **Limite** : si l'utilisateur refuse, l'app continue mais les push sont muets. Voir questions ouvertes.
 
-### INV-ANDROID-704 [C] 🐛 Reprise post-boot NON implémentée
-Aucun `BootReceiver` dans AndroidManifest, aucune permission `RECEIVE_BOOT_COMPLETED`. Après un reboot du device, le foreground service n'est **PAS** redémarré. L'utilisateur doit rouvrir l'app manuellement pour que le polling reprenne.
-- **Pourquoi (bug)** : un user de garde qui reboot son téléphone la nuit ne reçoit plus d'alarmes via polling jusqu'à la réouverture manuelle. FCM haute priorité PEUT éveiller l'app à condition que Google Play Services soit chargé, mais c'est fragile et non garanti après un reboot à froid.
-- **Fix proposé** : `BootReceiver extends BroadcastReceiver` avec action `android.intent.action.BOOT_COMPLETED`, qui démarre `AlarmPollingService` si un token est présent en prefs (et `is_oncall=true`).
-- **Manque** : pas de test Espresso (nécessite simuler reboot avec `adb reboot` + attendre).
-
+### INV-ANDROID-704 [C] ✅ Reprise du heartbeat après redémarrage du téléphone ou relance par Android — corrigé 2026-10-14
+- **Démarrage / mise à jour** : `BootReceiver` (`BOOT_COMPLETED`, `MY_PACKAGE_REPLACED`, permission `RECEIVE_BOOT_COMPLETED`) relance `AlarmPollingService` si l'utilisateur est d'astreinte (même chemin que `AlarmWakeUpHandler.onEscalationPushReceived`).
+- **Relance par Android (`START_STICKY`)** : l'intent arrive sans extra. Le service lit alors le token sauvegardé dans les prefs. Avant, il s'arrêtait (`token == null`), et **l'app plantait** (`RemoteServiceException` : `startForeground()` jamais appelé).
+- **Arrêt sans plantage** : `startForeground()` est appelé dès `onCreate()`. La rétrogradation envoie `ACTION_STOP` au lieu de `stopService()`, car un `stopService()` juste après `startForegroundService()` faisait planter l'app.
+- **Pourquoi** : bug terrain 2026-10-14. Il fallait se déconnecter puis se reconnecter pour réapparaître en ligne.
+- **Couverture** : Espresso `AlarmResilienceTest` (`demarrage_du_telephone_*`, `relance_par_android_sans_intent_*`). Le RED a été prouvé : échec, puis plantage de l'app avec le code d'origine.
 ---
 
 ## 9. Tests et isolation
