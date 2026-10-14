@@ -158,6 +158,7 @@ class AlarmE2ETest {
         com.alarm.critical.service.AlarmPollingService.authErrorAlarm = false
         com.alarm.critical.service.AlarmPollingService.authErrorMessage = null
         com.alarm.critical.service.AlarmPollingService.tokenRefreshIntervalMs = 12 * 60 * 60 * 1000L
+        com.alarm.critical.service.AlarmPollingService.modemStatus = null
 
         val prefs: SharedPreferences = context.getSharedPreferences("alarm_prefs", Context.MODE_PRIVATE)
         prefs.edit()
@@ -1330,6 +1331,28 @@ class AlarmE2ETest {
 
         onView(withId(R.id.modemSignal))
             .check(matches(withContentDescription(containsString("sans réseau"))))
+
+        scenario.close()
+    }
+
+    @Test
+    fun test31_modemStatusUnavailableExpiresLastKnownState() {
+        fakeApi.modemStatusResponse = Response.success(
+            com.alarm.critical.model.ModemStatusResponse("ok", 4, "LTE", -80.0, "2026-10-14T12:00:00")
+        )
+        waitForPolls(2)
+        val scenario = launchDashboard()
+        onView(withId(R.id.modemSignal))
+            .check(matches(withContentDescription(containsString("4/4"))))
+        unregisterAll()
+
+        // Endpoint en panne : l'icone ne doit pas rester verte sur un etat perime.
+        fakeApi.modemStatusResponse = Response.error(500, okhttp3.ResponseBody.create(null, "err"))
+        fakeApi.resetCallCount()
+        waitForPolls(2)
+
+        onView(withId(R.id.modemSignal))
+            .check(matches(withContentDescription(containsString("inconnu"))))
 
         scenario.close()
     }
