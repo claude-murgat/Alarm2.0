@@ -106,6 +106,23 @@ class TestFrontendLogin:
 # Navigation
 # ---------------------------------------------------------------------------
 
+class TestHeaderWithoutTestEndpoints:
+    """En prod, /api/test/* repond 404 (INV-076). L'en-tete et les cartes du
+    tableau de bord ne doivent pas en dependre (bug prod 2026-10-14 : en-tete
+    bloque sur "Serveur injoignable")."""
+
+    def test_header_shows_alarm_state_when_test_routes_are_disabled(self, page: Page, primary_url):
+        page.route("**/api/test/**", lambda route: route.fulfill(status=404, body="{}"))
+        page.goto(primary_url, wait_until="domcontentloaded", timeout=15000)
+        page.locator("#loginName").fill("admin")
+        page.locator("#loginPassword").fill("admin123")
+        page.locator("button:has-text('Se connecter')").click()
+        expect(page.locator("#dashboard")).to_be_visible(timeout=10000)
+
+        expect(page.locator("#alarmCount")).to_have_text("Aucune alarme", timeout=8000)
+        expect(page.locator("#statsGrid")).to_contain_text("Aucune alarme")
+
+
 class TestNavigation:
 
     def test_page_loads_with_dashboard(self, dashboard: Page):
