@@ -568,9 +568,13 @@
 
         async function loadStatus() {
             try {
-                const s = await api('/api/test/status');
-                const hasAlarm = s.alarms.active > 0 || s.alarms.acknowledged > 0;
-                const isAcked = s.alarms.acknowledged > 0 && s.alarms.active === 0;
+                // Route de prod : /api/test/* repond 404 en production (INV-076).
+                // shortcut: fenetre de 90 jours (max de l'API), une alarme ouverte plus ancienne ne compte pas.
+                const alarms = await api('/api/alarms/?days=90');
+                const activeCount = alarms.filter(a => ['active', 'escalated'].includes(a.status)).length;
+                const ackedCount = alarms.filter(a => a.status === 'acknowledged').length;
+                const hasAlarm = activeCount > 0 || ackedCount > 0;
+                const isAcked = ackedCount > 0 && activeCount === 0;
                 const bannerStatus = hasAlarm
                     ? (isAcked ? 'Acquittee' : 'Alarme active')
                     : 'Aucune alarme';
