@@ -31,6 +31,8 @@ class AlarmPollingService : Service() {
         var lastHeartbeatOk = false
         var activeAlarmCount = 0
         var currentAlarm: com.alarm.critical.model.AlarmResponse? = null
+        // INV-ANDROID-110 : dernier etat connu du modem gateway (icone de signal)
+        var modemStatus: com.alarm.critical.model.ModemStatusResponse? = null
 
         // Perte de heartbeat : alerte après ce délai (2 min par défaut, configurable pour tests)
         var heartbeatLossTimeoutMs = 120_000L
@@ -223,6 +225,11 @@ class AlarmPollingService : Service() {
                         val alarms = response.body() ?: emptyList()
                         activeAlarmCount = alarms.size
                         currentAlarm = alarms.firstOrNull()
+                        // shortcut: rafraichi seulement quand le polling tourne (astreinte ou alarme
+                        // en cours) ; un utilisateur en veille voit l'icone "inconnu".
+                        try {
+                            ApiProvider.service.getModemStatus("Bearer $token").body()?.let { modemStatus = it }
+                        } catch (_: Exception) { }
 
                         if (alarms.isNotEmpty()) {
                             val alarm = alarms.first()

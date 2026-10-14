@@ -54,3 +54,13 @@ data class FcmTokenRequest(val token: String, val device_id: String)
 data class FcmTokenDeleteRequest(val device_id: String)
 
 data class HeartbeatResponse(val status: String, val timestamp: String)
+
+/** INV-ANDROID-110 : etat du modem gateway (GET /api/system/modem-status, INV-129).
+ *  state : "ok" | "no_network" | "unknown" ; bars : 0-4. */
+data class ModemStatusResponse(
+    val state: String,
+    val bars: Int,
+    val tech: String?,
+    val rsrp: Double?,
+    val updated_at: String?
+)

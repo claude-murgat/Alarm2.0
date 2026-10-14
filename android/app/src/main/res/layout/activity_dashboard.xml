@@ -75,6 +75,13 @@
                         android:textColor="#FFFFFF"
                         android:textStyle="bold" />
                 </LinearLayout>
+
+                <!-- INV-ANDROID-110 : signal 4G du modem gateway (SMS/appels de secours) -->
+                <com.alarm.critical.view.SignalBarsView
+                    android:id="@+id/modemSignal"
+                    android:layout_width="26dp"
+                    android:layout_height="22dp"
+                    android:layout_marginStart="8dp" />
             </LinearLayout>
 
             <!-- ==================== CARTE STATUT ==================== -->

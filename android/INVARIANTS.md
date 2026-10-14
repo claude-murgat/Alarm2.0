@@ -180,6 +180,16 @@ La version apparaît dans **toutes les exports `AppLogger.exportLogs()`** via l'
 - **Statut** : implémenté 2026-06-12 dans `android/app/build.gradle.kts` (`gitOutput()` helper + 3 `val`s en tête de fichier). Build local vérifié : versionCode=188, versionName="1.0.188-b95d44b-dirty".
 - **Manque** : pas de test (la valeur dépend de l'environnement git, difficile à fixer dans un test unitaire). Acceptable car la logique est triviale et le smoke-test « build l'APK et lis le manifest » suffit.
 
+### INV-ANDROID-110 [H] ✅ Icône de signal 4G du modem gateway dans la barre du dashboard — 2026-10-14
+`DashboardActivity` affiche `R.id.modemSignal` (`SignalBarsView`, 4 barres) à droite du nom. L'icône est alimentée par `GET /api/system/modem-status` (INV-129 backend), lu à chaque cycle de polling (3 s) dans `AlarmPollingService.modemStatus`.
+- `state = ok` : barres vertes (orange à 1 barre), pulsation lente.
+- `state = no_network` : 4 barres rouges, pulsation rapide.
+- `state = unknown`, ou aucune donnée : barres grises, sans animation.
+- `contentDescription` : « Signal LTE du modem : 1/4 (-115.7 dBm) », « Modem sans réseau : SMS et appels de secours impossibles » ou « Signal du modem inconnu ».
+- **Pourquoi** : le modem d'onsite-2 est resté sans réseau du 12/09 au 13/10 sans que personne ne le voie, soit un mois sans SMS ni appel de secours. Le propriétaire a demandé le 2026-10-13 une icône animée en temps réel dans l'app et le web.
+- **Limite connue** : l'icône n'est rafraîchie que quand le polling tourne (astreinte, ou alarme en cours). Un utilisateur en veille voit l'état « inconnu ».
+- **Couverture** : Espresso `AlarmE2ETest::test29_modemSignalShowsBarsAndDbm`, `::test30_modemWithoutNetworkIsFlagged`. Le RED a été prouvé en débranchant le `show()`.
+
 ---
 
 ## 3. Acquittement

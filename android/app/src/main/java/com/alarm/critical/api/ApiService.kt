@@ -20,6 +20,9 @@ interface ApiService {
     @GET("api/alarms/mine")
     suspend fun getMyAlarms(@Header("Authorization") auth: String): Response<List<AlarmResponse>>
 
+    @GET("api/system/modem-status")
+    suspend fun getModemStatus(@Header("Authorization") auth: String): Response<ModemStatusResponse>
+
     @POST("api/alarms/{id}/ack")
     suspend fun acknowledgeAlarm(
         @Header("Authorization") auth: String,

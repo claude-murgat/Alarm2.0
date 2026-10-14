@@ -33,6 +33,7 @@ import com.alarm.critical.service.AlarmPollingService
 import com.alarm.critical.service.AlarmSoundManager
 import com.alarm.critical.util.AppLogger
 import com.alarm.critical.view.ArcTimerView
+import com.alarm.critical.view.SignalBarsView
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.*
@@ -419,6 +420,9 @@ class DashboardActivity : AppCompatActivity() {
             // Le texte du tiroir lit les memes prefs : sans cet appel il restait
             // celui du dernier onCreate, donc faux apres un push d'escalade.
             updateDrawerGuardStatus()
+
+            // ========== SIGNAL MODEM GATEWAY (INV-ANDROID-110) ==========
+            findViewById<SignalBarsView>(R.id.modemSignal).show(AlarmPollingService.modemStatus)
 
             // ========== CARTE ALARME HERO ==========
             val alarm = AlarmPollingService.currentAlarm

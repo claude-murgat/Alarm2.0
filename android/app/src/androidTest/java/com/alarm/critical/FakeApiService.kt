@@ -34,6 +34,11 @@ class FakeApiService : ApiService {
 
     var alarmHistoryResponse: Response<List<AlarmResponse>> = Response.success(emptyList())
 
+    // INV-ANDROID-110 : etat du modem gateway (defaut : inconnu)
+    var modemStatusResponse: Response<ModemStatusResponse> = Response.success(
+        ModemStatusResponse("unknown", 0, null, null, null)
+    )
+
     // Suivi des appels pour vérification
     var acknowledgeCalledWith: Pair<String, Int>? = null
     var loginCalled = false
@@ -73,6 +78,8 @@ class FakeApiService : ApiService {
         pollingIdlingResource?.onApiCallComplete()
         return resp
     }
+
+    override suspend fun getModemStatus(auth: String): Response<ModemStatusResponse> = modemStatusResponse
 
     override suspend fun acknowledgeAlarm(auth: String, alarmId: Int): Response<AlarmResponse> {
         acknowledgeCalledWith = Pair(auth, alarmId)

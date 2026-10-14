@@ -1300,4 +1300,37 @@ class AlarmE2ETest {
         fakeApi.registerDeviceShouldThrow = false
         scenario.close()
     }
+
+    // ── 29-30. INV-ANDROID-110 : signal 4G du modem gateway sur le dashboard ──
+
+    @Test
+    fun test29_modemSignalShowsBarsAndDbm() {
+        fakeApi.modemStatusResponse = Response.success(
+            com.alarm.critical.model.ModemStatusResponse("ok", 1, "LTE", -115.7, "2026-10-14T12:00:00")
+        )
+        waitForPolls(2)
+
+        val scenario = launchDashboard()
+
+        onView(withId(R.id.modemSignal)).check(matches(isDisplayed()))
+        onView(withId(R.id.modemSignal))
+            .check(matches(withContentDescription(allOf(containsString("1/4"), containsString("-115.7 dBm")))))
+
+        scenario.close()
+    }
+
+    @Test
+    fun test30_modemWithoutNetworkIsFlagged() {
+        fakeApi.modemStatusResponse = Response.success(
+            com.alarm.critical.model.ModemStatusResponse("no_network", 0, null, null, "2026-10-14T12:00:00")
+        )
+        waitForPolls(2)
+
+        val scenario = launchDashboard()
+
+        onView(withId(R.id.modemSignal))
+            .check(matches(withContentDescription(containsString("sans réseau"))))
+
+        scenario.close()
+    }
 }
