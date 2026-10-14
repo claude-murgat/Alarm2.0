@@ -24,6 +24,7 @@ Toutes les écritures de timestamp passent par clock_now() (INV-066).
 La création d'alarme gateway respecte INV-001 (unicité), INV-080 (fallback
 chaîne vide), INV-018 (original_created_at).
 """
+import json
 import os
 import logging
 from datetime import timedelta
@@ -336,3 +337,30 @@ def report_state(
     db.commit()
 
     return {"alarm_active": should_be_active, "dissensus": divergent}
+
+
+class ModemStatusRequest(BaseModel):
+    """INV-129 : etat reseau du modem, envoye par la gateway a chaque keepalive."""
+    registered: bool
+    tech: Optional[str] = None
+    rsrp: Optional[float] = None
+    csq: int = 0  # 0-31, 0 = inconnu (AT+CSQ 99)
+
+
+@router.post("/modem-status")
+def report_modem_status(
+    payload: ModemStatusRequest,
+    db: Session = Depends(get_db),
+    _: None = Depends(_check_gateway_key),
+):
+    """INV-129 : dernier etat reseau du modem, lu par GET /api/system/modem-status.
+    shortcut: une seule cle 'modem_status' (un seul modem, sur onsite-2) ;
+    passer a une cle par gateway_id si un 2e modem est installe."""
+    value = json.dumps({**payload.model_dump(), "reported_at": clock_now().isoformat()})
+    row = db.query(SystemConfig).filter(SystemConfig.key == "modem_status").first()
+    if row:
+        row.value = value
+    else:
+        db.add(SystemConfig(key="modem_status", value=value))
+    db.commit()
+    return {"status": "ok"}

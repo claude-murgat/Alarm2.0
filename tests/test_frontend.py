@@ -11,6 +11,8 @@ Usage :
   python -m pytest tests/test_frontend.py -v             # headless (CI)
 """
 
+import os
+import re
 import time
 import pytest
 import requests
@@ -584,3 +586,30 @@ class TestConnectivityTab:
         history_card = dashboard.locator("#connectivityHistoryCard")
         expect(history_card).to_be_visible()
         expect(dashboard.locator("#connectivityHistoryTitle")).to_contain_text("Historique")
+
+
+# ---------------------------------------------------------------------------
+# INV-129 : indicateur de signal 4G du modem gateway (en-tete)
+# ---------------------------------------------------------------------------
+
+class TestModemSignalIndicator:
+
+    GATEWAY_HEADERS = {"X-Gateway-Key": os.getenv("GATEWAY_KEY", "changeme-in-prod")}
+
+    def _report(self, primary_url, **status):
+        r = requests.post(f"{primary_url}/internal/alarms/modem-status",
+                          json=status, headers=self.GATEWAY_HEADERS, timeout=5)
+        assert r.status_code == 200, r.text
+
+    def test_shows_bars_from_gateway_report(self, dashboard: Page, primary_url):
+        self._report(primary_url, registered=True, tech="LTE", rsrp=-115.7, csq=15)
+        icon = dashboard.locator("#modemSignal")
+        expect(icon).to_have_attribute("data-state", "ok", timeout=8000)
+        expect(icon).to_have_attribute("data-bars", "1")
+        expect(icon).to_have_attribute("title", re.compile(r"-115\.7 dBm"))
+
+    def test_no_network_is_flagged(self, dashboard: Page, primary_url):
+        self._report(primary_url, registered=False, tech=None, rsrp=None, csq=0)
+        icon = dashboard.locator("#modemSignal")
+        expect(icon).to_have_attribute("data-state", "no_network", timeout=8000)
+        expect(icon).to_have_attribute("data-bars", "0")

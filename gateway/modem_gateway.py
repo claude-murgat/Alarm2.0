@@ -34,7 +34,9 @@ from modem_detect import detect_modem_port, send_at_command
 from dtmf_decoder import DtmfDecoder
 from locks import at_lock  # RLock reentrant partage du port AT (cf locks.py)
 from dry_contact import parse_dc_line, raw_to_state, decide_report  # logique pure (cf dry_contact.py)
-from modem_health import MAX_AT_FAILURES, at_failures_after, call_was_dialed  # logique pure (cf modem_health.py)
+from modem_health import (  # logique pure (cf modem_health.py)
+    MAX_AT_FAILURES, at_failures_after, call_was_dialed, parse_network, reregister_due,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -799,6 +801,7 @@ def main():
 
     # Boucle principale (keepalive)
     at_failures = 0
+    unregistered, reregister_tried = 0, False
     try:
         while True:
             time.sleep(60)
@@ -816,6 +819,28 @@ def main():
                 return 1
             if at_failures:
                 logger.error("Modem ne repond pas a AT — nouvel essai dans 60s")
+                continue
+
+            # INV-129 : etat reseau -> backend (indicateur de signal app + web)
+            with at_lock:
+                net = parse_network(
+                    send_at_command(ser, "AT+CREG?", timeout=3),
+                    send_at_command(ser, "AT+CPSI?", timeout=3),
+                    send_at_command(ser, "AT+CSQ", timeout=3),
+                )
+            _post_to_backend("/internal/alarms/modem-status", net)
+
+            # INV-128 : modem inscrit nulle part depuis ~5 min -> radio coupee/rallumee
+            unregistered = 0 if net["registered"] else unregistered + 1
+            if net["registered"]:
+                reregister_tried = False
+            elif reregister_due(unregistered, reregister_tried):
+                reregister_tried = True
+                logger.warning("Modem sans reseau depuis ~5 min — radio coupee puis rallumee (INV-128)")
+                with at_lock:
+                    send_at_command(ser, "AT+CFUN=0", timeout=15)
+                    time.sleep(5)
+                    send_at_command(ser, "AT+CFUN=1", timeout=15)
     except KeyboardInterrupt:
         logger.info("Arret demande (Ctrl+C)")
     finally:

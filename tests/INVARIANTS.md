@@ -361,6 +361,21 @@ Un appel n'est compté « passé » que si le modem répond `OK` à `ATD<numéro
 - **Pourquoi** : pendant l'incident INV-126, les appels étaient enregistrés `no_answer` alors qu'aucun téléphone n'avait sonné. L'opérateur croyait à un défaut de décroché au lieu d'une panne totale du canal. Règle validée par le propriétaire le 2026-10-13.
 - **Couverture** : Unit `test_gateway_modem_health.py::TestCallWasDialed`.
 
+### INV-128 [C] ✅ Gateway : modem sans réseau 5 min → radio coupée puis rallumée, une fois par épisode
+À chaque keepalive (60 s), la gateway lit `AT+CREG?`. Si le modem n'est inscrit nulle part (stat ≠ 1 et ≠ 5) pendant `UNREGISTERED_CHECKS_BEFORE_RECOVERY` = 5 contrôles consécutifs, elle envoie `AT+CFUN=0` puis `AT+CFUN=1`, **une seule fois par épisode**. Le compteur se remet à zéro dès que le modem est de nouveau inscrit.
+- **Pourquoi** : le 2026-10-13, onsite-2 était resté désinscrit (`+COPS: 2`, `+CME ERROR: SIM failure` sur `COPS=0`) depuis la ré-énumération USB du 2026-09-12. Pendant tout ce temps, aucun SMS ni appel n'était émis. Un cycle `CFUN=0/1` l'a réinscrit en 26 s. Il ne s'agit pas d'un reset modem : le lien USB n'est pas touché. Règle validée par le propriétaire le 2026-10-13.
+- **Couverture** : Unit `test_gateway_modem_health.py::TestParseNetwork`, `::TestReregisterDue`.
+
+### INV-129 [H] ✅ Signal 4G du modem visible dans l'app et le web, « inconnu » si la gateway se tait
+La gateway envoie à chaque keepalive `POST /internal/alarms/modem-status` (`X-Gateway-Key`, INV-065) `{registered, tech, rsrp, csq}`. `GET /api/system/modem-status` (tout utilisateur connecté) renvoie `{state, bars, tech, rsrp, updated_at}` :
+- `state = unknown`, `bars = 0` si aucun rapport ou rapport de plus de **180 s** (3 keepalives manqués) ;
+- `state = no_network`, `bars = 0` si le modem n'est pas inscrit ;
+- sinon `state = ok`, barres tirées du RSRP en LTE (≥ −90 → 4, ≥ −100 → 3, ≥ −110 → 2, sinon 1), ou à défaut du CSQ (≥ 20 → 4, ≥ 15 → 3, ≥ 10 → 2, sinon 1).
+
+Le web affiche `#modemSignal` (4 barres animées, `data-state` et `data-bars`, avec un libellé contenant les dBm). L'état sans réseau est rouge et pulsé.
+- **Pourquoi** : la perte de réseau du modem (INV-128) est restée invisible pendant un mois. Le propriétaire a demandé le 2026-10-13 une icône de signal en temps réel dans l'app et le web plutôt qu'un email. Mesure de référence onsite-2 : RSRP −116 dBm (1 barre, bordure de cellule).
+- **Couverture** : Unit `test_modem_signal.py` (mutation 100 %) ; Integration `test_modem_status_inv129.py` ; E2E Playwright `test_frontend.py::TestModemSignalIndicator`. App Android : PR séparée.
+
 ### INV-124 [H] ✅ Corps du SMS d'alarme : instruction d'acquittement + lien supervision
 Le corps du SMS d'alarme métier (escalade, `_enqueue_sms_for_user`) doit (a) instruire
 l'opérateur d'acquitter en **répondant `1`** au SMS, et (b) contenir le **lien de supervision

@@ -65,6 +65,19 @@
         .log-entry.info { color: #3b82f6; }
         .test-buttons { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        /* INV-129 : signal 4G du modem gateway (4 barres, animees) */
+        .modem-signal { display: inline-flex; align-items: flex-end; gap: 2px; height: 20px; cursor: help; }
+        .modem-signal i { width: 5px; border-radius: 1px; background: #475569; transition: background 0.4s; }
+        .modem-signal i:nth-child(1) { height: 25%; } .modem-signal i:nth-child(2) { height: 50%; }
+        .modem-signal i:nth-child(3) { height: 75%; } .modem-signal i:nth-child(4) { height: 100%; }
+        .modem-signal[data-state="ok"] i.on { background: #22c55e; animation: pulse 2.4s infinite; }
+        .modem-signal[data-state="ok"] i.on:nth-child(2) { animation-delay: 0.15s; }
+        .modem-signal[data-state="ok"] i.on:nth-child(3) { animation-delay: 0.3s; }
+        .modem-signal[data-state="ok"] i.on:nth-child(4) { animation-delay: 0.45s; }
+        .modem-signal[data-state="ok"][data-bars="1"] i.on { background: #f59e0b; }
+        .modem-signal[data-state="no_network"] i { background: #ef4444; animation: pulse 1s infinite; }
+        .modem-signal[data-state="unknown"] i { opacity: 0.4; }
+        @media (prefers-reduced-motion: reduce) { .modem-signal i { animation: none !important; } }
         .pulsing { animation: pulse 1s infinite; }
         /* Login overlay */
         .login-overlay { position: fixed; inset: 0; background: #0f172a; display: flex; align-items: center; justify-content: center; z-index: 1000; }
@@ -102,6 +115,8 @@
     <div class="header">
         <h1>Alarme Murgat</h1>
         <div class="status">
+            <span id="modemSignal" class="modem-signal" data-state="unknown" data-bars="0" role="img"
+                  title="Signal 4G du modem : inconnu" aria-label="Signal 4G du modem : inconnu"><i></i><i></i><i></i><i></i></span>
             <span id="alarmCount" style="font-weight:bold">-</span>
             <div class="user-info">
                 <span class="username" id="currentUserName"></span>
@@ -1195,6 +1210,23 @@
             loadCluster();
             loadAlertEmail();
             loadStats();
+            loadModemSignal();
+        }
+
+        // INV-129 : barres de signal du modem gateway (canal SMS/appel de secours)
+        async function loadModemSignal() {
+            try {
+                const m = await api('/api/system/modem-status');
+                const el = document.getElementById('modemSignal');
+                el.dataset.state = m.state;
+                el.dataset.bars = m.bars;
+                el.querySelectorAll('i').forEach((b, i) => b.classList.toggle('on', i < m.bars));
+                const label = m.state === 'no_network' ? 'Modem sans réseau : SMS et appels de secours impossibles'
+                    : m.state === 'unknown' ? 'Signal du modem inconnu (passerelle sans nouvelles)'
+                    : `Signal ${m.tech || ''} du modem : ${m.bars}/4` + (m.rsrp != null ? ` (${m.rsrp} dBm)` : '');
+                el.title = label;
+                el.setAttribute('aria-label', label);
+            } catch (e) {}
         }
 
         // Auto-refresh toutes les 5s (seulement si connecte)

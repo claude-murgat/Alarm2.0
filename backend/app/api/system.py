@@ -8,13 +8,21 @@ Endpoint public (pas d'auth) pour permettre l'orchestrateur de l'interroger
 sans gerer les tokens admin. Retourne uniquement des metriques operationnelles,
 aucune donnee business -> pas de fuite.
 """
+import json
 import os
 import time
 from datetime import datetime
 from typing import Optional
 
 import requests
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+
+from ..auth import get_current_user
+from ..clock import now as clock_now
+from ..database import get_db
+from ..logic.modem_signal import modem_signal
+from ..models import SystemConfig, User
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/system", tags=["system"])
@@ -109,3 +117,13 @@ def peer_health():
         uptime_s=int(time.time() - _BOOT_TS),
         checked_at=datetime.utcnow().isoformat(),
     )
+
+
+@router.get("/modem-status")
+def modem_status(
+    _user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """INV-129 : barres de signal 4G du modem gateway (indicateur app + web)."""
+    row = db.query(SystemConfig).filter(SystemConfig.key == "modem_status").first()
+    return modem_signal(json.loads(row.value) if row else None, clock_now())
