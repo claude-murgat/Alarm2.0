@@ -255,6 +255,47 @@ class DashboardActivity : AppCompatActivity() {
         ContextCompat.startForegroundService(this, intent)
     }
 
+    override fun onResume() {
+        super.onResume()
+        syncOncallFromChain()
+        askBatteryOptimizationExemptionOnce()
+    }
+
+    /**
+     * INV-ANDROID-606 : relit la position dans la chaine a chaque retour dans
+     * l'app. Le push `escalation_update` peut se perdre (token FCM perime) :
+     * l'app restait alors en veille, sans heartbeat, jusqu'a une reconnexion.
+     */
+    private fun syncOncallFromChain() {
+        val userId = getSharedPreferences("alarm_prefs", MODE_PRIVATE).getInt("user_id", -1)
+        if (userId == -1) return
+        lifecycleScope.launch {
+            try {
+                val chain = withContext(Dispatchers.IO) { ApiProvider.service.getEscalationChain() }
+                    .body() ?: return@launch
+                val position = chain.firstOrNull { it.user_id == userId }?.position ?: -1
+                com.alarm.critical.service.AlarmWakeUpHandler
+                    .onEscalationPushReceived(this@DashboardActivity, position, position == 1)
+            } catch (e: Exception) {
+                Log.w("Dashboard", "Sync astreinte impossible : ${e.message}")
+            }
+        }
+    }
+
+    /** INV-ANDROID-309 : sans exemption, Doze coupe le reseau malgre le service. Demande une fois. */
+    private fun askBatteryOptimizationExemptionOnce() {
+        val prefs = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
+        val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
+        if (prefs.getBoolean("battery_optimization_asked", false) || pm.isIgnoringBatteryOptimizations(packageName)) return
+        prefs.edit().putBoolean("battery_optimization_asked", true).apply()
+        try {
+            startActivity(Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                android.net.Uri.parse("package:$packageName")))
+        } catch (e: Exception) {
+            Log.w("Dashboard", "Dialogue batterie indisponible : ${e.message}")
+        }
+    }
+
     private fun stopPollingService() {
         stopService(Intent(this, AlarmPollingService::class.java))
     }
