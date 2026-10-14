@@ -123,6 +123,40 @@ class TestHeaderWithoutTestEndpoints:
         expect(page.locator("#statsGrid")).to_contain_text("Aucune alarme")
 
 
+class TestTestsTabInProd:
+    """En prod (/api/test/* -> 404, INV-076), l'onglet Tests doit rester utile :
+    "Envoyer une alarme" passe par la vraie route d'envoi, et les boutons de
+    simulation (qui n'ont de sens qu'en test) sont masques. Bug terrain
+    2026-10-14 : "Erreur : Test endpoints are disabled"."""
+
+    def _prod_dashboard(self, page: Page, primary_url):
+        def health(route):
+            body = route.fetch().json()
+            body["test_endpoints_enabled"] = False
+            route.fulfill(json=body)
+        page.route("**/health", health)
+        page.route("**/api/test/**", lambda route: route.fulfill(status=404, body="{}"))
+        page.goto(primary_url, wait_until="domcontentloaded", timeout=15000)
+        page.locator("#loginName").fill("admin")
+        page.locator("#loginPassword").fill("admin123")
+        page.locator("button:has-text('Se connecter')").click()
+        expect(page.locator("#dashboard")).to_be_visible(timeout=10000)
+        page.locator(".tab:text('Tests')").click()
+        return page
+
+    def test_send_alarm_uses_real_route(self, page: Page, primary_url):
+        page = self._prod_dashboard(page, primary_url)
+        with page.expect_request(lambda r: r.url.endswith("/api/alarms/send") and r.method == "POST"):
+            page.locator("button:has-text('Envoyer une alarme')").click()
+        expect(page.locator("#tests")).not_to_contain_text("Test endpoints are disabled")
+
+    def test_simulation_buttons_hidden(self, page: Page, primary_url):
+        page = self._prod_dashboard(page, primary_url)
+        for label in ["Escalader au suivant", "Tous les users hors ligne",
+                      "Couper les heartbeats", "Remise a zero"]:
+            expect(page.locator(f"button:has-text('{label}')")).to_be_hidden()
+
+
 class TestNavigation:
 
     def test_page_loads_with_dashboard(self, dashboard: Page):
