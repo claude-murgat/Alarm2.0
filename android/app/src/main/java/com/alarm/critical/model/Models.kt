@@ -55,6 +55,9 @@ data class FcmTokenDeleteRequest(val device_id: String)
 
 data class HeartbeatResponse(val status: String, val timestamp: String)
 
+/** INV-ANDROID-606 : une entree de GET /api/config/escalation (public). */
+data class EscalationEntry(val position: Int, val user_id: Int)
+
 /** INV-ANDROID-110 : etat du modem gateway (GET /api/system/modem-status, INV-129).
  *  state : "ok" | "no_network" | "unknown" ; bars : 0-4. */
 data class ModemStatusResponse(

@@ -166,6 +166,8 @@ class AlarmE2ETest {
             .putString("user_name", "user1")
             .putInt("user_id", 1)
             .putString("device_token", "test-device")
+            // INV-ANDROID-309 : pas de dialogue systeme d'optimisation batterie pendant les tests
+            .putBoolean("battery_optimization_asked", true)
             .commit()
 
         // Forcer orientation portrait pour les tests
