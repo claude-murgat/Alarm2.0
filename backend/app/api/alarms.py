@@ -164,7 +164,7 @@ def my_alarms(current_user: User = Depends(get_current_user), db: Session = Depe
             AlarmNotification.user_id == current_user.id,
         )
         # L'app affiche le 1er element : les alarmes a acquitter d'abord, la plus recente en tete.
-        .order_by(Alarm.status == "acknowledged", Alarm.created_at.desc(), Alarm.id.desc())
+        .order_by(Alarm.status == "acknowledged", Alarm.original_created_at.desc(), Alarm.id.desc())
         .all()
     )
     return [_alarm_response(a, db) for a in alarms]

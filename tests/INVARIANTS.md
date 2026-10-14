@@ -168,6 +168,7 @@ Nouveau champ `original_created_at` initialisé à la création et **jamais modi
 Les usages suivants doivent lire `original_created_at`, PAS `created_at` :
 - ✅ `alarms.py:133-134` — filtre `/alarms/?days=N` (historique) — PR #114 + #121
 - ✅ `alarms.py:149` — ORDER BY pour `/active` — PR #114 + #121
+- ✅ `alarms.py:167` — ORDER BY pour `/mine` — issue #208
 - ✅ `schemas.py:83/129` — champ exposé dans `AlarmResponse` — PR #102
 - ✅ `stats.py:107-149` — bucketing KPI par semaine + MTTR + filtre période — PR <à venir 2026-05-29>
 - ❌ `index.html:567, 575` — affichage timeAgo dans le front — issue #85 (`human-required`)
@@ -220,9 +221,10 @@ Le champ calculé `ack_remaining_seconds ≈ (suspended_until - now).total_secon
 - **Couverture** : E2E `TestAckedAlarmVisibility::test_ack_remaining_seconds_in_response` (1800 → 1200 après +10min).
 
 ### INV-034 [C] ✅ `/mine` : alarmes à acquitter en tête de liste
-`GET /api/alarms/mine` renvoie d'abord les alarmes non acquittées (`active`/`escalated`), la plus récente en premier, puis les `acknowledged`.
+`GET /api/alarms/mine` renvoie d'abord les alarmes non acquittées (`active`/`escalated`), puis les `acknowledged` ; dans chaque groupe, la plus récente en premier selon `original_created_at` (INV-018b, pas le timer `created_at`).
 - **Pourquoi** : l'app Android affiche et fait acquitter le **premier** élément. Une alarme acquittée (suspendue 30 min) ne bloque pas une nouvelle (INV-001) ; sans ce tri, la nouvelle restait derrière l'ancienne et n'était jamais acquittable. Incident prod 2026-10-13 : #526 escaladée sans possibilité d'ACK, #525 acquittée en tête. Règle validée par le propriétaire le 2026-10-13 (tranche la question ouverte `android/INVARIANTS.md` §6 « 2e alarme pendant la 1ère »).
 - **Couverture** : E2E `TestAckedAlarmVisibility::test_unacked_alarm_listed_before_acked_one` (RED avant le fix).
+  - `test_mine_unacked_first_then_acked_most_recent_first` (tue les mutants « sans critère status » et « `.asc()` ») et `test_mine_orders_by_original_created_at` (RED avant l'alignement sur `original_created_at`) — issue #208.
 
 ---
 
