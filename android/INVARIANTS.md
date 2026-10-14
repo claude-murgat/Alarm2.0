@@ -187,6 +187,7 @@ La version apparaît dans **toutes les exports `AppLogger.exportLogs()`** via l'
 - `state = unknown`, ou aucune donnée : barres grises, sans animation.
 - `contentDescription` : « Signal LTE du modem : 1/4 (-115.7 dBm) », « Modem sans réseau : SMS et appels de secours impossibles » ou « Signal du modem inconnu ».
 - **Pourquoi** : le modem d'onsite-2 est resté sans réseau du 12/09 au 13/10 sans que personne ne le voie, soit un mois sans SMS ni appel de secours. Le propriétaire a demandé le 2026-10-13 une icône animée en temps réel dans l'app et le web.
+- **Échec de lecture** (#215) : en cas d'erreur HTTP ou d'exception sur `GET /api/system/modem-status`, `modemStatus` repasse à `null`, et l'icône affiche « inconnu » au lieu de rester figée sur le dernier état. Couvert par `test32_modemStatusFetchFailureFallsBackToUnknown`.
 - **Limite connue** : l'icône n'est rafraîchie que quand le polling tourne (astreinte, ou alarme en cours). Un utilisateur en veille voit l'état « inconnu ».
 - **Couverture** : Espresso `AlarmE2ETest::test29_modemSignalShowsBarsAndDbm`, `::test30_modemWithoutNetworkIsFlagged`. Le RED a été prouvé en débranchant le `show()`.
 

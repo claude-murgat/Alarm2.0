@@ -227,9 +227,11 @@ class AlarmPollingService : Service() {
                         currentAlarm = alarms.firstOrNull()
                         // shortcut: rafraichi seulement quand le polling tourne (astreinte ou alarme
                         // en cours) ; un utilisateur en veille voit l'icone "inconnu".
-                        try {
-                            ApiProvider.service.getModemStatus("Bearer $token").body()?.let { modemStatus = it }
-                        } catch (_: Exception) { }
+                        // #215 : erreur HTTP ou exception -> null (icone "inconnu"), jamais
+                        // la derniere valeur "ok" figee alors que le serveur ne repond plus.
+                        modemStatus = try {
+                            ApiProvider.service.getModemStatus("Bearer $token").body()
+                        } catch (_: Exception) { null }
 
                         if (alarms.isNotEmpty()) {
                             val alarm = alarms.first()

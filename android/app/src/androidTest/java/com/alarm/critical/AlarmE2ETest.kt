@@ -1333,4 +1333,26 @@ class AlarmE2ETest {
 
         scenario.close()
     }
+
+    // ── 32. INV-ANDROID-110 / #215 : endpoint modem en erreur -> icone "inconnu" ──
+
+    @Test
+    fun test32_modemStatusFetchFailureFallsBackToUnknown() {
+        // Sans reset, l'icone gardait son dernier etat "ok" alors que le serveur ne
+        // repondait plus : exactement l'angle mort que l'icone doit supprimer.
+        fakeApi.modemStatusResponse = Response.success(
+            com.alarm.critical.model.ModemStatusResponse("ok", 3, "LTE", -98.0, "2026-10-14T12:00:00")
+        )
+        waitForPolls(2)
+        val scenario = launchDashboard()
+        onView(withId(R.id.modemSignal)).check(matches(withContentDescription(containsString("3/4"))))
+        unregisterAll()
+
+        fakeApi.modemStatusResponse = Response.error(500, okhttp3.ResponseBody.create(null, "boom"))
+        fakeApi.resetCallCount()
+        waitForPolls(2)
+
+        onView(withId(R.id.modemSignal)).check(matches(withContentDescription(containsString("inconnu"))))
+        scenario.close()
+    }
 }
