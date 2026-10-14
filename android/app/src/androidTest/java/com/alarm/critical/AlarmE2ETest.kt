@@ -1333,4 +1333,29 @@ class AlarmE2ETest {
 
         scenario.close()
     }
+
+    // ── 31. INV-ANDROID-209 : un poll perime ne defait pas un acquittement ──
+
+    @Test
+    fun test31_ackNotUndoneByStalePollResponse() {
+        // Le serveur (ou une requete partie avant l'ack) renvoie encore "active"
+        // pendant quelques polls : l'app ne doit pas refaire sonner (bug terrain
+        // 2026-10-14 : "l'alarme reprend directement, je dois re-acquitter").
+        fakeApi.myAlarmsResponses = mutableListOf(Response.success(listOf(fakeAlarm)))
+        fakeApi.acknowledgeResponse = Response.success(fakeAckedAlarm.copy(ack_remaining_seconds = 1800))
+        waitForPolls(2)
+
+        val scenario = launchDashboard()
+        onView(withId(R.id.dashboardAckButton)).check(matches(withEffectiveVisibility(Visibility.VISIBLE)))
+        unregisterAll()
+
+        onView(withId(R.id.dashboardAckButton)).perform(click())
+        fakeApi.resetCallCount()
+        waitForPolls(2)  // ~6 s de polls qui renvoient encore "active"
+
+        onView(withId(R.id.dashboardAckButton)).check(matches(withEffectiveVisibility(Visibility.GONE)))
+        onView(withId(R.id.ackArcTimer)).check(matches(isDisplayed()))
+
+        scenario.close()
+    }
 }

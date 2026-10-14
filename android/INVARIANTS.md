@@ -247,6 +247,11 @@ Si `alarm == null && isAcknowledged` → `alarmGoneDuringAck=true`, carte passe 
 
 ## 4. Heartbeat et connexion
 
+### INV-ANDROID-209 [C] ✅ Un acquittement réussi n'est jamais défait par une réponse de polling périmée — 2026-10-14
+Après un `POST /alarms/{id}/ack` réussi, depuis le dashboard ou depuis `AlarmActivity`, `AlarmPollingService.onAckSucceeded()` remplace `currentAlarm` par l'alarme acquittée renvoyée par le serveur. Pendant `ACK_GRACE_MS` (15 s), un poll qui renvoie cette même alarme dans un autre état qu'`acknowledged` est ignoré (`withAckGrace`).
+- **Pourquoi** : bug terrain 2026-10-14. Six alarmes ont été acquittées deux fois, à 1 à 3 s d'intervalle, entre le 13 et le 14/10. Jusqu'au poll suivant (3 s au plus), l'UI lisait la copie d'avant l'ack, encore `active`. Elle appliquait la règle « ack expiré » et refaisait sonner, ce qui obligeait à réacquitter. Une vraie réactivation n'arrive qu'après la suspension de 30 min (INV-003/016) : la fenêtre de 15 s ne masque rien de légitime.
+- **Couverture** : Espresso `AlarmE2ETest::test31_ackNotUndoneByStalePollResponse` (RED 3 fois sur 3 sur le code d'origine, GREEN 3 fois sur 3).
+
 ### INV-ANDROID-300 [C] ⚠️ Heartbeat envoyé toutes les 3s au POST /api/devices/heartbeat
 `AlarmPollingService.startHeartbeat()` boucle `while (isActive) { heartbeat; delay(3000) }`.
 - **Pourquoi** : le watchdog backend marque offline à 60s (INV-041 backend) → 3s laisse 20 tentatives avant de basculer offline.

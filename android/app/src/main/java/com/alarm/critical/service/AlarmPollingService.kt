@@ -31,6 +31,25 @@ class AlarmPollingService : Service() {
         var lastHeartbeatOk = false
         var activeAlarmCount = 0
         var currentAlarm: com.alarm.critical.model.AlarmResponse? = null
+
+        // INV-ANDROID-209 : apres un ack reussi, un poll perime (copie d'avant
+        // l'ack, ou requete partie juste avant) renvoie encore "active". Sans
+        // garde, l'UI prend ca pour une expiration d'ack et refait sonner.
+        // Une vraie reactivation n'arrive qu'apres 30 min : 15 s ne masque rien.
+        const val ACK_GRACE_MS = 15_000L
+        private var ackGraceAlarmId = -1
+        private var ackGraceUntilElapsed = 0L
+
+        fun onAckSucceeded(acked: com.alarm.critical.model.AlarmResponse?) {
+            acked ?: return
+            currentAlarm = acked
+            ackGraceAlarmId = acked.id
+            ackGraceUntilElapsed = android.os.SystemClock.elapsedRealtime() + ACK_GRACE_MS
+        }
+
+        fun withAckGrace(polled: com.alarm.critical.model.AlarmResponse?): com.alarm.critical.model.AlarmResponse? =
+            if (polled != null && polled.id == ackGraceAlarmId && polled.status != "acknowledged"
+                && android.os.SystemClock.elapsedRealtime() < ackGraceUntilElapsed) currentAlarm else polled
         // INV-ANDROID-110 : dernier etat connu du modem gateway (icone de signal)
         var modemStatus: com.alarm.critical.model.ModemStatusResponse? = null
 
@@ -224,7 +243,7 @@ class AlarmPollingService : Service() {
                         }
                         val alarms = response.body() ?: emptyList()
                         activeAlarmCount = alarms.size
-                        currentAlarm = alarms.firstOrNull()
+                        currentAlarm = withAckGrace(alarms.firstOrNull())
                         // shortcut: rafraichi seulement quand le polling tourne (astreinte ou alarme
                         // en cours) ; un utilisateur en veille voit l'icone "inconnu".
                         try {
