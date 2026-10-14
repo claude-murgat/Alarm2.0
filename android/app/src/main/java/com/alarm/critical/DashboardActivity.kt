@@ -658,6 +658,7 @@ class DashboardActivity : AppCompatActivity() {
             try {
                 val response = ApiProvider.service.acknowledgeAlarm("Bearer $t", alarm.id)
                 if (response.isSuccessful) {
+                    AlarmPollingService.onAckSucceeded(response.body())
                     soundManager?.stopAlarmSound()
                     isAcknowledged = true
                     acknowledgedAlarmId = alarm.id
