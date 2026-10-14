@@ -189,11 +189,11 @@ Toutes les notifications construites par l'app utilisent `R.drawable.ic_stat_ala
 `DashboardActivity` affiche `R.id.modemSignal` (`SignalBarsView`, 4 barres) à droite du nom. L'icône est alimentée par `GET /api/system/modem-status` (INV-129 backend), lu à chaque cycle de polling (3 s) dans `AlarmPollingService.modemStatus`.
 - `state = ok` : barres vertes (orange à 1 barre), pulsation lente.
 - `state = no_network` : 4 barres rouges, pulsation rapide.
-- `state = unknown`, ou aucune donnée : barres grises, sans animation.
+- `state = unknown`, ou aucune donnée : barres grises, sans animation. Si l'endpoint échoue (erreur HTTP, réseau), le dernier état connu est **oublié** : l'icône repasse à « inconnu » au lieu de rester verte sur un état périmé (#215).
 - `contentDescription` : « Signal LTE du modem : 1/4 (-115.7 dBm) », « Modem sans réseau : SMS et appels de secours impossibles » ou « Signal du modem inconnu ».
 - **Pourquoi** : le modem d'onsite-2 est resté sans réseau du 12/09 au 13/10 sans que personne ne le voie, soit un mois sans SMS ni appel de secours. Le propriétaire a demandé le 2026-10-13 une icône animée en temps réel dans l'app et le web.
 - **Limite connue** : l'icône n'est rafraîchie que quand le polling tourne (astreinte, ou alarme en cours). Un utilisateur en veille voit l'état « inconnu ».
-- **Couverture** : Espresso `AlarmE2ETest::test29_modemSignalShowsBarsAndDbm`, `::test30_modemWithoutNetworkIsFlagged`. Le RED a été prouvé en débranchant le `show()`.
+- **Couverture** : Espresso `AlarmE2ETest::test29_modemSignalShowsBarsAndDbm`, `::test30_modemWithoutNetworkIsFlagged`. Le RED a été prouvé en débranchant le `show()`. `::test32_modemStatusUnavailableExpiresLastKnownState` (RED avant le fix #215).
 
 ---
 
