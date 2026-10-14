@@ -65,6 +65,9 @@
         .log-entry.info { color: #3b82f6; }
         .test-buttons { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        /* Prod : routes /api/test/* coupees (INV-076) -> boutons de simulation masques */
+        body.prod-mode .test-only { display: none; }
+        body:not(.prod-mode) .prod-note { display: none; }
         /* INV-129 : signal 4G du modem gateway (4 barres, animees) */
         .modem-signal { display: inline-flex; align-items: flex-end; gap: 2px; height: 20px; cursor: help; }
         .modem-signal i { width: 5px; border-radius: 1px; background: #475569; transition: background 0.4s; }
@@ -317,11 +320,15 @@
                 <h3>Contrôles de test</h3>
                 <div class="test-buttons">
                     <button class="btn-danger" onclick="testSendAlarm()">&#x1F6A8; Envoyer une alarme</button>
-                    <button class="btn-warning" onclick="testTriggerEscalation()">&#x23EB; Escalader au suivant</button>
-                    <button class="btn-warning" onclick="testWatchdog()">&#x23F1; Tous les users hors ligne</button>
-                    <button class="btn-warning" id="btnHeartbeatPause" onclick="toggleHeartbeatPause()">&#x1F4E1; Couper les heartbeats</button>
-                    <button class="btn-success" onclick="testReset()">&#x1F504; Remise a zero</button>
+                    <button class="btn-warning test-only" onclick="testTriggerEscalation()">&#x23EB; Escalader au suivant</button>
+                    <button class="btn-warning test-only" onclick="testWatchdog()">&#x23F1; Tous les users hors ligne</button>
+                    <button class="btn-warning test-only" id="btnHeartbeatPause" onclick="toggleHeartbeatPause()">&#x1F4E1; Couper les heartbeats</button>
+                    <button class="btn-success test-only" onclick="testReset()">&#x1F504; Remise a zero</button>
                 </div>
+                <p class="prod-note" style="color:#94a3b8;font-size:0.85rem;margin-top:10px">
+                    Production : « Envoyer une alarme » déclenche une vraie alarme (escalade, SMS et appels compris).
+                    Les simulations sont désactivées ; résolvez l'alarme depuis l'onglet Alarmes après le test.
+                </p>
             </div>
             <div class="card">
                 <h3>Journal de test</h3>
@@ -475,6 +482,7 @@
             try {
                 const r = await fetch('/health');
                 const h = await r.json();
+                document.body.classList.toggle('prod-mode', h.test_endpoints_enabled === false);
                 if (h.role === 'primary') { PRIMARY_API = ''; return; }
             } catch(e) {}
             // Sinon chercher parmi les backends connus
@@ -977,8 +985,12 @@
         async function testSendAlarm() {
             log('Envoi alarme de test...', 'info');
             try {
-                const r = await api('/api/test/send-alarm', { method: 'POST' });
-                log(`Alarme envoyée ! ID: ${r.alarm_id}, Assignée à : ${r.assigned_to}`, 'success');
+                // Vraie route (fonctionne aussi en prod, ou /api/test/* repond 404).
+                const r = await api('/api/alarms/send', { method: 'POST', body: JSON.stringify({
+                    title: 'Alarme de test', message: "Déclenchée depuis l'onglet Tests",
+                    severity: 'critical', assigned_user_id: null,
+                })});
+                log(`Alarme envoyée ! ID: ${r.id}, Assignée à : ${getUserName(r.assigned_user_id)}`, 'success');
                 loadAll();
             } catch (e) { log(`Erreur : ${e.message}`, 'error'); }
         }
