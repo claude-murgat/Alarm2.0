@@ -77,7 +77,13 @@ object AlarmWakeUpHandler {
             // Plus de garde -> on coupe le heartbeat. Exception : si le service a
             // ete demarre par un push d'ALARME (started_by_fcm), il doit survivre
             // jusqu'a l'acquittement, sinon on fait taire une alarme en cours.
-            context.stopService(Intent(context, AlarmPollingService::class.java))
+            // Commande d'arret plutot que stopService() : un stopService() juste apres
+            // un startForegroundService() (ouverture d'app puis retrogradation) fait
+            // planter l'app (startForeground() jamais appele).
+            if (AlarmPollingService.isRunning) {
+                ContextCompat.startForegroundService(context,
+                    Intent(context, AlarmPollingService::class.java).setAction(AlarmPollingService.ACTION_STOP))
+            }
             Log.w(TAG, "Heartbeat stopped: no longer on call (position $position)")
         }
     }
