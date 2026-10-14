@@ -17,6 +17,9 @@ interface ApiService {
     @POST("api/devices/heartbeat")
     suspend fun heartbeat(@Header("Authorization") auth: String): Response<HeartbeatResponse>
 
+    @GET("api/config/escalation")
+    suspend fun getEscalationChain(): Response<List<EscalationEntry>>
+
     @GET("api/alarms/mine")
     suspend fun getMyAlarms(@Header("Authorization") auth: String): Response<List<AlarmResponse>>
 

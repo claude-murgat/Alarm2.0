@@ -1,5 +1,7 @@
 package com.alarm.critical
 
+import com.alarm.critical.service.AlarmPollingService
+
 import android.animation.ArgbEvaluator
 import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
@@ -147,6 +149,7 @@ class AlarmActivity : AppCompatActivity() {
             try {
                 val response = ApiProvider.service.acknowledgeAlarm("Bearer $token", alarmId)
                 if (response.isSuccessful) {
+                    AlarmPollingService.onAckSucceeded(response.body())
                     soundManager.stopAlarmSound()
                     val remaining = response.body()?.ack_remaining_seconds ?: 1800
                     runOnUiThread {
