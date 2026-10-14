@@ -155,6 +155,7 @@ class AlarmE2ETest {
         com.alarm.critical.service.AlarmPollingService.lastHeartbeatOk = false
         com.alarm.critical.service.AlarmPollingService.heartbeatLossTimeoutMs = 120_000L
         com.alarm.critical.service.AlarmPollingService.currentAlarm = null
+        com.alarm.critical.service.AlarmPollingService.modemStatus = null  // #216 : pas de fuite entre tests (INV-ANDROID-110)
         com.alarm.critical.service.AlarmPollingService.authErrorAlarm = false
         com.alarm.critical.service.AlarmPollingService.authErrorMessage = null
         com.alarm.critical.service.AlarmPollingService.tokenRefreshIntervalMs = 12 * 60 * 60 * 1000L
