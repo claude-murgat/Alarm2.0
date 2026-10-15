@@ -37,10 +37,15 @@ def test_notifies_initially_then_only_on_change():
 
         current = requests.get(f"{BASE_URL}{PATH}", headers={"Authorization": f"Bearer {token}"}, timeout=10).json()
         new_email = "live-ws@example.com" if current.get("alert_email") != "live-ws@example.com" else "live-ws2@example.com"
-        r = requests.post(f"{BASE_URL}{PATH}", json={"key": "alert_email", "value": new_email},
-                          headers={"Authorization": f"Bearer {token}"}, timeout=10)
+        auth = {"Authorization": f"Bearer {token}"}
+        r = requests.post(f"{BASE_URL}{PATH}", json={"key": "alert_email", "value": new_email}, headers=auth, timeout=10)
         r.raise_for_status()
-        assert _changed(ws, 10) == PATH
+        try:
+            assert _changed(ws, 10) == PATH
+        finally:
+            if current.get("alert_email"):
+                requests.post(f"{BASE_URL}{PATH}", json={"key": "alert_email", "value": current["alert_email"]},
+                              headers=auth, timeout=10)
 
 
 def test_invalid_token_closes_4401():
