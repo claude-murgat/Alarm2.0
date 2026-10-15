@@ -254,6 +254,9 @@ app.include_router(deployments_router)
 from .api.system import router as system_router
 app.include_router(system_router)
 
+from .api.live import router as live_router
+app.include_router(live_router)
+
 
 @app.get("/", response_class=HTMLResponse)
 async def root():

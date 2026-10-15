@@ -403,6 +403,11 @@ Avant d'appeler un numéro, la gateway vérifie `/internal/sms/pending` : tant q
 - **Pourquoi** : le backend crée le SMS et l'appel au même instant (INV-060), puis deux threads gateway indépendants les traitent. Un appel garde le modem jusqu'à ~45 s : si le thread des appels passait le premier, le message vocal « Consultez votre SMS » arrivait avant le SMS. Demande du propriétaire du 2026-10-14.
 - **Couverture** : Unit `test_gateway_voice_call.py::TestCallDeferredForSms`.
 
+### INV-135 [M] ✅ Web : rafraîchissement par WebSocket, un panneau ne se recharge que si ses données changent
+L'UI web ouvre `/api/ws` et envoie `{token, paths}`. Le nœud rejoue ces GET en interne toutes les 3 s et n'envoie `{"changed": path}` qu'à la connexion (sync initiale) puis quand la réponse change. Token invalide/expiré → fermeture `4401` → logout. Coupure → reconnexion espacée (3 s → 30 s), une seule ligne console. Filet de sécurité : resync complète toutes les 60 s (stats exclues tant que le live est ouvert).
+- **Pourquoi** : l'autorefresh 5 s rechargeait tout (dont le graphe des stats) en permanence et, backend en 503, inondait la console de ~10 erreurs toutes les 5 s. Pas de bus inter-nœuds : chaque nœud lit sa propre DB, donc ça marche aussi sur un replica.
+- **Couverture** : `tests/test_live_ws.py` (notif initiale, silence sans changement, notif après changement, 4401, paths hors `/api/` ignorés).
+
 ### INV-124 [H] ✅ Corps du SMS d'alarme : instruction d'acquittement + lien supervision
 Le corps du SMS d'alarme métier (escalade, `_enqueue_sms_for_user`) doit (a) instruire
 l'opérateur d'acquitter en **répondant `1`** au SMS, et (b) contenir le **lien de supervision
