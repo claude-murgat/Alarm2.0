@@ -381,7 +381,7 @@ jobs:
 
       - name: Code casse -> rollback vers l'ancien code, pas de boucle
         run: |
-          BAD=$(mktemp -d); cp gateway/* "$BAD/" 2>/dev/null || true
+          BAD=$(mktemp -d); cp -r gateway/. "$BAD/"
           echo "# BROKEN" >> "$BAD/modem_gateway.py"
           docker build -t "$IMG" -f gateway/Dockerfile "$BAD"
           sudo env HEALTH_TIMEOUT=15 /usr/local/bin/alarm-gateway-sync
