@@ -366,7 +366,9 @@ jobs:
         run: |
           sudo systemctl start alarm-gateway-sync.service
           for f in gateway/*.py; do sudo cmp "$f" "/opt/alarm-gateway/$(basename "$f")"; done
+          for f in gateway/voice/*.wav; do sudo cmp "$f" "/opt/alarm-gateway/voice/$(basename "$f")"; done
           test "$(sudo stat -c %U /opt/alarm-gateway/modem_gateway.py)" = alarm-gateway
+          test "$(sudo stat -c %U /opt/alarm-gateway/voice/alarme.wav)" = alarm-gateway
           test "$(sudo cat /var/lib/alarm/cd/gateway-image-id)" = "$(docker image inspect "$IMG" -f '{{.Id}}')"
           sudo grep -q "ancien code" /var/lib/alarm/cd/gateway-prev/modem_gateway.py
           systemctl is-active alarm-sms-gateway.service

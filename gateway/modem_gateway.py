@@ -15,8 +15,10 @@ Demarrage : python modem_gateway.py
 import argparse
 import glob
 import logging
+import os
 import threading
 import time
+import wave
 
 import requests
 import serial
@@ -31,11 +33,15 @@ from config import (
     DRY_CONTACT_LIVENESS_SECONDS,
 )
 from modem_detect import detect_modem_port, send_at_command
-from dtmf_decoder import DtmfDecoder
 from locks import at_lock  # RLock reentrant partage du port AT (cf locks.py)
 from dry_contact import parse_dc_line, raw_to_state, decide_report  # logique pure (cf dry_contact.py)
 from modem_health import (  # logique pure (cf modem_health.py)
     MAX_AT_FAILURES, at_failures_after, call_was_dialed, parse_network, reregister_due,
+)
+from voice_call import (  # logique pure (cf voice_call.py)
+    DTMF_WAIT_S, FRAME_S, HANG_UP_COMMANDS, LEAD_SILENCE_S, call_answered, call_deferred_for_sms,
+    call_ended, call_result, confirmation_file, cpcmfrm_for, dtmf_key, is_audio_port,
+    lead_silence, pcm_frames,
 )
 
 logging.basicConfig(
@@ -184,14 +190,45 @@ class SmsSenderThread(threading.Thread):
 
 # ── Call Sender Thread ───────────────────────────────────────────────────────
 
+VOICE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "voice")
+VOICE_FILES = ("alarme.wav", "acquittee.wav", "escaladee.wav")
+
+
+def _load_voice(voice_dir: str = VOICE_DIR) -> dict | None:
+    """INV-131 : charge les WAV du message et des confirmations (PCM 16 bits mono,
+    meme frequence 8 ou 16 kHz). None si un fichier manque ou est invalide ->
+    repli sur la synthese du module."""
+    try:
+        voice, rates = {}, set()
+        for name in VOICE_FILES:
+            with wave.open(os.path.join(voice_dir, name)) as w:
+                if (w.getsampwidth(), w.getnchannels()) != (2, 1):
+                    raise ValueError(f"{name} : PCM 16 bits mono attendu")
+                rates.add(w.getframerate())
+                voice[name] = w.readframes(w.getnframes())
+        if len(rates) != 1:
+            raise ValueError(f"frequences differentes : {sorted(rates)}")
+        rate = rates.pop()
+        cpcmfrm_for(rate)  # ValueError si ni 8 ni 16 kHz
+        voice["rate"] = rate
+        return voice
+    except Exception as e:
+        logger.warning(f"Voix preenregistree indisponible ({voice_dir}) : {e} — repli TTS du module")
+        return None
+
+
 class CallSenderThread(threading.Thread):
-    """Poll /internal/calls/pending et passe les appels via ATD + TTS."""
+    """Poll /internal/calls/pending et passe les appels : ATD, voix francaise
+    injectee par le port audio USB (repli TTS module), touche 1/2 confirmee."""
 
     def __init__(self, ser: serial.Serial, audio_port: str | None = None):
         super().__init__(daemon=True, name="CallSender")
         self.ser = ser
         self.audio_port = audio_port
+        self.voice = _load_voice()
         self.running = True
+        self._urc = ""
+        self._voice_started = False
 
     def run(self):
         logger.info("CallSenderThread demarre")
@@ -199,7 +236,12 @@ class CallSenderThread(threading.Thread):
             try:
                 pending = _get_from_backend("/internal/calls/pending")
                 if pending:
+                    # INV-133 : le SMS de detail part avant l'appel vers le meme numero.
+                    sms_pending = _get_from_backend("/internal/sms/pending")
                     for call in pending:
+                        if call_deferred_for_sms(call["to_number"], sms_pending):
+                            logger.info(f"Call {call['id']} differe : SMS en attente pour {call['to_number']}")
+                            continue
                         result = self._make_call(
                             call["to_number"],
                             call["tts_message"],
@@ -214,106 +256,164 @@ class CallSenderThread(threading.Thread):
             time.sleep(POLL_INTERVAL_SECONDS)
 
     def _make_call(self, to_number: str, tts_message: str) -> str:
-        """Passe un appel, joue le TTS, ecoute la reponse DTMF.
+        """Passe un appel, joue le message, ecoute la touche, confirme, raccroche.
         Retourne : ack_dtmf | escalate | no_answer | error"""
         try:
             with at_lock:
-                # Appeler
                 r = send_at_command(self.ser, f"ATD{to_number};", timeout=5)
                 # Reponse vide = port serie mort : ne pas maquiller en no_answer.
                 if not call_was_dialed(r):
                     return "error"
-
-                # Attendre la reponse (polling AT+CLCC pendant 30s)
-                answered = False
-                deadline = time.time() + 30
-                while time.time() < deadline:
-                    clcc = send_at_command(self.ser, "AT+CLCC", timeout=2)
-                    if ",0,0," in clcc:  # state 0 = active
-                        answered = True
-                        break
-                    if "NO CARRIER" in clcc or "BUSY" in clcc:
-                        return "no_answer"
-                    time.sleep(2)
-
-                if not answered:
-                    send_at_command(self.ser, "ATH", timeout=3)
+                # Pendant l'appel, plus de send_at_command : son reset_input_buffer
+                # effacerait les URC (VOICE CALL: BEGIN, +RXDTMF).
+                self._urc = ""
+                if not self._wait_answered(timeout=30):
+                    self._hang_up()
                     return "no_answer"
-
-                # Jouer le TTS (local au module — ne passe pas toujours sur la ligne)
-                time.sleep(2)  # Stabiliser l'appel
-                send_at_command(self.ser, f'AT+CTTS=2,"{tts_message}"', timeout=10)
-
-                # Attendre DTMF via URC (+RXDTMF: X ou +DTMF: X)
-                dtmf_key = self._wait_for_dtmf(timeout=30)
-
-                # Raccrocher
-                send_at_command(self.ser, "ATH", timeout=3)
-
-                if dtmf_key == "1":
-                    return "ack_dtmf"
-                elif dtmf_key == "2":
-                    return "escalate"
+                logger.info(f"Appel decroche ({to_number})")
+                key = None
+                if self.voice and self.audio_port:
+                    try:
+                        key = self._play_voice()
+                    except Exception as e:
+                        logger.warning(f"Voix PCM en echec ({e})")
+                        self._poll()
+                        key = dtmf_key(self._urc)
+                        # Repli seulement si le message n'a pas pu demarrer.
+                        if not self._voice_started and not call_ended(self._urc) and not key:
+                            logger.warning("Repli TTS du module")
+                            key = self._play_tts(tts_message)
                 else:
-                    return "no_answer"
+                    key = self._play_tts(tts_message)
+                self._hang_up()
+                logger.info(f"Touche recue : {key}")
+                return call_result(key)
 
         except Exception as e:
             logger.error(f"Call erreur : {e}")
             try:
                 with at_lock:
-                    send_at_command(self.ser, "ATH", timeout=3)
+                    self._hang_up()
             except Exception:
                 pass
             return "error"
 
-    def _wait_for_dtmf(self, timeout: float = 30) -> str | None:
-        """Attend une touche DTMF pendant un appel.
-        Strategie 1 : ecoute le port audio USB (Goertzel sur PCM 8kHz)
-        Strategie 2 (fallback) : ecoute les URC +DTMF sur le port AT
+    # ── E/S port AT pendant l'appel (URC conservees dans self._urc) ──
 
-        Retourne le digit ou None si timeout."""
-        import numpy as np
+    def _poll(self):
+        n = self.ser.in_waiting
+        if n:
+            self._urc += self.ser.read(n).decode(errors="replace").replace("\r", "")
 
-        # Tenter la detection via le port audio (Goertzel)
-        if self.audio_port:
-            try:
-                audio_ser = serial.Serial(
-                    port=self.audio_port,
-                    baudrate=115200,
-                    timeout=0.1,
-                )
-                decoder = DtmfDecoder(sample_rate=8000)
-                block_bytes = 410  # 205 samples * 2 bytes (16-bit)
-                deadline = time.time() + timeout
-
-                while time.time() < deadline:
-                    raw = audio_ser.read(block_bytes)
-                    if len(raw) >= block_bytes:
-                        samples = np.frombuffer(raw[:block_bytes], dtype=np.int16)
-                        key = decoder.detect(samples)
-                        if key:
-                            logger.info(f"DTMF Goertzel : {key}")
-                            audio_ser.close()
-                            return key
-                    time.sleep(0.01)
-
-                audio_ser.close()
-                return None
-            except Exception as e:
-                logger.warning(f"Audio port erreur ({self.audio_port}): {e}, fallback URC")
-
-        # Fallback : ecoute les notifications URC +DTMF sur le port AT
+    def _at(self, cmd: str, timeout: float = 3.0) -> str:
+        """Commande AT sans vider le tampon ; rend la main des OK/ERROR."""
+        start = len(self._urc)
+        self.ser.write(f"{cmd}\r\n".encode())
         deadline = time.time() + timeout
         while time.time() < deadline:
-            if self.ser.in_waiting > 0:
-                line = self.ser.readline().decode(errors="replace").strip()
-                if "+DTMF:" in line or "+RXDTMF:" in line:
-                    # Format: +DTMF: 1 ou +RXDTMF: 1
-                    digit = line.split(":")[-1].strip()
-                    logger.info(f"DTMF URC : {digit}")
-                    return digit
-            time.sleep(0.1)
-        return None
+            self._poll()
+            lines = [l.strip() for l in self._urc[start:].splitlines()]
+            if "OK" in lines or "ERROR" in lines or any(l.startswith("+CME ERROR") for l in lines):
+                break
+            time.sleep(0.01)
+        return self._urc[start:]
+
+    def _wait_answered(self, timeout: float) -> bool:
+        """INV-130 : surveillance continue (URC + AT+CLCC chaque seconde)."""
+        deadline, next_clcc = time.time() + timeout, 0.0
+        while time.time() < deadline:
+            if time.time() >= next_clcc:
+                self.ser.write(b"AT+CLCC\r\n")
+                next_clcc = time.time() + 1.0
+            self._poll()
+            if call_answered(self._urc):
+                return True
+            if call_ended(self._urc):
+                return False
+            time.sleep(0.02)
+        return False
+
+    def _hang_up(self):
+        """INV-132 : AT+CHUP (raccrochage appel vocal SIMCom), ATH en secours."""
+        for cmd in HANG_UP_COMMANDS:
+            if "OK" in self._at(cmd).splitlines():
+                return
+
+    # ── Message + touche ──
+
+    def _play_voice(self) -> str | None:
+        """INV-131/132 : voix preenregistree injectee par le port audio USB."""
+        rate = self.voice["rate"]
+        self._voice_started = False
+        # Ordre de l'exemple SIMCom (usb_audio_test.py) : port audio ouvert AVANT
+        # AT+CPCMREG=1 et ferme APRES AT+CPCMREG=0. Dans l'ordre inverse, l'appel
+        # suivant partait dans le vide (constate le 2026-10-15 sur alarm-1).
+        with serial.Serial(self.audio_port, 115200, timeout=0, write_timeout=2) as audio:
+            prev = self._at("AT+CPCMREG?")
+            if "+CPCMREG: 1" in prev:
+                logger.warning(f"Port audio reste ouvert, fermeture : {self._at('AT+CPCMREG=0').split()}")
+            frm = self._at(f"AT+CPCMFRM={cpcmfrm_for(rate)}")
+            reg = self._at("AT+CPCMREG=1")
+            logger.info(f"Port audio : CPCMFRM {frm.split()} CPCMREG {reg.split()}")
+            if "OK" not in reg.splitlines():
+                raise RuntimeError("AT+CPCMREG=1 refuse")
+            try:
+                audio.reset_input_buffer()
+                self._voice_started = True
+                state = self._stream(audio, lead_silence(rate) + self.voice["alarme.wav"], rate)
+                logger.info(f"Message : {state}")
+                if state == "fin":
+                    state = self._stream(audio, bytes(int(rate * DTMF_WAIT_S) * 2), rate)
+                    logger.info(f"Attente touche : {state}")
+                key = dtmf_key(self._urc)
+                conf = confirmation_file(key)
+                if conf and state != "raccroche":
+                    logger.info(f"Confirmation : {self._stream(audio, self.voice[conf], rate, stop_on_key=False)}")
+                return key
+            finally:
+                logger.info(f"Fermeture port audio : {self._at('AT+CPCMREG=0').split()}")
+
+    def _stream(self, audio: serial.Serial, pcm: bytes, rate: int, stop_on_key: bool = True) -> str:
+        """Injecte le PCM au rythme reel (20 ms). Retourne fin | touche | raccroche."""
+        t0 = time.time()
+        for n, frame in enumerate(pcm_frames(pcm, rate), 1):
+            try:
+                audio.write(frame)
+            except serial.SerialTimeoutException:
+                # Le modem cesse de lire le son des que l'appele raccroche, avant NO CARRIER.
+                deadline = time.time() + 3
+                while time.time() < deadline and not call_ended(self._urc):
+                    self._poll()
+                    time.sleep(0.05)
+                if call_ended(self._urc):
+                    return "raccroche"
+                raise
+            audio.read(8192)  # flux descendant non utilise : on le vide
+            self._poll()
+            if call_ended(self._urc):
+                return "raccroche"
+            if stop_on_key and dtmf_key(self._urc):
+                return "touche"
+            delay = t0 + n * FRAME_S - time.time()
+            if delay > 0:
+                time.sleep(delay)
+        return "fin"
+
+    def _play_tts(self, tts_message: str) -> str | None:
+        """Repli INV-131 : synthese du module, envoyee a l'appele (AT+CDTAM=1)."""
+        time.sleep(LEAD_SILENCE_S)
+        self._at("AT+CDTAM=1")
+        self._at(f'AT+CTTS=2,"{tts_message}"', timeout=10)
+        # Fin de lecture signalee par +CTTS: 0, puis DTMF_WAIT_S pour la touche.
+        deadline, spoken = time.time() + 20 + DTMF_WAIT_S, False
+        while time.time() < deadline:
+            self._poll()
+            if dtmf_key(self._urc) or call_ended(self._urc):
+                break
+            if not spoken and "+CTTS: 0" in self._urc.replace("+CTTS:0", "+CTTS: 0"):
+                spoken, deadline = True, time.time() + DTMF_WAIT_S
+            time.sleep(0.05)
+        return dtmf_key(self._urc)
 
 
 # ── SMS Receiver Thread ──────────────────────────────────────────────────────
@@ -728,17 +828,13 @@ def main():
         send_at_command(ser, "AT+CMGF=1", timeout=3)      # Mode texte SMS
         send_at_command(ser, "AT+CNMI=2,1,0,0,0", timeout=3)  # Notifications SMS
 
-    # Detecter le port audio (pour DTMF Goertzel)
-    audio_port = None
+    # INV-131 : port audio USB (interface 4) pour injecter la voix dans l'appel
     from serial.tools import list_ports as lp
-    for p in lp.comports():
-        if p.vid and p.vid in (0x1E0E, 0x2C7C) and "audio" in (p.description or "").lower():
-            audio_port = p.device
-            break
+    audio_port = next((p.device for p in lp.comports() if is_audio_port(p.vid, p.location)), None)
     if audio_port:
-        logger.info(f"Port audio detecte : {audio_port} (DTMF Goertzel)")
+        logger.info(f"Port audio detecte : {audio_port} (voix injectee dans l'appel)")
     else:
-        logger.warning("Port audio non detecte — DTMF via URC fallback uniquement")
+        logger.warning("Port audio non detecte — message par synthese du module (AT+CDTAM=1)")
 
     # Verifier la connectivite backend
     primary = _find_primary_url()
