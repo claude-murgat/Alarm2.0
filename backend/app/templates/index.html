@@ -467,6 +467,7 @@
             document.getElementById('loginPassword').value = '';
             document.getElementById('loginError').textContent = '';
             document.getElementById('currentUserName').textContent = '';
+            if (liveWs) liveWs.close();
         }
 
         // Soumettre le login avec Entree
@@ -626,7 +627,7 @@
             }
         }
 
-        // L'autorefresh 5s ne doit pas ecraser une saisie en cours : champ actif,
+        // Le rafraichissement live ne doit pas ecraser une saisie en cours : champ actif,
         // ou valeur modifiee mais pas encore enregistree (value != defaultValue).
         function isEditing(el) {
             return el === document.activeElement || el.value !== el.defaultValue;
@@ -1224,6 +1225,7 @@
 
         function loadAll() {
             if (!authToken) return;  // Pas connecte
+            connectLive();
             loadStatus();
             loadUsers();
             loadAlarms();
@@ -1251,8 +1253,57 @@
             } catch (e) {}
         }
 
-        // Auto-refresh toutes les 5s (seulement si connecte)
-        setInterval(() => { if (authToken) loadAll(); }, 5000);
+        // ── Live : WebSocket /api/ws remplace l'autorefresh 5s ───────────
+        // Le serveur surveille ces GET et ne notifie que ceux dont la reponse
+        // a change -> seuls les panneaux concernes se rechargent.
+        const LIVE_WATCH = {
+            '/api/alarms/?days=90': [loadStatus, loadAlarms, loadStats],
+            '/api/users/': [loadUsers, loadDevices, loadStatus],
+            '/api/config/escalation': [loadEscalation, loadStatus],
+            '/api/config/escalation-delay': [loadEscalation],
+            '/api/config/system': [loadAlertEmail],
+            '/api/cluster': [loadCluster],
+            '/api/system/modem-status': [loadModemSignal],
+        };
+        let liveWs = null, liveRetry = 0, livePending = new Set(), liveFlush = null;
+
+        function connectLive() {
+            if (!authToken || liveWs) return;
+            const ws = liveWs = new WebSocket((API || location.origin).replace(/^http/, 'ws') + '/api/ws');
+            ws.onopen = () => {
+                liveRetry = 0;
+                ws.send(JSON.stringify({ token: authToken, paths: Object.keys(LIVE_WATCH) }));
+            };
+            ws.onmessage = (ev) => {
+                (LIVE_WATCH[JSON.parse(ev.data).changed] || []).forEach(fn => livePending.add(fn));
+                // Regroupe les notifs proches : un loader n'est appele qu'une fois.
+                clearTimeout(liveFlush);
+                liveFlush = setTimeout(() => {
+                    const fns = [...livePending]; livePending.clear();
+                    fns.forEach(fn => Promise.resolve().then(fn).catch(e => console.warn(fn.name, e.message)));
+                }, 200);
+            };
+            ws.onclose = (ev) => {
+                liveWs = null;
+                if (ev.code === 4401) { doLogout(); return; }
+                if (!authToken) return;
+                // Un seul message par coupure, puis reconnexion espacee (3s -> 30s max)
+                if (liveRetry++ === 0) console.warn('Live deconnecte, reconnexion...');
+                setTimeout(connectLive, Math.min(30000, 3000 * liveRetry));
+            };
+        }
+
+        // Filet de securite (proxy sans WebSocket, saisie abandonnee, "il y a Xmin") :
+        // resync complete lente. Les stats ne bougent qu'avec les alarmes : seulement si le live est coupe.
+        setInterval(() => {
+            if (!authToken) return;
+            if (liveWs && liveWs.readyState === WebSocket.OPEN) {
+                new Set(Object.values(LIVE_WATCH).flat()).forEach(fn =>
+                    fn !== loadStats && Promise.resolve().then(fn).catch(() => {}));
+            } else {
+                loadAll();
+            }
+        }, 60000);
 
         // ── INV-056 : Disponibilité opérateurs ──────────────────────────
         let connectivityChartInstance = null;
