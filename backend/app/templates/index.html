@@ -551,9 +551,15 @@
             return res.json();
         }
 
+        // Le backend envoie de l'UTC sans suffixe (isoformat d'une date naive) :
+        // sans 'Z', le navigateur le lirait comme de l'heure locale (-2 h a Paris l'ete).
+        function parseUtc(s) {
+            return new Date(/[zZ]$|[+-]\d\d:?\d\d$/.test(s) ? s : s + 'Z');
+        }
+
         function timeAgo(dateStr) {
             if (!dateStr) return 'Jamais';
-            const d = new Date(dateStr.endsWith('Z') ? dateStr : dateStr + 'Z');
+            const d = parseUtc(dateStr);
             const now = new Date();
             const diff = (now - d) / 1000;
             if (diff < 60) return 'il y a ' + Math.floor(diff) + 's';
@@ -1122,7 +1128,7 @@
                 const tbody = document.getElementById('auditTableBody');
                 tbody.innerHTML = events.map(ev => {
                     const color = auditTypeColors[ev.event_type] || '#94a3b8';
-                    const ts = ev.timestamp ? new Date(ev.timestamp).toLocaleString() : '-';
+                    const ts = ev.timestamp ? parseUtc(ev.timestamp).toLocaleString() : '-';
                     const det = ev.details ? JSON.stringify(ev.details) : '';
                     const corrShort = ev.correlation_id ? ev.correlation_id.substring(0, 8) + '...' : '-';
                     return `<tr>
@@ -1303,7 +1309,7 @@
                 const tbody = document.getElementById('connectivityHistoryTable');
                 tbody.innerHTML = data.events.map(e => {
                     const label = e.event === 'went_offline' ? '🔴 Hors ligne' : '🟢 En ligne';
-                    return `<tr><td>${new Date(e.ts).toLocaleString('fr-FR')}</td><td>${label}</td></tr>`;
+                    return `<tr><td>${parseUtc(e.ts).toLocaleString('fr-FR')}</td><td>${label}</td></tr>`;
                 }).join('');
 
                 // Chart : un point par event, avec valeur 0 (offline) / 1 (online)
@@ -1314,10 +1320,10 @@
                 // sinon à 0
                 let state = sorted.length && sorted[0].event === 'went_offline' ? 1 : 0;
                 if (sorted.length) {
-                    points.push({ x: new Date(sorted[0].ts).getTime() - 1000, y: state });
+                    points.push({ x: parseUtc(sorted[0].ts).getTime() - 1000, y: state });
                 }
                 for (const e of sorted) {
-                    const t = new Date(e.ts).getTime();
+                    const t = parseUtc(e.ts).getTime();
                     points.push({ x: t, y: state });
                     state = e.event === 'went_offline' ? 0 : 1;
                     points.push({ x: t, y: state });

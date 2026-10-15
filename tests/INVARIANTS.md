@@ -378,6 +378,11 @@ Le web affiche `#modemSignal` (4 barres animées, `data-state` et `data-bars`, a
 - **Pourquoi** : la perte de réseau du modem (INV-128) est restée invisible pendant un mois. Le propriétaire a demandé le 2026-10-13 une icône de signal en temps réel dans l'app et le web plutôt qu'un email. Mesure de référence onsite-2 : RSRP −116 dBm (1 barre, bordure de cellule).
 - **Couverture** : Unit `test_modem_signal.py` (mutation 100 %) ; Integration `test_modem_status_inv129.py` ; E2E Playwright `test_frontend.py::TestModemSignalIndicator`. App Android : PR séparée.
 
+### INV-130 [H] ✅ Web : toute date affichée est convertie depuis l'UTC vers l'heure locale du navigateur
+Les dates de l'API sont de l'UTC naïf (`isoformat()` sans `Z`). Le web les lit avec `parseUtc()`, qui ajoute le `Z` si aucun fuseau n'est présent. C'est le cas du Journal (onglet Log), de l'onglet Disponibilité (tableau et graphe) et de `timeAgo`.
+- **Pourquoi** : sans `Z`, `new Date()` lit la chaîne comme de l'heure locale. Le Journal et la Disponibilité affichaient alors l'heure UTC (2 h d'écart l'été à Paris). Constaté le 2026-10-15 en analysant le contact sec du 14/10.
+- **Couverture** : Playwright `test_frontend.py::TestTimesShownInLocalTime` (navigateur réglé sur Europe/Paris). RED sur le code d'origine : 06:58 affiché au lieu de 08:58.
+
 ### INV-124 [H] ✅ Corps du SMS d'alarme : instruction d'acquittement + lien supervision
 Le corps du SMS d'alarme métier (escalade, `_enqueue_sms_for_user`) doit (a) instruire
 l'opérateur d'acquitter en **répondant `1`** au SMS, et (b) contenir le **lien de supervision

@@ -831,6 +831,9 @@ class DashboardActivity : AppCompatActivity() {
         if (dateStr == null) return "?"
         return try {
             val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault())
+            // INV-ANDROID-112 : le backend envoie de l'UTC sans suffixe ; l'affichage
+            // reste dans le fuseau du telephone (sinon 13:32 au lieu de 15:32 a Paris).
+            sdf.timeZone = TimeZone.getTimeZone("UTC")
             val display = SimpleDateFormat("dd/MM HH:mm", Locale.getDefault())
             val date = sdf.parse(dateStr)
             display.format(date!!)

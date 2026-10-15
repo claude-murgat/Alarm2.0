@@ -53,8 +53,11 @@ jobs:
       - name: Run tier 1 (unit tests)
         run: |
           mkdir -p reports
+          # Graine commune a tous les workers xdist : avec `last`, un runner sans
+          # cache pytest donne une graine differente par worker -> ordres de
+          # collecte differents -> xdist refuse ("Different tests were collected").
           pytest tests/unit -m unit -n auto \
-            --randomly-seed=last \
+            --randomly-seed=${{ github.run_id }} \
             --junitxml=reports/tier1.xml \
             --cov --cov-report=xml:reports/coverage-tier1.xml \
             --cov-report=term-missing

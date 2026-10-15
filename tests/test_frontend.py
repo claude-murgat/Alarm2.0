@@ -157,6 +157,34 @@ class TestTestsTabInProd:
             expect(page.locator(f"button:has-text('{label}')")).to_be_hidden()
 
 
+class TestTimesShownInLocalTime:
+    """Le backend envoie de l'UTC sans suffixe. Un navigateur a Paris doit voir
+    l'heure de Paris (incident 2026-10-14 : contact sec 15:32 affiche 13:32)."""
+
+    def test_log_tab_shows_local_time(self, browser, primary_url):
+        ctx = browser.new_context(timezone_id="Europe/Paris", locale="fr-FR")
+        page = ctx.new_page()
+        try:
+            token = requests.post(f"{primary_url}/api/auth/login",
+                                  json={"name": "admin", "password": "admin123"}, timeout=5).json()["access_token"]
+            hdr = {"Authorization": f"Bearer {token}"}
+
+            page.goto(primary_url, wait_until="domcontentloaded", timeout=15000)
+            page.locator("#loginName").fill("admin")
+            page.locator("#loginPassword").fill("admin123")
+            page.locator("button:has-text('Se connecter')").click()
+            expect(page.locator("#dashboard")).to_be_visible(timeout=10000)
+            page.locator(".tab:text('Log')").click()
+            expect(page.locator("#auditTableBody tr").first).to_be_visible(timeout=8000)
+            # Reference lue APRES la connexion du navigateur (qui cree elle-meme un evenement).
+            ts = requests.get(f"{primary_url}/api/audit/?page=1&page_size=1", headers=hdr, timeout=5).json()[0]["timestamp"]
+
+            expected = page.evaluate("ts => new Date(ts + 'Z').toLocaleString()", ts)
+            expect(page.locator("#auditTableBody tr").first.locator("td").first).to_have_text(expected, timeout=8000)
+        finally:
+            ctx.close()
+
+
 class TestNavigation:
 
     def test_page_loads_with_dashboard(self, dashboard: Page):

@@ -185,6 +185,11 @@ Toutes les notifications construites par l'app utilisent `R.drawable.ic_stat_ala
 - **Pourquoi** : demande du propriétaire le 2026-10-14. Avant, l'icône était `android.R.drawable.ic_dialog_alert`.
 - **Couverture** : Espresso `AlarmResilienceTest::notification_du_service_utilise_l_icone_de_l_app`.
 
+### INV-ANDROID-112 [H] ✅ Les heures de l'historique sont affichées dans le fuseau du téléphone — 2026-10-15
+Le backend envoie des dates UTC sans suffixe (`2026-10-14T13:32:38`). `formatDate()` les lit en UTC, puis les affiche dans le fuseau du téléphone (`dd/MM HH:mm`), comme le fait déjà `computeDuration()`.
+- **Pourquoi** : le contact sec du 2026-10-14 à 15:32:38 (Paris) était affiché « 13:32 » dans l'historique. Le collègue sur place pensait donc que l'alarme ne correspondait pas à l'incident. Écart de 2 h l'été, 1 h l'hiver.
+- **Couverture** : Espresso `AlarmE2ETest::test33_historyShowsLocalTimeNotUtc` (fuseau Europe/Paris forcé dans le processus de test). RED sur le code d'origine.
+
 ### INV-ANDROID-110 [H] ✅ Icône de signal 4G du modem gateway dans la barre du dashboard — 2026-10-14
 `DashboardActivity` affiche `R.id.modemSignal` (`SignalBarsView`, 4 barres) à droite du nom. L'icône est alimentée par `GET /api/system/modem-status` (INV-129 backend), lu à chaque cycle de polling (3 s) dans `AlarmPollingService.modemStatus`.
 - `state = ok` : barres vertes (orange à 1 barre), pulsation lente.
