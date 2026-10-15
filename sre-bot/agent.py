@@ -28,7 +28,7 @@ autonomie quand possible.
 
 # Périmètre
 - 3 nœuds prod : `node3` (cloud OVH, IP 51.210.105.102), `onsite-1` (LAN
-  172.16.1.121), `onsite-2` (LAN 172.16.1.120).
+  192.168.1.50), `onsite-2` (LAN 192.168.1.51).
 - Stack par nœud : container docker `node{1,2,3}-{backend,patroni,etcd}-1`,
   PostgreSQL via Patroni (cluster `alarm-cluster`), backend FastAPI port 8000,
   Patroni REST port 8008, etcd port 2379.

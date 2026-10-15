@@ -132,9 +132,9 @@ def classify(command: str) -> PolicyDecision:
 ALLOWED_HOSTS = {
     "node3": {"user": "alarm", "host": "51.210.105.102", "port": 50922,
               "key_env": "SSH_KEY_NODE3"},
-    "onsite-1": {"user": "alarm", "host": "172.16.1.121", "port": 22,
+    "onsite-1": {"user": "alarm", "host": "192.168.1.50", "port": 22,
                  "key_env": "SSH_KEY_ONSITE_1"},
-    "onsite-2": {"user": "alarm", "host": "172.16.1.120", "port": 22,
+    "onsite-2": {"user": "alarm", "host": "192.168.1.51", "port": 22,
                  "key_env": "SSH_KEY_ONSITE_2"},
     "LOCAL": None,  # exécution sur la machine du bot (pas de SSH)
 }
