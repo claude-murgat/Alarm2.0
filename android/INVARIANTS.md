@@ -548,6 +548,7 @@ MainActivity : `savedToken != null → goToDashboard(savedToken)` + `return` (sk
 ### INV-ANDROID-600 [C] ⚠️ Push FCM avec alarm_id → démarre le foreground service en mode veille
 `AlarmFirebaseService.onMessageReceived` → si `data["alarm_id"] != null`, delegue à `AlarmWakeUpHandler.onAlarmPushReceived(context, alarmId, title, severity)` → `startForegroundService(AlarmPollingService, started_by_fcm=true)` si pas déjà running.
 - **Pourquoi** : les users NON-astreinte ne maintiennent pas le foreground service actif (économie batterie). FCM haute priorité les réveille quand une alarme tombe sur leur position dans la chaîne.
+- **Push data-only obligatoire** (2026-10-15) : le backend n'envoie **aucun** bloc `notification` FCM, seulement `data` (`title`/`body` inclus) + `android.priority=high`. Avec un bloc `notification`, app en arrière-plan, Android affiche lui-même la notif (2 vibrations) et `onMessageReceived` n'est **jamais** appelé → pas de service, sonnerie seulement à l'ouverture de l'app (bug terrain constaté).
 - **Manque** : aucun test n'injecte un push FCM et vérifie le démarrage du service. Testable via `AlarmWakeUpHandler` en isolation (pas Firebase).
 
 ### INV-ANDROID-601 [H] ⚠️ FCM type=escalation_update met à jour les prefs **et** réconcilie le heartbeat
@@ -568,6 +569,7 @@ MainActivity : `savedToken != null → goToDashboard(savedToken)` + `return` (sk
   en position 1 restait donc **sans heartbeat jusqu'à une relance de l'app**, et le
   serveur le croyait hors ligne. C'est le point 2 qui rend vraie la promesse « sans
   relancer l'app » pour la partie fonctionnelle, pas seulement pour l'affichage.
+- **Notif visible** (2026-10-15) : le push étant data-only (cf INV-ANDROID-600), `AlarmFirebaseService` affiche lui-même une notif (canal `escalation_channel`) avec `title`/`body`. Obligatoire aussi côté FCM : un push haute priorité sans notif visible fait dégrader les suivants en priorité normale (retardés par Doze).
 - **Affichage** : `updateGuardBadge()` **et** `updateDrawerGuardStatus()` sont appelés
   dans le tick 1 Hz d'`updateStatus()`. Le second y a été ajouté le 2026-10-12 : il
   n'était appelé que dans `onCreate`, donc le texte du tiroir restait faux après un

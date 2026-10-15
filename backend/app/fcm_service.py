@@ -112,18 +112,15 @@ def _send_fcm_http(token: str, title: str, body: str, data: dict):
 
     try:
         url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
+        # Data-only : avec un bloc "notification", app en arriere-plan, Android
+        # affiche lui-meme la notif et n'appelle jamais onMessageReceived
+        # -> pas de sonnerie (alarme) ni de heartbeat (escalade). L'app affiche
+        # elle-meme une notif visible, sinon FCM degrade la priorite haute.
         message = {
             "message": {
                 "token": token,
-                "data": {k: str(v) for k, v in data.items()},
-                "android": {
-                    "priority": "high",
-                    "notification": {
-                        "title": title,
-                        "body": body,
-                        "channel_id": "alarm_channel",
-                    },
-                },
+                "data": {"title": title, "body": body, **{k: str(v) for k, v in data.items()}},
+                "android": {"priority": "high"},
             }
         }
 
