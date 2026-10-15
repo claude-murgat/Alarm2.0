@@ -106,6 +106,21 @@ class TestFrontendLogin:
 # Navigation
 # ---------------------------------------------------------------------------
 
+class TestSessionRestoreAfterReload:
+    """INV-135 : apres F5 (session restauree depuis sessionStorage), la page
+    charge ses donnees sans erreur JS et ouvre le WebSocket live. Bug du
+    2026-10-15 : loadAll() appele avant la declaration de liveWs ->
+    ReferenceError, aucun panneau charge."""
+
+    def test_reload_with_session_loads_without_js_error(self, dashboard: Page):
+        errors = []
+        dashboard.on("pageerror", lambda e: errors.append(str(e)))
+        dashboard.reload(wait_until="domcontentloaded")
+        expect(dashboard.locator("#loginOverlay")).to_be_hidden(timeout=10000)
+        dashboard.wait_for_function("liveWs && liveWs.readyState === WebSocket.OPEN", timeout=10000)
+        assert errors == []
+
+
 class TestHeaderWithoutTestEndpoints:
     """En prod, /api/test/* repond 404 (INV-076). L'en-tete et les cartes du
     tableau de bord ne doivent pas en dependre (bug prod 2026-10-14 : en-tete

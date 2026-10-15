@@ -500,13 +500,6 @@
         }
         detectPrimary();
 
-        // Restaurer la session apres un refresh
-        if (authToken && currentUserInfo) {
-            document.getElementById('loginOverlay').classList.add('hidden');
-            document.getElementById('currentUserName').textContent = currentUserInfo.name;
-            loadAll();
-        }
-
         document.querySelectorAll('.tab').forEach(tab => {
             tab.addEventListener('click', () => {
                 document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -1415,6 +1408,14 @@
             } catch (err) {
                 console.error('showConnectivityHistory error', err);
             }
+        }
+
+        // Restaurer la session apres un refresh. En fin de script : loadAll() touche
+        // des let declares plus haut (liveWs, editingEscalation...) -> sinon ReferenceError.
+        if (authToken && currentUserInfo) {
+            document.getElementById('loginOverlay').classList.add('hidden');
+            document.getElementById('currentUserName').textContent = currentUserInfo.name;
+            loadAll();
         }
     </script>
 </body>
