@@ -1385,4 +1385,30 @@ class AlarmE2ETest {
 
         scenario.close()
     }
+
+    // ── 33. INV-ANDROID-112 : heures de l'historique en heure locale ──────
+
+    @Test
+    fun test33_historyShowsLocalTimeNotUtc() {
+        // Incident 2026-10-14 : contact sec a 13:32:38 UTC, affiche "13:32" au lieu
+        // de 15:32 (Paris). Fuseau force dans le processus : test deterministe.
+        val previous = java.util.TimeZone.getDefault()
+        java.util.TimeZone.setDefault(java.util.TimeZone.getTimeZone("Europe/Paris"))
+        try {
+            fakeApi.myAlarmsResponses = mutableListOf(Response.success(emptyList()))
+            fakeApi.alarmHistoryResponse = Response.success(listOf(
+                fakeResolvedAlarm.copy(title = "Contact sec", created_at = "2026-10-14T13:32:38",
+                    acknowledged_at = null)
+            ))
+            waitForPolls(2)
+
+            val scenario = launchDashboard()
+
+            onView(withId(R.id.alarmHistoryList))
+                .check(matches(hasDescendant(withSubstring("14/10 15:32"))))
+            scenario.close()
+        } finally {
+            java.util.TimeZone.setDefault(previous)
+        }
+    }
 }
