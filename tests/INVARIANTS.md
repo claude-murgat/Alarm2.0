@@ -383,6 +383,26 @@ Les dates de l'API sont de l'UTC naïf (`isoformat()` sans `Z`). Le web les lit 
 - **Pourquoi** : sans `Z`, `new Date()` lit la chaîne comme de l'heure locale. Le Journal et la Disponibilité affichaient alors l'heure UTC (2 h d'écart l'été à Paris). Constaté le 2026-10-15 en analysant le contact sec du 14/10.
 - **Couverture** : Playwright `test_frontend.py::TestTimesShownInLocalTime` (navigateur réglé sur Europe/Paris). RED sur le code d'origine : 06:58 affiché au lieu de 08:58.
 
+### INV-131 [H] ✅ Gateway : appel « décroché » seulement quand le modem le dit actif
+L'appel n'est compté décroché que sur l'URC `VOICE CALL: BEGIN` **ou** une ligne `+CLCC` dont le **3ᵉ champ** (`stat`) vaut `0`. Les états numérotation (`2`) et sonnerie (`3`) ne comptent pas. `NO CARRIER`, `BUSY` ou `VOICE CALL: END` avant le décroché → `no_answer`.
+- **Pourquoi** : test réel du 2026-10-14 sur alarm-1 (SIM7600, Orange). La gateway cherchait `",0,0,"` n'importe où dans la réponse : `+CLCC: 3,0,2,0,0,"+33…",145` (numérotation) contient `,0,0,`. Elle croyait l'appel décroché avant même la sonnerie, jouait le message dans le vide, puis raccrochait en `no_answer` alors que le propriétaire avait bien décroché.
+- **Couverture** : Unit `test_gateway_voice_call.py::TestCallAnswered`, `::TestCallEnded`.
+
+### INV-132 [H] ✅ Gateway : message d'alarme en voix française, audible, juste après le décroché
+Une fois l'appel décroché, la gateway joue le message `voice/alarme.wav` (PCM 16 bits mono, 8 ou 16 kHz) en l'injectant dans l'appel par le port audio USB du SIM7600 (interface USB `:1.4`, **ouvert avant** `AT+CPCMFRM`/`AT+CPCMREG=1` et **fermé après** `AT+CPCMREG=0`), au rythme réel (trames de 20 ms), précédé de **0,8 s** de silence. Si le fichier ou le port audio manque, elle se rabat sur la synthèse du module **avec `AT+CDTAM=1`** (sinon le son reste local au module et l'appelé n'entend rien).
+- **Pourquoi** : tests réels du 2026-10-14. (1) `AT+CDTAM` vaut `0` par défaut : le message `AT+CTTS` n'a jamais été entendu au bout du fil. (2) La synthèse du module ne parle qu'anglais. (3) `AT+CCMXPLAYWAV` répond `ERROR` sur ce firmware (LE20B04SIM7600M22), l'injection PCM USB fonctionne. Voix retenue par le propriétaire : Piper `fr_FR-upmc-medium`, locutrice `jessica`, débit 1,0, traitement téléphonique, 16 kHz (appel en VoLTE). Sans silence, le message commençait trop tôt ; avec ~3-5 s d'attente, trop tard. (4) Le 2026-10-15, avec le port audio ouvert **après** `AT+CPCMREG=1` et fermé **avant** `AT+CPCMREG=0`, l'appel suivant un appel réussi restait muet (envoi bloqué au bout de ~14 s) jusqu'au redémarrage du modem ; dans l'ordre de l'exemple SIMCom, 3 appels d'affilée (dont un raccroché pendant le message) ont tous été entendus.
+- **Couverture** : Unit `test_gateway_voice_call.py::TestAudioPort`, `::TestPcmFrames`, `::TestLeadSilence`. Validation matérielle : appel réel sur alarm-1.
+
+### INV-133 [M] ✅ Gateway : touche 1/2 reconnue même pendant le message, et confirmée à voix haute
+La touche est lue sur les URC `+RXDTMF: <k>` (ou `+DTMF: <k>`), y compris pendant la lecture du message, qui s'interrompt alors. Sans touche, la gateway attend **30 s** après la fin du message. Touche `1` → confirmation `voice/acquittee.wav` puis résultat `ack_dtmf` ; touche `2` → `voice/escaladee.wav` puis `escalate` ; aucune touche → `no_answer`. La gateway **raccroche aussitôt la confirmation jouée** (`AT+CHUP`, commande de raccrochage des appels vocaux SIMCom, `ATH` en secours) : l'appelé n'a pas à raccrocher lui-même.
+- **Pourquoi** : test réel du 2026-10-14 : `+RXDTMF: 1` est bien émis par ce SIM7600 (contrairement à `ARCHITECTURE_SMS_VOIX.md`, qui le dit non supporté). Le propriétaire veut entendre que sa touche a été prise en compte.
+- **Couverture** : Unit `test_gateway_voice_call.py::TestDtmfKey`, `::TestCallResult`, `::TestConfirmation`, `::TestHangUp`.
+
+### INV-134 [H] ✅ Gateway : le SMS de détail part avant l'appel
+Avant d'appeler un numéro, la gateway vérifie `/internal/sms/pending` : tant qu'un SMS en attente vise **ce numéro**, l'appel est différé au cycle suivant (30 s), le temps que `SmsSenderThread` l'envoie. Les appels vers d'autres numéros ne sont pas retardés. Si `/internal/sms/pending` ne répond pas, l'appel part quand même (ne jamais bloquer un appel d'alarme sur une panne de lecture). Le report est borné par INV-064 (un SMS sort de la file après 3 échecs).
+- **Pourquoi** : le backend crée le SMS et l'appel au même instant (INV-060), puis deux threads gateway indépendants les traitent. Un appel garde le modem jusqu'à ~45 s : si le thread des appels passait le premier, le message vocal « Consultez votre SMS » arrivait avant le SMS. Demande du propriétaire du 2026-10-14.
+- **Couverture** : Unit `test_gateway_voice_call.py::TestCallDeferredForSms`.
+
 ### INV-124 [H] ✅ Corps du SMS d'alarme : instruction d'acquittement + lien supervision
 Le corps du SMS d'alarme métier (escalade, `_enqueue_sms_for_user`) doit (a) instruire
 l'opérateur d'acquitter en **répondant `1`** au SMS, et (b) contenir le **lien de supervision

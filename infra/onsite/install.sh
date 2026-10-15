@@ -32,6 +32,9 @@ if id alarm-gateway >/dev/null 2>&1; then
   for f in "$REPO"/gateway/*.py; do
     install -o alarm-gateway -g alarm-gateway -m644 "$f" "/opt/alarm-gateway/$(basename "$f")"
   done
+  # Messages vocaux des appels d'alarme (INV-132/133)
+  install -d -o alarm-gateway -g alarm-gateway -m755 /opt/alarm-gateway/voice
+  install -o alarm-gateway -g alarm-gateway -m644 "$REPO"/gateway/voice/*.wav /opt/alarm-gateway/voice/
   say "code gateway -> /opt/alarm-gateway/"
   if id -nG alarm-gateway | grep -qw dialout; then
     say "alarm-gateway déjà dans dialout"

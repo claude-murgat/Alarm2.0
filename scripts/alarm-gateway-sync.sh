@@ -6,7 +6,7 @@
 # L'image est tiree par alarm-cd-pull ; ce script ne touche pas au registry.
 #
 # Quand le digest local de alarm-gateway:stable change :
-#   1. extrait /gateway/*.py de l'image
+#   1. extrait /gateway/*.py et /gateway/voice/*.wav de l'image
 #   2. si requirements.txt a change : pip install (sinon le nouveau code
 #      demarrerait sans ses dependances)
 #   3. sauvegarde l'ancien code, installe le nouveau, redemarre la gateway
@@ -48,8 +48,11 @@ docker cp "$CID:/gateway/." "$NEW/"
 docker rm "$CID" >/dev/null
 
 CHANGED=""
-for f in "$NEW"/*.py; do
-  cmp -s "$f" "$GW_DIR/$(basename "$f")" || CHANGED="$CHANGED $(basename "$f")"
+# voice/*.wav : messages vocaux des appels (INV-132/133)
+for f in "$NEW"/*.py "$NEW"/voice/*.wav; do
+  [[ -e "$f" ]] || continue
+  rel="${f#"$NEW"/}"
+  cmp -s "$f" "$GW_DIR/$rel" || CHANGED="$CHANGED $rel"
 done
 if [[ -z "$CHANGED" ]]; then
   echo "$ID" > "$STATE_DIR/gateway-image-id"
@@ -71,10 +74,17 @@ OWNER=$(stat -c '%U:%G' "$GW_DIR")
 PREV="$STATE_DIR/gateway-prev"
 rm -rf "$PREV" && mkdir -p "$PREV"
 cp -p "$GW_DIR"/*.py "$PREV/"
+if compgen -G "$GW_DIR/voice/*.wav" >/dev/null; then
+  mkdir -p "$PREV/voice" && cp -p "$GW_DIR"/voice/*.wav "$PREV/voice/"
+fi
 
 install_and_check() {
   local src="$1" since
   install -o "${OWNER%:*}" -g "${OWNER#*:}" -m 644 "$src"/*.py "$GW_DIR/"
+  if compgen -G "$src/voice/*.wav" >/dev/null; then
+    install -d -o "${OWNER%:*}" -g "${OWNER#*:}" -m 755 "$GW_DIR/voice"
+    install -o "${OWNER%:*}" -g "${OWNER#*:}" -m 644 "$src"/voice/*.wav "$GW_DIR/voice/"
+  fi
   since=$(date '+%Y-%m-%d %H:%M:%S')
   systemctl restart "$GW_UNIT"
   for _ in $(seq 1 $((HEALTH_TIMEOUT / 5))); do

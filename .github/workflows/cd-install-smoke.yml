@@ -366,7 +366,9 @@ jobs:
         run: |
           sudo systemctl start alarm-gateway-sync.service
           for f in gateway/*.py; do sudo cmp "$f" "/opt/alarm-gateway/$(basename "$f")"; done
+          for f in gateway/voice/*.wav; do sudo cmp "$f" "/opt/alarm-gateway/voice/$(basename "$f")"; done
           test "$(sudo stat -c %U /opt/alarm-gateway/modem_gateway.py)" = alarm-gateway
+          test "$(sudo stat -c %U /opt/alarm-gateway/voice/alarme.wav)" = alarm-gateway
           test "$(sudo cat /var/lib/alarm/cd/gateway-image-id)" = "$(docker image inspect "$IMG" -f '{{.Id}}')"
           sudo grep -q "ancien code" /var/lib/alarm/cd/gateway-prev/modem_gateway.py
           systemctl is-active alarm-sms-gateway.service
@@ -379,7 +381,7 @@ jobs:
 
       - name: Code casse -> rollback vers l'ancien code, pas de boucle
         run: |
-          BAD=$(mktemp -d); cp gateway/* "$BAD/" 2>/dev/null || true
+          BAD=$(mktemp -d); cp -r gateway/. "$BAD/"
           echo "# BROKEN" >> "$BAD/modem_gateway.py"
           docker build -t "$IMG" -f gateway/Dockerfile "$BAD"
           sudo env HEALTH_TIMEOUT=15 /usr/local/bin/alarm-gateway-sync
