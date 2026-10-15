@@ -8,6 +8,8 @@ pytest-randomly==3.16.0
 pytest-cov==6.0.0
 hypothesis==6.122.3
 pytest-split==0.9.0
+# Client WebSocket de tests/test_live_ws.py (tier 3 n'installe pas backend/requirements.txt)
+websockets==15.0.1
 
 # Mutation testing (G1 du doc AI_STRATEGY.md). Utilise par le workflow
 # nightly `.github/workflows/mutation-testing.yml` ET utilisable localement
