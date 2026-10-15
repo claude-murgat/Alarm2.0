@@ -662,9 +662,9 @@ Un job nightly `.github/workflows/ai-streak-evaluator.yml` :
 ```bash
 # === Etape A — Prereqs SSH (depuis ~/poste admin~ et NODE3) ===
 # A.1. UFW sur onsite-1 ET onsite-2 (le LAN UFW bloque par defaut le SSH depuis WG)
-ssh -i ~/.ssh/alarm_onsite_1 alarm@172.16.1.121 \
+ssh -i ~/.ssh/alarm_onsite_1 alarm@192.168.1.50 \
   "sudo ufw allow from 10.99.0.0/24 to any port 22 proto tcp comment 'SSH mesh WG (CD orchestrator)'"
-ssh -i ~/.ssh/alarm_onsite_2 alarm@172.16.1.120 \
+ssh -i ~/.ssh/alarm_onsite_2 alarm@192.168.1.51 \
   "sudo ufw allow from 10.99.0.0/24 to any port 22 proto tcp comment 'SSH mesh WG (CD orchestrator)'"
 
 # A.2. Keypair outbound sur NODE3 (alarm) + ssh_config pour le self-loop sur 50922
@@ -679,8 +679,8 @@ EOF
 # Recuperer la pubkey :
 ALARM_CD_PUB=$(ssh -p 50922 -i ~/.ssh/alarm_node3 alarm@51.210.105.102 'cat ~/.ssh/id_ed25519.pub')
 # Distribuer aux 3 noeuds (incl. NODE3 lui-meme) :
-ssh -i ~/.ssh/alarm_onsite_1 alarm@172.16.1.121 "echo '$ALARM_CD_PUB' >> ~/.ssh/authorized_keys && sort -u ~/.ssh/authorized_keys -o ~/.ssh/authorized_keys"
-ssh -i ~/.ssh/alarm_onsite_2 alarm@172.16.1.120 "echo '$ALARM_CD_PUB' >> ~/.ssh/authorized_keys && sort -u ~/.ssh/authorized_keys -o ~/.ssh/authorized_keys"
+ssh -i ~/.ssh/alarm_onsite_1 alarm@192.168.1.50 "echo '$ALARM_CD_PUB' >> ~/.ssh/authorized_keys && sort -u ~/.ssh/authorized_keys -o ~/.ssh/authorized_keys"
+ssh -i ~/.ssh/alarm_onsite_2 alarm@192.168.1.51 "echo '$ALARM_CD_PUB' >> ~/.ssh/authorized_keys && sort -u ~/.ssh/authorized_keys -o ~/.ssh/authorized_keys"
 ssh -p 50922 -i ~/.ssh/alarm_node3 alarm@51.210.105.102 "echo '$ALARM_CD_PUB' >> ~/.ssh/authorized_keys && sort -u ~/.ssh/authorized_keys -o ~/.ssh/authorized_keys"
 # Verif :
 ssh -p 50922 -i ~/.ssh/alarm_node3 alarm@51.210.105.102 '

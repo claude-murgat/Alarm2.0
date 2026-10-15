@@ -15,7 +15,7 @@
 
 ## 0. Contexte et statut
 
-- **Où** : nœuds on-site uniquement (`onsite-1` 172.16.1.121, `onsite-2` 172.16.1.120). Le module
+- **Où** : nœuds on-site uniquement (`onsite-1` 192.168.1.50, `onsite-2` 192.168.1.51). Le module
   est physiquement branché et visible sur onsite-2 (cf [`PROVISIONING_ONSITE.md`](PROVISIONING_ONSITE.md) §1).
   **NODE3 cloud n'a pas de modem** (N/A, cf §22ter).
 - **Mode réel (onsite-2)** : le module énumère en **QMI** (`qmi_wwan`), pas en ECM. Vérifier le mode

@@ -2,8 +2,8 @@
 # Wrapper de bring-up cluster Patroni en mode PROD cross-machine.
 #
 # Usage : ./scripts/start-prod-node.sh <1|2|3>
-#   sur onsite-1 (172.16.1.121) : ./scripts/start-prod-node.sh 1
-#   sur onsite-2 (172.16.1.120) : ./scripts/start-prod-node.sh 2
+#   sur onsite-1 (192.168.1.50) : ./scripts/start-prod-node.sh 1
+#   sur onsite-2 (192.168.1.51) : ./scripts/start-prod-node.sh 2
 #   sur NODE3 cloud (10.99.0.1) : ./scripts/start-prod-node.sh 3
 #
 # Pourquoi ce wrapper :
