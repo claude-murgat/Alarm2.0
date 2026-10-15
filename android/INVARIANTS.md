@@ -180,15 +180,25 @@ La version apparaît dans **toutes les exports `AppLogger.exportLogs()`** via l'
 - **Statut** : implémenté 2026-06-12 dans `android/app/build.gradle.kts` (`gitOutput()` helper + 3 `val`s en tête de fichier). Build local vérifié : versionCode=188, versionName="1.0.188-b95d44b-dirty".
 - **Manque** : pas de test (la valeur dépend de l'environnement git, difficile à fixer dans un test unitaire). Acceptable car la logique est triviale et le smoke-test « build l'APK et lis le manifest » suffit.
 
+### INV-ANDROID-111 [M] ✅ Les notifications portent l'icône de l'app, pas une icône Android générique — 2026-10-14
+Toutes les notifications construites par l'app utilisent `R.drawable.ic_stat_alarm` : une silhouette monochrome de l'icône de l'app (cloche et poisson), comme l'impose Android pour les petites icônes. Les push FCM affichés par le système utilisent la même icône via `com.google.firebase.messaging.default_notification_icon`, avec la couleur `#00A2E5`.
+- **Pourquoi** : demande du propriétaire le 2026-10-14. Avant, l'icône était `android.R.drawable.ic_dialog_alert`.
+- **Couverture** : Espresso `AlarmResilienceTest::notification_du_service_utilise_l_icone_de_l_app`.
+
+### INV-ANDROID-112 [H] ✅ Les heures de l'historique sont affichées dans le fuseau du téléphone — 2026-10-15
+Le backend envoie des dates UTC sans suffixe (`2026-10-14T13:32:38`). `formatDate()` les lit en UTC, puis les affiche dans le fuseau du téléphone (`dd/MM HH:mm`), comme le fait déjà `computeDuration()`.
+- **Pourquoi** : le contact sec du 2026-10-14 à 15:32:38 (Paris) était affiché « 13:32 » dans l'historique. Le collègue sur place pensait donc que l'alarme ne correspondait pas à l'incident. Écart de 2 h l'été, 1 h l'hiver.
+- **Couverture** : Espresso `AlarmE2ETest::test33_historyShowsLocalTimeNotUtc` (fuseau Europe/Paris forcé dans le processus de test). RED sur le code d'origine.
+
 ### INV-ANDROID-110 [H] ✅ Icône de signal 4G du modem gateway dans la barre du dashboard — 2026-10-14
 `DashboardActivity` affiche `R.id.modemSignal` (`SignalBarsView`, 4 barres) à droite du nom. L'icône est alimentée par `GET /api/system/modem-status` (INV-129 backend), lu à chaque cycle de polling (3 s) dans `AlarmPollingService.modemStatus`.
 - `state = ok` : barres vertes (orange à 1 barre), pulsation lente.
 - `state = no_network` : 4 barres rouges, pulsation rapide.
-- `state = unknown`, ou aucune donnée : barres grises, sans animation.
+- `state = unknown`, ou aucune donnée : barres grises, sans animation. Si l'endpoint échoue (erreur HTTP, réseau), le dernier état connu est **oublié** : l'icône repasse à « inconnu » au lieu de rester verte sur un état périmé (#215).
 - `contentDescription` : « Signal LTE du modem : 1/4 (-115.7 dBm) », « Modem sans réseau : SMS et appels de secours impossibles » ou « Signal du modem inconnu ».
 - **Pourquoi** : le modem d'onsite-2 est resté sans réseau du 12/09 au 13/10 sans que personne ne le voie, soit un mois sans SMS ni appel de secours. Le propriétaire a demandé le 2026-10-13 une icône animée en temps réel dans l'app et le web.
 - **Limite connue** : l'icône n'est rafraîchie que quand le polling tourne (astreinte, ou alarme en cours). Un utilisateur en veille voit l'état « inconnu ».
-- **Couverture** : Espresso `AlarmE2ETest::test29_modemSignalShowsBarsAndDbm`, `::test30_modemWithoutNetworkIsFlagged`. Le RED a été prouvé en débranchant le `show()`.
+- **Couverture** : Espresso `AlarmE2ETest::test29_modemSignalShowsBarsAndDbm`, `::test30_modemWithoutNetworkIsFlagged`. Le RED a été prouvé en débranchant le `show()`. `::test32_modemStatusUnavailableExpiresLastKnownState` (RED avant le fix #215).
 
 ---
 
@@ -246,6 +256,11 @@ Si `alarm == null && isAcknowledged` → `alarmGoneDuringAck=true`, carte passe 
 ---
 
 ## 4. Heartbeat et connexion
+
+### INV-ANDROID-209 [C] ✅ Un acquittement réussi n'est jamais défait par une réponse de polling périmée — 2026-10-14
+Après un `POST /alarms/{id}/ack` réussi, depuis le dashboard ou depuis `AlarmActivity`, `AlarmPollingService.onAckSucceeded()` remplace `currentAlarm` par l'alarme acquittée renvoyée par le serveur. Pendant `ACK_GRACE_MS` (15 s), un poll qui renvoie cette même alarme dans un autre état qu'`acknowledged` est ignoré (`withAckGrace`).
+- **Pourquoi** : bug terrain 2026-10-14. Six alarmes ont été acquittées deux fois, à 1 à 3 s d'intervalle, entre le 13 et le 14/10. Jusqu'au poll suivant (3 s au plus), l'UI lisait la copie d'avant l'ack, encore `active`. Elle appliquait la règle « ack expiré » et refaisait sonner, ce qui obligeait à réacquitter. Une vraie réactivation n'arrive qu'après la suspension de 30 min (INV-003/016) : la fenêtre de 15 s ne masque rien de légitime.
+- **Couverture** : Espresso `AlarmE2ETest::test31_ackNotUndoneByStalePollResponse` (RED 3 fois sur 3 sur le code d'origine, GREEN 3 fois sur 3).
 
 ### INV-ANDROID-300 [C] ⚠️ Heartbeat envoyé toutes les 3s au POST /api/devices/heartbeat
 `AlarmPollingService.startHeartbeat()` boucle `while (isActive) { heartbeat; delay(3000) }`.
@@ -447,6 +462,13 @@ Préfixe exact, pas de variation. Le timestamp est purement informatif (audit vi
 
 ---
 
+### INV-ANDROID-309 [C] ✅ Veille (Doze) sur Wi-Fi : CPU et Wi-Fi maintenus éveillés pendant la surveillance — 2026-10-14
+Tant que `AlarmPollingService` tourne, il tient un `PARTIAL_WAKE_LOCK` et un `WifiLock` (`FULL_LOW_LATENCY`, ou `FULL_HIGH_PERF` avant l'API 29). Le dashboard demande **une fois** l'exemption d'optimisation de batterie (`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, pref `battery_optimization_asked`).
+- **Pourquoi** : bug terrain 2026-10-14. En veille sur Wi-Fi, Doze retardait les heartbeats (toutes les 3 s) au-delà du délai serveur de 60 s (`watchdog_timeout_seconds`, gardé à 60 s par décision du propriétaire). Le 13/10, timo a ainsi alterné une vingtaine de fois entre hors ligne et en ligne. Le surcoût batterie est accepté par le propriétaire le 2026-10-14.
+- **Couverture** : Espresso `AlarmResilienceTest::service_garde_le_cpu_et_le_wifi_eveilles`. Le dialogue système n'est pas testé, car il ouvre une activité système.
+
+---
+
 ## 5. Failover backend
 
 ### INV-ANDROID-400 [C] ⚠️ 3 échecs consécutifs de polling → switchToNextUrl()
@@ -526,6 +548,7 @@ MainActivity : `savedToken != null → goToDashboard(savedToken)` + `return` (sk
 ### INV-ANDROID-600 [C] ⚠️ Push FCM avec alarm_id → démarre le foreground service en mode veille
 `AlarmFirebaseService.onMessageReceived` → si `data["alarm_id"] != null`, delegue à `AlarmWakeUpHandler.onAlarmPushReceived(context, alarmId, title, severity)` → `startForegroundService(AlarmPollingService, started_by_fcm=true)` si pas déjà running.
 - **Pourquoi** : les users NON-astreinte ne maintiennent pas le foreground service actif (économie batterie). FCM haute priorité les réveille quand une alarme tombe sur leur position dans la chaîne.
+- **Push data-only obligatoire** (2026-10-15) : le backend n'envoie **aucun** bloc `notification` FCM, seulement `data` (`title`/`body` inclus) + `android.priority=high`. Avec un bloc `notification`, app en arrière-plan, Android affiche lui-même la notif (2 vibrations) et `onMessageReceived` n'est **jamais** appelé → pas de service, sonnerie seulement à l'ouverture de l'app (bug terrain constaté).
 - **Manque** : aucun test n'injecte un push FCM et vérifie le démarrage du service. Testable via `AlarmWakeUpHandler` en isolation (pas Firebase).
 
 ### INV-ANDROID-601 [H] ⚠️ FCM type=escalation_update met à jour les prefs **et** réconcilie le heartbeat
@@ -546,6 +569,7 @@ MainActivity : `savedToken != null → goToDashboard(savedToken)` + `return` (sk
   en position 1 restait donc **sans heartbeat jusqu'à une relance de l'app**, et le
   serveur le croyait hors ligne. C'est le point 2 qui rend vraie la promesse « sans
   relancer l'app » pour la partie fonctionnelle, pas seulement pour l'affichage.
+- **Notif visible** (2026-10-15) : le push étant data-only (cf INV-ANDROID-600), `AlarmFirebaseService` affiche lui-même une notif (canal `escalation_channel`) avec `title`/`body`. Obligatoire aussi côté FCM : un push haute priorité sans notif visible fait dégrader les suivants en priorité normale (retardés par Doze).
 - **Affichage** : `updateGuardBadge()` **et** `updateDrawerGuardStatus()` sont appelés
   dans le tick 1 Hz d'`updateStatus()`. Le second y a été ajouté le 2026-10-12 : il
   n'était appelé que dans `onCreate`, donc le texte du tiroir restait faux après un
@@ -579,6 +603,11 @@ Dans la boucle polling, si `alarms.isEmpty() && startedByFcm && !isOncall` → `
 - **Pourquoi** : équilibre batterie / résilience. L'incident est fini, le user retourne en "dormance", FCM le réveillera au prochain.
 - **Manque** : aucun test Espresso (testable via `AlarmPollingService` avec mock polling).
 
+### INV-ANDROID-606 [C] ✅ Statut d'astreinte relu depuis la chaîne à chaque retour dans l'app — 2026-10-14
+`DashboardActivity.onResume()` lit `GET /api/config/escalation` (public). La position de l'utilisateur (`user_id` en prefs) est appliquée par `AlarmWakeUpHandler.onEscalationPushReceived(position, position == 1)` : prefs mises à jour, heartbeat démarré ou arrêté.
+- **Pourquoi** : le push `escalation_update` (INV-ANDROID-601) peut se perdre, par exemple à cause d'un token FCM périmé (l'admin avait 9 tokens enregistrés le 2026-10-14). L'app restait alors en veille, sans heartbeat, jusqu'à une reconnexion.
+- **Couverture** : Espresso `AlarmResilienceTest::ouverture_app_reprend_l_astreinte_depuis_la_chaine`, `::ouverture_app_retrograde_si_plus_en_position_1`.
+
 ### INV-ANDROID-605 [L] ⚠️ Token FCM enregistré au login (DashboardActivity) et re-confirmé au onCreate
 Double registration : `MainActivity.login()` et `DashboardActivity.onCreate()` appellent `registerFcmToken`. Idempotent côté backend (upsert par `device_id`).
 - **Pourquoi** : robustesse. Si la première registration a foiré (réseau), le dashboard réessaye.
@@ -606,12 +635,12 @@ DashboardActivity `onCreate` : si `SDK >= TIRAMISU` et non grantée, `requestPer
 - **Pourquoi** : sans cette permission, aucune notification ne sort → full-screen intent ignoré → AlarmActivity non lancée par le service → alarme manquée.
 - **Limite** : si l'utilisateur refuse, l'app continue mais les push sont muets. Voir questions ouvertes.
 
-### INV-ANDROID-704 [C] 🐛 Reprise post-boot NON implémentée
-Aucun `BootReceiver` dans AndroidManifest, aucune permission `RECEIVE_BOOT_COMPLETED`. Après un reboot du device, le foreground service n'est **PAS** redémarré. L'utilisateur doit rouvrir l'app manuellement pour que le polling reprenne.
-- **Pourquoi (bug)** : un user de garde qui reboot son téléphone la nuit ne reçoit plus d'alarmes via polling jusqu'à la réouverture manuelle. FCM haute priorité PEUT éveiller l'app à condition que Google Play Services soit chargé, mais c'est fragile et non garanti après un reboot à froid.
-- **Fix proposé** : `BootReceiver extends BroadcastReceiver` avec action `android.intent.action.BOOT_COMPLETED`, qui démarre `AlarmPollingService` si un token est présent en prefs (et `is_oncall=true`).
-- **Manque** : pas de test Espresso (nécessite simuler reboot avec `adb reboot` + attendre).
-
+### INV-ANDROID-704 [C] ✅ Reprise du heartbeat après redémarrage du téléphone ou relance par Android — corrigé 2026-10-14
+- **Démarrage / mise à jour** : `BootReceiver` (`BOOT_COMPLETED`, `MY_PACKAGE_REPLACED`, permission `RECEIVE_BOOT_COMPLETED`) relance `AlarmPollingService` si l'utilisateur est d'astreinte (même chemin que `AlarmWakeUpHandler.onEscalationPushReceived`).
+- **Relance par Android (`START_STICKY`)** : l'intent arrive sans extra. Le service lit alors le token sauvegardé dans les prefs. Avant, il s'arrêtait (`token == null`), et **l'app plantait** (`RemoteServiceException` : `startForeground()` jamais appelé).
+- **Arrêt sans plantage** : `startForeground()` est appelé dès `onCreate()`. La rétrogradation envoie `ACTION_STOP` au lieu de `stopService()`, car un `stopService()` juste après `startForegroundService()` faisait planter l'app.
+- **Pourquoi** : bug terrain 2026-10-14. Il fallait se déconnecter puis se reconnecter pour réapparaître en ligne.
+- **Couverture** : Espresso `AlarmResilienceTest` (`demarrage_du_telephone_*`, `relance_par_android_sans_intent_*`). Le RED a été prouvé : échec, puis plantage de l'app avec le code d'origine.
 ---
 
 ## 9. Tests et isolation

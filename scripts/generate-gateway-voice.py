@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Genere les messages vocaux de la gateway (INV-131/132) -> gateway/voice/*.wav.
+"""Genere les messages vocaux de la gateway (INV-132/133) -> gateway/voice/*.wav.
 
 Voix validee par le proprietaire le 2026-10-14 (appels reels sur alarm-1) :
 Piper `fr_FR-upmc-medium`, locutrice `jessica`, debit 1.0, traitement pour la

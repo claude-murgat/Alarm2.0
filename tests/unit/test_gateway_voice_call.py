@@ -1,6 +1,6 @@
 """Unit test (tier 1) — appel vocal d'alarme de la gateway (`gateway/voice_call.py`).
 
-INV-130 / INV-131 / INV-132. Regression des tests reels du 2026-10-14 sur
+INV-131 / INV-132 / INV-133. Regression des tests reels du 2026-10-14 sur
 alarm-1 (SIM7600E-H, firmware LE20B04SIM7600M22, SIM Orange) :
   - `",0,0," in clcc` prenait la numerotation (`+CLCC: 3,0,2,0,0,...`) pour
     un decroche -> message joue dans le vide, resultat `no_answer` alors que
@@ -28,7 +28,7 @@ NUM = '"+33695024008",145'
 
 
 class TestCallAnswered:
-    """INV-130 : decroche seulement si le modem dit l'appel actif."""
+    """INV-131 : decroche seulement si le modem dit l'appel actif."""
 
     @pytest.mark.parametrize("text", [
         f"+CLCC: 3,0,0,0,0,{NUM}\nOK",
@@ -50,7 +50,7 @@ class TestCallAnswered:
 
 
 class TestCallEnded:
-    """INV-130 : fin d'appel avant (ou pendant) la conversation."""
+    """INV-131 : fin d'appel avant (ou pendant) la conversation."""
 
     @pytest.mark.parametrize("text", [
         "NO CARRIER", "BUSY", "VOICE CALL: END: 000027\n\nNO CARRIER",
@@ -66,7 +66,7 @@ class TestCallEnded:
 
 
 class TestDtmfKey:
-    """INV-132 : touche lue sur les URC du port AT."""
+    """INV-133 : touche lue sur les URC du port AT."""
 
     @pytest.mark.parametrize("text,key", [
         ("+RXDTMF: 1", "1"),
@@ -83,7 +83,7 @@ class TestDtmfKey:
 
 
 class TestCallResult:
-    """INV-132 : touche -> resultat renvoye au backend."""
+    """INV-133 : touche -> resultat renvoye au backend."""
 
     def test_one_acknowledges(self):
         assert _vc.call_result("1") == "ack_dtmf"
@@ -97,7 +97,7 @@ class TestCallResult:
 
 
 class TestConfirmation:
-    """INV-132 : confirmation vocale de la touche."""
+    """INV-133 : confirmation vocale de la touche."""
 
     def test_one_confirms_acknowledgement(self):
         assert _vc.confirmation_file("1") == "acquittee.wav"
@@ -114,7 +114,7 @@ class TestConfirmation:
 
 
 class TestAudioPort:
-    """INV-131 : port audio USB du SIM7600 = interface USB 4."""
+    """INV-132 : port audio USB du SIM7600 = interface USB 4."""
 
     def test_interface_4_of_simcom_is_audio(self):
         assert _vc.is_audio_port(0x1E0E, "3-9:1.4") is True
@@ -130,7 +130,7 @@ class TestAudioPort:
 
 
 class TestPcmFrames:
-    """INV-131 : injection au rythme reel, trames de 20 ms."""
+    """INV-132 : injection au rythme reel, trames de 20 ms."""
 
     @pytest.mark.parametrize("rate,frm", [(8000, 0), (16000, 1)])
     def test_cpcmfrm_matches_sample_rate(self, rate, frm):
@@ -149,7 +149,7 @@ class TestPcmFrames:
 
 
 class TestLeadSilence:
-    """INV-131 : 0,8 s de silence avant le message (retour proprietaire 2026-10-14)."""
+    """INV-132 : 0,8 s de silence avant le message (retour proprietaire 2026-10-14)."""
 
     def test_lead_silence_duration(self):
         assert _vc.LEAD_SILENCE_S == 0.8
@@ -162,14 +162,14 @@ class TestLeadSilence:
 
 
 class TestHangUp:
-    """INV-132 : raccrochage des appels vocaux SIMCom, ATH en secours."""
+    """INV-133 : raccrochage des appels vocaux SIMCom, ATH en secours."""
 
     def test_hang_up_commands(self):
         assert _vc.HANG_UP_COMMANDS == ("AT+CHUP", "ATH")
 
 
 class TestCallDeferredForSms:
-    """INV-133 : le SMS de detail part avant l'appel vers le meme numero."""
+    """INV-134 : le SMS de detail part avant l'appel vers le meme numero."""
 
     def test_pending_sms_for_same_number_defers_call(self):
         pending = [{"id": 7, "to_number": "+33695024008", "body": "ALARME ..."}]

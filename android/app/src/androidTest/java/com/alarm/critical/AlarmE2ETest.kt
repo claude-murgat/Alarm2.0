@@ -158,6 +158,7 @@ class AlarmE2ETest {
         com.alarm.critical.service.AlarmPollingService.authErrorAlarm = false
         com.alarm.critical.service.AlarmPollingService.authErrorMessage = null
         com.alarm.critical.service.AlarmPollingService.tokenRefreshIntervalMs = 12 * 60 * 60 * 1000L
+        com.alarm.critical.service.AlarmPollingService.modemStatus = null
 
         val prefs: SharedPreferences = context.getSharedPreferences("alarm_prefs", Context.MODE_PRIVATE)
         prefs.edit()
@@ -165,6 +166,8 @@ class AlarmE2ETest {
             .putString("user_name", "user1")
             .putInt("user_id", 1)
             .putString("device_token", "test-device")
+            // INV-ANDROID-309 : pas de dialogue systeme d'optimisation batterie pendant les tests
+            .putBoolean("battery_optimization_asked", true)
             .commit()
 
         // Forcer orientation portrait pour les tests
@@ -1332,5 +1335,80 @@ class AlarmE2ETest {
             .check(matches(withContentDescription(containsString("sans réseau"))))
 
         scenario.close()
+    }
+
+    // ── 31. INV-ANDROID-209 : un poll perime ne defait pas un acquittement ──
+
+    @Test
+    fun test31_ackNotUndoneByStalePollResponse() {
+        // Le serveur (ou une requete partie avant l'ack) renvoie encore "active"
+        // pendant quelques polls : l'app ne doit pas refaire sonner (bug terrain
+        // 2026-10-14 : "l'alarme reprend directement, je dois re-acquitter").
+        fakeApi.myAlarmsResponses = mutableListOf(Response.success(listOf(fakeAlarm)))
+        fakeApi.acknowledgeResponse = Response.success(fakeAckedAlarm.copy(ack_remaining_seconds = 1800))
+        waitForPolls(2)
+
+        val scenario = launchDashboard()
+        onView(withId(R.id.dashboardAckButton)).check(matches(withEffectiveVisibility(Visibility.VISIBLE)))
+        unregisterAll()
+
+        onView(withId(R.id.dashboardAckButton)).perform(click())
+        fakeApi.resetCallCount()
+        waitForPolls(2)  // ~6 s de polls qui renvoient encore "active"
+
+        onView(withId(R.id.dashboardAckButton)).check(matches(withEffectiveVisibility(Visibility.GONE)))
+        onView(withId(R.id.ackArcTimer)).check(matches(isDisplayed()))
+
+        scenario.close()
+    }
+
+    // ── 32. INV-ANDROID-110 / #215 : endpoint modem en erreur -> icone "inconnu" ──
+
+    @Test
+    fun test32_modemStatusUnavailableExpiresLastKnownState() {
+        fakeApi.modemStatusResponse = Response.success(
+            com.alarm.critical.model.ModemStatusResponse("ok", 4, "LTE", -80.0, "2026-10-14T12:00:00")
+        )
+        waitForPolls(2)
+        val scenario = launchDashboard()
+        onView(withId(R.id.modemSignal))
+            .check(matches(withContentDescription(containsString("4/4"))))
+        unregisterAll()
+
+        // Endpoint en panne : l'icone ne doit pas rester verte sur un etat perime.
+        fakeApi.modemStatusResponse = Response.error(500, okhttp3.ResponseBody.create(null, "err"))
+        fakeApi.resetCallCount()
+        waitForPolls(2)
+
+        onView(withId(R.id.modemSignal))
+            .check(matches(withContentDescription(containsString("inconnu"))))
+
+        scenario.close()
+    }
+
+    // ── 33. INV-ANDROID-112 : heures de l'historique en heure locale ──────
+
+    @Test
+    fun test33_historyShowsLocalTimeNotUtc() {
+        // Incident 2026-10-14 : contact sec a 13:32:38 UTC, affiche "13:32" au lieu
+        // de 15:32 (Paris). Fuseau force dans le processus : test deterministe.
+        val previous = java.util.TimeZone.getDefault()
+        java.util.TimeZone.setDefault(java.util.TimeZone.getTimeZone("Europe/Paris"))
+        try {
+            fakeApi.myAlarmsResponses = mutableListOf(Response.success(emptyList()))
+            fakeApi.alarmHistoryResponse = Response.success(listOf(
+                fakeResolvedAlarm.copy(title = "Contact sec", created_at = "2026-10-14T13:32:38",
+                    acknowledged_at = null)
+            ))
+            waitForPolls(2)
+
+            val scenario = launchDashboard()
+
+            onView(withId(R.id.alarmHistoryList))
+                .check(matches(hasDescendant(withSubstring("14/10 15:32"))))
+            scenario.close()
+        } finally {
+            java.util.TimeZone.setDefault(previous)
+        }
     }
 }

@@ -48,7 +48,7 @@ docker cp "$CID:/gateway/." "$NEW/"
 docker rm "$CID" >/dev/null
 
 CHANGED=""
-# voice/*.wav : messages vocaux des appels (INV-131/132)
+# voice/*.wav : messages vocaux des appels (INV-132/133)
 for f in "$NEW"/*.py "$NEW"/voice/*.wav; do
   [[ -e "$f" ]] || continue
   rel="${f#"$NEW"/}"

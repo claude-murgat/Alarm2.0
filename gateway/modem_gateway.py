@@ -195,7 +195,7 @@ VOICE_FILES = ("alarme.wav", "acquittee.wav", "escaladee.wav")
 
 
 def _load_voice(voice_dir: str = VOICE_DIR) -> dict | None:
-    """INV-131 : charge les WAV du message et des confirmations (PCM 16 bits mono,
+    """INV-132 : charge les WAV du message et des confirmations (PCM 16 bits mono,
     meme frequence 8 ou 16 kHz). None si un fichier manque ou est invalide ->
     repli sur la synthese du module."""
     try:
@@ -236,7 +236,7 @@ class CallSenderThread(threading.Thread):
             try:
                 pending = _get_from_backend("/internal/calls/pending")
                 if pending:
-                    # INV-133 : le SMS de detail part avant l'appel vers le meme numero.
+                    # INV-134 : le SMS de detail part avant l'appel vers le meme numero.
                     sms_pending = _get_from_backend("/internal/sms/pending")
                     for call in pending:
                         if call_deferred_for_sms(call["to_number"], sms_pending):
@@ -319,7 +319,7 @@ class CallSenderThread(threading.Thread):
         return self._urc[start:]
 
     def _wait_answered(self, timeout: float) -> bool:
-        """INV-130 : surveillance continue (URC + AT+CLCC chaque seconde)."""
+        """INV-131 : surveillance continue (URC + AT+CLCC chaque seconde)."""
         deadline, next_clcc = time.time() + timeout, 0.0
         while time.time() < deadline:
             if time.time() >= next_clcc:
@@ -334,7 +334,7 @@ class CallSenderThread(threading.Thread):
         return False
 
     def _hang_up(self):
-        """INV-132 : AT+CHUP (raccrochage appel vocal SIMCom), ATH en secours."""
+        """INV-133 : AT+CHUP (raccrochage appel vocal SIMCom), ATH en secours."""
         for cmd in HANG_UP_COMMANDS:
             if "OK" in self._at(cmd).splitlines():
                 return
@@ -342,7 +342,7 @@ class CallSenderThread(threading.Thread):
     # ── Message + touche ──
 
     def _play_voice(self) -> str | None:
-        """INV-131/132 : voix preenregistree injectee par le port audio USB."""
+        """INV-132/133 : voix preenregistree injectee par le port audio USB."""
         rate = self.voice["rate"]
         self._voice_started = False
         # Ordre de l'exemple SIMCom (usb_audio_test.py) : port audio ouvert AVANT
@@ -400,7 +400,7 @@ class CallSenderThread(threading.Thread):
         return "fin"
 
     def _play_tts(self, tts_message: str) -> str | None:
-        """Repli INV-131 : synthese du module, envoyee a l'appele (AT+CDTAM=1)."""
+        """Repli INV-132 : synthese du module, envoyee a l'appele (AT+CDTAM=1)."""
         time.sleep(LEAD_SILENCE_S)
         self._at("AT+CDTAM=1")
         self._at(f'AT+CTTS=2,"{tts_message}"', timeout=10)
@@ -828,7 +828,7 @@ def main():
         send_at_command(ser, "AT+CMGF=1", timeout=3)      # Mode texte SMS
         send_at_command(ser, "AT+CNMI=2,1,0,0,0", timeout=3)  # Notifications SMS
 
-    # INV-131 : port audio USB (interface 4) pour injecter la voix dans l'appel
+    # INV-132 : port audio USB (interface 4) pour injecter la voix dans l'appel
     from serial.tools import list_ports as lp
     audio_port = next((p.device for p in lp.comports() if is_audio_port(p.vid, p.location)), None)
     if audio_port:

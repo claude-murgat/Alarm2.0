@@ -1,5 +1,7 @@
 package com.alarm.critical.service
 
+import com.alarm.critical.R
+
 import android.app.*
 import android.content.Context
 import android.content.Intent
@@ -26,11 +28,35 @@ class AlarmPollingService : Service() {
         const val NOTIFICATION_ID = 1
         const val ALARM_NOTIFICATION_ID = 999
         const val EXTRA_TOKEN = "token"
+        const val ACTION_STOP = "com.alarm.critical.action.STOP_POLLING"
         var isRunning = false
+        // INV-ANDROID-309 : CPU + Wi-Fi eveilles tant que le service tourne,
+        // sinon Doze retarde les heartbeats au-dela de 60 s (faux "hors ligne").
+        var wakeLock: android.os.PowerManager.WakeLock? = null
+        var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
         var lastConnectionStatus = "Unknown"
         var lastHeartbeatOk = false
         var activeAlarmCount = 0
         var currentAlarm: com.alarm.critical.model.AlarmResponse? = null
+
+        // INV-ANDROID-209 : apres un ack reussi, un poll perime (copie d'avant
+        // l'ack, ou requete partie juste avant) renvoie encore "active". Sans
+        // garde, l'UI prend ca pour une expiration d'ack et refait sonner.
+        // Une vraie reactivation n'arrive qu'apres 30 min : 15 s ne masque rien.
+        const val ACK_GRACE_MS = 15_000L
+        private var ackGraceAlarmId = -1
+        private var ackGraceUntilElapsed = 0L
+
+        fun onAckSucceeded(acked: com.alarm.critical.model.AlarmResponse?) {
+            acked ?: return
+            currentAlarm = acked
+            ackGraceAlarmId = acked.id
+            ackGraceUntilElapsed = android.os.SystemClock.elapsedRealtime() + ACK_GRACE_MS
+        }
+
+        fun withAckGrace(polled: com.alarm.critical.model.AlarmResponse?): com.alarm.critical.model.AlarmResponse? =
+            if (polled != null && polled.id == ackGraceAlarmId && polled.status != "acknowledged"
+                && android.os.SystemClock.elapsedRealtime() < ackGraceUntilElapsed) currentAlarm else polled
         // INV-ANDROID-110 : dernier etat connu du modem gateway (icone de signal)
         var modemStatus: com.alarm.critical.model.ModemStatusResponse? = null
 
@@ -134,16 +160,48 @@ class AlarmPollingService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private fun acquireKeepAwakeLocks() {
+        if (wakeLock?.isHeld != true) {
+            wakeLock = (getSystemService(POWER_SERVICE) as android.os.PowerManager)
+                .newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "AlarmeMurgat:heartbeat")
+                .apply { setReferenceCounted(false); acquire() }
+        }
+        if (wifiLock?.isHeld != true) {
+            @Suppress("DEPRECATION")  // FULL_HIGH_PERF : seul mode qui garde le Wi-Fi actif ecran eteint avant API 29
+            val mode = if (android.os.Build.VERSION.SDK_INT >= 29)
+                android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            else android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            wifiLock = (applicationContext.getSystemService(WIFI_SERVICE) as android.net.wifi.WifiManager)
+                .createWifiLock(mode, "AlarmeMurgat:heartbeat")
+                .apply { setReferenceCounted(false); acquire() }
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        // Des la creation : un stopService() arrive parfois avant onStartCommand
+        // (retrogradation juste apres un demarrage). Sans startForeground() deja
+        // appele, Android tue l'app (RemoteServiceException).
+        startForeground(NOTIFICATION_ID, buildNotification("Surveillance des alarmes..."))
         // INV-ANDROID-305 : démarrer la surveillance réseau (data + cellulaire)
         // pour piloter l'armement de la sonnerie hors-connexion (INV-302).
         com.alarm.critical.util.NetworkAvailabilityMonitor.init(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_STOP) {
+            // Arret demande via startForegroundService : Android exige quand meme
+            // un startForeground() pour CET appel, sinon il tue l'app.
+            startForeground(NOTIFICATION_ID, buildNotification("Arret de la surveillance..."))
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        // INV-ANDROID-704 : START_STICKY relance le service avec un intent vide ;
+        // sans repli sur le token sauvegarde, le service s'arretait (et l'app
+        // plantait : startForeground() jamais appele).
         token = intent?.getStringExtra(EXTRA_TOKEN)
+            ?: getSharedPreferences("alarm_prefs", MODE_PRIVATE).getString("token", null)
         if (token == null) {
             stopSelf()
             return START_NOT_STICKY
@@ -157,6 +215,7 @@ class AlarmPollingService : Service() {
         val notification = buildNotification("Surveillance des alarmes...")
         startForeground(NOTIFICATION_ID, notification)
         isRunning = true
+        acquireKeepAwakeLocks()
         com.alarm.critical.util.AppLogger.log("Service", "Polling demarre (fcm=${startedByFcm})")
 
         // Trouver le primary avant de demarrer le polling
@@ -224,12 +283,13 @@ class AlarmPollingService : Service() {
                         }
                         val alarms = response.body() ?: emptyList()
                         activeAlarmCount = alarms.size
-                        currentAlarm = alarms.firstOrNull()
+                        currentAlarm = withAckGrace(alarms.firstOrNull())
                         // shortcut: rafraichi seulement quand le polling tourne (astreinte ou alarme
                         // en cours) ; un utilisateur en veille voit l'icone "inconnu".
-                        try {
-                            ApiProvider.service.getModemStatus("Bearer $token").body()?.let { modemStatus = it }
-                        } catch (_: Exception) { }
+                        // Erreur HTTP ou reseau -> null ("inconnu") : jamais d'etat perime affiche vert.
+                        modemStatus = try {
+                            ApiProvider.service.getModemStatus("Bearer $token").body()
+                        } catch (_: Exception) { null }
 
                         if (alarms.isNotEmpty()) {
                             val alarm = alarms.first()
@@ -530,7 +590,7 @@ class AlarmPollingService : Service() {
         manager.createNotificationChannel(channel)
 
         val notification = NotificationCompat.Builder(this, alarmChannelId)
-            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setSmallIcon(R.drawable.ic_stat_alarm)
             .setContentTitle("ALARME CRITIQUE")
             .setContentText(title)
             .setPriority(NotificationCompat.PRIORITY_MAX)
@@ -559,7 +619,7 @@ class AlarmPollingService : Service() {
         return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("Alarme Murgat")
             .setContentText(text)
-            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setSmallIcon(R.drawable.ic_stat_alarm)
             .setOngoing(true)
             .build()
     }
@@ -572,6 +632,8 @@ class AlarmPollingService : Service() {
 
     override fun onDestroy() {
         isRunning = false
+        wakeLock?.takeIf { it.isHeld }?.release()
+        wifiLock?.takeIf { it.isHeld }?.release()
         pollingJob?.cancel()
         heartbeatJob?.cancel()
         tokenRefreshJob?.cancel()
