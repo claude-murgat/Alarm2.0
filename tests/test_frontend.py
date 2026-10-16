@@ -707,3 +707,49 @@ class TestModemSignalIndicator:
         icon = dashboard.locator("#modemSignal")
         expect(icon).to_have_attribute("data-state", "no_network", timeout=8000)
         expect(icon).to_have_attribute("data-bars", "0")
+
+
+# ---------------------------------------------------------------------------
+# INV-136 : schema d'escalade temps reel (onglet Escalade)
+# ---------------------------------------------------------------------------
+
+class TestEscalationLiveDiagram:
+
+    def _login(self, primary_url, name, password):
+        r = requests.post(f"{primary_url}/api/auth/login", json={"name": name, "password": password}, timeout=10)
+        r.raise_for_status()
+        return {"Authorization": f"Bearer {r.json()['access_token']}"}
+
+    def _send_alarm(self, primary_url):
+        r = requests.post(f"{primary_url}/api/alarms/send", headers=self._login(primary_url, "admin", "admin123"),
+                          json={"title": "Schema INV-136", "message": "test", "severity": "critical"}, timeout=10)
+        r.raise_for_status()
+        return r.json()["id"]
+
+    def test_no_alarm_shows_idle_chain(self, dashboard: Page):
+        dashboard.locator(".tab[data-tab='escalation']").click()
+        live = dashboard.locator("#escalationLive")
+        expect(live).to_have_attribute("data-state", "none", timeout=8000)
+        expect(live.locator(".esc-lane")).to_have_count(3)
+
+    def test_live_updates_on_alarm_escalation_and_ack(self, dashboard: Page, primary_url):
+        dashboard.locator(".tab[data-tab='escalation']").click()
+        live = dashboard.locator("#escalationLive")
+        expect(live).to_have_attribute("data-state", "none", timeout=8000)
+
+        alarm_id = self._send_alarm(primary_url)
+        expect(live).to_have_attribute("data-state", "active", timeout=10000)
+        first = live.locator(".esc-lane").nth(0)
+        expect(first).to_have_attribute("data-role", "current")
+        expect(first.locator("[data-stage='notif']")).to_have_attribute("data-status", "ok")
+        expect(first.locator("[data-stage='escalate']")).to_have_attribute("data-status", "doing")
+
+        requests.post(f"{primary_url}/api/test/trigger-escalation", timeout=10).raise_for_status()
+        expect(live.locator(".esc-lane").nth(1)).to_have_attribute("data-role", "current", timeout=10000)
+        expect(first).to_have_attribute("data-role", "notified")
+
+        requests.post(f"{primary_url}/api/alarms/{alarm_id}/ack", headers=self._login(primary_url, "user2", "user123"),
+                      timeout=10).raise_for_status()
+        expect(live).to_have_attribute("data-state", "acknowledged", timeout=10000)
+        expect(live.locator(".esc-lane.acked")).to_have_attribute("data-role", "current")
+        expect(live.locator(".esc-banner.ok")).to_contain_text("user2")

@@ -4,7 +4,7 @@ from typing import List
 from datetime import timedelta
 from ..clock import now as clock_now
 from ..database import get_db
-from ..models import Alarm, AlarmNotification, User, EscalationConfig
+from ..models import Alarm, AlarmNotification, User, EscalationConfig, SystemConfig, SmsQueue, CallQueue
 from ..schemas import AlarmCreate, AlarmResponse
 from ..auth import get_current_user, get_current_admin
 from ..events import log_event
@@ -150,6 +150,102 @@ def active_alarms(
         .all()
     )
     return [_alarm_response(a, db) for a in alarms]
+
+
+def _iso(dt):
+    return dt.isoformat() if dt else None
+
+
+def _config_minutes(db, key: str, default: float) -> float:
+    row = db.query(SystemConfig).filter(SystemConfig.key == key).first()
+    return float(row.value) if row else default
+
+
+@router.get("/active/escalation")
+def active_escalation(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """INV-136 : etat de l'escalade de l'alarme courante, pour le schema temps reel.
+    Aucun champ ne bouge sans evenement (le WebSocket INV-135 diffuse sur changement) :
+    les comptes a rebours sont calcules par le navigateur."""
+    escalation_delay = _config_minutes(db, "escalation_delay_minutes", 15.0)
+    sms_call_delay = _config_minutes(db, "sms_call_delay_minutes", 2.0)
+    alarm = (
+        db.query(Alarm)
+        .filter(Alarm.status.in_(["active", "escalated", "acknowledged"]))
+        .order_by(Alarm.original_created_at.desc(), Alarm.id.desc())
+        .first()
+    )
+    notifs = {}
+    if alarm:
+        notifs = {n.user_id: n for n in db.query(AlarmNotification).filter(AlarmNotification.alarm_id == alarm.id)}
+
+    steps = []
+    for ec in db.query(EscalationConfig).order_by(EscalationConfig.position).all():
+        user = db.query(User).filter(User.id == ec.user_id).first()
+        notif = notifs.get(ec.user_id)
+        sms = call = "none"
+        if notif and not (user and user.phone_number):
+            sms = call = "no_phone"
+        elif notif:
+            sms_row = (
+                db.query(SmsQueue)
+                .filter(SmsQueue.to_number == user.phone_number, SmsQueue.created_at >= notif.notified_at)
+                .order_by(SmsQueue.created_at.desc())
+                .first()
+            )
+            if not sms_row:
+                sms = "pending" if notif.sms_sent else "scheduled"
+            else:
+                sms = "sent" if sms_row.sent_at else "failed" if sms_row.retries >= 3 else "pending"
+            call_row = (
+                db.query(CallQueue)
+                .filter(CallQueue.alarm_id == alarm.id, CallQueue.user_id == ec.user_id,
+                        CallQueue.created_at >= notif.notified_at)
+                .order_by(CallQueue.created_at.desc())
+                .first()
+            )
+            if not call_row:
+                call = "pending" if notif.call_sent else "scheduled"
+            else:
+                call = call_row.result or ("error" if call_row.retries >= 3 else "pending")
+        steps.append({
+            "position": ec.position,
+            "user_id": ec.user_id,
+            "name": user.name if user else "?",
+            "has_phone": bool(user and user.phone_number),
+            "is_online": bool(user and user.is_online),
+            "role": "upcoming" if not notif else "current" if ec.user_id == alarm.assigned_user_id else "notified",
+            "notified_at": _iso(notif.notified_at) if notif else None,
+            "contact_at": _iso(notif.notified_at + timedelta(minutes=sms_call_delay)) if notif else None,
+            "sms": sms,
+            "call": call,
+            "acked": bool(alarm and alarm.status == "acknowledged" and alarm.acknowledged_by == ec.user_id),
+        })
+
+    running = alarm is not None and alarm.status != "acknowledged"
+    return {
+        "alarm": None if not alarm else {
+            "id": alarm.id,
+            "title": alarm.title,
+            "status": alarm.status,
+            "assigned_user_id": alarm.assigned_user_id,
+            "escalation_count": alarm.escalation_count,
+            "original_created_at": _iso(alarm.original_created_at),
+            "created_at": _iso(alarm.created_at),
+            "acknowledged_by": alarm.acknowledged_by,
+            "acknowledged_by_name": alarm.acknowledged_by_name,
+            "acknowledged_at": _iso(alarm.acknowledged_at),
+            "suspended_until": _iso(alarm.suspended_until),
+            # INV-016 : redevenue active apres un ack -> acquittement oublie
+            "ack_expired": running and alarm.acknowledged_at is not None,
+        },
+        "escalation_delay_minutes": escalation_delay,
+        "sms_call_delay_minutes": sms_call_delay,
+        "next_escalation_at": _iso(alarm.created_at + timedelta(minutes=escalation_delay)) if running else None,
+        "steps": steps,
+    }
 
 
 @router.get("/mine", response_model=List[AlarmResponse])

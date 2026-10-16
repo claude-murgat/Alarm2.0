@@ -65,6 +65,50 @@
         .log-entry.info { color: #3b82f6; }
         .test-buttons { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        /* INV-136 : schema d'escalade temps reel */
+        .esc-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+        .esc-pill { padding: 4px 12px; border-radius: 999px; font-weight: 700; font-size: 0.85rem; background: #33415566; color: #94a3b8; }
+        #escalationLive[data-state="active"] .esc-pill { background: #ef444433; color: #f87171; animation: escGlow 1.4s ease-in-out infinite; }
+        #escalationLive[data-state="acknowledged"] .esc-pill { background: #22c55e33; color: #4ade80; }
+        #escalationLive[data-state="active"] { border-color: #ef444488; }
+        #escalationLive[data-state="acknowledged"] { border-color: #22c55e66; }
+        .esc-banner { padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; font-size: 0.9rem; }
+        .esc-banner.warn { background: #f59e0b22; color: #fbbf24; border: 1px solid #f59e0b55; }
+        .esc-banner.ok { background: #22c55e1a; color: #4ade80; border: 1px solid #22c55e44; }
+        .esc-lane { display: flex; align-items: stretch; gap: 0; padding: 10px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; transition: all .4s; overflow-x: auto; }
+        .esc-lane[data-role="current"] { border-color: #3b82f6; box-shadow: 0 0 0 1px #3b82f6, 0 0 18px #3b82f655; }
+        .esc-lane[data-role="upcoming"] { opacity: .6; }
+        .esc-lane.acked { border-color: #22c55e; box-shadow: 0 0 16px #22c55e44; }
+        .esc-who { flex: 0 0 170px; display: flex; align-items: center; gap: 8px; padding-right: 10px; }
+        .esc-pos { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; background: #334155; color: #e2e8f0; flex: none; }
+        .esc-lane[data-role="current"] .esc-pos { background: #3b82f6; animation: escRing 1.6s ease-out infinite; }
+        .esc-lane.acked .esc-pos { background: #22c55e; animation: none; }
+        .esc-name { font-weight: 600; }
+        .esc-sub { font-size: 0.75rem; color: #94a3b8; }
+        .esc-stage { min-width: 118px; flex: 1; padding: 8px 10px; border-radius: 6px; border: 1px solid #334155; background: #1e293b; font-size: 0.8rem; transition: all .4s; }
+        .esc-stage b { display: block; font-size: 0.72rem; text-transform: uppercase; letter-spacing: .03em; color: #94a3b8; margin-bottom: 2px; }
+        .esc-stage[data-status="doing"] { border-color: #3b82f6; background: #3b82f61f; animation: escPulse 1.6s ease-in-out infinite; }
+        .esc-stage[data-status="ok"] { border-color: #22c55e88; background: #22c55e1a; }
+        .esc-stage[data-status="ko"] { border-color: #ef444488; background: #ef44441a; color: #fca5a5; }
+        .esc-stage[data-status="warn"] { border-color: #f59e0b88; background: #f59e0b1a; color: #fcd34d; }
+        .esc-stage[data-status="todo"] { color: #64748b; }
+        .esc-bar { height: 4px; border-radius: 2px; background: #334155; margin-top: 6px; overflow: hidden; }
+        .esc-bar i { display: block; height: 100%; background: linear-gradient(90deg, #3b82f6, #60a5fa); transition: width 1s linear; }
+        .esc-link { flex: 0 0 22px; align-self: center; height: 2px; background: #334155; position: relative; }
+        .esc-link.flow { background: repeating-linear-gradient(90deg, #3b82f6 0 6px, transparent 6px 12px); background-size: 24px 2px; animation: escFlow .8s linear infinite; }
+        .esc-link.done { background: #22c55e88; }
+        .esc-down { text-align: center; color: #64748b; font-size: 0.75rem; padding: 4px 0; }
+        .esc-down.flow { color: #60a5fa; }
+        @keyframes escPulse { 0%, 100% { box-shadow: 0 0 0 0 #3b82f600; } 50% { box-shadow: 0 0 0 4px #3b82f633; } }
+        @keyframes escRing { 0% { box-shadow: 0 0 0 0 #3b82f6aa; } 100% { box-shadow: 0 0 0 10px #3b82f600; } }
+        @keyframes escGlow { 0%, 100% { opacity: 1; } 50% { opacity: .6; } }
+        @keyframes escFlow { to { background-position: 24px 0; } }
+        @media (max-width: 700px) {
+            .esc-lane { flex-direction: column; }
+            .esc-who { flex: none; padding: 0 0 8px; }
+            .esc-link { flex: 0 0 10px; width: 2px; height: 10px; }
+        }
+        @media (prefers-reduced-motion: reduce) { .esc-stage, .esc-pos, .esc-pill, .esc-link { animation: none !important; } }
         /* Prod : routes /api/test/* coupees (INV-076) -> boutons de simulation masques */
         body.prod-mode .test-only { display: none; }
         body:not(.prod-mode) .prod-note { display: none; }
@@ -195,6 +239,15 @@
 
         <!-- Escalade -->
         <div class="panel" id="escalation">
+            <div class="card" id="escalationLive" data-state="none">
+                <div class="esc-head">
+                    <h3 style="margin:0">Escalade en cours</h3>
+                    <span class="esc-pill" id="escLivePill">Aucune alarme</span>
+                    <span class="esc-sub" id="escLiveMeta"></span>
+                </div>
+                <div id="escLiveBanner"></div>
+                <div id="escLiveLanes"></div>
+            </div>
             <div class="card">
                 <h3>Configuration</h3>
                 <div class="form-row" style="align-items:center;gap:24px;flex-wrap:wrap">
@@ -1224,6 +1277,7 @@
             loadAlarms();
             loadDevices();
             loadEscalation();
+            loadEscalationLive().catch(() => {});
             loadCluster();
             loadAlertEmail();
             loadStats();
@@ -1246,6 +1300,123 @@
             } catch (e) {}
         }
 
+        // ── INV-136 : schema d'escalade temps reel ──────────────────────
+        function escHtml(v) {
+            return String(v ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+        }
+        const hhmm = d => d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+        // Compte a rebours mis a jour chaque seconde par tickEscalationLive()
+        const countdown = (deadline, start) => `<span data-deadline="${deadline}"${start ? ` data-start="${start}"` : ''}></span>`;
+        const progress = (deadline, start) => `<div class="esc-bar"><i data-deadline="${deadline}" data-start="${start}" style="width:0"></i></div>`;
+        const stage = (name, status, title, body) =>
+            `<div class="esc-stage" data-stage="${name}" data-status="${status}"><b>${title}</b>${body}</div>`;
+        const SMS_LABELS = { pending: 'en attente', sent: 'envoyé', failed: 'en échec', scheduled: 'programmé' };
+        const CALL_RESULTS = {
+            ack_dtmf: ['ok', 'Acquitté par appel (touche 1)'], ack_sms: ['ok', 'Acquitté par SMS'],
+            no_answer: ['ko', 'Pas de réponse'], busy: ['ko', 'Occupé'], error: ['ko', 'Appel en échec'],
+            escalate: ['warn', 'Touche 2 : escalade demandée'], pending: ['doing', 'Appel en cours…'],
+        };
+
+        async function loadEscalationLive() {
+            renderEscalationLive(await api('/api/alarms/active/escalation'));
+        }
+
+        function renderEscalationLive(d) {
+            const a = d.alarm, steps = d.steps, n = steps.length;
+            const running = !!a && a.status !== 'acknowledged';
+            const card = document.getElementById('escalationLive');
+            card.dataset.state = !a ? 'none' : running ? 'active' : 'acknowledged';
+            document.getElementById('escLivePill').textContent =
+                !a ? 'Aucune alarme' : running ? `ALARME ACTIVE · ${a.title}` : 'ACQUITTÉE';
+            document.getElementById('escLiveMeta').textContent = !a ? '' :
+                `#${a.id} · déclenchée à ${hhmm(parseUtc(a.original_created_at))} · ${a.escalation_count} escalade(s)`;
+
+            const banners = [];
+            if (!n) banners.push(['warn', "Chaîne d'escalade vide : personne ne sera appelé."]);
+            if (a && !running) banners.push(['ok',
+                `Acquittée par <b>${escHtml(a.acknowledged_by_name)}</b> à ${hhmm(parseUtc(a.acknowledged_at))}. ` +
+                `Si elle n'est pas résolue, l'escalade reprend dans ${countdown(a.suspended_until)}.`]);
+            if (a && a.ack_expired) banners.push(['warn',
+                `Acquittement de <b>${escHtml(a.acknowledged_by_name)}</b> expiré sans résolution : l'escalade a repris.`]);
+            if (running && n && a.escalation_count >= n) banners.push(['warn',
+                `Toute la chaîne a été notifiée : tour ${Math.floor(a.escalation_count / n) + 1}, retour en position 1.`]);
+            document.getElementById('escLiveBanner').innerHTML =
+                banners.map(([cls, html]) => `<div class="esc-banner ${cls}">${html}</div>`).join('');
+
+            const ci = steps.findIndex(s => s.role === 'current');
+            const nextAt = d.next_escalation_at && parseUtc(d.next_escalation_at);
+            const delayMs = d.escalation_delay_minutes * 60000;
+            const lanes = steps.map((s, i) => {
+                // Heure prevue de notification pour ceux qui n'ont pas encore ete notifies
+                let eta = null;
+                if (running && ci >= 0 && nextAt && s.role === 'upcoming') {
+                    eta = new Date(nextAt.getTime() + (((i - ci + n) % n) - 1) * delayMs);
+                }
+                const notified = !!s.notified_at;
+                const scheduled = s.sms === 'scheduled' || s.call === 'scheduled';
+
+                const notif = notified
+                    ? stage('notif', 'ok', 'Notification', `Push envoyé à ${hhmm(parseUtc(s.notified_at))}`)
+                    : stage('notif', 'todo', 'Notification', eta ? `Prévue vers ${hhmm(eta)}` : 'À venir');
+
+                const wait = !notified ? stage('wait', 'todo', 'Attente', `${d.sms_call_delay_minutes} min`)
+                    : scheduled && running ? stage('wait', 'doing', 'Attente',
+                        `SMS + appel dans ${countdown(s.contact_at)}${progress(s.contact_at, s.notified_at)}`)
+                    : scheduled ? stage('wait', 'todo', 'Attente', 'Annulé (acquittée)')
+                    : stage('wait', 'ok', 'Attente', 'Écoulée');
+
+                let contact;
+                if (!notified || scheduled) contact = stage('contact', 'todo', 'SMS + appel', s.has_phone ? 'À venir' : 'Pas de numéro !');
+                else if (s.sms === 'no_phone') contact = stage('contact', 'ko', 'SMS + appel', 'Pas de numéro de téléphone');
+                else {
+                    const st = s.sms === 'failed' ? 'ko' : (s.sms === 'pending' || s.call === 'pending') ? 'doing' : 'ok';
+                    contact = stage('contact', st, 'SMS + appel',
+                        `SMS ${SMS_LABELS[s.sms] || s.sms}<br>Appel ${s.call === 'pending' ? 'en cours' : 'passé'}`);
+                }
+
+                const [rs, rl] = s.acked ? ['ok', 'Acquitté ✓'] : CALL_RESULTS[s.call] || ['todo', '—'];
+                const result = stage('result', rs, 'Réponse', rl);
+
+                const nextName = n ? escHtml(steps[(i + 1) % n].name) : '';
+                let escal;
+                if (s.acked) escal = stage('escalate', 'ok', 'Suite', 'Escalade suspendue');
+                else if (s.role === 'current' && running) escal = stage('escalate', 'doing', `Vers ${nextName}`,
+                    `dans ${countdown(d.next_escalation_at)}${progress(d.next_escalation_at, a.created_at)}`);
+                else if (s.role === 'notified') escal = stage('escalate', 'warn', 'Suite', `Escaladé (sonne toujours)`);
+                else if (s.role === 'current') escal = stage('escalate', 'todo', 'Suite', 'Suspendue');
+                else escal = stage('escalate', 'todo', 'Suite', `${d.escalation_delay_minutes} min`);
+
+                const linkCls = notified ? (running && s.role === 'current' ? 'flow' : 'done') : '';
+                const link = `<div class="esc-link ${linkCls}"></div>`;
+                const who = `<div class="esc-who"><div class="esc-pos">${s.position}</div><div>
+                    <div class="esc-name">${escHtml(s.name)}</div>
+                    <div class="esc-sub"><span class="status-dot ${s.is_online ? 'online' : 'offline'}"></span>${s.is_online ? 'en ligne' : 'hors ligne'}${s.role === 'current' && running ? ' · <b style="color:#60a5fa">à joindre</b>' : ''}</div>
+                    </div></div>`;
+                const lane = `<div class="esc-lane${s.acked ? ' acked' : ''}" data-user="${s.user_id}" data-role="${s.role}">` +
+                    who + [notif, wait, contact, result, escal].join(link) + `</div>`;
+                const down = i < n - 1 ? `<div class="esc-down${running && s.role === 'current' ? ' flow' : ''}">↓ escalade après ${d.escalation_delay_minutes} min sans acquittement</div>` : '';
+                return lane + down;
+            });
+            document.getElementById('escLiveLanes').innerHTML = lanes.join('');
+            tickEscalationLive();
+        }
+
+        function tickEscalationLive() {
+            const now = Date.now();
+            document.querySelectorAll('#escalationLive [data-deadline]').forEach(el => {
+                const end = parseUtc(el.dataset.deadline).getTime();
+                if (el.tagName === 'I') {
+                    const start = parseUtc(el.dataset.start).getTime();
+                    el.style.width = Math.max(0, Math.min(100, (now - start) / (end - start) * 100)) + '%';
+                } else {
+                    const left = Math.max(0, Math.round((end - now) / 1000));
+                    el.textContent = left ? `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}` : 'quelques secondes';
+                }
+            });
+        }
+        // shortcut: compte a rebours sur l'horloge du navigateur, faux si /api/test/advance-clock est utilise (tests seulement)
+        setInterval(tickEscalationLive, 1000);
+
         // ── Live : WebSocket /api/ws remplace l'autorefresh 5s ───────────
         // Le serveur surveille ces GET et ne notifie que ceux dont la reponse
         // a change -> seuls les panneaux concernes se rechargent.
@@ -1253,6 +1424,7 @@
             '/api/alarms/?days=90': [loadStatus, loadAlarms, loadStats],
             '/api/users/': [loadUsers, loadDevices, loadStatus],
             '/api/config/escalation': [loadEscalation, loadStatus],
+            '/api/alarms/active/escalation': [loadEscalationLive],
             '/api/config/escalation-delay': [loadEscalation],
             '/api/config/system': [loadAlertEmail],
             '/api/cluster': [loadCluster],
