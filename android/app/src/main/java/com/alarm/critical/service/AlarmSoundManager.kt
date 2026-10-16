@@ -6,11 +6,16 @@ import android.media.AudioManager
 import android.media.MediaPlayer
 import android.media.RingtoneManager
 import android.os.Build
+import android.os.PowerManager
 
 class AlarmSoundManager(private val context: Context) {
-    private var mediaPlayer: MediaPlayer? = null
+    companion object {
+        // Un seul lecteur pour toute l'app : le service sonne app fermee, les ecrans
+        // reutilisent le meme son, et un ack depuis un ecran le coupe partout.
+        private var mediaPlayer: MediaPlayer? = null
+    }
 
-    fun startAlarmSound() {
+    fun startAlarmSound(): Unit = synchronized(Companion) {
         if (mediaPlayer?.isPlaying == true) return
 
         try {
@@ -20,6 +25,8 @@ class AlarmSoundManager(private val context: Context) {
 
             mediaPlayer = MediaPlayer().apply {
                 setDataSource(context, alarmUri)
+                // Garde le CPU eveille pendant la lecture, telephone en veille
+                setWakeMode(context.applicationContext, PowerManager.PARTIAL_WAKE_LOCK)
                 setAudioAttributes(
                     AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_ALARM)
@@ -39,7 +46,7 @@ class AlarmSoundManager(private val context: Context) {
         }
     }
 
-    fun stopAlarmSound() {
+    fun stopAlarmSound(): Unit = synchronized(Companion) {
         mediaPlayer?.let {
             if (it.isPlaying) {
                 it.stop()

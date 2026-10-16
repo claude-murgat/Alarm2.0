@@ -158,6 +158,11 @@ class AlarmPollingService : Service() {
         var alarmActivityLaunchedForId: Int = -1
     }
 
+    private val soundManager by lazy { AlarmSoundManager(applicationContext) }
+    // Vrai si c'est le service qui a lance le son : on ne coupe pas une sonnerie
+    // "connexion perdue" lancee par le dashboard sur le meme lecteur.
+    private var serviceRinging = false
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun acquireKeepAwakeLocks() {
@@ -284,6 +289,15 @@ class AlarmPollingService : Service() {
                         val alarms = response.body() ?: emptyList()
                         activeAlarmCount = alarms.size
                         currentAlarm = withAckGrace(alarms.firstOrNull())
+                        // Sonnerie portee par le service : sans ca, app fermee + ecran
+                        // verrouille, seul l'ecran AlarmActivity sonnait (lance a l'ouverture).
+                        val shouldRing = currentAlarm?.let { it.status != "acknowledged" } == true
+                        if (shouldRing) {
+                            soundManager.startAlarmSound()
+                        } else if (serviceRinging) {
+                            soundManager.stopAlarmSound()
+                        }
+                        serviceRinging = shouldRing
                         // shortcut: rafraichi seulement quand le polling tourne (astreinte ou alarme
                         // en cours) ; un utilisateur en veille voit l'icone "inconnu".
                         // Erreur HTTP ou reseau -> null ("inconnu") : jamais d'etat perime affiche vert.
@@ -632,6 +646,7 @@ class AlarmPollingService : Service() {
 
     override fun onDestroy() {
         isRunning = false
+        if (serviceRinging) soundManager.stopAlarmSound()
         wakeLock?.takeIf { it.isHeld }?.release()
         wifiLock?.takeIf { it.isHeld }?.release()
         pollingJob?.cancel()

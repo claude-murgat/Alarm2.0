@@ -259,6 +259,22 @@ class DashboardActivity : AppCompatActivity() {
         super.onResume()
         syncOncallFromChain()
         askBatteryOptimizationExemptionOnce()
+        askFullScreenIntentPermissionOnce()
+    }
+
+    /** Android 14+ : sans cette autorisation, l'ecran d'alarme n'apparait pas sur l'ecran verrouille (simple notif). */
+    private fun askFullScreenIntentPermissionOnce() {
+        if (android.os.Build.VERSION.SDK_INT < 34) return
+        val prefs = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
+        val nm = getSystemService(android.app.NotificationManager::class.java)
+        if (prefs.getBoolean("fsi_permission_asked", false) || nm.canUseFullScreenIntent()) return
+        prefs.edit().putBoolean("fsi_permission_asked", true).apply()
+        try {
+            startActivity(Intent(android.provider.Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
+                android.net.Uri.parse("package:$packageName")))
+        } catch (e: Exception) {
+            Log.w("Dashboard", "Reglage plein ecran indisponible : ${e.message}")
+        }
     }
 
     /**
