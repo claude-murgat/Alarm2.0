@@ -408,6 +408,22 @@ L'UI web ouvre `/api/ws` et envoie `{token, paths}`. Le nœud rejoue ces GET en 
 - **Pourquoi** : l'autorefresh 5 s rechargeait tout (dont le graphe des stats) en permanence et, backend en 503, inondait la console de ~10 erreurs toutes les 5 s. Pas de bus inter-nœuds : chaque nœud lit sa propre DB, donc ça marche aussi sur un replica.
 - **Couverture** : `tests/test_live_ws.py` (notif initiale, silence sans changement, notif après changement, 4401, paths hors `/api/` ignorés).
 
+### INV-136 [M] ✅ Web : schéma d'escalade en temps réel de l'alarme courante (onglet Escalade)
+`GET /api/alarms/active/escalation` (tout utilisateur connecté) décrit l'escalade de l'alarme non résolue en cours :
+- `alarm` : `null` sans alarme, sinon `{id, title, status, assigned_user_id, escalation_count, original_created_at, created_at, acknowledged_by, acknowledged_by_name, acknowledged_at, suspended_until, ack_expired}`. `ack_expired` = alarme redevenue `active`/`escalated` alors qu'elle avait été acquittée (acquittement oublié, INV-016).
+- `escalation_delay_minutes`, `sms_call_delay_minutes`, `next_escalation_at` (= `created_at + escalation_delay`, `null` si l'alarme est acquittée).
+- `steps` : une entrée par position de la chaîne, dans l'ordre : `{position, user_id, name, has_phone, is_online, role, notified_at, contact_at, sms, call, acked}`.
+  - `role` : `current` (l'utilisateur assigné, celui qu'on cherche à joindre), `notified` (déjà notifié, sonne toujours, INV-012), `upcoming` (pas encore notifié).
+  - `contact_at` = `notified_at + sms_call_delay` (moment du SMS + appel, INV-060).
+  - `sms` : `none` (pas notifié), `no_phone`, `scheduled` (délai pas encore atteint), `pending`, `sent`, `failed` (≥ 3 essais).
+  - `call` : `none`, `no_phone`, `scheduled`, `pending`, ou le résultat gateway (`ack_dtmf`, `ack_sms`, `no_answer`, `busy`, `error`, `escalate`).
+  - `acked` : c'est cet utilisateur qui a acquitté.
+- La réponse ne contient **aucun champ qui change sans événement** (pas de « secondes restantes ») : le WebSocket INV-135 ne notifie que sur un vrai changement, les comptes à rebours sont calculés par le navigateur.
+
+Le web affiche `#escalationLive` en tête de l'onglet Escalade (`data-state` = `none` | `active` | `acknowledged`). Une ligne par utilisateur (`.esc-lane`, `data-user`, `data-role`), chacune avec les étapes Notification → attente SMS/appel → SMS + appel → résultat → escalade au suivant (`.esc-stage`, `data-stage`, `data-status` = `todo` | `doing` | `ok` | `ko`). Couleurs : gris à venir, bleu pulsé en cours, vert acquitté/OK, rouge échec, orange acquittement expiré ou escalade. Comptes à rebours vers le SMS/appel et vers l'escalade suivante. Mise à jour en temps réel via `/api/ws`.
+- **Pourquoi** : demande du propriétaire du 2026-10-16. Pendant une alarme, voir d'un coup d'œil qui est censé être joint, à quelle étape on en est, et ce qui a échoué (appel sans réponse, acquittement oublié), sans fouiller le journal.
+- **Couverture** : E2E `tests/test_escalation_live.py` ; Playwright `test_frontend.py::TestEscalationLiveDiagram`.
+
 ### INV-124 [H] ✅ Corps du SMS d'alarme : instruction d'acquittement + lien supervision
 Le corps du SMS d'alarme métier (escalade, `_enqueue_sms_for_user`) doit (a) instruire
 l'opérateur d'acquitter en **répondant `1`** au SMS, et (b) contenir le **lien de supervision
