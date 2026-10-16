@@ -57,16 +57,32 @@ echo
 #   - sans --splits / --group : on veut l'integralite des durees en un seul run
 #   - avec --store-durations : ecrit .test_durations a la racine du repo
 #   - sans --junitxml : pas besoin pour ce one-shot
-pytest tests/ \
-    --ignore=tests/unit \
-    --ignore=tests/integration \
-    --ignore=tests/test_frontend.py \
-    --ignore=tests/test_failback.py \
-    --ignore=tests/test_manual_multi_emulator.py \
-    --ignore=tests/test_dtmf_decoder.py \
-    --skip-failover \
-    -p no:randomly \
-    --store-durations
+TIER3_ARGS=(
+    tests/
+    --ignore=tests/unit
+    --ignore=tests/integration
+    --ignore=tests/prod_config
+    --ignore=tests/test_frontend.py
+    --ignore=tests/test_failback.py
+    --ignore=tests/test_manual_multi_emulator.py
+    --ignore=tests/test_dtmf_decoder.py
+    --skip-failover
+    -p no:randomly
+)
+# Un echec (ex. test dependant de l'env Docker du CI) n'empeche pas d'ecrire les durees.
+pytest "${TIER3_ARGS[@]}" --store-durations || echo "[regen-durations] pytest en echec, durees ecrites quand meme"
+
+# --store-durations fusionne avec l'ancien fichier : les tests supprimes y restent
+# et faussent la repartition (4 tests INV-050 fantomes a ~90 s chacun en 2026-10).
+pytest "${TIER3_ARGS[@]}" --collect-only -q 2>/dev/null | grep '::' > /tmp/tier3-collected.txt
+python - <<'PY'
+import json
+ids = set(open("/tmp/tier3-collected.txt").read().split())
+d = json.load(open(".test_durations"))
+kept = {k: v for k, v in sorted(d.items()) if k in ids}
+json.dump(kept, open(".test_durations", "w"), indent=4)
+print(f"[regen-durations] {len(d) - len(kept)} entree(s) de tests disparus retiree(s)")
+PY
 
 echo
 echo "[regen-durations] OK : .test_durations a la racine du repo."
