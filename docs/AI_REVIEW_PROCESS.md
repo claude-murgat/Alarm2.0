@@ -35,10 +35,12 @@ Ce process couvre **3 types de PRs** à reviewer. Adapter selon le type :
     - `pull_request_target.opened/synchronize/reopened` (auteur bot) → review auto à chaque push du bot
     - `pull_request_target.labeled` avec label `ai:review` → review d'une PR humaine (sessions Claude interactives)
     - `workflow_dispatch` manuel pour les cas exceptionnels
-    - `check_run.completed` → re-tente quand la CI repasse verte après un fail
-    
-    Lance le triplet Claude headless, parse le verdict JSON, pose `ai:approved` / poste `/ai-retry` / pose `ai:abandoned`. Sort Mathieu du goulot review pour les PR bot ; permet le triplet sur PR humaine via simple pose de label. Veto humain : retirer `ai:approved` avant le merge auto.
+    - `workflow_run.completed` des workflows `CI` et `CD Install Smoke` → lance la review dès que la CI d'une PR est verte (une PR labelée pendant que la CI tourne est reviewée à la fin de la CI). Remplace `check_run.completed`, qui ne se déclenchait jamais : GitHub ne déclenche pas de workflow sur les check runs créés par Actions.
+
+    Lance Claude headless (**Sonnet 5.5** depuis 2026-10-16, Opus 4.7 avant), parse le verdict JSON, pose `ai:approved` / poste `/ai-retry` / pose `ai:abandoned`. Sort Mathieu du goulot review pour les PR bot ; permet le triplet sur PR humaine via simple pose de label. Veto humain : retirer `ai:approved` avant le merge auto.
   - **`ai-bot-replay.yml` (Pipeline 2)** : trigger sur `issues.labeled ai:needs-human` (sauf si `ai:replayed` déjà). Pose `ai:replayed` (anti-boucle), déclenche `ai-bot.yml` pour re-tenter. Si l'issue produit une PR → Pipeline 1 la review automatiquement.
+- **Contexte pré-calculé (2026-10-16)** : le workflow calcule lui-même l'INV, sa criticité, l'entrée du catalogue, le préflight §2.1 (fichiers supprimés, denylist, `mergeStateStatus`), extrait §2.2–§5 de ce document et le diff, puis donne le tout à l'agent (`/tmp/review-context.md`), qui ne relit plus rien. INV absent, hors catalogue ou criticité illisible → `REJECT` direct, sans appel au modèle.
+- **Triplet selon §3.1** : obligatoire sur [C] (effort `high`). En [M]/[L], et en [H] par défaut, review simple (effort `medium`). L'agent bascule en triplet sur [H] en cas de doute légitime, si l'exception sonnerie/alarme remonte l'INV en [C], ou avant tout RETRY/REJECT.
 - Le process documenté ci-dessous (§2–§7) **reste la spec** : les workflows automatisés en sont l'implémentation. Toute évolution du process (calibration, affinements trancheur, anti-patterns) doit être propagée dans le prompt `.github/ai-bot/review-prompt.md`.
 
 #### Comportement adapté PR humaine vs PR bot

@@ -9,7 +9,7 @@
 #   - APPROVE -> pose label `ai:approved` -> ai-merge.yml merge
 #   - RETRY -> poste comment `/ai-retry <texte>` -> ai-bot.yml itere
 #   - REJECT -> pose label `ai:abandoned` + commente la PR
-#   - WAIT_CI -> exit propre, retournera au prochain check_run.completed
+#   - WAIT_CI -> exit propre, retournera a la fin du prochain run CI (workflow_run)
 #
 # Le verdict humain (Mathieu) reste un veto : il peut retirer `ai:approved`
 # avant le merge auto (ai-merge.yml a quelques minutes de delay).
@@ -25,7 +25,12 @@ on:
     # uniquement dans le job dispatch). Les autres types (opened, synchronize,
     # reopened) declenchent automatiquement sur les PR du bot.
     types: [opened, synchronize, reopened, labeled]
-  check_run:
+  # Relance la review quand le CI se termine. `check_run` ne se declenchait
+  # jamais : GitHub ne declenche pas de workflow sur les check runs crees par
+  # Actions -> une PR labelee pendant que le CI tournait n'etait jamais reviewee.
+  # Les 2 workflows qui tournent sur PR : le dernier a finir declenche la review.
+  workflow_run:
+    workflows: ["CI", "CD Install Smoke"]
     types: [completed]
   workflow_dispatch:
     inputs:
@@ -38,7 +43,7 @@ on:
 # cancel-in-progress: false pour ne pas perdre un verdict en cours si un
 # nouveau push arrive.
 concurrency:
-  group: ai-bot-review-pr-${{ github.event.pull_request.number || github.event.check_run.pull_requests[0].number || inputs.pr_number || 'unknown' }}
+  group: ai-bot-review-pr-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || inputs.pr_number || github.event.workflow_run.head_branch || 'unknown' }}
   cancel-in-progress: false
 
 jobs:
@@ -74,17 +79,29 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPO: ${{ github.repository }}
+          WR_EVENT: ${{ github.event.workflow_run.event }}
+          WR_PR: ${{ github.event.workflow_run.pull_requests[0].number }}
+          WR_BRANCH: ${{ github.event.workflow_run.head_branch }}
         run: |
           set -euo pipefail
           case "${{ github.event_name }}" in
             pull_request_target)
               PR="${{ github.event.pull_request.number }}"
               ;;
-            check_run)
-              # check_run peut etre lie a plusieurs PRs (rare) ou aucune (push direct master)
-              PR=$(jq -r '.pull_requests[0].number // empty' <<< '${{ toJson(github.event.check_run) }}')
+            workflow_run)
+              # Run CI sans PR (push master) -> skip. pull_requests peut etre vide
+              # meme pour une PR : repli sur la branche.
+              if [ "$WR_EVENT" != "pull_request" ]; then
+                echo "workflow_run event=${WR_EVENT} (pas une PR) → skip"
+                echo "pr_number=" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              PR="$WR_PR"
               if [ -z "$PR" ]; then
-                echo "check_run sans PR associee → skip"
+                PR=$(gh pr list --repo "$REPO" --head "$WR_BRANCH" --state open --json number -q '.[0].number // empty')
+              fi
+              if [ -z "$PR" ]; then
+                echo "workflow_run sans PR ouverte associee → skip"
                 echo "pr_number=" >> "$GITHUB_OUTPUT"
                 exit 0
               fi
@@ -204,7 +221,7 @@ jobs:
           # interactives type #121) sans necessiter `gh workflow run`.
           # Le bypass se fonde sur la presence courante du label (pas seulement
           # le moment exact de pose) : sinon les re-dispatch declenches par
-          # `check_run.completed` perdent le bypass et tombent dans le check
+          # la fin du CI (`workflow_run`) perdent le bypass et tombent dans le check
           # auteur != bot, alors meme que `ai:review` reste pose sur la PR.
           LABEL_BYPASS=""
           if echo ",${LABELS}," | grep -q ",ai:review,"; then
@@ -252,7 +269,7 @@ jobs:
             exit 0
           fi
           if [ -n "$PENDING_CHECKS" ]; then
-            echo "CI checks pending: ${PENDING_CHECKS} → wait (skip ce run, retournera sur check_run.completed)"
+            echo "CI checks pending: ${PENDING_CHECKS} → wait (skip ce run, retournera a la fin du CI via workflow_run)"
             echo "should_run=false" >> "$GITHUB_OUTPUT"
             echo "reject_reason=ci-pending" >> "$GITHUB_OUTPUT"
             exit 0
@@ -276,7 +293,7 @@ jobs:
   # Job 2 - triplet_review : spawn Claude headless, parse verdict, agir
   # ============================================================================
   triplet_review:
-    name: Triplet review (Opus 4.7)
+    name: AI review (Sonnet 5.5)
     needs: dispatch
     if: needs.dispatch.outputs.should_run == 'true'
     runs-on: ubuntu-latest
@@ -317,7 +334,7 @@ jobs:
           npm install -g @anthropic-ai/claude-code
           claude --version
 
-      - name: Build agent input (PR context + metadata)
+      - name: Build agent input (PR context + preflight + INV, pre-calcules)
         id: build_input
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -327,85 +344,142 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Metadata + diff
+          # Tout ce qui est deterministe est calcule ici, une fois : l'agent (et
+          # ses sous-agents) ne relisent ni le process, ni le catalogue, ni le diff.
           gh pr view "$PR" --repo "$REPO" \
-            --json number,title,body,headRefName,baseRefName,additions,deletions,files \
+            --json number,title,body,headRefName,mergeStateStatus,files \
             > /tmp/pr-full.json
-
           gh pr diff "$PR" --repo "$REPO" > /tmp/pr-diff.patch
 
           TITLE=$(jq -r .title /tmp/pr-full.json)
-          BODY=$(jq -r .body /tmp/pr-full.json)
+          BODY=$(jq -r '.body // ""' /tmp/pr-full.json)
           HEAD=$(jq -r .headRefName /tmp/pr-full.json)
+          MERGE_STATE=$(jq -r .mergeStateStatus /tmp/pr-full.json)
+          jq -r '.files[].path' /tmp/pr-full.json > /tmp/pr-files.txt
 
-          # Diff vs master stat (pour preflight check §2.1 du process)
-          git diff origin/master..HEAD --stat > /tmp/diff-stat.txt
+          # INV cible : titre d'abord, body ensuite (catalogue backend ou Android)
+          INV_ID=$( { grep -oE 'INV-(ANDROID-)?[0-9]+[a-z]?' <<< "$TITLE" || grep -oE 'INV-(ANDROID-)?[0-9]+[a-z]?' <<< "$BODY" || true; } | head -1)
+          INV_ENTRY=""
+          if [ -n "$INV_ID" ]; then
+            for cat in tests/INVARIANTS.md android/INVARIANTS.md; do
+              [ -f "$cat" ] || continue
+              INV_ENTRY=$(awk -v id="$INV_ID" '
+                $0 ~ "^### " id " " { on=1; print; next }
+                on && /^##/ { exit }
+                on { print }' "$cat")
+              [ -n "$INV_ENTRY" ] && break
+            done
+          fi
+          CRIT=$(head -1 <<< "$INV_ENTRY" | grep -oE '\[[CHML]\]' | head -1 | tr -d '[]' || true)
 
-          # Construire le prompt d'entree
-          cat > /tmp/agent-input.md <<EOF
-          # Mission : triplet review automatique sur PR #${PR}
+          # Garde-fous deterministes : verdict direct, sans appeler le modele
+          SHORT_REASON=""
+          if [ -z "$INV_ID" ]; then SHORT_REASON="inv-id-missing"
+          elif [ -z "$INV_ENTRY" ]; then SHORT_REASON="inv-not-in-catalog"
+          elif [ -z "$CRIT" ]; then SHORT_REASON="criticity-unparseable"
+          fi
 
-          Tu es l'agent de review automatique. Process complet dans
-          \`.github/ai-bot/review-prompt.md\` (lis-le en entier).
+          MODE=SIMPLE; EFFORT=medium
+          if [ "$CRIT" = "C" ]; then MODE=TRIPLET; EFFORT=high; fi
 
-          ## Metadonnees PR
+          # Preflight §2.1
+          DELETED=$(git diff --diff-filter=D --name-only origin/master...HEAD || true)
+          DENY_HITS=""
+          if [ "$AUTHOR" = "alarm-murgat-bot[bot]" ] || [ "$AUTHOR" = "alarm-murgat-bot" ]; then
+            while read -r pat; do
+              case "$pat" in ''|'#'*) continue ;; esac
+              DENY_HITS+=$(grep -E "^${pat//./\\.}(/|$)" /tmp/pr-files.txt || true)$'\n'
+            done < .github/ai-bot/denylist.txt
+            DENY_HITS=$(sed '/^$/d' <<< "$DENY_HITS" | sort -u)
+          fi
 
-          - PR_NUMBER : ${PR}
-          - PR_AUTHOR : ${AUTHOR}
-          - PR_TITLE : ${TITLE}
-          - HEAD_BRANCH : ${HEAD}
+          # Grille, anti-patterns, templates /ai-retry (§2.2 a §5 du process)
+          GRID=$(awk '/^### 2\.2 /{on=1} /^## 6\. /{on=0} on' docs/AI_REVIEW_PROCESS.md)
 
-          ## Body PR
+          DIFF_LINES=$(wc -l < /tmp/pr-diff.patch)
+          MAX_DIFF=6000
+          # shortcut: diff tronque au-dela de 6000 lignes, l'agent lit le reste dans /tmp/pr-diff.patch
+          DIFF_NOTE=""
+          [ "$DIFF_LINES" -gt "$MAX_DIFF" ] && DIFF_NOTE="(tronque a ${MAX_DIFF}/${DIFF_LINES} lignes, suite dans /tmp/pr-diff.patch)"
 
-          \`\`\`
-          ${BODY}
-          \`\`\`
+          {
+            echo "# Review automatique — PR #${PR} — mode ${MODE}"
+            echo
+            echo "Contexte pre-calcule par le workflow : ne relis ni le process, ni le catalogue, ni le diff via gh."
+            echo
+            echo "## Metadonnees"
+            echo "- PR_NUMBER : ${PR}"
+            echo "- PR_AUTHOR : ${AUTHOR}"
+            echo "- PR_TITLE : ${TITLE}"
+            echo "- HEAD_BRANCH : ${HEAD}"
+            echo "- INV_ID : ${INV_ID:-absent}"
+            echo "- CRITICITY : ${CRIT:-?}"
+            echo "- MODE : ${MODE}"
+            echo "- CI_STATUS : GREEN (verifie par le job dispatch)"
+            echo
+            echo "## Preflight §2.1 (deja execute)"
+            echo "- mergeStateStatus : ${MERGE_STATE}"
+            echo "- Fichiers supprimes par la PR : ${DELETED:-aucun}"
+            echo "- Intersection denylist (PR bot) : ${DENY_HITS:-aucune}"
+            echo "- Fichiers touches :"
+            sed 's/^/  - /' /tmp/pr-files.txt
+            echo
+            echo "## Entree INV (catalogue)"
+            echo
+            echo "${INV_ENTRY:-(absente)}"
+            echo
+            echo "## Body PR"
+            echo
+            echo '````'
+            echo "$BODY"
+            echo '````'
+            echo
+            echo "## Grille de calibration, anti-patterns, templates /ai-retry (docs/AI_REVIEW_PROCESS.md §2.2-§5)"
+            echo
+            echo "$GRID"
+            echo
+            echo "## Diff complet ${DIFF_NOTE}"
+            echo
+            echo '````diff'
+            head -n "$MAX_DIFF" /tmp/pr-diff.patch
+            echo '````'
+          } > /tmp/review-context.md
 
-          ## Diff vs master (stat)
+          echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
+          echo "effort=${EFFORT}" >> "$GITHUB_OUTPUT"
+          echo "short_reason=${SHORT_REASON}" >> "$GITHUB_OUTPUT"
+          echo "INV=${INV_ID:-?} crit=${CRIT:-?} mode=${MODE} diff=${DIFF_LINES} lignes, contexte=$(wc -c < /tmp/review-context.md) octets"
 
-          \`\`\`
-          $(cat /tmp/diff-stat.txt)
-          \`\`\`
+          if [ -n "$SHORT_REASON" ]; then
+            jq -n --arg r "$SHORT_REASON" --arg inv "${INV_ID:-}" '{
+              decision: "REJECT", inv_id: $inv, criticity: null,
+              summary: ("Garde-fou deterministe : " + $r),
+              retry_comment: null, followup_issues: [],
+              audit_trail: ("Pas de review modele : " + $r)}' > /tmp/short-verdict.json
+            { echo "Verdict deterministe (sans modele) : ${SHORT_REASON}"
+              echo "<TRIPLET_VERDICT_JSON>"; cat /tmp/short-verdict.json; echo "</TRIPLET_VERDICT_JSON>"
+            } > /tmp/agent-summary.md
+          fi
 
-          ## Diff complet
-
-          Acces via : \`gh pr diff ${PR}\` ou lire \`/tmp/pr-diff.patch\`.
-          Tu peux aussi grep les fichiers actuels via Read/Bash, etc.
-
-          ## Instructions
-
-          1. Lis \`.github/ai-bot/review-prompt.md\` integralement.
-          2. Lis \`docs/AI_REVIEW_PROCESS.md\` sections 2, 3, 4.
-          3. Extrais INV_ID du titre PR (regex \`INV-\d+[a-z]?\`). Si absent,
-             cherche dans le body. Si toujours absent, verdict REJECT avec
-             reason \`inv-id-missing\`.
-          4. Lis l'entree INV correspondante dans \`tests/INVARIANTS.md\` pour
-             extraire la criticite [C/H/M/L].
-          5. Execute les 3 phases du triplet (toi + 2 sous-agents avec
-             clause "aucune action").
-          6. Termine par le bloc \`<TRIPLET_VERDICT_JSON>...</TRIPLET_VERDICT_JSON>\`
-             en derniere ligne, JSON valide.
-
-          NE FAIS AUCUN \`gh\` qui modifie l'etat (label, comment, merge).
-          NE FAIS AUCUN \`git\` qui modifie l'etat (commit, push, branch).
-          Tu peux LIRE (\`gh pr view\`, \`gh pr diff\`, \`git diff\`, \`git log\`).
-          Le workflow YAML appellera \`gh\` lui-meme apres avoir parse ton verdict.
-          EOF
-
-          echo "Agent input built ($(wc -l </tmp/agent-input.md) lines)"
-
-      - name: Run Claude Code CLI (triplet review)
+      - name: Run Claude Code CLI (review)
         id: run_claude
+        if: steps.build_input.outputs.short_reason == ''
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # Sous-agents du triplet sur le meme modele que l'agent principal
+          CLAUDE_CODE_SUBAGENT_MODEL: claude-sonnet-5-5
         run: |
           set -eu  # PAS -o pipefail (continuer si claude fail)
 
-          # Live log + persistent file (pattern de ai-bot.yml §agent_fix)
-          claude -p "$(cat /tmp/agent-input.md)" \
+          # Sonnet 5.5 : ~2x moins cher et nettement plus rapide qu'Opus, suffisant
+          # pour une review cadree par la grille. Effort high en [C] (triplet), medium sinon.
+          # Outils d'ecriture/web retires : la review ne fait que lire.
+          claude -p "$(cat /tmp/review-context.md)" \
             --append-system-prompt "$(cat .github/ai-bot/review-prompt.md)" \
-            --model claude-opus-4-7 \
+            --model claude-sonnet-5-5 \
+            --effort "${{ steps.build_input.outputs.effort }}" \
+            --disallowed-tools "Edit Write NotebookEdit WebSearch WebFetch Workflow" \
             --output-format stream-json \
             --verbose \
             --dangerously-skip-permissions \
@@ -727,7 +801,7 @@ jobs:
               gh pr comment "$PR" --repo "$REPO" --body "**Triplet review : PARSE_ERROR**. Le verdict Claude n'a pas pu etre parse. Voir les logs du run ${{ github.run_id }} pour le summary brut. Reprise humaine necessaire."
             fi
           fi
-          # WAIT_CI : pas de commentaire (le workflow re-tournera sur check_run.completed)
+          # WAIT_CI : pas de commentaire (le workflow re-tournera a la fin du CI via workflow_run)
 
       - name: Upload agent output as artifact
         if: always()
