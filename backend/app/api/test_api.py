@@ -259,6 +259,9 @@ def trigger_escalation(db: Session = Depends(get_db)):
                 db.flush()  # Flush pour que la query notified_ids voie le nouvel ajout
             alarm.status = "escalated"
             alarm.escalation_count += 1
+            # Reset timer pour aligner sur la prod (escalation.py:280, calls.py:96)
+            # — sinon next_escalation_at (INV-136) resterait colle a t0.
+            alarm.created_at = clock_now()
             escalated_count += 1
             notified_ids = [
                 n[0] for n in db.query(AlarmNotification.user_id)
