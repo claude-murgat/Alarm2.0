@@ -424,6 +424,15 @@ Le web affiche `#escalationLive` en tête de l'onglet Escalade (`data-state` = `
 - **Pourquoi** : demande du propriétaire du 2026-10-16. Pendant une alarme, voir d'un coup d'œil qui est censé être joint, à quelle étape on en est, et ce qui a échoué (appel sans réponse, acquittement oublié), sans fouiller le journal.
 - **Couverture** : E2E `tests/test_escalation_live.py` ; Playwright `test_frontend.py::TestEscalationLiveDiagram`.
 
+### INV-137 [C] ✅ Secours 4G : aucun client QMI fui, route posée quelle que soit la passerelle opérateur
+`scripts/4g-standby.sh` (déployé en `/opt/alarm/4g-standby.sh`) :
+1. **Chaque client WDS alloué est libéré** : un démarrage raté, une IP absente ou une route refusée libère le CID (`--wds-noop --client-cid`). Une session tombée ou l'arrêt du service la coupe et libère le CID (`--wds-stop-network --client-cid`).
+2. **La route par défaut 4G est posée `onlink`** (adresse en `/32`, interface vidée avant), même quand la passerelle n'est pas dans le même `/30` que l'adresse. Un refus de route est journalisé comme un échec, jamais comme « lien 4G UP ».
+- **Pourquoi** : incident onsite-2 du 2026-10-19.
+  - (1) Depuis le 14/10, la session 4G tombait (38 fois). Chaque reconnexion ratée, toutes les 15 s, allouait un CID jamais libéré (1 356 échecs en 19 h, CID 89 → 124 → …). Le modem a saturé, ne répondait plus en AT, puis il est tombé du bus USB à 01:06 et à 09:28 (récupéré par le watchdog, e-mail « droppé puis récupéré »). Contact sec, SMS, voix et 4G sont restés HS pendant ces fenêtres.
+  - (2) Ensuite, l'opérateur a attribué `10.133.126.63` avec la passerelle `.64` (hors du `/30`). Le noyau a refusé la route (`Nexthop has invalid gateway`) alors que le script annonçait « lien 4G UP » : le secours 4G était inopérant sans alerte.
+- **Couverture** : Unit `tests/unit/test_4g_standby.py` (faux `qmicli`/`ip`). RED sur le script d'origine : 5 CID fuis sur 6, route sans `onlink`.
+
 ### INV-124 [H] ✅ Corps du SMS d'alarme : instruction d'acquittement + lien supervision
 Le corps du SMS d'alarme métier (escalade, `_enqueue_sms_for_user`) doit (a) instruire
 l'opérateur d'acquitter en **répondant `1`** au SMS, et (b) contenir le **lien de supervision
