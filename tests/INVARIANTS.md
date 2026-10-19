@@ -433,6 +433,21 @@ Le web affiche `#escalationLive` en tête de l'onglet Escalade (`data-state` = `
   - (2) Ensuite, l'opérateur a attribué `10.133.126.63` avec la passerelle `.64` (hors du `/30`). Le noyau a refusé la route (`Nexthop has invalid gateway`) alors que le script annonçait « lien 4G UP » : le secours 4G était inopérant sans alerte.
 - **Couverture** : Unit `tests/unit/test_4g_standby.py` (faux `qmicli`/`ip`). RED sur le script d'origine : 5 CID fuis sur 6, route sans `onlink`.
 
+### INV-138 [H] ✅ Onglet Tests en prod : 4 actions réelles, admin, sans rien détruire
+En prod (`/api/test/*` coupé, INV-076), l'onglet Tests propose, **en plus** de « Envoyer une alarme », des actions qui passent par de **vraies routes** réservées aux admins (`403` sinon) et tracées dans l'audit :
+- **Escalader au suivant** — `POST /api/alarms/escalate-now` : chaque alarme `active`/`escalated` passe immédiatement à l'utilisateur suivant de la chaîne (même effet qu'un palier d'escalade : notification, `escalation_count + 1`, timer remis à zéro, FCM aux notifiés). Event `alarm_escalated`.
+- **Me mettre hors ligne (5 min)** — `POST /api/devices/me/go-offline` : **seul l'admin qui clique** passe hors ligne et ses heartbeats sont refusés (`503`) pendant **5 min**. Les autres utilisateurs ne sont pas touchés.
+- **Couper mes heartbeats** — `POST /api/devices/me/heartbeat-pause` : bascule. Tant qu'elle est active (au plus **5 min**, puis fin automatique), les heartbeats de l'admin sont refusés (`503`) ; le watchdog le marque hors ligne au délai habituel. Un second clic rétablit les heartbeats.
+- **Résoudre les alarmes actives** — `POST /api/alarms/{id}/resolve` sur chaque alarme active. **Rien n'est supprimé**, la chaîne d'escalade et la configuration restent intactes.
+En dev/CI, les boutons de simulation `/api/test/*` restent inchangés.
+- **Pourquoi** : PR #219 avait masqué ces boutons en prod (ils appelaient `/api/test/*`). Le propriétaire veut les retrouver en prod (2026-10-19), mais la remise à zéro de test supprime tout l'historique et remplace la chaîne réelle, et les simulations de test touchent tous les utilisateurs. Décision du propriétaire : versions sûres, limitées à son propre compte et bornées dans le temps.
+- **Couverture** : Integration `test_tests_tab_prod_inv138.py` ; Playwright `test_frontend.py::TestTestsTabInProd`.
+
+### INV-139 [M] ✅ Web : chaque action affiche un retour visuel (snackbar succès ou erreur)
+Toute écriture déclenchée depuis le web (POST/PUT/PATCH/DELETE via `api()` : enregistrer, supprimer, envoyer, résoudre, boutons de l'onglet Tests…) affiche une snackbar `#snackbar` en bas de l'écran : **verte** « Action effectuée » si la requête réussit, **rouge** avec le message d'erreur du serveur (`detail`) sinon. Une seule snackbar à la fois (la nouvelle remplace l'ancienne), disparition après 3 s (succès) ou 6 s (erreur), annoncée aux lecteurs d'écran (`role="status"`). Les lectures (GET) n'en affichent pas.
+- **Pourquoi** : demande du propriétaire du 2026-10-19 : après un clic, rien n'indiquait si l'action avait réussi.
+- **Couverture** : Playwright `test_frontend.py::TestActionFeedback`.
+
 ### INV-124 [H] ✅ Corps du SMS d'alarme : instruction d'acquittement + lien supervision
 Le corps du SMS d'alarme métier (escalade, `_enqueue_sms_for_user`) doit (a) instruire
 l'opérateur d'acquitter en **répondant `1`** au SMS, et (b) contenir le **lien de supervision

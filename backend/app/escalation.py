@@ -479,3 +479,45 @@ def _find_next_user(db, escalation_chain, current_position, current_user_id):
         return ec
 
     return None
+
+
+def escalate_active_alarms_now(db: Session, by_user: Optional[int] = None) -> int:
+    """Palier d'escalade immediat pour chaque alarme active/escaladee, sans
+    attendre le delai configure (route de test + bouton admin INV-138).
+    Retourne le nombre d'alarmes escaladees."""
+    chain = db.query(EscalationConfig).order_by(EscalationConfig.position).all()
+    if not chain:
+        return 0
+    escalated = 0
+    for alarm in db.query(Alarm).filter(Alarm.status.in_(["active", "escalated"])).all():
+        current_position = next((ec.position for ec in chain if ec.user_id == alarm.assigned_user_id), -1)
+        next_user = _find_next_user(db, chain, current_position, alarm.assigned_user_id)
+        if not next_user or next_user.user_id == alarm.assigned_user_id:
+            continue
+        prev_user = alarm.assigned_user_id
+        alarm.assigned_user_id = next_user.user_id
+        if not db.query(AlarmNotification).filter(
+            AlarmNotification.alarm_id == alarm.id,
+            AlarmNotification.user_id == next_user.user_id,
+        ).first():
+            # INV-066 : notified_at=clock_now() pour coherence horloge injectable
+            db.add(AlarmNotification(alarm_id=alarm.id, user_id=next_user.user_id, notified_at=clock_now()))
+            db.flush()  # pour que notified_ids voie le nouvel ajout
+        alarm.status = "escalated"
+        alarm.escalation_count += 1
+        # Reset timer comme un palier normal — sinon next_escalation_at (INV-136) reste a t0.
+        alarm.created_at = clock_now()
+        escalated += 1
+        notified_ids = [n[0] for n in db.query(AlarmNotification.user_id)
+                        .filter(AlarmNotification.alarm_id == alarm.id).all()]
+        extra = {"by_user": by_user} if by_user is not None else {}
+        log_event("alarm_escalated", db=db, alarm_id=alarm.id, from_user=prev_user,
+                  to_user=next_user.user_id, notified_user_ids=notified_ids, **extra)
+        for uid in notified_ids:  # FCM a tous les notifies (escalade cumulative)
+            try:
+                send_fcm_to_user(db, uid, alarm.title, alarm.message,
+                                 {"alarm_id": str(alarm.id), "severity": alarm.severity})
+            except Exception:
+                pass
+    db.commit()
+    return escalated

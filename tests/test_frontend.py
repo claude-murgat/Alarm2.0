@@ -165,11 +165,61 @@ class TestTestsTabInProd:
             page.locator("button:has-text('Envoyer une alarme')").click()
         expect(page.locator("#tests")).not_to_contain_text("Test endpoints are disabled")
 
-    def test_simulation_buttons_hidden(self, page: Page, primary_url):
+    def test_prod_buttons_use_real_admin_routes(self, page: Page, primary_url):
+        """INV-138 : les actions reviennent en prod via de vraies routes admin."""
         page = self._prod_dashboard(page, primary_url)
-        for label in ["Escalader au suivant", "Tous les users hors ligne",
-                      "Couper les heartbeats", "Remise a zero"]:
+        # Les 2 actions heartbeat sont interceptees : sinon admin aurait ses
+        # heartbeats refuses 5 min pour les tests suivants (effet couvert en tier 2).
+        page.route("**/api/devices/me/**", lambda route: route.fulfill(
+            json={"status": "ok", "paused": True, "until": "2026-01-01T00:00:00"}))
+        for label, path in [("Escalader au suivant", "/api/alarms/escalate-now"),
+                            ("Me mettre hors ligne", "/api/devices/me/go-offline"),
+                            ("Couper mes heartbeats", "/api/devices/me/heartbeat-pause")]:
+            btn = page.locator(f"#tests button:visible:has-text('{label}')")
+            expect(btn).to_be_visible()
+            with page.expect_request(lambda r, p=path: r.url.endswith(p) and r.method == "POST"):
+                btn.click()
+        expect(page.locator("#testLog")).not_to_contain_text("Erreur")
+
+    def test_prod_resolve_active_alarms(self, page: Page, primary_url):
+        """INV-138 : « Résoudre les alarmes actives » resout sans rien supprimer."""
+        token = requests.post(f"{primary_url}/api/auth/login",
+                              json={"name": "admin", "password": "admin123"}, timeout=5).json()["access_token"]
+        hdr = {"Authorization": f"Bearer {token}"}
+        sent = requests.post(f"{primary_url}/api/alarms/send", headers=hdr, timeout=5, json={
+            "title": "Alarme de test", "message": "INV-138", "severity": "critical", "assigned_user_id": None})
+        assert sent.status_code == 200, sent.text
+        page = self._prod_dashboard(page, primary_url)
+        with page.expect_request(lambda r: r.url.endswith(f"/api/alarms/{sent.json()['id']}/resolve")):
+            page.locator("#tests button:visible:has-text('Résoudre les alarmes actives')").click()
+        expect(page.locator("#testLog")).to_contain_text("résolue", timeout=8000)
+        assert requests.get(f"{primary_url}/api/alarms/active", headers=hdr, timeout=5).json() == []
+        # Rien n'est supprime : l'alarme reste dans l'historique.
+        assert any(a["id"] == sent.json()["id"] for a in
+                   requests.get(f"{primary_url}/api/alarms/", headers=hdr, timeout=5).json())
+
+    def test_dev_simulation_buttons_hidden_in_prod(self, page: Page, primary_url):
+        """Les simulations /api/test/* (dev/CI) restent masquees en prod."""
+        page = self._prod_dashboard(page, primary_url)
+        for label in ["Tous les users hors ligne", "Couper les heartbeats", "Remise a zero"]:
             expect(page.locator(f"button:has-text('{label}')")).to_be_hidden()
+
+
+class TestActionFeedback:
+    """INV-139 : snackbar verte apres une action reussie, rouge avec le message
+    du serveur apres un echec."""
+
+    def test_success_snackbar(self, dashboard: Page):
+        dashboard.locator(".tab:text('Tests')").click()
+        dashboard.locator("#tests button:visible:has-text('Escalader au suivant')").click()
+        expect(dashboard.locator("#snackbar.show.success")).to_contain_text("Action effectuée", timeout=5000)
+
+    def test_error_snackbar_shows_server_message(self, dashboard: Page):
+        dashboard.route("**/api/alarms/escalate-now", lambda route: route.fulfill(
+            status=409, json={"detail": "Refus de test INV-139"}))
+        dashboard.locator(".tab:text('Tests')").click()
+        dashboard.locator("#tests button:visible:has-text('Escalader au suivant')").click()
+        expect(dashboard.locator("#snackbar.show.error")).to_contain_text("Refus de test INV-139", timeout=5000)
 
 
 class TestTimesShownInLocalTime:

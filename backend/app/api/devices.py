@@ -10,7 +10,8 @@ from ..clock import now as clock_now
 from ..database import get_db
 from ..models import ConnectivityEvent, User, DeviceToken
 from ..schemas import UserResponse, FcmTokenRequest, FcmTokenDeleteRequest
-from ..auth import get_current_user, security, SECRET_KEY, ALGORITHM
+from datetime import timedelta
+from ..auth import get_current_user, get_current_admin, security, SECRET_KEY, ALGORITHM
 from ..events import log_event
 from ..leader_election import is_leader
 
@@ -118,6 +119,9 @@ def heartbeat(
         # aucun leader joignable" remonté par _proxy_heartbeat_to_primary.
         raise HTTPException(status_code=503, detail="replica")
 
+    if _my_pause_until(current_user.id):
+        raise HTTPException(status_code=503, detail="Heartbeats coupés depuis l'onglet Tests (INV-138)")
+
     was_offline = not current_user.is_online
     now = clock_now()
     current_user.last_heartbeat = now
@@ -130,6 +134,52 @@ def heartbeat(
     if was_offline:
         log_event("user_online", db=db, user_id=current_user.id, user_name=current_user.name)
     return {"status": "ok", "timestamp": now.isoformat()}
+
+
+# INV-138 : heartbeats de l'admin refuses jusqu'a cette date (boutons de l'onglet Tests).
+# shortcut: en memoire sur le leader (les heartbeats y sont relayes, INV-043) ; une
+# bascule de leader leve la pause plus tot — acceptable pour un test de 5 min max.
+_paused_until: dict = {}
+MY_PAUSE = timedelta(minutes=5)
+
+
+def _my_pause_until(user_id: int):
+    until = _paused_until.get(user_id)
+    if until and clock_now() < until:
+        return until
+    _paused_until.pop(user_id, None)
+    return None
+
+
+@router.post("/me/go-offline")
+def go_offline(
+    current_user: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """INV-138 : l'admin qui clique passe hors ligne, heartbeats refuses 5 min."""
+    now = clock_now()
+    _paused_until[current_user.id] = now + MY_PAUSE
+    if current_user.is_online:
+        db.add(ConnectivityEvent(user_id=current_user.id, event="went_offline", ts=now))  # INV-056
+    current_user.is_online = False
+    db.commit()
+    log_event("test_go_offline", db=db, user_id=current_user.id, user_name=current_user.name)
+    return {"status": "ok", "paused": True, "until": _paused_until[current_user.id].isoformat()}
+
+
+@router.post("/me/heartbeat-pause")
+def toggle_my_heartbeat_pause(
+    current_user: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """INV-138 : bascule — heartbeats de l'admin refuses (au plus 5 min) ou retablis."""
+    if _my_pause_until(current_user.id):
+        _paused_until.pop(current_user.id)
+    else:
+        _paused_until[current_user.id] = clock_now() + MY_PAUSE
+    until = _my_pause_until(current_user.id)
+    log_event("test_heartbeat_pause", db=db, user_id=current_user.id, paused=until is not None)
+    return {"status": "ok", "paused": until is not None, "until": until.isoformat() if until else None}
 
 
 @router.post("/fcm-token")
