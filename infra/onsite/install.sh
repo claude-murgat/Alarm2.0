@@ -38,6 +38,9 @@ for s in 4g-standby.sh:alarm-4g-standby modem-set-rat.py: modem-watchdog.py:alar
 done
 
 # 1b. Deploiement auto (CD) : code gateway depuis l'image + partie hote au commit :stable.
+# Nouvelle logique de sync -> oublier l'image deja traitee pour qu'elle re-compare tout
+# (sinon la copie des voix, ajoutee le 2026-10-19, n'aurait lieu qu'au prochain changement d'image).
+cmp -s "$REPO/scripts/alarm-gateway-sync.sh" /usr/local/bin/alarm-gateway-sync || rm -f /var/lib/alarm/cd/gateway-image-id
 inst "$REPO/scripts/alarm-gateway-sync.sh" /usr/local/bin/alarm-gateway-sync 755
 inst "$REPO/scripts/alarm-host-sync.sh" /usr/local/bin/alarm-host-sync 755
 

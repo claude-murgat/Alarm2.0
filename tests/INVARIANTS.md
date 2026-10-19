@@ -428,12 +428,13 @@ Le web affiche `#escalationLive` en tête de l'onglet Escalade (`data-state` = `
 `scripts/4g-standby.sh` (déployé en `/opt/alarm/4g-standby.sh`) :
 1. **Chaque client WDS alloué est libéré** : un démarrage raté, une IP absente ou une route refusée libère le CID (`--wds-noop --client-cid`). Une session tombée ou l'arrêt du service la coupe et libère le CID (`--wds-stop-network --client-cid`).
 2. **La route par défaut 4G est posée `onlink`** (adresse en `/32`, interface vidée avant), même quand la passerelle n'est pas dans le même `/30` que l'adresse. Un refus de route est journalisé comme un échec, jamais comme « lien 4G UP ».
+3. **Connexion par défaut déjà ouverte** : si l'opérateur refuse `apn=…` avec `multiple-connection-to-same-pdn-not-allowed` (cas après un redémarrage du modem : l'attache LTE a ouvert la connexion par défaut), le CID est libéré et la session est démarrée sur le profil d'attache (`3gpp-profile=1`). Constaté sur alarm-1 le 2026-10-19 : sans ça, la 4G ne remontait jamais après `AT+CFUN=1,1`.
 - **Pourquoi** : incident onsite-2 du 2026-10-19.
   - (1) Depuis le 14/10, la session 4G tombait (38 fois). Chaque reconnexion ratée, toutes les 15 s, allouait un CID jamais libéré (1 356 échecs en 19 h, CID 89 → 124 → …). Le modem a saturé, ne répondait plus en AT, puis il est tombé du bus USB à 01:06 et à 09:28 (récupéré par le watchdog, e-mail « droppé puis récupéré »). Contact sec, SMS, voix et 4G sont restés HS pendant ces fenêtres.
   - (2) Ensuite, l'opérateur a attribué `10.133.126.63` avec la passerelle `.64` (hors du `/30`). Le noyau a refusé la route (`Nexthop has invalid gateway`) alors que le script annonçait « lien 4G UP » : le secours 4G était inopérant sans alerte.
 - **Couverture** : Unit `tests/unit/test_4g_standby.py` (faux `qmicli`/`ip`). RED sur le script d'origine : 5 CID fuis sur 6, route sans `onlink`.
 
-### INV-140 [C] ❌ Secours 4G : bascule automatique quand la box est allumée mais sans internet
+### INV-140 [C] ✅ Secours 4G : bascule automatique quand la box est allumée mais sans internet
 Sur un nœud qui a une route 4G (`dev ww*`, posée par `alarm-4g-standby`, INV-137), `alarm-wan-failover` teste internet **par la box** toutes les **10 s** (`ping -I <interface box>` vers le cloud `51.210.105.102`, `1.1.1.1`, `9.9.9.9` ; un seul succès suffit).
 - **3 échecs consécutifs** par la box **et** la 4G répond → la route par défaut de la box passe en **métrique 500** (derrière la 4G, métrique 300) : tout le trafic sort par la 4G.
 - **3 succès consécutifs** par la box (testée sur son interface même rétrogradée) → la route de la box reprend sa priorité d'origine (métrique 0).
@@ -442,7 +443,7 @@ Sur un nœud qui a une route 4G (`dev ww*`, posée par `alarm-4g-standby`, INV-1
 - **Pourquoi** : la route par défaut vers la box (`192.168.1.1`, statique `onlink`) ne disparaît que si le câble Ethernet du nœud est coupé. Box éteinte ou sans internet, le port reste UP : le trafic continuait vers une box morte et la 4G (métrique 300) ne prenait **jamais** le relais. Constaté le 2026-10-19 en relisant les routes réelles d'onsite-2 ; le smoketest de juin simulait la panne en retirant la route à la main. Demande du propriétaire du 2026-10-19.
 - **Couverture** : Unit `test_wan_failover.py` ; validation matérielle sur alarm-1 (ICMP coupé sur l'interface box → bascule 4G → retour).
 
-### INV-141 [C] ❌ Déploiement auto de la partie hôte (scripts + units `infra/onsite`) au commit promu
+### INV-141 [C] ✅ Déploiement auto de la partie hôte (scripts + units `infra/onsite`) au commit promu
 Sur chaque nœud on-site, `alarm-host-sync.timer` (toutes les 5 min, root) lit le commit promu (label `org.opencontainers.image.revision` de `alarm-backend:stable`, déjà tirée par `alarm-cd-pull`). S'il diffère du dernier appliqué : `/opt/alarm` passe en checkout détaché sur ce commit (en tant que propriétaire du clone), puis `infra/onsite/install.sh --auto` installe les scripts/units qui ont changé et **redémarre les seules units concernées**. Seul un commit passé en CI et promu `:stable` est déployé, comme pour les images.
 - Un clone avec des **modifications locales suivies** n'est jamais écrasé (erreur journalisée, rien n'est fait).
 - `--auto` ne touche **pas** au code gateway (déployé et redémarré par `alarm-gateway-sync` depuis l'image) ; la pile modem n'est activée que là où existe le user `alarm-gateway` (onsite-2).

@@ -36,11 +36,28 @@ SLEEP = ('#!/usr/bin/env bash\nc=$(( $(cat "$H/sl" 2>/dev/null || echo 0) + 1 ))
          '[ $c -ge 9 ] && kill -TERM $PPID\nexit 0\n')
 
 
-@pytest.fixture
-def calls(tmp_path):
+# Apres un redemarrage du modem, l'attache LTE a deja ouvert la connexion par defaut :
+# demarrer avec apn=... est refuse, le profil d'attache (3gpp-profile=1) fonctionne (alarm-1, 2026-10-19).
+QMICLI_SAME_PDN = r"""#!/usr/bin/env bash
+echo "qmicli $*" >> "$H/calls.log"
+n=$(cat "$H/cid" 2>/dev/null || echo 40)
+case "$*" in
+  *--wds-start-network=*3gpp-profile=1*) echo $((n+1)) > "$H/cid"; echo "Packet data handle: '99'"; echo "    CID: '$n'" ;;
+  *--wds-start-network*)
+    echo $((n+1)) > "$H/cid"
+    echo "error: couldn't start network: QMI protocol error (14): 'CallFailed'"
+    echo "verbose call end reason (6,55): [3gpp] multiple-connection-to-same-pdn-not-allowed"
+    echo "    CID: '$n'"; exit 1 ;;
+  *--wds-get-current-settings*) echo "IPv4 address: 10.134.124.148"; echo "IPv4 gateway address: 10.134.124.149" ;;
+  *--wds-get-packet-service-status*) echo "'connected'" ;;
+esac
+"""
+
+
+def _run(tmp_path, qmicli):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for name, body in {"qmicli": QMICLI, "ip": IP, "sleep": SLEEP}.items():
+    for name, body in {"qmicli": qmicli, "ip": IP, "sleep": SLEEP}.items():
         (bin_dir / name).write_text(body)
         (bin_dir / name).chmod(0o755)
     # Pas de vrai modem : on court-circuite l'attente de /dev/cdc-wdm0 et la detection de l'interface
@@ -55,6 +72,21 @@ def calls(tmp_path):
     env = {"H": str(tmp_path), "PATH": f"{bin_dir}:/usr/bin:/bin", "WDM": "/dev/null"}
     subprocess.run(["bash", str(script)], env=env, timeout=30, capture_output=True)
     return (tmp_path / "calls.log").read_text().splitlines()
+
+
+@pytest.fixture
+def calls(tmp_path):
+    return _run(tmp_path, QMICLI)
+
+
+def test_same_pdn_refusal_reuses_attach_profile(tmp_path):
+    calls = _run(tmp_path, QMICLI_SAME_PDN)
+    starts = [l for l in calls if "--wds-start-network=" in l and "disable" not in l]
+    assert any("3gpp-profile=1" in l for l in starts), starts
+    assert any(l.startswith("ip route replace default via 10.134.124.149") and l.endswith(" onlink") for l in calls)
+    allocated = [str(40 + i) for i in range(len(starts))]
+    released = [m.group(1) for l in calls if (m := re.search(r"--client-cid=(\d+)", l))]
+    assert sorted(set(allocated) - set(released)) == [], "client QMI WDS fui"
 
 
 def test_every_allocated_wds_client_is_released(calls):
