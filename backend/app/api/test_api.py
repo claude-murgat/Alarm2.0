@@ -142,6 +142,7 @@ def reset_all(db: Session = Depends(get_db),
     from . import devices as devices_module
     devices_module.heartbeat_paused = False
     devices_module.connection_loss_time_int = None
+    devices_module._paused_until.clear()  # pauses INV-138
 
     # Reset flag de simulation de stall de la boucle d'escalade
     from .. import escalation as esc_module
@@ -210,100 +211,8 @@ def trigger_escalation(db: Session = Depends(get_db)):
     Escalade toutes les alarmes actives vers l'utilisateur suivant dans la chaîne,
     indépendamment du délai configuré. Saute les utilisateurs offline."""
     _require_test_endpoints()
-    from ..models import EscalationConfig
-
-    active_alarms = (
-        db.query(Alarm)
-        .filter(Alarm.status.in_(["active", "escalated"]))
-        .all()
-    )
-
-    escalation_chain = (
-        db.query(EscalationConfig)
-        .order_by(EscalationConfig.position)
-        .all()
-    )
-
-    escalated_count = 0
-    for alarm in active_alarms:
-        if not escalation_chain:
-            continue
-
-        # Trouver la position actuelle dans la chaîne
-        current_position = -1
-        for ec in escalation_chain:
-            if ec.user_id == alarm.assigned_user_id:
-                current_position = ec.position
-                break
-
-        # Trouver l'utilisateur suivant (sans filtre online — FCM reveille)
-        next_user = _find_next_user(
-            db, escalation_chain, current_position, alarm.assigned_user_id
-        )
-
-        if next_user and next_user.user_id != alarm.assigned_user_id:
-            prev_user = alarm.assigned_user_id
-            alarm.assigned_user_id = next_user.user_id
-            # Ajouter le nouvel utilisateur à la table des notifiés
-            existing_notif = (
-                db.query(AlarmNotification)
-                .filter(AlarmNotification.alarm_id == alarm.id,
-                        AlarmNotification.user_id == next_user.user_id)
-                .first()
-            )
-            if not existing_notif:
-                # INV-066 : notified_at=clock_now() pour coherence horloge injectable
-                db.add(AlarmNotification(
-                    alarm_id=alarm.id, user_id=next_user.user_id, notified_at=clock_now()
-                ))
-                db.flush()  # Flush pour que la query notified_ids voie le nouvel ajout
-            alarm.status = "escalated"
-            alarm.escalation_count += 1
-            # Reset timer pour aligner sur la prod (escalation.py:280, calls.py:96)
-            # — sinon next_escalation_at (INV-136) resterait colle a t0.
-            alarm.created_at = clock_now()
-            escalated_count += 1
-            notified_ids = [
-                n[0] for n in db.query(AlarmNotification.user_id)
-                .filter(AlarmNotification.alarm_id == alarm.id).all()
-            ]
-            log_event("alarm_escalated", db=db, alarm_id=alarm.id,
-                      from_user=prev_user, to_user=next_user.user_id,
-                      notified_user_ids=notified_ids)
-
-            # FCM a tous les notifies (cumulative)
-            from ..fcm_service import send_fcm_to_user
-            for uid in notified_ids:
-                try:
-                    send_fcm_to_user(db, uid, alarm.title, alarm.message,
-                                     {"alarm_id": str(alarm.id), "severity": alarm.severity})
-                except Exception:
-                    pass
-
-    db.commit()
-    return {"status": "ok", "escalated": escalated_count}
-
-
-def _find_next_user(db, escalation_chain, current_position, current_user_id):
-    """Find the next user in the escalation chain after current_position.
-    Wraps around if needed. Ne filtre PAS sur is_online — FCM reveille les users."""
-    candidates = []
-    for ec in escalation_chain:
-        if ec.position > current_position:
-            candidates.append(ec)
-    for ec in escalation_chain:
-        if ec.position <= current_position:
-            candidates.append(ec)
-
-    for ec in candidates:
-        if ec.user_id == current_user_id:
-            continue
-        user = db.query(User).filter(User.id == ec.user_id).first()
-        if not user:
-            continue
-        return ec
-
-    return None
+    from ..escalation import escalate_active_alarms_now
+    return {"status": "ok", "escalated": escalate_active_alarms_now(db)}
 
 
 @router.get("/last-email-sent")

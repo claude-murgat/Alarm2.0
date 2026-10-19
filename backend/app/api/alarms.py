@@ -306,6 +306,16 @@ def acknowledge_alarm(
     return _alarm_response(alarm, db)
 
 
+@router.post("/escalate-now")
+def escalate_now(
+    current_user: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """INV-138 : palier d'escalade immediat (bouton de l'onglet Tests, prod comprise)."""
+    from ..escalation import escalate_active_alarms_now
+    return {"status": "ok", "escalated": escalate_active_alarms_now(db, by_user=current_user.id)}
+
+
 @router.post("/{alarm_id}/resolve", response_model=AlarmResponse)
 def resolve_alarm(
     alarm_id: int,

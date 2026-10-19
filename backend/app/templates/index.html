@@ -62,6 +62,12 @@
         .log-entry { padding: 2px 0; border-bottom: 1px solid #1e293b; }
         .log-entry.error { color: #ef4444; }
         .log-entry.success { color: #22c55e; }
+        #snackbar { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%) translateY(20px); max-width: calc(100% - 32px);
+                    padding: 12px 18px; border-radius: 8px; color: white; font-weight: 500; box-shadow: 0 4px 16px rgba(0,0,0,.4);
+                    opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; z-index: 2000; }
+        #snackbar.show { opacity: 1; transform: translateX(-50%); }
+        #snackbar.success { background: #16a34a; }
+        #snackbar.error { background: #dc2626; }
         .log-entry.info { color: #3b82f6; }
         .test-buttons { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
@@ -111,7 +117,7 @@
         @media (prefers-reduced-motion: reduce) { .esc-stage, .esc-pos, .esc-pill, .esc-link { animation: none !important; } }
         /* Prod : routes /api/test/* coupees (INV-076) -> boutons de simulation masques */
         body.prod-mode .test-only { display: none; }
-        body:not(.prod-mode) .prod-note { display: none; }
+        body:not(.prod-mode) .prod-note, body:not(.prod-mode) .prod-only { display: none; }
         /* INV-129 : signal 4G du modem gateway (4 barres, animees) */
         .modem-signal { display: inline-flex; align-items: flex-end; gap: 2px; height: 20px; cursor: help; }
         .modem-signal i { width: 5px; border-radius: 1px; background: #475569; transition: background 0.4s; }
@@ -373,14 +379,19 @@
                 <h3>Contrôles de test</h3>
                 <div class="test-buttons">
                     <button class="btn-danger" onclick="testSendAlarm()">&#x1F6A8; Envoyer une alarme</button>
-                    <button class="btn-warning test-only" onclick="testTriggerEscalation()">&#x23EB; Escalader au suivant</button>
+                    <button class="btn-warning" onclick="testTriggerEscalation()">&#x23EB; Escalader au suivant</button>
                     <button class="btn-warning test-only" onclick="testWatchdog()">&#x23F1; Tous les users hors ligne</button>
                     <button class="btn-warning test-only" id="btnHeartbeatPause" onclick="toggleHeartbeatPause()">&#x1F4E1; Couper les heartbeats</button>
                     <button class="btn-success test-only" onclick="testReset()">&#x1F504; Remise a zero</button>
+                    <!-- INV-138 : equivalents prod, limites a mon compte et sans suppression -->
+                    <button class="btn-warning prod-only" onclick="prodGoOffline()">&#x23F1; Me mettre hors ligne (5 min)</button>
+                    <button class="btn-warning prod-only" id="btnMyHeartbeatPause" onclick="prodToggleMyHeartbeats()">&#x1F4E1; Couper mes heartbeats</button>
+                    <button class="btn-success prod-only" onclick="prodResolveActive()">&#x2705; Résoudre les alarmes actives</button>
                 </div>
                 <p class="prod-note" style="color:#94a3b8;font-size:0.85rem;margin-top:10px">
                     Production : « Envoyer une alarme » déclenche une vraie alarme (escalade, SMS et appels compris).
-                    Les simulations sont désactivées ; résolvez l'alarme depuis l'onglet Alarmes après le test.
+                    « Hors ligne » et « Couper mes heartbeats » ne concernent que votre compte et s'arrêtent seuls au bout de 5 min.
+                    « Résoudre les alarmes actives » ne supprime rien.
                 </p>
             </div>
             <div class="card">
@@ -471,6 +482,8 @@
             </div>
         </div>
     </div>
+
+    <div id="snackbar" role="status" aria-live="polite"></div>
 
     <script>
         let API = '';           // URL de base pour les lectures (ce backend)
@@ -564,7 +577,28 @@
             });
         });
 
+        // Retour visuel apres chaque action (ecriture) : snackbar succes ou erreur.
         async function api(path, opts = {}) {
+            const isWrite = opts.method && opts.method !== 'GET';
+            try {
+                const r = await apiCall(path, opts);
+                if (isWrite) snack('Action effectuée', 'success');
+                return r;
+            } catch (e) {
+                if (isWrite) snack(e.message, 'error');
+                throw e;
+            }
+        }
+
+        function snack(msg, type) {
+            const el = document.getElementById('snackbar');
+            el.textContent = (type === 'error' ? '✖ ' : '✔ ') + msg;
+            el.className = `show ${type}`;
+            clearTimeout(snack.timer);
+            snack.timer = setTimeout(() => { el.className = type; }, type === 'error' ? 6000 : 3000);
+        }
+
+        async function apiCall(path, opts = {}) {
             if (!authToken) { doLogout(); throw new Error('Non authentifie'); }
             // Les ecritures (POST/PUT/DELETE) vont au primary
             const isWrite = opts.method && opts.method !== 'GET';
@@ -1051,8 +1085,39 @@
         async function testTriggerEscalation() {
             log('Escalade forcee...', 'info');
             try {
-                const r = await api('/api/test/trigger-escalation', { method: 'POST' });
+                // Vraie route admin (INV-138), aussi en prod.
+                const r = await api('/api/alarms/escalate-now', { method: 'POST' });
                 log(`Escalade : ${r.escalated} alarme(s) escaladee(s)`, r.escalated > 0 ? 'success' : 'warning');
+                loadAll();
+            } catch (e) { log(`Erreur : ${e.message}`, 'error'); }
+        }
+
+        async function prodGoOffline() {
+            log('Mise hors ligne de mon compte...', 'info');
+            try {
+                const r = await api('/api/devices/me/go-offline', { method: 'POST' });
+                log(`Vous êtes hors ligne, heartbeats refusés jusqu'à ${parseUtc(r.until).toLocaleTimeString('fr-FR')}`, 'success');
+                loadAll();
+            } catch (e) { log(`Erreur : ${e.message}`, 'error'); }
+        }
+
+        async function prodToggleMyHeartbeats() {
+            try {
+                const r = await api('/api/devices/me/heartbeat-pause', { method: 'POST' });
+                document.getElementById('btnMyHeartbeatPause').textContent =
+                    r.paused ? '⏸️ Rétablir mes heartbeats' : '📡 Couper mes heartbeats';
+                log(r.paused ? `Vos heartbeats sont refusés jusqu'à ${parseUtc(r.until).toLocaleTimeString('fr-FR')} (fin automatique)`
+                             : 'Vos heartbeats sont rétablis', r.paused ? 'info' : 'success');
+                loadAll();
+            } catch (e) { log(`Erreur : ${e.message}`, 'error'); }
+        }
+
+        async function prodResolveActive() {
+            log('Résolution des alarmes actives...', 'info');
+            try {
+                const active = await api('/api/alarms/active');
+                for (const a of active) await api(`/api/alarms/${a.id}/resolve`, { method: 'POST' });
+                log(`${active.length} alarme(s) résolue(s)`, active.length ? 'success' : 'warning');
                 loadAll();
             } catch (e) { log(`Erreur : ${e.message}`, 'error'); }
         }
