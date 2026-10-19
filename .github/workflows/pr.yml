@@ -385,6 +385,22 @@ jobs:
       - name: Wait for cluster ready
         run: ./scripts/ci-wait-cluster.sh "$PROJECT" 180
 
+      - name: Fast escalation tick (INV-084, 1 s au lieu de 10 s)
+        # Les tests attendent la boucle d'escalade via tests/_timing.py, cale sur
+        # cette valeur : ~2,5 s par tick attendu au lieu de 12 s. Le reset de test
+        # ne la touche pas. La boucle, peut-etre en plein sleep(10), l'adopte au
+        # tick suivant : on attend qu'elle ait pu le faire avant de lancer pytest.
+        run: |
+          set -euo pipefail
+          TOKEN=$(curl -sf -X POST "$BACKEND_URL/api/auth/login" -H 'Content-Type: application/json' \
+            -d '{"name":"admin","password":"admin123"}' \
+            | python -c "import json,sys; print(json.load(sys.stdin)['access_token'])")
+          curl -sf -X POST "$BACKEND_URL/api/config/system" -H "Authorization: Bearer $TOKEN" \
+            -H 'Content-Type: application/json' -d '{"key":"escalation_tick_seconds","value":"1"}'
+          curl -sf "$BACKEND_URL/api/config/system" \
+            | python -c "import json,sys; assert json.load(sys.stdin)['escalation_tick_seconds'] == '1'"
+          sleep 11
+
       - name: Run tier 3 (e2e tests, split ${{ matrix.worker }}/2)
         # Iteration 2 : reintegration de tous les fichiers tier 3 + matrix worker 2 actif.
         # Tests cibles : test_e2e (119) + test_improvements (28) + test_user_modes (5)

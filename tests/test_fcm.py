@@ -12,6 +12,7 @@ import os
 import time
 import requests
 import pytest
+from _timing import wait_escalation_ticks
 
 _ALL_BACKEND_URLS = ["http://localhost:8000", "http://localhost:8001", "http://localhost:8002"]
 
@@ -344,7 +345,7 @@ class TestEscalationWithFcm:
         _advance_clock_all_nodes(3)
         requests.post(f"{API}/devices/heartbeat", headers=self.headers1)
         requests.post(f"{API}/devices/heartbeat", headers=self.headers2)
-        time.sleep(12)
+        wait_escalation_ticks()
 
         # L'alarme NE DOIT PAS etre escaladee (delai uniforme INV-011)
         alarms = requests.get(f"{API}/alarms/", headers=self.admin_headers).json()
@@ -367,7 +368,7 @@ class TestEscalationWithFcm:
         _advance_clock_all_nodes(5)
         requests.post(f"{API}/devices/heartbeat", headers=self.headers1)
         requests.post(f"{API}/devices/heartbeat", headers=self.headers2)
-        time.sleep(12)
+        wait_escalation_ticks()
 
         # L'alarme ne doit PAS etre escaladee (delai uniforme 15 min)
         alarms = requests.get(f"{API}/alarms/", headers=self.admin_headers).json()

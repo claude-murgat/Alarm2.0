@@ -14,6 +14,7 @@ import subprocess
 from pathlib import Path
 import requests
 import pytest
+from _timing import wait_escalation_ticks
 
 # Racine du repo (cwd portable pour subprocess docker compose ...).
 # Remplace les anciens chemins Windows hardcodes qui cassaient en CI Linux.
@@ -416,7 +417,7 @@ class TestAlarmAcknowledgement:
         # Avancer de 31 min (suspension = 30 min)
         _advance_clock_all_nodes(31)
         self._refresh_all_heartbeats()  # Garder les users online après avance horloge
-        time.sleep(12)  # Attendre un tick de la boucle d'escalade
+        wait_escalation_ticks()  # Attendre un tick de la boucle d'escalade
 
         # L'alarme doit être redevenue active (ou escaladée si la boucle a déjà tourné)
         alarm = self._find_alarm_by_title("Expiry Test")
@@ -441,7 +442,7 @@ class TestAlarmAcknowledgement:
         # Avancer de 31 min → réactivation par la boucle d'escalade
         _advance_clock_all_nodes(31)
         self._refresh_all_heartbeats()  # Garder les users online après avance horloge
-        time.sleep(12)
+        wait_escalation_ticks()
 
         # L'alarme doit ne plus être acknowledged (réactivée ou déjà escaladée)
         alarm = self._find_alarm_by_title("Ack+Esc Test")
@@ -657,7 +658,7 @@ class TestEscalationWithClock:
         _advance_clock_all_nodes(13)
         self._refresh_all_heartbeats()  # Keep users online after clock advance
 
-        time.sleep(11)  # Attendre un tick de la boucle d'escalade (10s)
+        wait_escalation_ticks()  # Attendre un tick de la boucle d'escalade
 
         alarm = self._find_alarm_by_title("Timing no-esc")
         assert alarm is not None, \
@@ -682,7 +683,7 @@ class TestEscalationWithClock:
         _advance_clock_all_nodes(16)
         self._refresh_all_heartbeats()  # Keep users online after clock advance
 
-        time.sleep(11)  # Attendre un tick de la boucle d'escalade
+        wait_escalation_ticks()  # Attendre un tick de la boucle d'escalade
 
         alarm = self._find_alarm_by_title("Timing esc-16")
         assert alarm is not None, \
@@ -706,7 +707,7 @@ class TestEscalationWithClock:
         _advance_clock_all_nodes(15)
         self._refresh_all_heartbeats()  # Keep users online after clock advance
 
-        time.sleep(11)
+        wait_escalation_ticks()
 
         alarm = self._find_alarm_by_title("Boundary-15")
         assert alarm is not None, \
@@ -1352,7 +1353,7 @@ class TestCumulativeEscalation:
         _advance_clock_all_nodes(16)
         requests.post(f"{API}/devices/heartbeat", headers=h1)
         requests.post(f"{API}/devices/heartbeat", headers=h2)
-        time.sleep(11)
+        wait_escalation_ticks()
 
         # user2 doit la voir
         r = requests.get(f"{API}/alarms/mine", headers=h2)
@@ -1374,7 +1375,7 @@ class TestCumulativeEscalation:
 
         # Escalader
         _advance_clock_all_nodes(16)
-        time.sleep(11)
+        wait_escalation_ticks()
 
         # user1 acquitte (même si l'alarme a été escaladée)
         alarms = requests.get(f"{API}/alarms/mine", headers=h1).json()
@@ -1435,7 +1436,7 @@ class TestOnCallDisconnectionAlarm:
         admin_h = _admin_headers()
         requests.post(f"{API}/alarms/reset", headers=admin_h)
         # Attendre un cycle du background task avec l'état propre
-        time.sleep(12)
+        wait_escalation_ticks()
         # Re-nettoyer si le background task a créé quelque chose entre temps
         requests.post(f"{API}/alarms/reset", headers=admin_h)
         yield
@@ -1458,7 +1459,7 @@ class TestOnCallDisconnectionAlarm:
 
         # Avancer 16 min
         _advance_clock_all_nodes(16)
-        time.sleep(11)
+        wait_escalation_ticks()
 
         # Vérifier qu'un email a été envoyé
         r = requests.get(f"{MAILHOG_URL}/api/v2/messages", timeout=5)
@@ -1497,7 +1498,7 @@ class TestSmtpAsyncDoesNotBlockEventLoop:
         admin_h = _admin_headers()
         requests.post(f"{API}/alarms/reset", headers=admin_h)
         # Laisser un tick passer avec l'état propre
-        time.sleep(12)
+        wait_escalation_ticks()
         requests.post(f"{API}/alarms/reset", headers=admin_h)
         yield
         # Cleanup : restaurer SMTP normal et l'horloge AVANT de relâcher
@@ -1765,7 +1766,7 @@ class TestAckedAlarmVisibility:
         c = self._send_and_ack("Ordre C")
         _advance_clock_all_nodes(21)
         requests.post(f"{API}/devices/heartbeat", headers=self.headers1)
-        time.sleep(12)  # un tick de la boucle d'escalade (expiration de l'ack de A)
+        wait_escalation_ticks()  # un tick de la boucle d'escalade (expiration de l'ack de A)
         return a, b, c
 
     def test_mine_unacked_first_then_acked_most_recent_first(self):
@@ -1800,7 +1801,7 @@ class TestSmsAndHealth:
         requests.post(f"{API}/test/reset-sms-queue")
         # Attendre que la boucle d'escalade fasse un tick apres un eventuel
         # simulate-loop-stall du test precedent (test_health_endpoint_returns_503)
-        time.sleep(12)
+        wait_escalation_ticks()
         yield
         _reset_clock_all_nodes()
         requests.post(f"{API}/test/reset-sms-queue")
@@ -1889,7 +1890,7 @@ class TestSmsAndHealth:
         requests.post(f"{API}/devices/heartbeat", headers={"Authorization": f"Bearer {token_admin}"})
         # Attendre 2 ticks de la boucle d'escalade (10s chacun) + marge
         # pour absorber le delai apres simulate-loop-stall du test precedent
-        time.sleep(22)
+        wait_escalation_ticks(2)
 
         r = requests.get(
             f"{BASE_URL}/internal/sms/pending",
@@ -2304,7 +2305,7 @@ class TestRedundancy:
         # peut être n'importe lequel après un failover précédent
         _advance_clock_all_nodes(16)
         _advance_clock_all_nodes(16)
-        time.sleep(12)
+        wait_escalation_ticks()
 
         pending = requests.get(f"{BASE_URL}/internal/sms/pending",
                                headers=GATEWAY_HEADERS).json()
@@ -2750,7 +2751,7 @@ class TestEscalationDelayGlobal:
                           (ADMIN_NAME, ADMIN_PASSWORD)]:
             t = requests.post(f"{API}/auth/login", json={"name": name, "password": pwd}).json()["access_token"]
             requests.post(f"{API}/devices/heartbeat", headers={"Authorization": f"Bearer {t}"})
-        time.sleep(22)  # 2 ticks d'escalade (10s chacun) + marge
+        wait_escalation_ticks(2)  # 2 ticks d'escalade + marge
 
         alarms = requests.get(f"{API}/alarms/", headers=admin_h).json()
         alarm = next(a for a in alarms if a["title"] == "Delay Test")

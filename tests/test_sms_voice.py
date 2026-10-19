@@ -15,6 +15,7 @@ import os
 import time
 import requests
 import pytest
+from _timing import wait_escalation_ticks
 
 _ALL_BACKEND_URLS = ["http://localhost:8000", "http://localhost:8001", "http://localhost:8002"]
 
@@ -57,12 +58,10 @@ USER2_PASSWORD = "user123"
 GATEWAY_KEY = os.getenv("GATEWAY_KEY", "changeme-in-prod")
 GATEWAY_HEADERS = {"X-Gateway-Key": GATEWAY_KEY}
 
-# Boucle d'escalade backend : tick toutes les 10s (cf escalation.py asyncio.sleep(10)).
+# Boucle d'escalade backend : periode `escalation_tick_seconds` (1 s en CI, 10 s par defaut).
 # Pour verifier une PRESENCE (SMS/call enqueued), prefere _wait_for_sms / _wait_for_calls
 # qui pollent sur condition observable (timeout 20s, retour des l'apparition).
-# Pour verifier une ABSENCE, utilise _wait_one_tick() (sleep court 12s = 1 tick + marge).
-# Avant : TICK_WAIT=22s sur 21 sites + sleep(12) au setup ≈ 510s wall-clock par run tier 3.
-TICK_WAIT_BRIEF = 12
+# Pour verifier une ABSENCE, utilise wait_escalation_ticks() (1 tick + marge, cf _timing.py).
 
 
 def _reset_clock_all_nodes():
@@ -80,16 +79,6 @@ def _advance_clock_all_nodes(minutes):
                          params={"minutes": minutes, "peer": "false"}, timeout=2)
         except Exception:
             pass
-
-
-def _wait_one_tick():
-    """Bloque jusqu'a ce qu'un tick complet de la boucle d'escalade ait eu lieu.
-
-    Utilise UNIQUEMENT pour verifier une ABSENCE (pas de SMS, pas de call) ou il
-    n'y a pas de condition observable a poller. Pour une presence, prefere
-    _wait_for_sms / _wait_for_calls (retour des que la condition apparait).
-    """
-    time.sleep(TICK_WAIT_BRIEF)
 
 
 def _wait_for_sms(to_number, timeout=20.0, poll_interval=0.5, min_count=1):
@@ -222,7 +211,7 @@ class TestSmsCallTimer:
         self.admin_id = _get_user_id(ADMIN_NAME)
         _register_phone(self.user1_id, "+33600000001")
         _register_phone(self.user2_id, "+33600000002")
-        time.sleep(12)  # Attendre tick escalation loop
+        wait_escalation_ticks()  # Attendre tick escalation loop
         yield
         _reset_clock_all_nodes()
         requests.post(f"{API}/test/reset-sms-queue")
@@ -235,7 +224,7 @@ class TestSmsCallTimer:
         _refresh_all_heartbeats()
         # Verification d'ABSENCE : on doit attendre au moins 1 tick complet pour
         # garantir que la boucle a vu l'horloge avancee (et choisi de ne RIEN faire).
-        _wait_one_tick()
+        wait_escalation_ticks()
 
         pending = _get_pending_sms()
         sms_for_user1 = [s for s in pending if s["to_number"] == "+33600000001"]
@@ -287,7 +276,7 @@ class TestSmsCallTimer:
         # +3min : pas de SMS (< 5min) — verification d'ABSENCE (sleep necessaire).
         _advance_clock_all_nodes(3)
         _refresh_all_heartbeats()
-        _wait_one_tick()
+        wait_escalation_ticks()
         sms = _get_pending_sms()
         sms_user1 = [s for s in sms if s["to_number"] == "+33600000001"]
         assert len(sms_user1) == 0, f"Pas de SMS a +3min (delai 5min), got {len(sms_user1)}"
@@ -318,7 +307,7 @@ class TestSmsCallTimer:
         # Avancer de 3min — verification d'ABSENCE (sleep necessaire).
         _advance_clock_all_nodes(3)
         _refresh_all_heartbeats()
-        _wait_one_tick()
+        wait_escalation_ticks()
 
         sms = _get_pending_sms()
         sms_user1 = [s for s in sms if s["to_number"] == "+33600000001"]
@@ -368,7 +357,7 @@ class TestSmsCallTimer:
         # Attendre encore 1 tick puis verifier qu'aucun SMS supplementaire n'apparait.
         # Verification d'ABSENCE de doublon : sleep necessaire (pas de condition observable
         # pour "rien de nouveau n'arrive").
-        _wait_one_tick()
+        wait_escalation_ticks()
         sms = _get_pending_sms()
         sms_user1 = [s for s in sms if s["to_number"] == "+33600000001"]
         assert len(sms_user1) == count_first, \
@@ -385,7 +374,7 @@ class TestSmsCallTimer:
         assert count_first >= 1, "Au moins 1 call"
 
         # ABSENCE de doublon : sleep necessaire (1 tick).
-        _wait_one_tick()
+        wait_escalation_ticks()
         calls = _get_pending_calls()
         calls_user1 = [c for c in calls if c["to_number"] == "+33600000001"]
         assert len(calls_user1) == count_first, \
@@ -406,7 +395,7 @@ class TestCallQueueEndpoints:
         admin_h = _admin_headers()
         requests.post(f"{API}/alarms/reset", headers=admin_h)
         requests.post(f"{API}/test/reset-call-queue")
-        time.sleep(12)
+        wait_escalation_ticks()
         yield
         _reset_clock_all_nodes()
         requests.post(f"{API}/test/reset-call-queue")
@@ -545,7 +534,7 @@ class TestAckByPhone:
         requests.post(f"{API}/test/reset-call-queue")
         self.user1_id = _get_user_id(USER1_NAME)
         _register_phone(self.user1_id, "+33600000001")
-        time.sleep(12)
+        wait_escalation_ticks()
         yield
         _reset_clock_all_nodes()
 
@@ -627,7 +616,7 @@ class TestSmsCallIntegration:
         self.user2_id = _get_user_id(USER2_NAME)
         _register_phone(self.user1_id, "+33600000001")
         _register_phone(self.user2_id, "+33600000002")
-        time.sleep(12)
+        wait_escalation_ticks()
         yield
         _reset_clock_all_nodes()
         requests.post(f"{API}/test/reset-sms-queue")
@@ -674,7 +663,7 @@ class TestSmsCallIntegration:
         # Avancer au-dela du delai — verification d'ABSENCE (sleep necessaire).
         _advance_clock_all_nodes(5)
         _refresh_all_heartbeats()
-        _wait_one_tick()
+        wait_escalation_ticks()
 
         sms = _get_pending_sms()
         sms_user1 = [s for s in sms if s["to_number"] == "+33600000001"]
@@ -697,7 +686,7 @@ class TestSmsCallIntegration:
         # ABSENCE attendue pendant la suspension : sleep necessaire.
         _advance_clock_all_nodes(5)
         _refresh_all_heartbeats()
-        _wait_one_tick()
+        wait_escalation_ticks()
 
         # Pas de SMS pendant la suspension
         requests.post(f"{API}/test/reset-sms-queue")
@@ -709,7 +698,7 @@ class TestSmsCallIntegration:
         # Sleep pour laisser un tick traiter la reactivation.
         _advance_clock_all_nodes(26)
         _refresh_all_heartbeats()
-        _wait_one_tick()
+        wait_escalation_ticks()
 
         # L'alarme est reactivee → nouveau delai SMS — polling sur presence.
         _advance_clock_all_nodes(3)

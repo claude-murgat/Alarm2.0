@@ -127,6 +127,10 @@ docker compose --env-file .env.node3 -p node3 up --build -d
 COMPOSE_PROFILES=mailhog docker compose --env-file .env.dev -p dev up --build -d
 
 # Tests backend
+# Tick de la boucle d'escalade a 1 s (comme le CI, INV-084) : les attentes de tick
+# des tests (tests/_timing.py) passent de 12 s a ~2,5 s. Remettre "10" apres.
+curl -X POST localhost:8000/api/config/system -H "Authorization: Bearer $TOKEN_ADMIN" \
+  -H 'Content-Type: application/json' -d '{"key":"escalation_tick_seconds","value":"1"}'
 python -m pytest tests/test_e2e.py -v
 python -m pytest tests/test_user_modes.py -v
 python -m pytest tests/test_frontend.py -v  # necessite playwright
