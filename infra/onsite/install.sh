@@ -118,7 +118,11 @@ if id alarm-gateway >/dev/null 2>&1; then
     systemctl enable "$u" >/dev/null 2>&1 || true; say "enabled $u"
   done
 else
-  say "pas de user alarm-gateway : pile modem non activee"
+  # Regle par capacite, pas par nom de noeud : suit les changements d'environnement.
+  for u in alarm-4g-standby alarm-modem-rat alarm-modem-watchdog; do
+    systemctl disable --now "$u" >/dev/null 2>&1 || true
+  done
+  say "pas de user alarm-gateway : pile modem desactivee et arretee"
 fi
 # Le timer disque, lui, on l'active ET on le démarre tout de suite : c'est une
 # sonde read-only sans risque, et NE PAS la démarrer reproduirait la classe de bug
@@ -133,7 +137,7 @@ done
 if [ "$AUTO" = 1 ]; then
   # Units dont le script ou le fichier d'unit a change : relance (try-restart = seulement si actives).
   for u in $(echo "$RESTART" | tr ' ' '\n' | sort -u); do
-    systemctl try-restart "$u.service" && say "redemarre $u"
+    systemctl is-active -q "$u.service" && systemctl restart "$u.service" && say "redemarre $u"
   done
   say "FAIT (auto)."
   exit 0
