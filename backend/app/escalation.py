@@ -60,6 +60,9 @@ def _add_notified_user(db: Session, alarm, user_id: int):
     )
     if not existing:
         db.add(AlarmNotification(alarm_id=alarm.id, user_id=user_id, notified_at=clock_now()))
+        # Session en autoflush=False : sans flush, _get_notified_user_ids ne voit pas ce
+        # notifie et l'escalade ne lui envoie aucun push (INV-142, prod 2026-10-20).
+        db.flush()
 
 
 def _get_notified_user_ids(db: Session, alarm_id: int) -> list[int]:
