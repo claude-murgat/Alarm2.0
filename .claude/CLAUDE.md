@@ -143,6 +143,8 @@ python -m pytest tests/test_frontend.py -v  # necessite playwright
 # puis : git add .test_durations && commit + PR
 
 # Mutation testing local (logique pure backend/app/logic/, ~3 min sur ce poste)
+# mutmut_config.py (racine) est lu automatiquement : chaque mutant ne lance que les tests de
+# son module. En CI (PR), seuls les modules touches sont mutes (cf Tier 1.5 de pr.yml).
 # Permet de boucler sans attendre le nightly. Workflow CI nightly = identique.
 # Windows : PYTHONIOENCODING=utf-8 obligatoire (mutmut crashe sur l'emoji 🎉
 # affiche pour chaque kill car cp1252 ne sait pas l'encoder).

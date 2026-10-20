@@ -118,12 +118,14 @@ jobs:
     # Path-filtre : ne tourne que si logic/, tests/unit/ ou pyproject.toml ont change
     # (~90% des PRs ne payent pas le cout). Bloquant a 100% : tout survivant != mutation
     # deja marquee `# pragma: no mutate` (cf INV-020) = vraie regression.
-    # Local : ~3 min ; CI : ~5-8 min selon runner. Nightly mutation-testing.yml reste actif
-    # comme filet de securite (path filter peut rater des cas indirects).
+    # Acceleration (mutmut_config.py) : en PR, seuls les modules touches (directement ou via
+    # les tests modifies) sont mutes, et chaque mutant ne lance que les tests de son module.
+    # Push sur master : tout est mute. Nightly mutation-testing.yml reste le filet complet.
     name: Tier 1.5 — Mutation testing (logic pure, blocking)
     needs: tier1_unit
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 9 min 39 s pour tout muter avant l'acceleration (PR #237) : marge au-dela de 10 min.
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -139,14 +141,35 @@ jobs:
               - 'backend/app/logic/**'
               - 'tests/unit/**'
               - 'pyproject.toml'
+              - 'mutmut_config.py'
 
       - name: Skip notice (no logic changes)
         if: steps.changes.outputs.logic != 'true'
         run: |
           echo "::notice::Pas de changement dans backend/app/logic/, tests/unit/ ou pyproject.toml — mutation testing skip. Le nightly couvre quand meme."
 
-      - name: Setup Python 3.12
+      - name: Select modules to mutate
+        # PR : modules de logique modifies + ceux que citent les tests modifies (tout si
+        # pyproject.toml / models.py / mutmut_config.py change). Push master : tout.
+        id: select
         if: steps.changes.outputs.logic == 'true'
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch -q origin "${{ github.base_ref }}"
+            CHANGED=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
+          else
+            CHANGED="mutmut_config.py"
+          fi
+          PATHS=$(python3 -c 'import sys, mutmut_config as m; print(",".join(m.modules_to_mutate(sys.stdin.read().split())))' <<<"$CHANGED")
+          echo "paths=$PATHS" >> "$GITHUB_OUTPUT"
+          if [ -n "$PATHS" ]; then
+            echo "::notice::Modules mutes : $PATHS"
+          else
+            echo "::notice::Aucun module de backend/app/logic/ concerne par la PR — mutation testing skip. Le nightly couvre quand meme."
+          fi
+
+      - name: Setup Python 3.12
+        if: steps.changes.outputs.logic == 'true' && steps.select.outputs.paths != ''
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -156,7 +179,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install dependencies
-        if: steps.changes.outputs.logic == 'true'
+        if: steps.changes.outputs.logic == 'true' && steps.select.outputs.paths != ''
         run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
@@ -165,16 +188,16 @@ jobs:
       - name: Sanity check — tier 1 baseline must be green
         # Prerequis mutmut : sans baseline verte, tous les mutants sont "killed" pour
         # la mauvaise raison (le mauvais fail). On le verifie explicitement avant.
-        if: steps.changes.outputs.logic == 'true'
+        if: steps.changes.outputs.logic == 'true' && steps.select.outputs.paths != ''
         run: pytest tests/unit -m unit -p no:randomly -q --no-cov
 
       - name: Run mutmut
         id: mutmut_run
-        if: steps.changes.outputs.logic == 'true'
+        if: steps.changes.outputs.logic == 'true' && steps.select.outputs.paths != ''
         run: |
           set +e
           mutmut run \
-            --paths-to-mutate backend/app/logic/ \
+            --paths-to-mutate "${{ steps.select.outputs.paths }}" \
             --tests-dir tests/unit/ \
             --runner "python -m pytest -x --assert=plain -m 'unit and not no_mutation' -p no:randomly tests/unit/" \
             2>&1 | tee /tmp/mutmut-run.log
@@ -188,7 +211,7 @@ jobs:
           echo "mutmut_exit=${EXIT}" >> "$GITHUB_OUTPUT"
 
       - name: Generate reports (results + html + junit)
-        if: always() && steps.changes.outputs.logic == 'true'
+        if: always() && steps.changes.outputs.logic == 'true' && steps.select.outputs.paths != ''
         run: |
           mkdir -p reports/mutation
           mutmut junitxml > reports/mutation/junit.xml 2>&1 || true
@@ -197,7 +220,7 @@ jobs:
           [[ -d html ]] && mv html reports/mutation/html
 
       - name: Gate on score (100% strict blocking)
-        if: steps.changes.outputs.logic == 'true'
+        if: steps.changes.outputs.logic == 'true' && steps.select.outputs.paths != ''
         run: |
           python .github/scripts/mutation_score.py \
             reports/mutation/junit.xml \
@@ -215,7 +238,7 @@ jobs:
           echo "::notice::Mutation score : $score% — gate OK."
 
       - name: Upload reports
-        if: always() && steps.changes.outputs.logic == 'true'
+        if: always() && steps.changes.outputs.logic == 'true' && steps.select.outputs.paths != ''
         uses: actions/upload-artifact@v4
         with:
           name: mutation-pr-reports-${{ github.run_id }}
