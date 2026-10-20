@@ -404,7 +404,8 @@ La touche est lue sur les URC `+RXDTMF: <k>` (ou `+DTMF: <k>`), y compris pendan
 - **Couverture** : Unit `test_gateway_voice_call.py::TestDtmfKey`, `::TestCallResult`, `::TestConfirmation`, `::TestHangUp`.
 
 ### INV-134 [H] ✅ Gateway : le SMS de détail part avant l'appel
-Avant d'appeler un numéro, la gateway vérifie `/internal/sms/pending` : tant qu'un SMS en attente vise **ce numéro**, l'appel est différé au cycle suivant (30 s), le temps que `SmsSenderThread` l'envoie. Les appels vers d'autres numéros ne sont pas retardés. Si `/internal/sms/pending` ne répond pas, l'appel part quand même (ne jamais bloquer un appel d'alarme sur une panne de lecture). Le report est borné par INV-064 (un SMS sort de la file après 3 échecs).
+Avant d'appeler un numéro, la gateway vérifie `/internal/sms/pending` : tant qu'un SMS **jamais tenté** (`retries = 0`) vise **ce numéro**, l'appel est différé au cycle suivant (30 s), le temps que `SmsSenderThread` l'envoie. Un SMS **déjà en échec** (`retries ≥ 1`) ne retient pas l'appel : un SMS qui échoue retarde donc l'appel d'**un cycle au plus**. Les appels vers d'autres numéros ne sont pas retardés. Si `/internal/sms/pending` ne répond pas, l'appel part quand même (ne jamais bloquer un appel d'alarme sur une panne de lecture).
+- **Révision 2026-10-20** : l'ancienne règle attendait tout SMS en attente, borné seulement par INV-064 (3 échecs). En prod (alarme 818), le SMS échouait (`AT_ERROR`, modem instable) : l'appel est resté différé ~3 min et n'est parti qu'**après l'escalade**.
 - **Pourquoi** : le backend crée le SMS et l'appel au même instant (INV-060), puis deux threads gateway indépendants les traitent. Un appel garde le modem jusqu'à ~45 s : si le thread des appels passait le premier, le message vocal « Consultez votre SMS » arrivait avant le SMS. Demande du propriétaire du 2026-10-14.
 - **Couverture** : Unit `test_gateway_voice_call.py::TestCallDeferredForSms`.
 
