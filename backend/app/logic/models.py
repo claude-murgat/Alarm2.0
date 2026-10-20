@@ -64,6 +64,7 @@ class EscalationDecision:
     alarm_id: int
     from_user_id: int
     to_user_id: int
+    without_call: bool = False  # INV-144 : escalade forcee, l'appel de from_user n'est pas passe
 
 
 @dataclass(frozen=True)

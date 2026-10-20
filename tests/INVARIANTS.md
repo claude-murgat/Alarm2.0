@@ -146,6 +146,13 @@ L'API expose `has_device` (au moins un jeton FCM enregistré) dans `/api/users/`
 - **Pourquoi** : les utilisateurs hors garde n'envoient pas de heartbeat par design (INV-ANDROID-600), ils sont réveillés par push. Le web les affichait « Hors ligne » alors que leur téléphone était allumé et joignable ; le propriétaire a cru, le 2026-10-20, qu'ils ne seraient pas appelés.
 - **Couverture** : Integration `test_waiting_status_inv143.py` ; Playwright `test_frontend.py::TestWaitingStatus` (joué en local, hors CI).
 
+### INV-144 [C] ✅ Escalade : le SMS et l'appel de l'assigné passent avant l'escalade au suivant
+La boucle d'escalade n'escalade une alarme de A vers B qu'une fois l'appel de A **passé** pour cette alarme (`call_queue.called_at` renseigné, quel que soit le résultat : sans réponse, échec, acquitté), le SMS partant avant l'appel (INV-134). Ne concerne que les assignés ayant un `phone_number`. Un appel abandonné après 3 échecs (INV-064) compte comme passé.
+- **Borne** : si l'appel n'est toujours pas passé `escalation_delay_minutes + CALL_WAIT_MAX_MINUTES` (= **3 min**) après le début du palier, l'escalade part quand même (une passerelle ou un modem en panne ne doit pas bloquer toute la chaîne), avec l'événement d'audit `escalation_without_call` et un email à `alert_email`. Choix du propriétaire du 2026-10-20 (+3 min).
+- Hors champ : `/api/alarms/escalate-now` (bouton admin), `/api/test/trigger-escalation` et l'escalade par touche 2 au téléphone ne passent pas par la boucle.
+- **Pourquoi** : prod 2026-10-20, alarme 852 : délais d'escalade et de SMS/appel à 2 min ; escalade à 10:13:55, SMS et appel de timo créés à 10:13:57, appel passé à 10:15:28 — après l'escalade. L'alarme 818 : appel retardé ~3 min par un modem instable, parti après l'escalade. Le propriétaire exige que SMS et appel précèdent toujours l'escalade.
+- **Couverture** : Unit `test_escalation.py::TestWaitForCallInv144` (borne exacte, attente, défaut inchangé) ; Integration `test_escalation_waits_for_call_inv144.py` (vraie boucle : retenue puis escalade dès l'appel passé ; escalade forcée à délai + 3 min avec audit + email).
+
 ### INV-015 [H] ✅ Pas d'escalade d'une alarme acknowledged
 Une alarme `status = 'acknowledged'` ne peut pas être escaladée (escalation_count ne change pas).
 - **Pourquoi** : ACK doit suspendre l'escalade.
