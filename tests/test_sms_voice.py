@@ -184,10 +184,14 @@ def _get_pending_calls():
 
 
 def _complete_call(to_number, result="no_answer"):
-    """Joue la passerelle : rapporte le resultat de l'appel en attente vers ce numero.
-    INV-144 : l'escalade attend que l'appel de l'assigne soit passe (au plus delai + 3 min)."""
+    """Joue la passerelle : envoie le SMS puis rapporte le resultat de l'appel vers ce numero.
+    INV-144 : l'escalade attend que le SMS et l'appel de l'assigne soient passes (au plus delai + 3 min)."""
     calls = _wait_for_calls(to_number)
     assert calls, f"appel vers {to_number} attendu"
+    pending = requests.get(f"{BASE_URL}/internal/sms/pending", headers=GATEWAY_HEADERS).json()
+    for sms in (s for s in pending if s["to_number"] == to_number):
+        r = requests.post(f"{BASE_URL}/internal/sms/{sms['id']}/sent", headers=GATEWAY_HEADERS)
+        assert r.status_code == 200, r.text
     r = requests.post(f"{BASE_URL}/internal/calls/{calls[0]['id']}/result",
                       headers=GATEWAY_HEADERS, json={"result": result})
     assert r.status_code == 200, r.text
