@@ -18,6 +18,12 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     alarms = relationship("Alarm", back_populates="assigned_user", foreign_keys="Alarm.assigned_user_id")
+    devices = relationship("DeviceToken", viewonly=True)
+
+    @property
+    def has_device(self) -> bool:
+        """INV-143 : au moins un telephone (jeton FCM) enregistre -> joignable par push."""
+        return bool(self.devices)
 
 
 class Alarm(Base):

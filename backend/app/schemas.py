@@ -68,6 +68,7 @@ class UserResponse(BaseModel):
     is_admin: bool
     is_active: bool
     is_online: bool = False
+    has_device: bool = False  # INV-143
     last_heartbeat: Optional[datetime] = None
     phone_number: Optional[str] = None
     created_at: datetime
