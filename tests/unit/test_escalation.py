@@ -320,3 +320,49 @@ class TestContinueSemantics:
         result = evaluate_escalation([alarm], chain, {}, DELAY, NOW)
         assert len(result.escalations) == 1
         assert len(result.wake_ups) == 0  # pas de wake-up car traite comme online
+
+
+class TestWaitForCallInv144:
+    """INV-144 : l'escalade attend que l'appel de l'assigne soit passe (SMS avant, INV-134),
+    au plus CALL_WAIT_MAX_MINUTES apres le delai normal ; ensuite escalade marquee sans appel."""
+
+    def _run(self, minutes_since_palier: float, awaiting=None):
+        alarm = _alarm(created_at=NOW - timedelta(minutes=minutes_since_palier))
+        return evaluate_escalation([alarm], _chain(1, 2), {1: True, 2: True}, DELAY, NOW,
+                                   awaiting_call=awaiting)
+
+    def test_wait_bound_is_three_minutes(self):
+        from backend.app.logic.escalation import CALL_WAIT_MAX_MINUTES
+        assert CALL_WAIT_MAX_MINUTES == 3.0
+
+    def test_call_not_done_holds_escalation_at_delay(self):
+        assert self._run(DELAY, awaiting={1}).escalations == ()
+
+    def test_call_not_done_holds_escalation_just_before_bound(self):
+        assert self._run(DELAY + 3.0 - 0.01, awaiting={1}).escalations == ()
+
+    def test_call_not_done_escalates_at_bound_marked_without_call(self):
+        (d,) = self._run(DELAY + 3.0, awaiting={1}).escalations
+        assert (d.alarm_id, d.from_user_id, d.to_user_id, d.without_call) == (1, 1, 2, True)
+
+    def test_call_done_escalates_at_delay_normally(self):
+        (d,) = self._run(DELAY, awaiting=set()).escalations
+        assert d.without_call is False
+
+    def test_other_alarm_awaiting_does_not_hold_this_one(self):
+        (d,) = self._run(DELAY, awaiting={99}).escalations
+        assert d.without_call is False
+
+    def test_default_keeps_previous_behaviour(self):
+        (d,) = self._run(DELAY).escalations
+        assert d.without_call is False
+
+    def test_still_nothing_before_delay(self):
+        assert self._run(DELAY - 0.01, awaiting=set()).escalations == ()
+
+    def test_held_alarm_does_not_stop_the_next_ones(self):
+        held = _alarm(alarm_id=1, assigned_user_id=1, created_at=NOW - timedelta(minutes=DELAY))
+        other = _alarm(alarm_id=2, assigned_user_id=1, created_at=NOW - timedelta(minutes=DELAY))
+        actions = evaluate_escalation([held, other], _chain(1, 2), {1: True, 2: True}, DELAY, NOW,
+                                      awaiting_call={1})
+        assert [d.alarm_id for d in actions.escalations] == [2]

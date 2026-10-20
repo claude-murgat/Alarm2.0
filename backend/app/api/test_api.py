@@ -156,6 +156,8 @@ def reset_all(db: Session = Depends(get_db),
     for user in users:
         user.is_online = True
         user.last_heartbeat = clock_now()
+        # Etat deterministe : un numero laisse par un test retiendrait l'escalade des suivants (INV-144).
+        user.phone_number = None
     db.commit()
 
     # Restore default escalation chain — TOUJOURS (pas seulement si vide).

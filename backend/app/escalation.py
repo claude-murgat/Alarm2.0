@@ -3,6 +3,7 @@ import logging
 import uuid
 from datetime import timedelta
 from typing import Optional
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from .database import SessionLocal
 from .models import Alarm, AlarmNotification, EscalationConfig, User, SystemConfig, SmsQueue, CallQueue
@@ -73,6 +74,45 @@ def _get_notified_user_ids(db: Session, alarm_id: int) -> list[int]:
         .all()
     )
     return [n[0] for n in notifs]
+
+
+def _alarms_awaiting_call(db: Session, alarms) -> set[int]:
+    """INV-144 : alarmes dont l'assigne a un numero mais n'a pas encore recu son appel
+    (pas encore cree, ou en file non traite). Un appel abandonne apres 3 echecs (INV-064)
+    compte comme fait : on n'attend jamais un appel qui ne partira plus."""
+    awaiting = set()
+    for alarm in alarms:
+        user = db.query(User).filter(User.id == alarm.assigned_user_id).first() if alarm.assigned_user_id else None
+        if not user or not user.phone_number:
+            continue
+        done = db.query(CallQueue).filter(
+            CallQueue.alarm_id == alarm.id,
+            CallQueue.user_id == user.id,
+            or_(CallQueue.called_at.isnot(None), CallQueue.retries >= 3),
+        ).first()
+        if not done:
+            awaiting.add(alarm.id)
+    return awaiting
+
+
+def _report_escalation_without_call(db: Session, alarm, decision):
+    """INV-144 : l'appel de l'assigne n'est pas passe dans le delai + 3 min (passerelle ou
+    modem en panne) -> escalade quand meme, tracee et signalee par email."""
+    user = db.query(User).filter(User.id == decision.from_user_id).first()
+    name = user.name if user else str(decision.from_user_id)
+    log_event("escalation_without_call", db=db, alarm_id=alarm.id,
+              from_user=decision.from_user_id, to_user=decision.to_user_id)
+    cfg = db.query(SystemConfig).filter(SystemConfig.key == "alert_email").first()
+    if cfg and cfg.value:
+        try:
+            send_alert_email(
+                subject=f"[Alarme Murgat] Escalade sans appel : {name} n'a pas pu etre appele",
+                body=(f"Alarme {alarm.id} ({alarm.title}) escaladee sans que l'appel de {name} soit passe "
+                      f"(delai d'escalade + 3 min). Verifier la passerelle SMS/appels et le modem."),
+                to=cfg.value,
+            )
+        except Exception:
+            logger.exception("email escalade sans appel")
 
 
 def _alarm_to_snapshot(alarm: Alarm) -> AlarmSnapshot:
@@ -241,7 +281,8 @@ async def escalation_loop():
                     alarm_snapshots = [_alarm_to_snapshot(a) for a in active_alarms]
 
                     actions = evaluate_escalation(
-                        alarm_snapshots, chain_snapshot, users_online, delay_minutes, now
+                        alarm_snapshots, chain_snapshot, users_online, delay_minutes, now,
+                        awaiting_call=_alarms_awaiting_call(db, active_alarms),
                     )
 
                     alarm_by_id = {a.id: a for a in active_alarms}
@@ -300,6 +341,11 @@ async def escalation_loop():
                             except Exception:
                                 pass  # FCM best-effort
                     db.commit()
+                    # INV-144 : apres le commit (l'audit a sa propre session ; SQLite verrouille
+                    # pendant la transaction) et seulement une fois l'escalade enregistree.
+                    for decision in actions.escalations:
+                        if decision.without_call:
+                            _report_escalation_without_call(db, alarm_by_id[decision.alarm_id], decision)
 
                 # --- 3. Timer-based SMS/Call enqueue ---
                 # Logique de decision extraite dans logic/sms_timer.py (testee unit).

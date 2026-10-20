@@ -24,12 +24,18 @@ from .models import (
 )
 
 
+# INV-144 : attente max de l'appel de l'assigne au-dela du delai normal, puis escalade
+# quand meme (marquee sans appel) : un modem en panne ne doit pas bloquer toute la chaine.
+CALL_WAIT_MAX_MINUTES = 3.0
+
+
 def evaluate_escalation(
     alarms: list[AlarmSnapshot],
     chain: list[EscalationChainEntry],
     users_online: dict[int, bool],
     delay_minutes: float,
     now: datetime,
+    awaiting_call: Optional[set[int]] = None,
 ) -> EscalationActions:
     """Retourne les escalades et FCM wake-ups à appliquer pour ce tick.
 
@@ -40,6 +46,8 @@ def evaluate_escalation(
                        (pas pour choisir le next_user, cf INV-014).
         delay_minutes : délai uniforme entre chaque palier (INV-011).
         now : horloge injectable (cf backend/app/clock.py).
+        awaiting_call : ids des alarmes dont l'assigné (avec numéro) n'a pas encore reçu
+                        son appel (INV-144). None = aucune attente.
     """
     if not chain:
         return EscalationActions(escalations=(), wake_ups=())
@@ -53,6 +61,10 @@ def evaluate_escalation(
 
         elapsed_minutes = (now - alarm.created_at).total_seconds() / 60.0
         if elapsed_minutes < delay_minutes:
+            continue
+        # INV-144 : SMS + appel de l'assigné avant d'escalader, borné à +CALL_WAIT_MAX_MINUTES.
+        without_call = alarm.id in (awaiting_call or ())
+        if without_call and elapsed_minutes < delay_minutes + CALL_WAIT_MAX_MINUTES:
             continue
 
         next_user_id = _find_next_user_id(chain, alarm.assigned_user_id)
@@ -68,6 +80,7 @@ def evaluate_escalation(
                 alarm_id=alarm.id,
                 from_user_id=alarm.assigned_user_id,
                 to_user_id=next_user_id,
+                without_call=without_call,
             )
         )
 

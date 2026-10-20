@@ -183,6 +183,17 @@ def _get_pending_calls():
     return r.json()
 
 
+def _complete_call(to_number, result="no_answer"):
+    """Joue la passerelle : rapporte le resultat de l'appel en attente vers ce numero.
+    INV-144 : l'escalade attend que l'appel de l'assigne soit passe (au plus delai + 3 min)."""
+    calls = _wait_for_calls(to_number)
+    assert calls, f"appel vers {to_number} attendu"
+    r = requests.post(f"{BASE_URL}/internal/calls/{calls[0]['id']}/result",
+                      headers=GATEWAY_HEADERS, json={"result": result})
+    assert r.status_code == 200, r.text
+    return calls[0]
+
+
 def _register_phone(user_id, phone_number):
     admin_h = _admin_headers()
     r = requests.patch(f"{API}/users/{user_id}", headers=admin_h, json={"phone_number": phone_number})
@@ -330,9 +341,10 @@ class TestSmsCallTimer:
         sms_user2 = [s for s in sms if s["to_number"] == "+33600000002"]
         assert len(sms_user2) == 0, f"Pas de SMS user2 avant escalade"
 
-        # t+16min : escalade (15min) → user2 notifie. Polling sur escalation visible.
+        # t+16min : escalade (15min) → user2 notifie, une fois l'appel de user1 passe (INV-144).
         _advance_clock_all_nodes(13)
         _refresh_all_heartbeats()
+        _complete_call("+33600000001")
         alarm_after_esc = _wait_for_alarm_assigned_to(alarm_id, self.user2_id)
         assert alarm_after_esc is not None and alarm_after_esc.get("assigned_user_id") == self.user2_id, \
             f"Escalade vers user2 attendue, got {alarm_after_esc}"
@@ -633,9 +645,10 @@ class TestSmsCallIntegration:
         sms_user1 = _wait_for_sms("+33600000001")
         assert len(sms_user1) >= 1, "user1 SMS a t+3"
 
-        # t+16min : escalade (user2 notifie) — polling sur assigned_user_id.
+        # t+16min : escalade (user2 notifie) une fois l'appel de user1 passe (INV-144).
         _advance_clock_all_nodes(13)
         _refresh_all_heartbeats()
+        _complete_call("+33600000001")
         alarm_after_esc = _wait_for_alarm_assigned_to(alarm_id, self.user2_id)
         assert alarm_after_esc is not None and alarm_after_esc.get("assigned_user_id") == self.user2_id, \
             f"Escalade vers user2 attendue, got {alarm_after_esc}"
@@ -646,9 +659,8 @@ class TestSmsCallIntegration:
         sms_user2 = _wait_for_sms("+33600000002")
         assert len(sms_user2) >= 1, "user2 SMS a t+19"
 
-        # Calls doivent aussi etre presentes — deja la apres les ticks ci-dessus.
+        # Appel de user1 deja passe (_complete_call, INV-144) ; celui de user2 est en file.
         calls = _get_pending_calls()
-        assert any(c["to_number"] == "+33600000001" for c in calls), "user1 call"
         assert any(c["to_number"] == "+33600000002" for c in calls), "user2 call"
 
     def test_ack_stops_future_sms_calls(self):

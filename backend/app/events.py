@@ -10,6 +10,7 @@ AUDITABLE_EVENTS = {
     "alarm_created", "alarm_acknowledged", "alarm_resolved", "alarm_escalated",
     "user_login", "user_login_failed", "config_changed",
     "user_created", "user_deleted", "escalation_timeout", "watchdog_offline",
+    "escalation_without_call",  # INV-144
 }
 
 
