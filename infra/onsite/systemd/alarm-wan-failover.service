@@ -1,0 +1,15 @@
+[Unit]
+Description=Alarm 2.0 - Bascule box -> 4G si la box est UP sans internet (INV-140)
+After=network-online.target alarm-4g-standby.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/alarm/wan-failover.py
+Restart=always
+RestartSec=10
+# SIGTERM -> le script remet la box en priorite avant de sortir
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

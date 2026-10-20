@@ -37,6 +37,14 @@ bring_up(){
   local start; start="$(qmicli -d "$WDM" -p --wds-start-network="apn='$APN',ip-type=4" --client-no-release-cid 2>&1)"
   HANDLE="$(grep -oE "handle: '[0-9]+'" <<<"$start" | grep -oE '[0-9]+' | head -1)"
   CID="$(grep -oE "CID: '[0-9]+'" <<<"$start" | grep -oE '[0-9]+' | head -1)"
+  # Apres un redemarrage du modem, l'attache LTE a deja ouvert la connexion par defaut et
+  # l'operateur refuse une 2e connexion au meme APN : reutiliser le profil d'attache (1).
+  if [ -z "$HANDLE" ] && grep -q "same-pdn-not-allowed" <<<"$start"; then
+    release_cid
+    start="$(qmicli -d "$WDM" -p --wds-start-network="3gpp-profile=1,ip-type=4" --client-no-release-cid 2>&1)"
+    HANDLE="$(grep -oE "handle: '[0-9]+'" <<<"$start" | grep -oE '[0-9]+' | head -1)"
+    CID="$(grep -oE "CID: '[0-9]+'" <<<"$start" | grep -oE '[0-9]+' | head -1)"
+  fi
   [ -n "$HANDLE" ] || { log "echec WDS start : $(grep -iE 'error|reason' <<<"$start" | head -1)"; release_cid; return 1; }
   local s; s="$(qmicli -d "$WDM" -p --wds-get-current-settings 2>&1)"
   IP4="$(awk -F': ' '/IPv4 address/{print $2}' <<<"$s" | tr -d ' ')"

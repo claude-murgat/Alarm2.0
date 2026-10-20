@@ -199,7 +199,7 @@ jobs:
           mutmut run \
             --paths-to-mutate "${{ steps.select.outputs.paths }}" \
             --tests-dir tests/unit/ \
-            --runner "python -m pytest -x --assert=plain -m unit -p no:randomly tests/unit/" \
+            --runner "python -m pytest -x --assert=plain -m 'unit and not no_mutation' -p no:randomly tests/unit/" \
             2>&1 | tee /tmp/mutmut-run.log
           EXIT=${PIPESTATUS[0]}
           # Bit 0 = fatal (infra). Bits 2/4/8 = survivants/timeouts/suspicieux,

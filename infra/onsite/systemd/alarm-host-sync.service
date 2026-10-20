@@ -1,0 +1,16 @@
+# /etc/systemd/system/alarm-host-sync.service
+# Deploie scripts + units hote (infra/onsite) au commit promu :stable. Cf scripts/alarm-host-sync.sh.
+[Unit]
+Description=Deploiement auto de la partie hote (scripts + units infra/onsite) au commit :stable
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# root : installe dans /opt/alarm, /usr/local/bin et /etc/systemd/system, redemarre les units.
+User=root
+StateDirectory=alarm/cd
+TimeoutStartSec=600
+ExecStart=/usr/local/bin/alarm-host-sync
+StandardOutput=journal
+StandardError=journal

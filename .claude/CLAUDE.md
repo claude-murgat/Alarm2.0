@@ -151,7 +151,7 @@ python -m pytest tests/test_frontend.py -v  # necessite playwright
 PYTHONIOENCODING=utf-8 python -m mutmut run \
   --paths-to-mutate backend/app/logic/ \
   --tests-dir tests/unit/ \
-  --runner "python -m pytest -x --assert=plain -m unit -p no:randomly tests/unit/"
+  --runner "python -m pytest -x --assert=plain -m 'unit and not no_mutation' -p no:randomly tests/unit/"
 PYTHONIOENCODING=utf-8 python -m mutmut results       # liste survivants par module
 PYTHONIOENCODING=utf-8 python -m mutmut html          # rapport navigable (./html/)
 PYTHONIOENCODING=utf-8 python -m mutmut show <id>     # diff d'un mutant precis

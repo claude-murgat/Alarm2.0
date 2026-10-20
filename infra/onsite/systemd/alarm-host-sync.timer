@@ -1,0 +1,14 @@
+# /etc/systemd/system/alarm-host-sync.timer
+[Unit]
+Description=Timer du deploiement auto de la partie hote
+
+[Timer]
+# Decale de alarm-cd-pull (5 min apres boot) et de alarm-gateway-sync (7 min).
+OnBootSec=9min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30s
+Persistent=true
+Unit=alarm-host-sync.service
+
+[Install]
+WantedBy=timers.target

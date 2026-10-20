@@ -26,11 +26,22 @@
   # .../cdc_ether → ECM                 → §2     (dhclient)
   ls /dev/cdc-wdm*    # présent ⇒ control QMI dispo
   ```
-- **Principe** : le SIM7600E-H expose une interface réseau (`wwp0s20f0u4i5` sur onsite-2 — le nom
-  dépend du port USB). On lui donne une **route par défaut de métrique 300** : Linux route
-  automatiquement par le lien UP de plus basse métrique, donc la 4G ne sert que si fibre (métrique
-  ~100) **et** Starlink (~200) sont tombées. Aucun script de bascule. En QMI, c'est `qmicli` qui monte
-  le lien data (l'hôte pose ensuite l'IP/route) ; en ECM, le module dial seul et l'hôte fait du DHCP.
+- **État réel du site (relevé le 2026-10-19, après le déménagement de juin)** : **un seul accès
+  internet, la box** (`192.168.1.1`, pas de Starlink). Route statique `default via 192.168.1.1
+  onlink`, métrique 0, sur les deux nœuds. **Seul onsite-2** a la 4G (SIM7600, interface
+  `wwp0s20f0u3i5` — le nom dépend du port USB) ; onsite-1 n'a aucun secours. Les valeurs
+  `172.16.x`, `31.204.85.180`, « fibre métrique 100 » et Starlink des sections ci-dessous datent de
+  l'ancien site : remplacer par `192.168.1.1` / métrique 0 et l'interface réelle.
+- **Principe** : le SIM7600E-H expose une interface réseau. On lui donne une **route par défaut de
+  métrique 300**, en dessous de la box (métrique 0). En QMI, c'est `qmicli` qui monte le lien data
+  (l'hôte pose ensuite l'IP/route) ; en ECM, le module dial seul et l'hôte fait du DHCP.
+- **Bascule automatique (INV-140, `alarm-wan-failover`)** : la route de la box ne disparaît que si
+  le câble Ethernet est coupé — box éteinte ou sans internet, le port reste UP et, sans aide, la 4G
+  ne prenait **jamais** le relais. `scripts/wan-failover.py` sonde internet par l'interface de la box
+  toutes les 10 s (cloud `51.210.105.102`, `1.1.1.1`, `9.9.9.9`). Après 3 échecs, si la 4G répond,
+  la route box passe en métrique 500 (le trafic sort par la 4G) ; après 3 succès elle reprend la
+  métrique 0. Jamais de bascule vers une 4G muette ; à l'arrêt du service la box est toujours remise
+  en priorité. Suivi : `journalctl -u alarm-wan-failover -f` ; état : `ip route show default`.
 - **Standby « chaud »** : l'interface reste UP en permanence (registration + DHCP), métrique 300.
   Conso au repos ≈ 0, bascule instantanée. Le forfait data (~120 Go/mois) couvre largement un
   failover soutenu portant la réplication PostgreSQL + les push FCM.
@@ -284,33 +295,39 @@ fibre de référence pour la restaurer en garde-fou. Les sous-sections 4.1–4.4
 Force le trafic à sortir par la 4G **sans toucher au routage de prod** :
 
 ```bash
-IF=wwp0s20f0u4i5
-# (a) IP publique vue par la 4G — doit différer de l'egress fibre du site (31.204.85.180)
+IF=wwp0s20f0u3i5   # onsite-2, 2026-10-19 (`ip -br link | grep ww`)
+# (a) IP publique vue par la 4G — doit différer de celle de la box (curl -s https://api.ipify.org)
 curl --interface "$IF" -s https://api.ipify.org ; echo
 # (b) latence brute 4G
 ping -I "$IF" -c4 1.1.1.1
 # (c) le cloud OVH (NODE3) est joignable par la 4G
 ping -I "$IF" -c4 51.210.105.102
-# (d) le routage de prod n'a PAS bougé (doit sortir via la fibre 172.16.0.1) :
+# (d) le routage de prod n'a PAS bougé (doit sortir via la box 192.168.1.1) :
 ip route get 1.1.1.1
 ```
 
-**Pass L1** : (a) renvoie une IP opérateur ≠ `31.204.85.180`, (b)/(c) répondent, (d) montre toujours
-la fibre. → le lien 4G fonctionne de bout en bout, prod intacte.
+**Pass L1** : (a) renvoie une IP opérateur différente de celle de la box, (b)/(c) répondent, (d)
+montre toujours la box. → le lien 4G fonctionne de bout en bout, prod intacte.
 
 ### 4.2. L2 — bascule contrôlée (avec auto-revert)
 
-Pré-requis : standby chaud actif (§2.4 — fibre metric 100 + 4G metric 300 toutes deux présentes).
+Pré-requis : standby chaud actif (box métrique 0 + 4G métrique 300 toutes deux présentes).
+Arrêter d'abord la bascule automatique pour qu'elle ne remette pas la box pendant le test :
+`sudo systemctl stop alarm-wan-failover` (elle remet la box en priorité en s'arrêtant).
+
+> ⚠️ La route box est en **métrique 0** : `ip route replace … metric 9000` seul **ajoute** une
+> seconde route et laisse la métrique 0 en place (aucune bascule). Il faut ajouter **puis** retirer.
 
 ```bash
-GW_FIBRE=172.16.0.1 ; DEV_FIBRE=enp1s0   # adapter par nœud (onsite-1 = enp0s31f6)
+GW_BOX=192.168.1.1 ; DEV_BOX=enp1s0   # onsite-2 (onsite-1 = enp0s31f6, mais pas de 4G)
 
-# (0) FILET DE SÉCURITÉ — restaure la fibre dans 180 s quoi qu'il arrive :
+# (0) FILET DE SÉCURITÉ — remet la box en priorité dans 180 s quoi qu'il arrive :
 sudo systemd-run --on-active=180 --timer-property=AccuracySec=1s \
-  ip route replace default via "$GW_FIBRE" dev "$DEV_FIBRE" metric 100
+  ip route replace default via "$GW_BOX" dev "$DEV_BOX" metric 0 onlink
 
-# (1) DÉCLENCHE la bascule : démote la fibre sous la 4G → la 4G (metric 300) devient la meilleure :
-sudo ip route replace default via "$GW_FIBRE" dev "$DEV_FIBRE" metric 9000
+# (1) DÉCLENCHE la bascule : box sous la 4G → la 4G (metric 300) devient la meilleure :
+sudo ip route replace default via "$GW_BOX" dev "$DEV_BOX" metric 9000 onlink
+sudo ip route del default via "$GW_BOX" dev "$DEV_BOX" metric 0
 
 # (2) VALIDATIONS pendant la bascule :
 ip route get 51.210.105.102                       # doit sortir via wwp0s20f0u4i5
@@ -322,10 +339,17 @@ curl -s https://fcm.googleapis.com -o /dev/null -w '%{http_code}\n'  # Google FC
 
 # (3) (optionnel golden path) lever une alarme de test et confirmer la réception du push sur device
 
-# (4) RESTAURE tout de suite (ne pas attendre le timer) :
-sudo ip route replace default via "$GW_FIBRE" dev "$DEV_FIBRE" metric 100
-ip route get 1.1.1.1                               # de nouveau via la fibre
+# (4) RESTAURE tout de suite (ne pas attendre le timer), puis relance la bascule auto :
+sudo ip route replace default via "$GW_BOX" dev "$DEV_BOX" metric 0 onlink
+sudo ip route del default via "$GW_BOX" dev "$DEV_BOX" metric 9000
+ip route get 1.1.1.1                               # de nouveau via la box
+sudo systemctl start alarm-wan-failover
 ```
+
+> Test de la bascule **automatique** (INV-140) sans toucher aux routes à la main : couper l'ICMP
+> sortant par la box (`sudo iptables -I OUTPUT -o "$DEV_BOX" -p icmp -j DROP`), constater en
+> ~30-40 s `demote` dans `journalctl -u alarm-wan-failover` et `ip route get 1.1.1.1` via la 4G, puis
+> `sudo iptables -D OUTPUT -o "$DEV_BOX" -p icmp -j DROP` → `restore` en ~30-40 s.
 
 ### 4.3. Critères de réussite
 
@@ -354,7 +378,9 @@ cat /sys/class/net/wwp0s20f0u4i5/statistics/rx_bytes \
 
 ## 5. Rollback / abort
 
-- **Abandon en cours de test** : `sudo ip route replace default via 172.16.0.1 dev <DEV_FIBRE> metric 100`.
+- **Abandon en cours de test** : `sudo ip route replace default via 192.168.1.1 dev <DEV_BOX> metric 0 onlink`
+  puis `sudo ip route del default via 192.168.1.1 dev <DEV_BOX> metric 9000` (et `metric 500` si la
+  bascule auto l'avait posée).
   Le filet `systemd-run` (§4.2-0) le fait de toute façon sous 180 s.
 - **Désactiver complètement le failover** : `sudo systemctl disable --now alarm-4g-ecm.service`,
   retirer `/etc/network/interfaces.d/4g-ecm` (ou le `.network`), `sudo ifdown wwp0s20f0u4i5`.
