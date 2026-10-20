@@ -182,3 +182,13 @@ class TestCallDeferredForSms:
     @pytest.mark.parametrize("pending", [[], None])
     def test_no_pending_sms_or_unreadable_queue_never_blocks(self, pending):
         assert _vc.call_deferred_for_sms("+33695024008", pending) is False
+
+    @pytest.mark.parametrize("retries", [1, 2])
+    def test_failing_sms_never_blocks_the_call(self, retries):
+        # Prod 2026-10-20 (alarme 818) : SMS en AT_ERROR, appel differe ~3 min -> parti apres l'escalade.
+        pending = [{"id": 599, "to_number": "+33695024008", "body": "ALARME ...", "retries": retries}]
+        assert _vc.call_deferred_for_sms("+33695024008", pending) is False
+
+    def test_untried_sms_still_defers(self):
+        pending = [{"id": 599, "to_number": "+33695024008", "body": "ALARME ...", "retries": 0}]
+        assert _vc.call_deferred_for_sms("+33695024008", pending) is True

@@ -85,6 +85,8 @@ def lead_silence(sample_rate: int) -> bytes:
 
 
 def call_deferred_for_sms(to_number: str, pending_sms: list | None) -> bool:
-    """INV-134 : differer l'appel tant qu'un SMS en attente vise ce numero.
-    File illisible (None) -> ne jamais bloquer un appel d'alarme."""
-    return any(s.get("to_number") == to_number for s in pending_sms or [])
+    """INV-134 : differer l'appel tant qu'un SMS jamais tente vise ce numero.
+    Un SMS deja en echec (retries >= 1) ne retient pas l'appel : en prod (alarme 818) il
+    l'a bloque ~3 min, jusqu'apres l'escalade. File illisible (None) -> ne jamais bloquer."""
+    return any(s.get("to_number") == to_number and not s.get("retries")
+               for s in pending_sms or [])
