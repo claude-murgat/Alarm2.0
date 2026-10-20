@@ -133,6 +133,11 @@ L'escalade ne filtre PAS sur `is_online`. FCM réveille le destinataire.
   - Unit : `test_escalation.py::test_ignores_online_status_for_next_user_selection`
   - E2E : `TestEscalationReachesOffline::test_escalation_reaches_offline_user` + `test_escalation_wraps_even_all_offline`
 
+### INV-142 [C] ✅ Escalade : le nouvel assigné reçoit un push au tick même de l'escalade
+Quand la boucle d'escalade (`escalation_loop`) passe une alarme à l'utilisateur suivant, ce dernier figure dans `notified_user_ids` **et** reçoit un FCM dans le même tick, avec les anciens notifiés (cumulative, INV-012). Vaut pour tout appelant de `_add_notified_user` (création, escalade de la boucle, escalade par touche 2).
+- **Pourquoi** : prod 2026-10-20, alarme 817 : escalade timo → admin à 08:33:31, push envoyé à timo seul (`notified_user_ids: [4]`). Session SQLAlchemy en `autoflush=False` : la notification ajoutée sans `flush` était invisible à la relecture qui choisit les destinataires. admin n'était réveillé qu'au palier suivant ou par le SMS (+2 min). Les tests FCM existants passaient par `/api/test/trigger-escalation` (qui flush) et ne voyaient pas la vraie boucle.
+- **Couverture** : Integration `test_escalation_push_new_assignee_inv142.py` (vraie boucle, tick 1 s, horloge avancée). RED avant le correctif : push à l'ancien assigné seul.
+
 ### INV-015 [H] ✅ Pas d'escalade d'une alarme acknowledged
 Une alarme `status = 'acknowledged'` ne peut pas être escaladée (escalation_count ne change pas).
 - **Pourquoi** : ACK doit suspendre l'escalade.
