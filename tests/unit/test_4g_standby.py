@@ -10,7 +10,9 @@ import subprocess
 
 import pytest
 
-pytestmark = pytest.mark.unit
+# no_mutation : lance le vrai script bash (~0,5 s) sans toucher backend/app/logic ; le relancer
+# pour chaque mutant faisait deborder le job de mutation (10 min).
+pytestmark = [pytest.mark.unit, pytest.mark.no_mutation]
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "4g-standby.sh"
 
@@ -74,9 +76,11 @@ def _run(tmp_path, qmicli):
     return (tmp_path / "calls.log").read_text().splitlines()
 
 
-@pytest.fixture
-def calls(tmp_path):
-    return _run(tmp_path, QMICLI)
+# Portee module : les 2 tests lisent le meme journal ; un seul lancement du script (le job de
+# mutation relance tests/unit/ pour chaque mutant, sous 10 min — 9 min 39 s avant ce partage).
+@pytest.fixture(scope="module")
+def calls(tmp_path_factory):
+    return _run(tmp_path_factory.mktemp("standby"), QMICLI)
 
 
 def test_same_pdn_refusal_reuses_attach_profile(tmp_path):

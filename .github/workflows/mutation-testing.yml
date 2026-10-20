@@ -99,7 +99,7 @@ jobs:
           mutmut run \
             --paths-to-mutate backend/app/logic/ \
             --tests-dir tests/unit/ \
-            --runner "python -m pytest -x --assert=plain tests/unit/" \
+            --runner "python -m pytest -x --assert=plain -m 'not no_mutation' tests/unit/" \
             2>&1 | tee /tmp/mutmut-run.log
           EXIT=${PIPESTATUS[0]}
           echo "mutmut exit code: $EXIT"
