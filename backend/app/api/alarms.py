@@ -216,6 +216,7 @@ def active_escalation(
             "name": user.name if user else "?",
             "has_phone": bool(user and user.phone_number),
             "is_online": bool(user and user.is_online),
+            "has_device": bool(user and user.has_device),  # INV-143
             "role": "upcoming" if not notif else "current" if ec.user_id == alarm.assigned_user_id else "notified",
             "notified_at": _iso(notif.notified_at) if notif else None,
             "contact_at": _iso(notif.notified_at + timedelta(minutes=sms_call_delay)) if notif else None,

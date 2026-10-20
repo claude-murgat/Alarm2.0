@@ -222,6 +222,24 @@ class TestActionFeedback:
         expect(dashboard.locator("#snackbar.show.error")).to_contain_text("Refus de test INV-139", timeout=5000)
 
 
+class TestWaitingStatus:
+    """INV-143 : hors garde + telephone enregistre + pas de heartbeat -> « En attente » ;
+    la personne de garde sans heartbeat reste « Hors ligne » (vraie anomalie)."""
+
+    def test_users_tab_shows_waiting_for_off_duty_user_with_phone(self, dashboard: Page, primary_url):
+        requests.post(f"{primary_url}/api/test/simulate-watchdog-failure", timeout=5)  # tous hors ligne
+        tok = requests.post(f"{primary_url}/api/auth/login",
+                            json={"name": "user2", "password": "user123"}, timeout=5).json()["access_token"]
+        r = requests.post(f"{primary_url}/api/devices/fcm-token", timeout=5,
+                          headers={"Authorization": f"Bearer {tok}"},
+                          json={"token": "tok-user2-inv143-web", "device_id": "dev-user2-inv143-web"})
+        assert r.status_code == 200, r.text
+        dashboard.locator(".tab:text('Utilisateurs')").click()
+        row = lambda name: dashboard.locator("#usersTable tr", has_text=name)
+        expect(row("user2").locator(".badge.waiting")).to_have_text("En attente", timeout=8000)
+        expect(row("user1").locator(".badge.offline")).to_have_text("Hors ligne", timeout=8000)
+
+
 class TestTimesShownInLocalTime:
     """Le backend envoie de l'UTC sans suffixe. Un navigateur a Paris doit voir
     l'heure de Paris (incident 2026-10-14 : contact sec 15:32 affiche 13:32)."""

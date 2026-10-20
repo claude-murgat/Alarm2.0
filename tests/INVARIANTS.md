@@ -138,6 +138,14 @@ Quand la boucle d'escalade (`escalation_loop`) passe une alarme à l'utilisateur
 - **Pourquoi** : prod 2026-10-20, alarme 817 : escalade timo → admin à 08:33:31, push envoyé à timo seul (`notified_user_ids: [4]`). Session SQLAlchemy en `autoflush=False` : la notification ajoutée sans `flush` était invisible à la relecture qui choisit les destinataires. admin n'était réveillé qu'au palier suivant ou par le SMS (+2 min). Les tests FCM existants passaient par `/api/test/trigger-escalation` (qui flush) et ne voyaient pas la vraie boucle.
 - **Couverture** : Integration `test_escalation_push_new_assignee_inv142.py` (vraie boucle, tick 1 s, horloge avancée). RED avant le correctif : push à l'ancien assigné seul.
 
+### INV-143 [M] ✅ Web : un utilisateur hors garde avec un téléphone s'affiche « En attente », pas « Hors ligne »
+L'API expose `has_device` (au moins un jeton FCM enregistré) dans `/api/users/` et dans chaque étape de `/api/alarms/active/escalation`. Le web affiche, partout où il montre un statut (onglet Utilisateurs, Disponibilité, schéma d'escalade) :
+- **En ligne** (vert) si `is_online` ;
+- **En attente** (orange, « réveillé par push à l'escalade ») si l'utilisateur **n'est pas de garde** (pas en position 1 de la chaîne) et a un téléphone enregistré ;
+- **Hors ligne** (rouge) sinon — y compris la personne **de garde** sans heartbeat, qui reste une vraie anomalie.
+- **Pourquoi** : les utilisateurs hors garde n'envoient pas de heartbeat par design (INV-ANDROID-600), ils sont réveillés par push. Le web les affichait « Hors ligne » alors que leur téléphone était allumé et joignable ; le propriétaire a cru, le 2026-10-20, qu'ils ne seraient pas appelés.
+- **Couverture** : Integration `test_waiting_status_inv143.py` ; Playwright `test_frontend.py::TestWaitingStatus` (joué en local, hors CI).
+
 ### INV-015 [H] ✅ Pas d'escalade d'une alarme acknowledged
 Une alarme `status = 'acknowledged'` ne peut pas être escaladée (escalation_count ne change pas).
 - **Pourquoi** : ACK doit suspendre l'escalade.

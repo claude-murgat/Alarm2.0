@@ -14,6 +14,7 @@
         .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 4px; }
         .status-dot.online { background: #22c55e; }
         .status-dot.offline { background: #ef4444; }
+        .status-dot.waiting { background: #f59e0b; }
         .tabs { display: flex; background: #1e293b; border-bottom: 1px solid #334155; }
         .tab { padding: 12px 24px; cursor: pointer; border-bottom: 2px solid transparent; color: #94a3b8; transition: all 0.2s; }
         .tab:hover { color: #e2e8f0; }
@@ -37,6 +38,7 @@
         .badge.escalated { background: #a855f733; color: #a855f7; }
         .badge.online { background: #22c55e33; color: #22c55e; }
         .badge.offline { background: #ef444433; color: #ef4444; }
+        .badge.waiting { background: #f59e0b33; color: #f59e0b; }
         .badge.critical { background: #ef444433; color: #ef4444; }
         .badge.high { background: #f59e0b33; color: #f59e0b; }
         .badge.medium { background: #3b82f633; color: #3b82f6; }
@@ -220,7 +222,7 @@
             </div>
             <div class="card">
                 <h3>Utilisateurs</h3>
-                <table><thead><tr><th>ID</th><th>Nom</th><th>Admin</th><th>En ligne</th><th>Téléphone</th><th>Actions</th></tr></thead>
+                <table><thead><tr><th>ID</th><th>Nom</th><th>Admin</th><th>Statut</th><th>Téléphone</th><th>Actions</th></tr></thead>
                 <tbody id="usersTable"></tbody></table>
             </div>
         </div>
@@ -716,15 +718,31 @@
             if (!isEditing(el)) el.value = el.defaultValue = value;
         }
 
+        // INV-143 : hors garde (position != 1), sans heartbeat mais avec un telephone enregistre ->
+        // « En attente » : pas de heartbeat par design (INV-ANDROID-600), reveille par push.
+        function presence(u, oncallId) {
+            if (u.is_online) return ['online', 'En ligne', ''];
+            if (u.id !== oncallId && u.has_device) return ['waiting', 'En attente', 'Hors garde : réveillé par push à l\'escalade'];
+            return ['offline', 'Hors ligne', ''];
+        }
+        async function oncallUserId() {
+            try { const c = await api('/api/config/escalation'); return c.length ? c[0].user_id : null; } catch (_) { return null; }
+        }
+        function presenceBadge(u, oncallId) {
+            const [cls, label, tip] = presence(u, oncallId);
+            return `<span class="badge ${cls}" title="${tip}">${label}</span>`;
+        }
+
         async function loadUsers() {
             users = await api('/api/users/');
+            const oncall = await oncallUserId();
             // Re-rendre le tableau detruirait les champs tel en cours de saisie.
             if ([...document.querySelectorAll('#usersTable input.user-phone')].some(isEditing)) return;
             // Assignation alarme supprimee (toujours auto-escalade)
             document.getElementById('usersTable').innerHTML = users.map(u => `
                 <tr><td>${u.id}</td><td>${u.name}</td>
                 <td>${u.is_admin ? 'Oui' : 'Non'}</td>
-                <td><span class="badge ${u.is_online ? 'online' : 'offline'}">${u.is_online ? 'Oui' : 'Non'}</span></td>
+                <td>${presenceBadge(u, oncall)}</td>
                 <td>
                     <input class="user-phone" id="phone_${u.id}" type="tel" value="${u.phone_number || ''}" placeholder="+33612345678" style="width:130px">
                     <button class="btn-sm save-phone-btn" onclick="savePhone(${u.id})" style="margin-left:4px">Enregistrer</button>
@@ -773,9 +791,10 @@
 
         async function loadDevices() {
             const usersList = await api('/api/users/');
+            const oncall = await oncallUserId();
             document.getElementById('devicesTable').innerHTML = usersList.map(u => `
                 <tr><td>${u.name}</td>
-                <td><span class="badge ${u.is_online ? 'online' : 'offline'}">${u.is_online ? 'En ligne' : 'Hors ligne'}</span></td>
+                <td>${presenceBadge(u, oncall)}</td>
                 <td>${timeAgo(u.last_heartbeat)}</td></tr>`).join('') || '<tr><td colspan="3" style="text-align:center;color:#94a3b8">Aucun utilisateur</td></tr>';
         }
 
@@ -1453,9 +1472,11 @@
 
                 const linkCls = notified ? (running && s.role === 'current' ? 'flow' : 'done') : '';
                 const link = `<div class="esc-link ${linkCls}"></div>`;
+                const [pCls, pLabel] = presence({id: s.user_id, is_online: s.is_online, has_device: s.has_device},
+                                                s.position === 1 ? s.user_id : null);
                 const who = `<div class="esc-who"><div class="esc-pos">${s.position}</div><div>
                     <div class="esc-name">${escHtml(s.name)}</div>
-                    <div class="esc-sub"><span class="status-dot ${s.is_online ? 'online' : 'offline'}"></span>${s.is_online ? 'en ligne' : 'hors ligne'}${s.role === 'current' && running ? ' · <b style="color:#60a5fa">à joindre</b>' : ''}</div>
+                    <div class="esc-sub"><span class="status-dot ${pCls}"></span>${pLabel.toLowerCase()}${s.role === 'current' && running ? ' · <b style="color:#60a5fa">à joindre</b>' : ''}</div>
                     </div></div>`;
                 const lane = `<div class="esc-lane${s.acked ? ' acked' : ''}" data-user="${s.user_id}" data-role="${s.role}">` +
                     who + [notif, wait, contact, result, escal].join(link) + `</div>`;
