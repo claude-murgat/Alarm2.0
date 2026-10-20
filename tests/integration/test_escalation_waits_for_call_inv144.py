@@ -5,6 +5,10 @@ passe avant d'escalader, au plus delai + 3 min (puis escalade marquee « sans ap
 Prod 2026-10-20 (alarme 852) : delai d'escalade et delai SMS/appel a 2 min ; l'escalade est
 partie a 10:13:55, le SMS et l'appel de timo n'ont ete crees qu'a 10:13:57 (appel passe a
 10:15:28). Le proprietaire exige que SMS et appel precedent toujours l'escalade.
+
+Revision 2026-10-20 (alarme 853) : SMS en echec (AT_ERROR), appel en `error` (modem muet) a
+13:15:14 compte comme passe -> escalade a 13:15:22, SMS parti a 13:16:03. Desormais un appel
+`error` (jamais emis, INV-127) est rejoue, et le SMS doit etre parti lui aussi.
 """
 import time
 
@@ -91,6 +95,13 @@ def _pending_call(client):
     raise AssertionError("la boucle n'a pas cree l'appel de l'assigne")
 
 
+def _send_sms(client):
+    """Joue la gateway : envoie le SMS en attente de user1."""
+    sms = next(s for s in client.get("/internal/sms/pending", headers=GW).json()
+               if s["to_number"] == "+33600000144")
+    assert client.post(f"/internal/sms/{sms['id']}/sent", headers=GW).status_code == 200
+
+
 def _audit(client, h, alarm_id):
     r = client.get("/api/audit/", headers=h, params={"alarm_id": alarm_id, "page_size": 200})
     assert r.status_code == 200, r.text
@@ -104,6 +115,7 @@ def test_escalation_waits_for_the_call_then_goes(setup):
     call = _pending_call(client)
     assert _alarm(client, h)["escalation_count"] == 0, "escalade partie avant l'appel de l'assigne"
 
+    _send_sms(client)
     assert client.post(f"/internal/calls/{call['id']}/result", headers=GW,
                        json={"result": "no_answer"}).status_code == 200
 
@@ -124,3 +136,45 @@ def test_escalation_goes_anyway_three_minutes_after_delay(setup):
     assert "escalation_without_call" in _audit(client, h, alarm_id)
     email = client.get("/api/test/last-email-sent").json()
     assert "Escalade sans appel" in email.get("subject", ""), email
+
+
+def test_call_error_is_replayed_and_holds_escalation(setup):
+    """Alarme 853 : un appel `error` n'a jamais sonne -> pas passe, rejoue par la gateway."""
+    client, h, uid1 = setup
+    _send(client, h, uid1)
+    _advance(client, 15.5)
+    call = _pending_call(client)
+    _send_sms(client)
+    assert client.post(f"/internal/calls/{call['id']}/result", headers=GW,
+                       json={"result": "error"}).status_code == 200
+
+    time.sleep(2.5)  # >= 2 ticks
+    assert _alarm(client, h)["escalation_count"] == 0, "escalade sur un appel jamais emis"
+    again = [c for c in client.get("/internal/calls/pending", headers=GW).json() if c["id"] == call["id"]]
+    assert again and again[0]["retries"] == 1, "l'appel en error n'est pas rejoue"
+
+    assert client.post(f"/internal/calls/{call['id']}/result", headers=GW,
+                       json={"result": "no_answer"}).status_code == 200
+    went = _wait(client, h, lambda a: a["escalation_count"] >= 1, 10)
+    assert went["escalation_count"] == 1
+
+
+def test_escalation_waits_for_the_sms(setup):
+    """Alarme 853 : SMS en echec, appel passe -> on attend que le SMS parte."""
+    client, h, uid1 = setup
+    _send(client, h, uid1)
+    _advance(client, 15.5)
+    call = _pending_call(client)
+    sms = next(s for s in client.get("/internal/sms/pending", headers=GW).json()
+               if s["to_number"] == "+33600000144")
+    assert client.post(f"/internal/sms/{sms['id']}/error", headers=GW,
+                       json={"error": "AT_ERROR"}).status_code == 200
+    assert client.post(f"/internal/calls/{call['id']}/result", headers=GW,
+                       json={"result": "no_answer"}).status_code == 200
+
+    time.sleep(2.5)  # >= 2 ticks
+    assert _alarm(client, h)["escalation_count"] == 0, "escalade avant le SMS de l'assigne"
+
+    _send_sms(client)
+    went = _wait(client, h, lambda a: a["escalation_count"] >= 1, 10)
+    assert went["escalation_count"] == 1

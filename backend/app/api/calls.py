@@ -58,7 +58,9 @@ def post_call_result(
 
     result = payload.get("result", "unknown")
     row.result = result
-    row.called_at = clock_now()
+    # INV-144 : `error` = appel jamais emis (INV-127) -> reste en file, rejoue jusqu'a 3 echecs (INV-064)
+    if result != "error":
+        row.called_at = clock_now()
 
     if result in ("ack_dtmf", "ack_sms"):
         # Acquitter l'alarme

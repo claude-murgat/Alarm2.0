@@ -78,8 +78,9 @@ def _get_notified_user_ids(db: Session, alarm_id: int) -> list[int]:
 
 def _alarms_awaiting_call(db: Session, alarms) -> set[int]:
     """INV-144 : alarmes dont l'assigne a un numero mais n'a pas encore recu son appel
-    (pas encore cree, ou en file non traite). Un appel abandonne apres 3 echecs (INV-064)
-    compte comme fait : on n'attend jamais un appel qui ne partira plus."""
+    (pas encore cree, ou en file non traite) ou son SMS (encore en file). Un SMS/appel
+    abandonne apres 3 echecs (INV-064) compte comme fait : on n'attend jamais ce qui ne
+    partira plus. Un appel `error` reste en file (cf post_call_result)."""
     awaiting = set()
     for alarm in alarms:
         user = db.query(User).filter(User.id == alarm.assigned_user_id).first() if alarm.assigned_user_id else None
@@ -90,7 +91,12 @@ def _alarms_awaiting_call(db: Session, alarms) -> set[int]:
             CallQueue.user_id == user.id,
             or_(CallQueue.called_at.isnot(None), CallQueue.retries >= 3),
         ).first()
-        if not done:
+        sms_pending = db.query(SmsQueue).filter(
+            SmsQueue.to_number == user.phone_number,
+            SmsQueue.sent_at == None,
+            SmsQueue.retries < 3,
+        ).first()
+        if not done or sms_pending:
             awaiting.add(alarm.id)
     return awaiting
 
