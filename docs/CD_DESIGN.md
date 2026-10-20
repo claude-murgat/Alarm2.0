@@ -68,7 +68,7 @@ Sélection en lecture de `tests/INVARIANTS.md` + `android/INVARIANTS.md` qui con
 | **Build** | GHCR (`ghcr.io/claude-murgat/alarm-{backend,patroni}`), images x86_64, tag `:sha-<short>` à chaque push master |
 | **Promotion** | Manuelle V1, `workflow_dispatch` avec input `sha`, prérequis : tier 1+2+3 verts + tier 1.5 mutation 100% + ≥ 24 h depuis le merge |
 | **Pull** | Systemd timer **5 min** par nœud, comparaison digest distant `:stable`. Pull-only (le restart est une étape séparée et coordonnée) |
-| **Canary** | NODE3 → onsite-2 → onsite-1, soak **10 min** entre chaque + healthcheck `/health` + replication lag `< 100 ms` + pas de churn leader Patroni |
+| **Canary** | NODE3 → onsite-2 → onsite-1, soak **2 min** entre chaque (10 min jusqu'au 2026-10-20, réduit à la demande du propriétaire : ~10 min de déploiement au lieu de ~35) + healthcheck `/health` + replication lag `< 100 ms` + pas de churn leader Patroni |
 | **Rollback** | Auto si `/health` 503 × 3 / 60 s OU restart-loop OU lag > 30 s. Garde **K=5** digests précédents par nœud, revert via `docker tag <prev-digest> alarm-backend:stable` puis `up -d` |
 | **Observabilité** | Table Postgres `deployment_events` (réplication native), email à `direction_technique@charlesmurgat.com` sur rollback ou promo `:stable`. Pas de Grafana V1 |
 | **Bot IA — mode normal** | Bot ne promeut pas `:stable`. Frontière de blast-radius pour les fix non-urgents |

@@ -32,7 +32,7 @@ Group=alarm
 # Exemple de contenu /etc/alarm/cd.env :
 #   GATEWAY_KEY=<meme valeur que dans .env.prod.secrets sur les noeuds backend>
 #   # Overrides optionnels :
-#   # SOAK=600
+#   # SOAK=120
 #   # API_BASE=http://10.99.0.1:8000
 #   # REGISTRY=ghcr.io/claude-murgat
 #   # TAG=stable
@@ -44,8 +44,8 @@ RuntimeDirectory=alarm-cd-orchestrate
 # /var/lib/alarm/cd/ : partage avec alarm-cd-pull (digests.tsv + orchestrate.state).
 # Cree owner alarm:alarm.
 StateDirectory=alarm/cd
-# Limite de temps : 3 etapes canary × (restart + soak 10 min) + preflight +
-# overhead ~= 45 min max. On laisse 1 h de marge avant kill brutal.
+# Limite de temps : 3 etapes canary × (restart + soak 2 min) + preflight +
+# overhead ~= 15 min. 1 h de marge avant kill brutal (couvre un SOAK plus long en override).
 TimeoutStartSec=3600
 ExecStart=/usr/local/bin/alarm-cd-orchestrate
 # Pas de Restart= (Type=oneshot). Le timer relance toutes les 15 min de toute
