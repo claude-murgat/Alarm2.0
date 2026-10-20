@@ -49,8 +49,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Cf §5 doc — "hystérésis : pas de nouvelle tentative de pull :stable sur ce
 # noeud pendant 1 h". Ici on porte ça au niveau orchestration (chaine entiere).
 COOLDOWN_AFTER_FAIL=3600
-# Soak entre etapes (override possible via env, default 600s = 10 min).
-SOAK="${SOAK:-600}"
+# Soak entre etapes (override possible via env). 120 s depuis le 2026-10-20 (choix proprietaire :
+# ~10 min de deploiement au lieu de ~35) ; toujours un noeud a la fois, rollback auto conserve.
+SOAK="${SOAK:-120}"
 # Ordre canary fige : NODE3 (cloud, le moins critique) -> onsite-2 (Celeron,
 # maillon faible) -> onsite-1 (i5, le plus puissant et souvent primary).
 # Cf §4 doc — justification de l'ordre.
