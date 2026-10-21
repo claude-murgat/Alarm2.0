@@ -37,6 +37,7 @@ from locks import at_lock  # RLock reentrant partage du port AT (cf locks.py)
 from dry_contact import parse_dc_line, raw_to_state, decide_report  # logique pure (cf dry_contact.py)
 from modem_health import (  # logique pure (cf modem_health.py)
     MAX_AT_FAILURES, at_failures_after, call_was_dialed, parse_network, reregister_due,
+    sends_allowed,
 )
 from voice_call import (  # logique pure (cf voice_call.py)
     DTMF_WAIT_S, FRAME_S, HANG_UP_COMMANDS, LEAD_SILENCE_S, call_answered, call_deferred_for_sms,
@@ -51,6 +52,10 @@ logging.basicConfig(
 logger = logging.getLogger("modem_gateway")
 
 GATEWAY_HEADERS = {"X-Gateway-Key": GATEWAY_KEY}
+
+# INV-145 : pose par le keepalive (modem joignable + inscrit) ; les threads SMS/appel
+# n'essaient rien tant qu'il n'est pas pose, pour ne pas bruler les 3 essais (INV-064).
+modem_ready = threading.Event()
 
 
 # ── Helpers HTTP ─────────────────────────────────────────────────────────────
@@ -124,7 +129,9 @@ class SmsSenderThread(threading.Thread):
         while self.running:
             try:
                 pending = _get_from_backend("/internal/sms/pending")
-                if pending:
+                if pending and not modem_ready.is_set():
+                    logger.warning(f"{len(pending)} SMS en attente : modem hors reseau, pas d'essai (INV-145)")
+                elif pending:
                     for sms in pending:
                         success, error = self._send_sms(sms["to_number"], sms["body"])
                         if success:
@@ -235,7 +242,9 @@ class CallSenderThread(threading.Thread):
         while self.running:
             try:
                 pending = _get_from_backend("/internal/calls/pending")
-                if pending:
+                if pending and not modem_ready.is_set():
+                    logger.warning(f"{len(pending)} appel(s) en attente : modem hors reseau, pas d'essai (INV-145)")
+                elif pending:
                     # INV-134 : le SMS de detail part avant l'appel vers le meme numero.
                     sms_pending = _get_from_backend("/internal/sms/pending")
                     for call in pending:
@@ -898,13 +907,17 @@ def main():
     # Boucle principale (keepalive)
     at_failures = 0
     unregistered, reregister_tried = 0, False
+    delay = 0  # 1er controle immediat : modem_ready est pose avant le 1er envoi (INV-145)
     try:
         while True:
-            time.sleep(60)
+            time.sleep(delay)
+            delay = 60
             # Verifier que le modem repond toujours
             with at_lock:
                 r = send_at_command(ser, "AT", timeout=3)
             at_failures = at_failures_after(r, at_failures)
+            if at_failures:
+                modem_ready.clear()
             if at_failures >= MAX_AT_FAILURES:
                 # Le port a pu changer (modem re-enumere sur l'USB) : on sort, systemd
                 # (Restart=always) relance la gateway qui re-detecte le bon port.
@@ -925,6 +938,10 @@ def main():
                     send_at_command(ser, "AT+CSQ", timeout=3),
                 )
             _post_to_backend("/internal/alarms/modem-status", net)
+            if sends_allowed(at_failures, net["registered"]):
+                modem_ready.set()
+            else:
+                modem_ready.clear()
 
             # INV-128 : modem inscrit nulle part depuis ~5 min -> radio coupee/rallumee
             unregistered = 0 if net["registered"] else unregistered + 1

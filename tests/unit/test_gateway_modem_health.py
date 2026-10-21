@@ -105,3 +105,18 @@ class TestReregisterDue:
 
     def test_only_once_per_episode(self):
         assert _mh.reregister_due(_mh.UNREGISTERED_CHECKS_BEFORE_RECOVERY + 3, tried=True) is False
+
+
+class TestSendsAllowed:
+    """INV-145 : la gateway ne tente un SMS/appel que si le modem repond a AT et est
+    inscrit sur un reseau. Sinon l'essai echouerait a coup sur et brulerait un des
+    3 essais (INV-064) : alarme 886 du 2026-10-21, SMS abandonne en 1 min 30 modem muet."""
+
+    def test_ready_modem_sends(self):
+        assert _mh.sends_allowed(at_failures=0, registered=True) is True
+
+    def test_unregistered_modem_does_not_send(self):
+        assert _mh.sends_allowed(at_failures=0, registered=False) is False
+
+    def test_mute_modem_does_not_send(self):
+        assert _mh.sends_allowed(at_failures=1, registered=True) is False
