@@ -262,6 +262,14 @@ Après un `POST /alarms/{id}/ack` réussi, depuis le dashboard ou depuis `AlarmA
 - **Pourquoi** : bug terrain 2026-10-14. Six alarmes ont été acquittées deux fois, à 1 à 3 s d'intervalle, entre le 13 et le 14/10. Jusqu'au poll suivant (3 s au plus), l'UI lisait la copie d'avant l'ack, encore `active`. Elle appliquait la règle « ack expiré » et refaisait sonner, ce qui obligeait à réacquitter. Une vraie réactivation n'arrive qu'après la suspension de 30 min (INV-003/016) : la fenêtre de 15 s ne masque rien de légitime.
 - **Couverture** : Espresso `AlarmE2ETest::test31_ackNotUndoneByStalePollResponse` (RED 3 fois sur 3 sur le code d'origine, GREEN 3 fois sur 3).
 
+### INV-ANDROID-210 [C] ✅ Alarme résolue → sonnerie coupée et écran d'alarme fermé, même téléphone verrouillé — 2026-10-21
+Deux déclencheurs, l'un ou l'autre suffit :
+1. **Push `alarm_resolved`** (INV-147) : `AlarmFirebaseService` → `AlarmWakeUpHandler.onAlarmResolvedPushReceived(alarmId)`, **sans réseau** : `currentAlarm` remis à `null` (sinon le tick 1 s du dashboard relancerait le son), sonnerie partagée arrêtée, notification plein écran (`ALARM_NOTIFICATION_ID`) annulée, `AlarmActivity` fermée si elle affiche cette alarme. Sans effet si `currentAlarm` est une **autre** alarme (push arrivé en retard). Une notification visible « Alarme resolue » est affichée (sinon FCM dégrade la priorité haute, cf INV-ANDROID-601).
+2. **Poll sans alarme** : quand `getMyAlarms` ne renvoie plus rien, le service ferme `AlarmActivity` (`AlarmActivity.closeIfShowing()`) et annule la notification plein écran, en plus de couper le son qu'il a lancé.
+`AlarmActivity.onDestroy` coupe la sonnerie : fermer l'écran suffit à faire taire celle qu'il a lancée.
+- **Pourquoi** : prod 2026-10-21, alarme 886 résolue depuis le web. Téléphone de admin (Pixel 9a, verrouillé) : sonnerie continue jusqu'au déverrouillage et à l'ouverture de l'app — le seul canal de fin d'alarme était le poll, bloqué ou retardé en veille. Téléphone de timo : son coupé par le poll, mais `AlarmActivity` restait affichée — rien ne la fermait hormis l'acquittement ou le bouton retour au dashboard. Une notification plein écran restée affichée rouvrait en plus l'écran (et sa sonnerie) sur une alarme terminée.
+- **Couverture** : Espresso `AlarmResolutionTest` (push de résolution ; poll sans alarme). Compilé, pas encore exécuté sur émulateur.
+
 ### INV-ANDROID-300 [C] ⚠️ Heartbeat envoyé toutes les 3s au POST /api/devices/heartbeat
 `AlarmPollingService.startHeartbeat()` boucle `while (isActive) { heartbeat; delay(3000) }`.
 - **Pourquoi** : le watchdog backend marque offline à 60s (INV-041 backend) → 3s laisse 20 tentatives avant de basculer offline.

@@ -43,6 +43,25 @@ object AlarmWakeUpHandler {
     }
 
     /**
+     * INV-ANDROID-210 : push `alarm_resolved`. Coupe la sonnerie et ferme l'ecran
+     * sans reseau : en Doze, le poll qui verrait la resolution peut ne jamais passer.
+     */
+    fun onAlarmResolvedPushReceived(context: Context, alarmId: String?) {
+        val id = alarmId?.toIntOrNull()
+        com.alarm.critical.util.AppLogger.log("Alarme", "Push resolution recu (id=$alarmId)")
+        val current = AlarmPollingService.currentAlarm
+        // Ne pas faire taire une autre alarme si ce push arrive en retard.
+        if (id != null && current != null && current.id != id) return
+        // Sinon le dashboard (tick 1 s sur currentAlarm) relancerait la sonnerie.
+        AlarmPollingService.currentAlarm = null
+        AlarmPollingService.activeAlarmCount = 0
+        AlarmSoundManager(context).stopAlarmSound()
+        context.getSystemService(android.app.NotificationManager::class.java)
+            .cancel(AlarmPollingService.ALARM_NOTIFICATION_ID)
+        com.alarm.critical.AlarmActivity.closeIfShowing(id)
+    }
+
+    /**
      * Appele quand un push FCM `escalation_update` arrive (INV-ANDROID-601).
      *
      * Met a jour le cache local ET reconcilie le heartbeat. Sans la seconde

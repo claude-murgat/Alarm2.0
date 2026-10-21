@@ -324,6 +324,9 @@ class AlarmPollingService : Service() {
                         } else {
                             // Plus d'alarme active → reset du flag
                             alarmActivityLaunchedForId = -1
+                            // INV-ANDROID-210 : alarme terminee → fermer l'ecran plein ecran et sa notif
+                            AlarmActivity.closeIfShowing()
+                            getSystemService(NotificationManager::class.java).cancel(ALARM_NOTIFICATION_ID)
                         }
 
                         updateNotification("Surveillance - ${alarms.size} alarme(s) active(s)")

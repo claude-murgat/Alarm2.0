@@ -25,6 +25,18 @@ class AlarmActivity : AppCompatActivity() {
     companion object {
         @Volatile
         var isVisible = false
+
+        // INV-ANDROID-210 : ecran ouvert, pour le fermer quand l'alarme est terminee.
+        @Volatile
+        private var shown: java.lang.ref.WeakReference<AlarmActivity>? = null
+
+        /** Ferme l'ecran d'alarme (onDestroy coupe sa sonnerie). alarmId null : quelle qu'elle soit. */
+        fun closeIfShowing(alarmId: Int? = null) {
+            val activity = shown?.get() ?: return
+            activity.runOnUiThread {
+                if (alarmId == null || activity.alarmId == alarmId) activity.finish()
+            }
+        }
     }
 
     private lateinit var soundManager: AlarmSoundManager
@@ -47,6 +59,7 @@ class AlarmActivity : AppCompatActivity() {
         setContentView(R.layout.activity_alarm)
 
         alarmId = intent.getIntExtra("alarm_id", 0)
+        shown = java.lang.ref.WeakReference(this)
         val title = intent.getStringExtra("alarm_title") ?: "ALARME CRITIQUE"
         val message = intent.getStringExtra("alarm_message") ?: ""
         token = intent.getStringExtra("token")
@@ -188,6 +201,7 @@ class AlarmActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         isVisible = false
+        if (shown?.get() === this) shown = null
         stopPulseAnimations()
         soundManager.stopAlarmSound()
         super.onDestroy()
