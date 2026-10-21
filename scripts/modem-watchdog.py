@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # Watchdog modem SIM7600 : detecte un drop USB, recupere auto (PCI remove/rescan
 # xHCI + restart gateway/4g-standby), et envoie UN SEUL email par episode.
-import os, sys, time, subprocess, smtplib, socket
+# INV-146 : detecte aussi un modem PRESENT mais muet (gateway relancee en boucle) -> reset USB.
+import os, sys, time, subprocess, smtplib, socket, glob
 from email.message import EmailMessage
 WDM = '/dev/cdc-wdm0'
 XHCI = os.getenv('MODEM_XHCI', '0000:00:14.0')
@@ -9,6 +10,30 @@ CHECK = int(os.getenv('WATCHDOG_CHECK_SECONDS', '60'))
 GRACE = int(os.getenv('WATCHDOG_GRACE_SECONDS', '20'))
 HOST = socket.gethostname()
 def log(m): print(f"[modem-watchdog] {m}", flush=True)
+# INV-146 : la gateway sort quand le modem est muet (INV-126) ; 3 relances en 10 min = muet.
+MUTE_RESTARTS, MUTE_WINDOW = 3, 600
+def mute_detected(restart_times, now):
+    return sum(1 for t in restart_times if now - t <= MUTE_WINDOW) >= MUTE_RESTARTS
+def gateway_restarts():
+    try:
+        out = subprocess.run(['systemctl', 'show', 'alarm-sms-gateway', '-p', 'NRestarts', '--value'],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+        return int(out or 0)
+    except Exception: return 0
+def usb_reset_modem():
+    """Reset USB du seul SIM7600 (authorized 0 -> 1) : a debloque onsite-2 le 2026-10-21."""
+    for d in glob.glob('/sys/bus/usb/devices/*'):
+        try:
+            if open(f'{d}/idVendor').read().strip() != '1e0e': continue
+        except OSError: continue  # interfaces USB : pas d'idVendor
+        log(f"reset USB {d}")
+        try:
+            open(f'{d}/authorized', 'w').write('0'); time.sleep(3); open(f'{d}/authorized', 'w').write('1')
+        except Exception as e: log(f"reset USB KO: {e}")
+    time.sleep(25)
+    subprocess.run(['systemctl', 'restart', 'alarm-modem-rat', 'alarm-sms-gateway', 'alarm-4g-standby'],
+                   capture_output=True)
+    log("modem-rat + gateway + 4g-standby relances")
 def load_env(*paths):
     cfg = {}
     for p in paths:
@@ -57,9 +82,22 @@ def main():
         sys.exit(0 if ok else 1)
     log(f"demarre (check={CHECK}s xHCI={XHCI} alerte->{ALERT_TO}) — 1 email par episode")
     incident = False
+    restarts, last_n, mute_mailed = [], gateway_restarts(), False
     while True:
         if modem_present():
             if incident: log("modem present a nouveau — episode clos"); incident = False
+            n, now = gateway_restarts(), time.time()
+            if n > last_n: restarts.append(now)
+            last_n = n
+            if mute_detected(restarts, now):
+                log("MODEM MUET (gateway relancee en boucle) -> reset USB + 1 email")
+                usb_reset_modem(); restarts.clear(); last_n = gateway_restarts()
+                if not mute_mailed:
+                    mute_mailed = True
+                    send_email(f"[ALARME-MURGAT] Modem SIM7600 muet sur {HOST} — reset USB auto",
+                               f"Le modem SIM7600 etait present sur l'USB mais ne repondait plus (gateway relancee {MUTE_RESTARTS} fois en {MUTE_WINDOW // 60} min) sur {HOST}.\nReset USB du modem effectue automatiquement. Si l'alerte revient, power-cycle physique du modem.")
+            elif not restarts or now - restarts[-1] > MUTE_WINDOW:
+                mute_mailed = False  # episode clos : plus de relance depuis 10 min
             time.sleep(CHECK); continue
         time.sleep(GRACE)
         if modem_present(): continue

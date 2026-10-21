@@ -44,3 +44,9 @@ def parse_network(creg: str, cpsi: str, csq: str) -> dict:
 def reregister_due(unregistered_checks: int, tried: bool) -> bool:
     """Une seule tentative de reinscription par episode sans reseau."""
     return not tried and unregistered_checks >= UNREGISTERED_CHECKS_BEFORE_RECOVERY
+
+
+def sends_allowed(at_failures: int, registered: bool) -> bool:
+    """INV-145 : un SMS/appel n'est tente que modem joignable ET inscrit ; sinon il
+    echouerait a coup sur et consommerait un des 3 essais (INV-064)."""
+    return at_failures == 0 and registered

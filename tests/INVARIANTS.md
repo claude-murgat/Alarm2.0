@@ -390,6 +390,16 @@ Un appel n'est compté « passé » que si le modem répond `OK` à `ATD<numéro
 - **Pourquoi** : le 2026-10-13, onsite-2 était resté désinscrit (`+COPS: 2`, `+CME ERROR: SIM failure` sur `COPS=0`) depuis la ré-énumération USB du 2026-09-12. Pendant tout ce temps, aucun SMS ni appel n'était émis. Un cycle `CFUN=0/1` l'a réinscrit en 26 s. Il ne s'agit pas d'un reset modem : le lien USB n'est pas touché. Règle validée par le propriétaire le 2026-10-13.
 - **Couverture** : Unit `test_gateway_modem_health.py::TestParseNetwork`, `::TestReregisterDue`.
 
+### INV-145 [C] ✅ Gateway : aucun essai de SMS/appel tant que le modem est muet ou sans réseau
+La gateway ne tente un SMS ou un appel que si son dernier keepalive (60 s, contrôle immédiat au démarrage) a obtenu `OK` à `AT` **et** un modem inscrit (`AT+CREG?` stat 1 ou 5). Sinon les SMS et appels restent en file **sans consommer d'essai** (INV-064) et partent dès que le modem est de nouveau prêt.
+- **Pourquoi** : alarme 886 du 2026-10-21 (admin). Modem désinscrit puis muet : le SMS a échoué 3 fois en 1 min 30 (`AT_ERROR`, `CMGF_FAILED`) et a été **abandonné** ; il ne serait jamais parti, même après le retour du modem. Le propriétaire exige que SMS et appel partent absolument.
+- **Couverture** : Unit `test_gateway_modem_health.py::TestSendsAllowed`.
+
+### INV-146 [C] ✅ Watchdog : modem présent mais muet → reset USB automatique
+`alarm-modem-watchdog` suit les relances de la gateway (`NRestarts` systemd ; la gateway sort quand le modem est muet, INV-126). **3 relances en 10 min** = modem muet : reset USB du seul SIM7600 (`authorized` 0 → 1 sur le périphérique `1e0e`), puis relance de `alarm-modem-rat`, de la gateway et de `alarm-4g-standby`. **Un seul email par épisode** ; l'épisode se clôt après 10 min sans relance. Le cas « modem absent de l'USB » (PCI rescan) est inchangé.
+- **Pourquoi** : alarme 886 du 2026-10-21 : SIM7600 visible sur l'USB mais port inutilisable (`BrokenPipeError`), gateway relancée toutes les ~90 s. Le watchdog ne réagissait qu'à un modem absent : aucune récupération. Un reset USB manuel (`authorized` 0 → 1) l'a rétabli en 30 s.
+- **Couverture** : Unit `test_modem_watchdog.py::TestMuteDetected`.
+
 ### INV-129 [H] ✅ Signal 4G du modem visible dans l'app et le web, « inconnu » si la gateway se tait
 La gateway envoie à chaque keepalive `POST /internal/alarms/modem-status` (`X-Gateway-Key`, INV-065) `{registered, tech, rsrp, csq}`. `GET /api/system/modem-status` (tout utilisateur connecté) renvoie `{state, bars, tech, rsrp, updated_at}` :
 - `state = unknown`, `bars = 0` si aucun rapport ou rapport de plus de **180 s** (3 keepalives manqués) ;
