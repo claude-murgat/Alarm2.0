@@ -2,7 +2,7 @@
 # infra/onsite/install.sh — installe / met à jour la stack modem on-site sur un nœud :
 #   - gateway SMS + voix + contact sec  (modem_gateway.py, port AT)
 #   - secours internet 4G               (alarm-4g-standby, QMI)
-#   - lock RAT WCDMA+LTE sans 2G         (alarm-modem-rat, CNMP=54 au boot)
+#   - selection reseau auto              (alarm-modem-rat, CNMP=2 au boot)
 #   - watchdog modem                     (alarm-modem-watchdog, auto-récup + alerte email)
 #   - supervision disque                 (alarm-disk-check.timer, alerte email si fs plein)
 #

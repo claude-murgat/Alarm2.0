@@ -47,9 +47,9 @@
   failover soutenu portant la réplication PostgreSQL + les push FCM.
 - **Statut actuel : VALIDÉ et ARMÉ sur onsite-2 (2026-06-11).** Failover prouvé de bout en bout
   (`smoketest-4g.sh --failover` → PASS 14/14 : bascule réelle, cloud + FCM joignables via 4G). Tourne
-  en **LTE Bande 20** (SIM Sosh activée + `CNMP=54` qui exclut la 2G → accroche la 4G). Persistance en
+  en **LTE Bande 20** (SIM Sosh activée + `CNMP=54`). **2026-10-21 : `CNMP=54` bloquait l'inscription (attache 4G refusée, pas de repli 3G) → passé en `CNMP=2`.** Persistance en
   place : standby chaud via `alarm-4g-standby.service` (`scripts/4g-standby.sh`, QMI, reconnecte tout
-  seul, route métrique 300) + `alarm-modem-rat.service` (`scripts/modem-set-rat.py`, force `CNMP=54` au
+  seul, route métrique 300) + `alarm-modem-rat.service` (`scripts/modem-set-rat.py`, remet `CNMP=2` — sélection auto — au
   boot, avant la gateway). Survit aux reboots (services enabled). Coexiste avec la gateway SMS/voix
   (`modem_gateway.py`, port AT) car le data passe en QMI (`cdc-wdm0`) — interfaces séparées.
 - **Correctif vs design existant** : l'esquisse `ARCHITECTURE_SMS_VOIX.md` utilise `nmcli`
