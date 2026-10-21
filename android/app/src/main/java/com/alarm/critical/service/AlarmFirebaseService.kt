@@ -44,6 +44,13 @@ class AlarmFirebaseService : FirebaseMessagingService() {
             return
         }
 
+        if (msgType == "alarm_resolved") {
+            AlarmWakeUpHandler.onAlarmResolvedPushReceived(applicationContext, data["alarm_id"])
+            // Notif visible : sinon FCM degrade les push haute priorite suivants.
+            showEscalationNotification(data["title"], data["body"])
+            return
+        }
+
         val alarmId = data["alarm_id"]
         val title = data["title"] ?: message.notification?.title
         val severity = data["severity"]

@@ -331,6 +331,8 @@ def resolve_alarm(
     db.commit()
     db.refresh(alarm)
     log_event("alarm_resolved", db=db, alarm_id=alarm.id, user_id=current_user.id)
+    from ..fcm_service import push_alarm_resolved
+    push_alarm_resolved(db, alarm)
     return _alarm_response(alarm, db)
 
 

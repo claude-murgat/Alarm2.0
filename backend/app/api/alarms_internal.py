@@ -278,6 +278,7 @@ def report_state(
     if any_active_alarm is not None and any_active_alarm.source == "gateway_dry_contact":
         gateway_alarm = any_active_alarm
 
+    resolved_alarm = None
     if should_be_active:
         if any_active_alarm is None:
             # Pas d'alarme active → CREATE
@@ -287,6 +288,7 @@ def report_state(
         if gateway_alarm is not None:
             # Toutes alive closed + alarme gateway existante → RESOLVE
             _resolve_gateway_alarm(db, gateway_alarm)
+            resolved_alarm = gateway_alarm
             gateway_alarm = None  # plus en (active, escalated)
         # Sinon : no-op (pas d'alarme gateway à résoudre ; on ne touche pas aux
         # alarmes "api"/"oncall" actives)
@@ -335,6 +337,9 @@ def report_state(
                 gateway_alarm.sensor_dissensus_email_sent_at = None
 
     db.commit()
+    if resolved_alarm is not None:
+        from ..fcm_service import push_alarm_resolved
+        push_alarm_resolved(db, resolved_alarm)  # INV-147
 
     return {"alarm_active": should_be_active, "dissensus": divergent}
 

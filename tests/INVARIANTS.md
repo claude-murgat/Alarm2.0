@@ -155,6 +155,11 @@ La boucle d'escalade n'escalade une alarme de A vers B qu'une fois l'appel de A 
 - **Pourquoi** : prod 2026-10-20, alarme 852 : délais d'escalade et de SMS/appel à 2 min ; escalade à 10:13:55, SMS et appel de timo créés à 10:13:57, appel passé à 10:15:28 — après l'escalade. L'alarme 818 : appel retardé ~3 min par un modem instable, parti après l'escalade. Le propriétaire exige que SMS et appel précèdent toujours l'escalade.
 - **Couverture** : Unit `test_escalation.py::TestWaitForCallInv144` (borne exacte, attente, défaut inchangé) ; Integration `test_escalation_waits_for_call_inv144.py` (vraie boucle : retenue puis escalade dès SMS et appel passés ; appel `error` rejoué et retenu ; SMS en échec retenu jusqu'à son envoi ; escalade forcée à délai + 3 min avec audit + email).
 
+### INV-147 [C] ✅ Résolution : chaque utilisateur notifié reçoit un push `alarm_resolved`
+Quand une alarme passe `resolved` — depuis le web ou l'app (`POST /api/alarms/{id}/resolve`) ou par la résolution automatique de la gateway (`/internal/alarms/report-state` à `closed`, INV-120) — le backend envoie, après le commit, un FCM haute priorité data-only à **chaque** utilisateur de `alarm_notifications` : `data = {type: "alarm_resolved", alarm_id, title: "Alarme resolue", body: <titre de l'alarme>}`. Best-effort : un échec FCM n'empêche pas la résolution. Le traitement côté téléphone est INV-ANDROID-210.
+- **Pourquoi** : prod 2026-10-21, alarme 886 résolue depuis le web. Le Pixel 9a de admin, verrouillé, a continué de sonner jusqu'à ce que le propriétaire le déverrouille ; le téléphone de timo a coupé le son mais gardé l'écran d'alarme. Aucun push n'était envoyé à la résolution : un téléphone en veille ne l'apprenait qu'à son prochain poll réussi, que Doze peut retarder indéfiniment.
+- **Couverture** : Integration `test_resolve_push_inv147.py` (résolution web avec 2 notifiés après escalade ; résolution automatique gateway). RED avant le correctif : aucun push.
+
 ### INV-015 [H] ✅ Pas d'escalade d'une alarme acknowledged
 Une alarme `status = 'acknowledged'` ne peut pas être escaladée (escalation_count ne change pas).
 - **Pourquoi** : ACK doit suspendre l'escalade.
