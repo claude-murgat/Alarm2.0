@@ -21,7 +21,7 @@ pour la procédure complète et les explications.
 | `systemd/alarm-cd-pull.service` | `/etc/systemd/system/alarm-cd-pull.service` | Pull idempotent GHCR `:stable` (CD V1) |
 | `systemd/alarm-cd-pull.timer` | `/etc/systemd/system/alarm-cd-pull.timer` | Timer 5 min pour le pull (CD V1) |
 | `systemd/alarm-4g-standby.service` | `/etc/systemd/system/alarm-4g-standby.service` | Secours internet 4G en standby chaud (QMI, métrique 300) |
-| `systemd/alarm-modem-rat.service` | `/etc/systemd/system/alarm-modem-rat.service` | Force `CNMP=54` (WCDMA+LTE sans 2G) au boot — coexistence voix+data |
+| `systemd/alarm-modem-rat.service` | `/etc/systemd/system/alarm-modem-rat.service` | Remet `CNMP=2` (sélection réseau automatique) au boot — `CNMP=54` bloquait l'inscription (2026-10-21) |
 | `systemd/alarm-modem-watchdog.service` | `/etc/systemd/system/alarm-modem-watchdog.service` | Watchdog modem : auto-récup d'un drop USB (PCI rescan) + alerte email |
 | `systemd/alarm-disk-check.service` | `/etc/systemd/system/alarm-disk-check.service` | Sonde remplissage disque (`/` + `/var/lib/docker`) → alerte email si seuil dépassé (oneshot, lancé par le timer) |
 | `systemd/alarm-disk-check.timer` | `/etc/systemd/system/alarm-disk-check.timer` | Timer 15 min de la sonde disque (garde-fou anti-saturation, cf incident WAL 2026-06-22) |
