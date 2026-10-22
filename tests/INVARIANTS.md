@@ -421,7 +421,7 @@ Les dates de l'API sont de l'UTC naïf (`isoformat()` sans `Z`). Le web les lit 
 - **Couverture** : Playwright `test_frontend.py::TestTimesShownInLocalTime` (navigateur réglé sur Europe/Paris). RED sur le code d'origine : 06:58 affiché au lieu de 08:58.
 
 ### INV-131 [H] ✅ Gateway : appel « décroché » seulement quand le modem le dit actif
-L'appel n'est compté décroché que sur l'URC `VOICE CALL: BEGIN` **ou** une ligne `+CLCC` dont le **3ᵉ champ** (`stat`) vaut `0`. Les états numérotation (`2`) et sonnerie (`3`) ne comptent pas. `NO CARRIER`, `BUSY` ou `VOICE CALL: END` avant le décroché → `no_answer`.
+L'appel n'est compté décroché que sur l'URC `VOICE CALL: BEGIN` **ou** une ligne `+CLCC` dont le **3ᵉ champ** (`stat`) vaut `0`. Les états numérotation (`2`) et sonnerie (`3`) ne comptent pas. `NO CARRIER`, `BUSY` ou `VOICE CALL: END` avant le décroché → `no_answer` si le téléphone a sonné, sinon `error` (INV-148).
 - **Pourquoi** : test réel du 2026-10-14 sur alarm-1 (SIM7600, Orange). La gateway cherchait `",0,0,"` n'importe où dans la réponse : `+CLCC: 3,0,2,0,0,"+33…",145` (numérotation) contient `,0,0,`. Elle croyait l'appel décroché avant même la sonnerie, jouait le message dans le vide, puis raccrochait en `no_answer` alors que le propriétaire avait bien décroché.
 - **Couverture** : Unit `test_gateway_voice_call.py::TestCallAnswered`, `::TestCallEnded`.
 
@@ -434,6 +434,11 @@ Une fois l'appel décroché, la gateway joue le message `voice/alarme.wav` (PCM 
 La touche est lue sur les URC `+RXDTMF: <k>` (ou `+DTMF: <k>`), y compris pendant la lecture du message, qui s'interrompt alors. Sans touche, la gateway attend **30 s** après la fin du message. Touche `1` → confirmation `voice/acquittee.wav` puis résultat `ack_dtmf` ; touche `2` → `voice/escaladee.wav` puis `escalate` ; aucune touche → `no_answer`. La gateway **raccroche aussitôt la confirmation jouée** (`AT+CHUP`, commande de raccrochage des appels vocaux SIMCom, `ATH` en secours) : l'appelé n'a pas à raccrocher lui-même.
 - **Pourquoi** : test réel du 2026-10-14 : `+RXDTMF: 1` est bien émis par ce SIM7600 (contrairement à `ARCHITECTURE_SMS_VOIX.md`, qui le dit non supporté). Le propriétaire veut entendre que sa touche a été prise en compte.
 - **Couverture** : Unit `test_gateway_voice_call.py::TestDtmfKey`, `::TestCallResult`, `::TestConfirmation`, `::TestHangUp`.
+
+### INV-148 [C] ✅ Gateway : `no_answer` seulement si le téléphone a sonné, sinon `error` (rejoué)
+Un appel non décroché n'est enregistré `no_answer` que si le modem a signalé la **sonnerie** chez le destinataire : une ligne `+CLCC` avec `stat` = 3 (alerte) ou 0 (actif) pendant l'attente. Sinon, l'appel s'est perdu sur le réseau avant de sonner : résultat `error`, donc rejoué (INV-144, au plus 3 essais INV-064). Précise INV-131 (`NO CARRIER` avant décroché).
+- **Pourquoi** : alarme 888 du 2026-10-22, onsite-2 en 3G à CSQ 3. `ATD` accepté, mais le téléphone de timo n'a jamais sonné ; l'appel a été enregistré `no_answer`, compté comme passé, donc jamais rejoué. Le propriétaire exige que l'appel parte absolument.
+- **Couverture** : Unit `test_gateway_voice_call.py::TestCallRang`.
 
 ### INV-134 [H] ✅ Gateway : le SMS de détail part avant l'appel
 Avant d'appeler un numéro, la gateway vérifie `/internal/sms/pending` : tant qu'un SMS **jamais tenté** (`retries = 0`) vise **ce numéro**, l'appel est différé au cycle suivant (30 s), le temps que `SmsSenderThread` l'envoie. Un SMS **déjà en échec** (`retries ≥ 1`) ne retient pas l'appel : un SMS qui échoue retarde donc l'appel d'**un cycle au plus**. Les appels vers d'autres numéros ne sont pas retardés. Si `/internal/sms/pending` ne répond pas, l'appel part quand même (ne jamais bloquer un appel d'alarme sur une panne de lecture).
