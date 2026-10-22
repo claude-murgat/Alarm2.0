@@ -222,9 +222,10 @@ class DashboardActivity : AppCompatActivity() {
         val t = token
         val deviceId = prefs.getString("device_token", null)
 
-        // Supprimer le token FCM cote backend avant de partir
+        // Supprimer le token FCM cote backend avant de partir. Hors lifecycleScope :
+        // finish() plus bas l'annulerait avant l'envoi (INV-ANDROID-503).
         if (t != null && deviceId != null) {
-            lifecycleScope.launch {
+            CoroutineScope(Dispatchers.IO).launch {
                 try {
                     ApiProvider.service.deleteFcmToken(
                         "Bearer $t",

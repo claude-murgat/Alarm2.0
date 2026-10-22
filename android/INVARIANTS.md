@@ -528,10 +528,11 @@ MainActivity : `if (BuildConfig.DEBUG) { nameInput.setText("user1"); passwordInp
 - **Pourquoi** : nettoyage complet pour éviter qu'une session zombie continue de tourner en arrière-plan.
 - **Couverture** : test14 (assert token null après logout, login fonctionne ensuite).
 
-### INV-ANDROID-503 [C] ⚠️ Logout appelle DELETE /api/devices/fcm-token avant clear
-Avant le `clear()`, `ApiProvider.service.deleteFcmToken(auth, FcmTokenDeleteRequest(deviceId))` est appelé en `lifecycleScope.launch` (fire-and-forget, pas d'await).
-- **Pourquoi** : retirer l'appareil du destinataire FCM côté backend → plus de push envoyé à ce device.
-- **Caveat connu** : appel async → si l'app crashe ou perd le réseau avant l'envoi, le token reste enregistré côté backend. Le backend devrait tolérer ça (push envoyé à un device déconnecté = ignoré par FCM).
+### INV-ANDROID-503 [C] ✅ Logout envoie DELETE /api/devices/fcm-token jusqu'au bout, même écran fermé (révisé 2026-10-22)
+`performLogout()` appelle `deleteFcmToken(auth, FcmTokenDeleteRequest(deviceId))` (jeton et `deviceId` lus **avant** `clear()`) dans une coroutine **indépendante de l'écran** (`CoroutineScope(Dispatchers.IO)`) : la fermeture du dashboard (`finish()`) ne l'annule pas. La déconnexion n'attend pas la réponse ; un échec réseau ne l'empêche pas.
+- **Pourquoi** : retirer l'appareil côté backend → plus de push, et l'utilisateur n'apparaît plus « En attente » (INV-143).
+- **Révision 2026-10-22** : l'appel était lancé dans `lifecycleScope` puis `finish()` détruisait l'activité → coroutine annulée, requête rarement partie. Prod : timo, déconnecté de tous ses téléphones, restait « En attente » (2 inscriptions fantômes). Le backend nettoie aussi les fantômes d'une même installation (INV-153).
+- **Couverture** : Espresso `LogoutDeviceTest`.
 
 ### INV-ANDROID-504 [H] ⚠️ Refresh token automatique toutes les 12h
 `tokenRefreshIntervalMs = 12 * 60 * 60 * 1000L` (12h, hardcodé). Coroutine dédiée `startTokenRefresh()` : `while (isActive) { delay(interval); tryRefreshToken() }`.

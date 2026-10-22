@@ -4,6 +4,7 @@ import urllib.request
 import json as _json
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from typing import List
 from ..clock import now as clock_now
@@ -182,6 +183,12 @@ def toggle_my_heartbeat_pause(
     return {"status": "ok", "paused": until is not None, "until": until.isoformat() if until else None}
 
 
+def _same_install(token: str):
+    """INV-153 : une installation de l'app = identifiant Firebase (jeton avant ':')."""
+    fid = token.split(":", 1)[0]
+    return or_(DeviceToken.fcm_token == fid, DeviceToken.fcm_token.startswith(fid + ":", autoescape=True))
+
+
 @router.post("/fcm-token")
 def register_fcm_token(
     data: FcmTokenRequest,
@@ -189,6 +196,11 @@ def register_fcm_token(
     db: Session = Depends(get_db),
 ):
     """Enregistre ou met a jour un token FCM pour le device de l'utilisateur."""
+    # INV-153 : un telephone n'est inscrit qu'une fois, pour un seul utilisateur.
+    db.query(DeviceToken).filter(
+        _same_install(data.token),
+        ~((DeviceToken.user_id == current_user.id) & (DeviceToken.device_id == data.device_id)),
+    ).delete(synchronize_session=False)
     existing = (
         db.query(DeviceToken)
         .filter(DeviceToken.user_id == current_user.id, DeviceToken.device_id == data.device_id)
@@ -214,11 +226,13 @@ def delete_fcm_token(
     db: Session = Depends(get_db),
 ):
     """Supprime un token FCM (au logout)."""
-    deleted = (
-        db.query(DeviceToken)
-        .filter(DeviceToken.user_id == current_user.id, DeviceToken.device_id == data.device_id)
-        .delete()
-    )
+    mine = db.query(DeviceToken).filter(DeviceToken.user_id == current_user.id)
+    row = mine.filter(DeviceToken.device_id == data.device_id).first()
+    # INV-153 : aussi les inscriptions fantomes de ce meme telephone (anciennes connexions)
+    same_phone = DeviceToken.device_id == data.device_id
+    if row:
+        same_phone = or_(same_phone, _same_install(row.fcm_token))
+    deleted = mine.filter(same_phone).delete(synchronize_session=False)
     db.commit()
     return {"status": "ok", "deleted": deleted}
 
