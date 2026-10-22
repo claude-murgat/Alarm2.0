@@ -687,6 +687,13 @@ DELETE /users/{id}, POST /alarms/reset, POST /config/* → requièrent `is_admin
   - Stratégie : body pydantiquement valide pour éviter faux positif 422 ; body non-destructif côté admin (id inexistant, payload conflit)
   - Pour chaque endpoint : assert user1 → 403, assert admin → non-403
 
+### INV-153 [H] ✅ Un téléphone n'est inscrit qu'une fois, pour un seul utilisateur (2026-10-22)
+Une installation de l'app est identifiée par son jeton FCM, plus précisément par l'identifiant d'installation Firebase (la partie du jeton avant `:` ; jeton entier s'il n'y en a pas).
+- **Inscription** (`POST /api/devices/fcm-token`) : toute autre inscription de la même installation est supprimée, **quel que soit l'utilisateur** (un téléphone n'est connecté qu'à un compte à la fois).
+- **Déconnexion** (`DELETE /api/devices/fcm-token`) : toutes les inscriptions **de cet utilisateur** pour cette installation sont supprimées, pas seulement celle du `device_id` envoyé. Ses autres téléphones restent inscrits (INV-078).
+- **Pourquoi** : prod 2026-10-22, timo déconnecté de tous ses téléphones restait « En attente » (INV-143) : 2 inscriptions fantômes (13 et 14 oct., même jeton, `device_id` différents) laissées par des déconnexions dont l'appel serveur n'était pas parti (INV-ANDROID-503) ; chaque connexion recrée un `device_id`. Le même téléphone était entre-temps connecté au compte `test`.
+- **Couverture** : Integration `test_fcm_one_registration_per_install_inv153.py`.
+
 ### INV-078 [M] ✅ Logout supprime le token FCM
 POST /devices/fcm-token DELETE → retire de la base, plus de push reçu.
 - **Fix** : PR #95 (bot IA, 2026-05-13). Aucune modif prod (`delete_fcm_token` dans `devices.py:126-139` exécute déjà `db.query(DeviceToken).filter(...).delete() + commit`).

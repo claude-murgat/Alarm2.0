@@ -123,7 +123,11 @@ class FakeApiService : ApiService {
         return Response.success(mapOf("status" to "ok"))
     }
 
+    /** INV-ANDROID-503 : latence reseau simulee (un vrai appel n'est jamais instantane). */
+    var deleteFcmDelayMs = 0L
+
     override suspend fun deleteFcmToken(auth: String, request: FcmTokenDeleteRequest): Response<Map<String, String>> {
+        kotlinx.coroutines.delay(deleteFcmDelayMs)
         fcmTokenDeleted = request
         return Response.success(mapOf("status" to "ok"))
     }
