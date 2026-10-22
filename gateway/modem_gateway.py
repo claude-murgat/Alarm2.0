@@ -40,7 +40,7 @@ from modem_health import (  # logique pure (cf modem_health.py)
     sends_allowed,
 )
 from voice_call import (  # logique pure (cf voice_call.py)
-    DTMF_WAIT_S, FRAME_S, HANG_UP_COMMANDS, LEAD_SILENCE_S, call_answered, call_deferred_for_sms,
+    DTMF_WAIT_S, FRAME_S, HANG_UP_COMMANDS, LEAD_SILENCE_S, call_answered, call_deferred_for_sms, call_rang,
     call_ended, call_result, confirmation_file, cpcmfrm_for, dtmf_key, is_audio_port,
     lead_silence, pcm_frames,
 )
@@ -277,7 +277,11 @@ class CallSenderThread(threading.Thread):
                 # effacerait les URC (VOICE CALL: BEGIN, +RXDTMF).
                 self._urc = ""
                 if not self._wait_answered(timeout=30):
+                    rang = call_rang(self._urc)
                     self._hang_up()
+                    if not rang:  # INV-148 : perdu avant la sonnerie -> error, rejoue
+                        logger.warning(f"Appel {to_number} jamais arrive en sonnerie -> error")
+                        return "error"
                     return "no_answer"
                 logger.info(f"Appel decroche ({to_number})")
                 key = None

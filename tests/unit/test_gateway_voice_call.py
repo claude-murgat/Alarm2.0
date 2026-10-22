@@ -192,3 +192,22 @@ class TestCallDeferredForSms:
     def test_untried_sms_still_defers(self):
         pending = [{"id": 599, "to_number": "+33695024008", "body": "ALARME ...", "retries": 0}]
         assert _vc.call_deferred_for_sms("+33695024008", pending) is True
+
+
+class TestCallRang:
+    """INV-148 : `no_answer` seulement si le telephone a sonne (`+CLCC` stat 3 alerte, ou
+    0 actif). Appel perdu sur le reseau avant la sonnerie -> `error`, rejoue (INV-144).
+    Alarme 888 du 2026-10-22 : ATD accepte, signal 3G CSQ 3, le telephone n'a jamais
+    sonne, appel enregistre `no_answer` -> jamais rejoue."""
+
+    def test_alerting_means_rang(self):
+        assert _vc.call_rang('+CLCC: 1,0,3,0,0,"+33695024008",145\r\nOK') is True
+
+    def test_active_means_rang(self):
+        assert _vc.call_rang('+CLCC: 1,0,0,0,0,"+33695024008",145') is True
+
+    def test_dialing_only_never_rang(self):
+        assert _vc.call_rang('+CLCC: 1,0,2,0,0,"+33695024008",145\r\nOK\r\nNO CARRIER') is False
+
+    def test_nothing_never_rang(self):
+        assert _vc.call_rang("") is False

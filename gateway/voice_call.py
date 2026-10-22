@@ -32,6 +32,18 @@ def call_answered(text: str) -> bool:
     return False
 
 
+def call_rang(text: str) -> bool:
+    """INV-148 : le telephone a sonne si une ligne `+CLCC` a eu stat 3 (alerte) ou 0
+    (actif). Sinon l'appel s'est perdu avant la sonnerie : ce n'est pas un `no_answer`."""
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("+CLCC:"):
+            fields = line[len("+CLCC:"):].split(",")
+            if len(fields) > 2 and fields[2].strip() in ("0", "3"):
+                return True
+    return False
+
+
 def call_ended(text: str) -> bool:
     """INV-131 : fin d'appel (raccroche, occupe)."""
     return any(m in text for m in ("NO CARRIER", "BUSY", "VOICE CALL: END"))
