@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import SmsQueue
 from ..clock import now as clock_now
+from ..escalation import contact_is_obsolete
 
 router = APIRouter(prefix="/internal/sms", tags=["sms-gateway"])
 
@@ -22,13 +23,15 @@ def get_pending(
     db: Session = Depends(get_db),
     _: None = Depends(_check_gateway_key),
 ):
-    """Retourne les SMS en attente d'envoi (non envoyés, retries < 3)."""
+    """Retourne les SMS en attente d'envoi (non envoyés, retries < 3), sauf ceux d'une
+    alarme déjà acquittée ou résolue (INV-154)."""
     rows = (
         db.query(SmsQueue)
         .filter(SmsQueue.sent_at == None, SmsQueue.retries < 3)
         .order_by(SmsQueue.created_at)
         .all()
     )
+    rows = [r for r in rows if not contact_is_obsolete(db, r)]
     return [
         {
             "id": r.id,

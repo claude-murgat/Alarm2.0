@@ -1418,11 +1418,12 @@
         const progress = (deadline, start) => `<div class="esc-bar"><i data-deadline="${deadline}" data-start="${start}" style="width:0"></i></div>`;
         const stage = (name, status, title, body) =>
             `<div class="esc-stage" data-stage="${name}" data-status="${status}"><b>${title}</b>${body}</div>`;
-        const SMS_LABELS = { pending: 'en attente', sent: 'envoyé', failed: 'en échec', scheduled: 'programmé' };
+        const SMS_LABELS = { pending: 'en attente', sent: 'envoyé', failed: 'en échec', scheduled: 'programmé', cancelled: 'annulé (alarme acquittée)' };
         const CALL_RESULTS = {
             ack_dtmf: ['ok', 'Acquitté par appel (touche 1)'], ack_sms: ['ok', 'Acquitté par SMS'],
             no_answer: ['ko', 'Pas de réponse'], busy: ['ko', 'Occupé'], error: ['ko', 'Appel en échec'],
             escalate: ['warn', 'Touche 2 : escalade demandée'], pending: ['doing', 'Appel en cours…'],
+            cancelled: ['todo', 'Annulé (alarme acquittée)'],  // INV-154
         };
 
         async function loadEscalationLive() {
