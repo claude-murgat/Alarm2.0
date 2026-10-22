@@ -209,6 +209,31 @@ jobs:
           fi
           gh release view "$GITHUB_REF_NAME" --json url --jq '"Release publiee : " + .url'
 
+      # APK du cluster de TEST (alarm-1/alarm-2), app separee "Alarme Murgat TEST"
+      # (build type clustertest). Firebase exige que com.alarm.critical.test soit declare
+      # dans google-services.json : sinon on saute (warning) sans bloquer la release prod.
+      - name: APK du cluster de test (Alarme Murgat TEST)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/alarm-release.jks
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          VER: ${{ steps.apk.outputs.version }}
+        run: |
+          set -eu
+          if ! jq -e '.client[].client_info.android_client_info.package_name | select(. == "com.alarm.critical.test")' \
+               android/app/google-services.json > /dev/null; then
+            echo "::warning::com.alarm.critical.test absent de google-services.json — APK de test non publie."
+            exit 0
+          fi
+          (cd android && ./gradlew assembleClustertest --no-daemon --console=plain)
+          APK=android/app/build/outputs/apk/clustertest/app-clustertest.apk
+          test -f "$APK" || { echo "::error::$APK introuvable — APK de test non signe."; exit 1; }
+          OUT="alarme-murgat-TEST-${GITHUB_REF_NAME}-${VER}.apk"
+          cp "$APK" "$OUT"
+          gh release upload "$GITHUB_REF_NAME" "$OUT" --clobber
+
       - name: Conserver l'APK en artefact (debug du workflow)
         if: always()
         uses: actions/upload-artifact@v4

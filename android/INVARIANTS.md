@@ -208,6 +208,12 @@ Le backend envoie des dates UTC sans suffixe (`2026-10-14T13:32:38`). `formatDat
 
 ---
 
+### INV-ANDROID-113 [H] ✅ APK du cluster de test séparée, jamais un sélecteur dans l'app de prod — 2026-10-22
+Le build type Gradle `clustertest` produit une **autre app** : `com.alarm.critical.test`, nommée « Alarme Murgat TEST », installable à côté de l'app de prod. Elle ne joint **que** le cluster de test (alarm-2 `172.16.1.121`, alarm-1 `172.16.1.120`). L'app de prod (`release`) garde exclusivement les backends de prod. Le nom affiché vient de `@string/app_name` (manifeste), surchargé dans `src/clustertest/res`.
+- **Pourquoi** : choix du propriétaire du 2026-10-22, pour tester alarm-1/alarm-2 avant la bascule. Un sélecteur de cluster dans l'app de prod risquait de laisser un téléphone d'astreinte pointé sur le test, donc sourd aux vraies alarmes.
+- **Publication** : la release publie aussi `alarme-murgat-TEST-<tag>-<version>.apk` quand `google-services.json` déclare `com.alarm.critical.test`. Sinon, avertissement sans bloquer la release prod.
+- **Couverture** : vérification de build (`aapt dump badging` : package `com.alarm.critical.test`, label « Alarme Murgat TEST » ; debug et release inchangés).
+
 ## 3. Acquittement
 
 ### INV-ANDROID-200 [C] ⚠️ Bouton ACK visible UNIQUEMENT quand alarme active et user notifié
