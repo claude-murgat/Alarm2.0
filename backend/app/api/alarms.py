@@ -9,6 +9,7 @@ from ..schemas import AlarmCreate, AlarmResponse
 from ..auth import get_current_user, get_current_admin
 from ..events import log_event
 from ..logic.alarm_creation import evaluate_alarm_creation_plan
+from ..escalation import CANCELLED_SMS_ERROR
 from ..logic.ack_authorization import evaluate_ack_authorization
 from ..logic.models import EscalationChainEntry, UserSnapshot
 
@@ -198,7 +199,8 @@ def active_escalation(
             if not sms_row:
                 sms = "pending" if notif.sms_sent else "scheduled"
             else:
-                sms = "sent" if sms_row.sent_at else "failed" if sms_row.retries >= 3 else "pending"
+                sms = ("sent" if sms_row.sent_at else "cancelled" if sms_row.error == CANCELLED_SMS_ERROR
+                       else "failed" if sms_row.retries >= 3 else "pending")
             call_row = (
                 db.query(CallQueue)
                 .filter(CallQueue.alarm_id == alarm.id, CallQueue.user_id == ec.user_id,
