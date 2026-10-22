@@ -57,6 +57,7 @@ Sélection en lecture de `tests/INVARIANTS.md` + `android/INVARIANTS.md` qui con
 
 - Reboot OS coordonné (déjà documenté §19 du provisioning, à instrumenter en parallèle).
 - Migration de schéma DB (Alembic ou autre) — sera traitée séparément ; le CD V1 suppose des images backwards-compatibles sur le schéma.
+  - **Conséquence pratique (2026-10-22, INV-148)** : une colonne ajoutée à une table existante **et lue par le code** se livre en **deux déploiements** : d'abord la migration seule (l'ancien code ignore la colonne), puis le code qui la lit. En un seul déploiement, le premier nœud du canary (node3, replica) lirait une colonne que le leader n'a pas encore créée (migration jouée au boot du leader, base en lecture seule sur replica) → 500 sur toutes les requêtes de la table jusqu'à la mise à jour du leader.
 - Déploiement de l'app Android (release Play Store reste manuel, hors topologie cluster).
 - Auto-fix prod par bot IA (Phase 4).
 - Multi-arch arm64 (Raspberry Pi pas dans la roadmap V1).

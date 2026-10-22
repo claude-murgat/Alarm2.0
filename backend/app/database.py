@@ -27,11 +27,17 @@ def run_migrations(engine):
                 conn.execute(text("ALTER TABLE users ADD COLUMN phone_number VARCHAR"))
                 conn.commit()
                 logger.info("Migration: users.phone_number ajoutée")
+            # INV-148 : DEFAULT FALSE remplit les comptes existants (NULL casserait UserResponse)
+            if "is_test" not in cols:
+                conn.execute(text("ALTER TABLE users ADD COLUMN is_test BOOLEAN NOT NULL DEFAULT FALSE"))
+                conn.commit()
+                logger.info("Migration: users.is_test ajoutée")
         else:
             # PostgreSQL supporte IF NOT EXISTS
             conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_number VARCHAR"))
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_test BOOLEAN NOT NULL DEFAULT FALSE"))
             conn.commit()
-            logger.info("Migration: users.phone_number vérifiée/ajoutée")
+            logger.info("Migration: users.phone_number + users.is_test vérifiées/ajoutées")
 
         # ── Migration : table alarm_notifications ──────────────────────────
         _migrate_alarm_notifications(conn, is_sqlite)
