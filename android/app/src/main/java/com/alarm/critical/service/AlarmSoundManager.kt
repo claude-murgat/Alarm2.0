@@ -46,6 +46,13 @@ class AlarmSoundManager(private val context: Context) {
         }
     }
 
+    /** Sonnerie d'une alarme : muette pour un compte test (INV-ANDROID-008). Les alertes
+     *  "connexion perdue" / "session expiree" appellent startAlarmSound() et sonnent toujours. */
+    fun startAlarmRing() {
+        val prefs = context.getSharedPreferences("alarm_prefs", Context.MODE_PRIVATE)
+        if (!prefs.getBoolean("is_test", false)) startAlarmSound()
+    }
+
     fun stopAlarmSound(): Unit = synchronized(Companion) {
         mediaPlayer?.let {
             if (it.isPlaying) {

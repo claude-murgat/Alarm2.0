@@ -29,7 +29,9 @@ data class UserResponse(
     val email: String,
     val name: String,
     val is_admin: Boolean,
-    val is_active: Boolean
+    val is_active: Boolean,
+    // INV-151 : compte test -> l'alarme ne sonne pas (INV-ANDROID-008)
+    val is_test: Boolean = false
 )
 
 data class AlarmResponse(

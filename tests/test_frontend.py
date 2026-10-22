@@ -65,6 +65,22 @@ def dashboard(page: Page, primary_url):
     return page
 
 
+def _admin_headers(primary_url):
+    tok = requests.post(
+        f"{primary_url}/api/auth/login",
+        json={"name": "admin", "password": "admin123"}, timeout=5,
+    ).json()["access_token"]
+    return {"Authorization": f"Bearer {tok}"}
+
+
+def _delete_user(primary_url, name):
+    """Cleanup : reset_all ne supprime pas les users, on retire le user cree."""
+    hdr = _admin_headers(primary_url)
+    for u in requests.get(f"{primary_url}/api/users/", headers=hdr, timeout=5).json():
+        if u["name"] == name:
+            requests.delete(f"{primary_url}/api/users/{u['id']}", headers=hdr, timeout=5)
+
+
 # ---------------------------------------------------------------------------
 # Login front
 # ---------------------------------------------------------------------------
@@ -376,19 +392,7 @@ class TestUsersTab:
                 f"valeurs={phone_values}"
             )
         finally:
-            # Cleanup : reset_all ne supprime pas les users, on retire le user cree.
-            tok = requests.post(
-                f"{primary_url}/api/auth/login",
-                json={"name": "admin", "password": "admin123"}, timeout=5,
-            ).json()["access_token"]
-            hdr = {"Authorization": f"Bearer {tok}"}
-            for u in requests.get(
-                f"{primary_url}/api/users/", headers=hdr, timeout=5
-            ).json():
-                if u["name"] == unique:
-                    requests.delete(
-                        f"{primary_url}/api/users/{u['id']}", headers=hdr, timeout=5
-                    )
+            _delete_user(primary_url, unique)
 
     def test_invalid_phone_shows_error_and_no_request(self, dashboard: Page):
         """INV-069 : un numero invalide affiche une erreur et n'envoie aucun PATCH."""
@@ -423,6 +427,51 @@ class TestUsersTab:
             "Un membre de la chaine sans numero doit afficher un badge 'pas de tel' "
             "(.no-phone-badge)"
         )
+
+    # --- INV-151 : role test ---
+
+    def test_add_test_user_shows_test_column(self, dashboard: Page, primary_url):
+        """INV-151 : creer un user avec Test=Oui l'affiche « Oui » dans la colonne Test."""
+        unique = f"optest{int(time.time() * 1000) % 1000000}"
+        dashboard.locator(".tab:text('Utilisateurs')").click()
+        dashboard.wait_for_timeout(1000)
+        dashboard.locator("#newUserName").fill(unique)
+        dashboard.locator("#newUserPassword").fill("pass1234")
+        dashboard.locator("#newUserTest").select_option("true")
+        dashboard.locator("button[onclick='addUser()']").click()
+        try:
+            row = dashboard.locator("#usersTable tr", has_text=unique)
+            expect(row.locator("td.user-test")).to_have_text("Oui")
+            user1_row = dashboard.locator("#usersTable tr", has_text="user1")
+            expect(user1_row.locator("td.user-test")).to_have_text("Non")
+        finally:
+            _delete_user(primary_url, unique)
+
+    def test_escalation_chain_flags_test_member(self, dashboard: Page, primary_url):
+        """INV-151 : un compte test dans la chaine d'escalade affiche un badge
+        .test-badge, les autres membres non."""
+        unique = f"esctest{int(time.time() * 1000) % 1000000}"
+        user = requests.post(
+            f"{primary_url}/api/auth/register", headers=_admin_headers(primary_url),
+            json={"name": unique, "password": "pass1234", "is_test": True}, timeout=5,
+        ).json()
+        try:
+            r = requests.post(
+                f"{primary_url}/api/config/escalation", headers=_admin_headers(primary_url),
+                json={"position": 4, "user_id": user["id"]}, timeout=5,
+            )
+            assert r.status_code == 200, r.text
+            # Recharger dans l'ordre : le badge lit la liste des users.
+            dashboard.evaluate("async () => { await loadUsers(); await loadEscalation(); }")
+            dashboard.locator(".tab:text('Escalade')").click()
+
+            member = dashboard.locator("#escalationChain .esc-item", has_text=unique)
+            expect(member.locator(".test-badge")).to_be_visible()
+            expect(dashboard.locator("#escalationChain .test-badge")).to_have_count(1)
+        finally:
+            # Sortir le user de la chaine avant de le supprimer (sinon FK -> echec).
+            requests.post(f"{primary_url}/api/test/reset", timeout=5)
+            _delete_user(primary_url, unique)
 
 
 # ---------------------------------------------------------------------------
@@ -821,3 +870,36 @@ class TestEscalationLiveDiagram:
         expect(live).to_have_attribute("data-state", "acknowledged", timeout=10000)
         expect(live.locator(".esc-lane.acked")).to_have_attribute("data-role", "current")
         expect(live.locator(".esc-banner.ok")).to_contain_text("user2")
+
+
+# ---------------------------------------------------------------------------
+# INV-150 : web utilisable sur telephone
+# ---------------------------------------------------------------------------
+
+class TestMobileLayout:
+
+    def test_no_tab_scrolls_the_page_horizontally_on_a_phone(self, page: Page, primary_url):
+        """INV-150 : a 375 px, aucun onglet ne deborde horizontalement (alarme en cours
+        pour remplir les tableaux), et le bouton Deconnexion reste dans l'ecran."""
+        r = requests.post(f"{primary_url}/api/alarms/send", headers=_admin_headers(primary_url), timeout=5,
+                          json={"title": "Pompe de relevage en defaut", "message": "INV-150", "severity": "critical"})
+        assert r.status_code == 200, r.text
+
+        page.set_viewport_size({"width": 375, "height": 800})
+        page.goto(primary_url, wait_until="domcontentloaded", timeout=15000)
+        page.locator("#loginName").fill("admin")
+        page.locator("#loginPassword").fill("admin123")
+        page.locator("button:has-text('Se connecter')").click()
+        expect(page.locator("#loginOverlay")).to_be_hidden(timeout=15000)
+
+        logout = page.locator("button:has-text('Déconnexion')").bounding_box()
+        assert logout and logout["x"] + logout["width"] <= 375, f"Deconnexion hors ecran : {logout}"
+
+        overflowing = {}
+        for tab in page.locator(".tab").all():
+            tab.click()
+            page.wait_for_timeout(500)
+            width = page.evaluate("document.documentElement.scrollWidth")
+            if width > 375:
+                overflowing[tab.inner_text()] = width
+        assert not overflowing, f"Onglets qui debordent a 375 px (largeur de page) : {overflowing}"

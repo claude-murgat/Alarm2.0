@@ -11,6 +11,7 @@ class User(Base):
     hashed_password = Column(String, nullable=False)
     name = Column(String, unique=True, index=True, nullable=False)
     is_admin = Column(Boolean, default=False)
+    is_test = Column(Boolean, default=False)  # INV-151 : l'alarme ne sonne pas sur son tel
     is_active = Column(Boolean, default=True)
     last_heartbeat = Column(DateTime, nullable=True)
     is_online = Column(Boolean, default=False)

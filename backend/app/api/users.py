@@ -47,7 +47,11 @@ def _record_failure(username: str):
 
 
 @router.post("/register", response_model=UserResponse)
-def register(user_data: UserCreate, db: Session = Depends(get_db)):
+def register(
+    user_data: UserCreate,
+    _admin: User = Depends(get_current_admin),  # INV-149 : seul un admin cree un compte
+    db: Session = Depends(get_db),
+):
     # name is already lowercased and validated (no spaces) by pydantic
     existing = db.query(User).filter(func.lower(User.name) == user_data.name.lower()).first()
     if existing:
@@ -57,6 +61,7 @@ def register(user_data: UserCreate, db: Session = Depends(get_db)):
         name=user_data.name.lower(),
         hashed_password=hash_password(user_data.password),
         is_admin=user_data.is_admin,
+        is_test=user_data.is_test,
         phone_number=user_data.phone_number,  # INV-069 : saisi a la creation
     )
     db.add(user)

@@ -293,7 +293,7 @@ class AlarmPollingService : Service() {
                         // verrouille, seul l'ecran AlarmActivity sonnait (lance a l'ouverture).
                         val shouldRing = currentAlarm?.let { it.status != "acknowledged" } == true
                         if (shouldRing) {
-                            soundManager.startAlarmSound()
+                            soundManager.startAlarmRing()
                         } else if (serviceRinging) {
                             soundManager.stopAlarmSound()
                         }

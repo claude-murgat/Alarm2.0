@@ -27,7 +27,7 @@ def run_migrations(engine):
                 conn.execute(text("ALTER TABLE users ADD COLUMN phone_number VARCHAR"))
                 conn.commit()
                 logger.info("Migration: users.phone_number ajoutée")
-            # INV-148 : DEFAULT FALSE remplit les comptes existants (NULL casserait UserResponse)
+            # INV-151 : DEFAULT FALSE remplit les comptes existants (NULL casserait UserResponse)
             if "is_test" not in cols:
                 conn.execute(text("ALTER TABLE users ADD COLUMN is_test BOOLEAN NOT NULL DEFAULT FALSE"))
                 conn.commit()

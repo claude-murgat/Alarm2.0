@@ -224,7 +224,7 @@ class TestEndpointAuth:
         """DELETE /users/{id} par un admin → 200."""
         headers = _admin_headers()
         # Créer un user temporaire
-        r = requests.post(f"{API}/auth/register", json={
+        r = requests.post(f"{API}/auth/register", headers=headers, json={
             "name": "tempdelete", "password": "test123",
         })
         uid = r.json()["id"]

@@ -31,6 +31,7 @@ class UserCreate(BaseModel):
     name: str
     password: str
     is_admin: bool = False
+    is_test: bool = False  # INV-151
     phone_number: Optional[str] = None
 
     @field_validator("name")
@@ -66,6 +67,7 @@ class UserResponse(BaseModel):
     id: int
     name: str
     is_admin: bool
+    is_test: bool = False  # INV-151
     is_active: bool
     is_online: bool = False
     has_device: bool = False  # INV-143
