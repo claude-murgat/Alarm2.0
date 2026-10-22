@@ -44,9 +44,10 @@ plutôt que d'interpréter à partir du code (le code peut être buggy).
 
 ## 1. Alarme — état et cycle de vie
 
-### INV-001 [C] ✅ Une seule alarme active à la fois
-À tout instant, il existe **au plus une** alarme avec `status IN ('active', 'escalated')`.
+### INV-001 [C] ❌ Une seule alarme active à la fois **par site**
+À tout instant, il existe **au plus une** alarme avec `status IN ('active', 'escalated')` **par valeur de `site`** (INV-155). Les alarmes sans site (alarme d'astreinte, perte de heartbeat) forment leur propre périmètre : au plus une à la fois. Une 2e alarme sur le **même** site est refusée (`409` par l'API ; ignorée par le contact sec, comme aujourd'hui). Une alarme d'**un autre** site est créée normalement.
 - **Pourquoi** : design explicite (CLAUDE.md). Évite la surcharge cognitive de l'opérateur.
+- **Révision 2026-10-22 (multi-site, en attente de validation)** : Izeron et Beaufort seront couverts par la même app et la même équipe de garde. Avec l'ancienne règle globale, une alarme de Beaufort pendant une alarme d'Izeron était **perdue sans bruit** (`alarms_internal.py:273-288`). Choix du propriétaire : une alarme active par site.
 - **Couverture** :
   - E2E : `TestSingleAlarm::test_only_one_alarm_at_a_time` (409 sur 2e alarme)
   - Unit : `test_oncall.py::test_regular_active_alarm_blocks_oncall_creation` (oncall respecte l'unicité)
@@ -162,6 +163,35 @@ Dès qu'une alarme est acquittée (quel que soit le moyen : web, app, touche 1, 
 - **Hors champ** : un SMS ou un appel déjà remis à la gateway et en cours d'envoi au moment de l'acquittement va au bout.
 - **Pourquoi** : prod 2026-10-22, alarme 923 : acquittée à 12:14:51 et résolue à 12:15:05 (UTC). Gênée par un modem instable (`AT_ERROR`), la gateway rejouait encore SMS et appel : SMS à 12:16:15, appel décroché à 12:16:28. Le propriétaire a reçu un SMS et un appel après l'acquittement : « ça ne doit pas être possible ».
 - **Couverture** : Integration `test_no_contact_after_ack_inv154.py`.
+
+### INV-155 [C] ❌ Multi-site : chaque passerelle et chaque alarme portent un site (2026-10-22, en attente de validation)
+Sites connus : `SystemConfig sites`, par défaut `izeron,beaufort`. `SystemConfig default_site`, par défaut `izeron`.
+- **Passerelle** : variable `GATEWAY_SITE` (un site). Elle est envoyée dans `POST /internal/alarms/report-state`, `POST /internal/alarms/modem-status` et en paramètre `site` de `/internal/sms/pending` et `/internal/calls/pending`. Absente (passerelle d'avant cet invariant), elle vaut `default_site`. Une liste (`izeron,beaufort`) n'est admise que sur le cluster de test, pour qu'un seul modem joue les deux sites.
+- **Alarme** (`alarms.site`, migration) :
+  - contact sec → le site de la passerelle qui l'a déclenché ;
+  - alarme manuelle (web, `POST /api/alarms/send`) → `site` obligatoire, parmi les sites connus (`422` sinon) ;
+  - alarme d'astreinte (perte de heartbeat) → `site` vide ; ses SMS et appels partent par `default_site`.
+- **Affichage** : le titre de l'alarme contact sec nomme le site (« Déclenchement contact sec — Izeron »). Le SMS commence par le site (`ALARME Izeron: …`). Le site apparaît dans le push, l'app (écran d'alarme, dashboard, notification) et le web (tableau de bord, historique).
+- **Inchangé** : une seule chaîne d'escalade pour tous les sites (même équipe de garde). Délais, acquittement, expiration, INV-144/145/148 s'appliquent alarme par alarme.
+- **Pourquoi** : Izeron (aujourd'hui onsite-1/2, demain alarm-1/2) et Beaufort (alarm-3/4) formeront **un seul cluster de 5 nœuds**, avec la même APK et la même équipe de garde. Décision du propriétaire du 2026-10-22.
+
+### INV-156 [C] ❌ Multi-site : les SMS et appels d'une alarme partent par le modem de son site
+`sms_queue.site` et `call_queue.site` reçoivent le site de l'alarme (ou `default_site` pour une alarme sans site). `/internal/sms/pending?site=X` et `/internal/calls/pending?site=X` ne renvoient **que** les lignes du site X. Un SMS ou un appel n'est donc jamais remis à deux passerelles (plus de double envoi).
+- **Pas de secours croisé** (choix du propriétaire) : si le modem d'un site est en panne, ses SMS et appels attendent ce modem (INV-145), et l'escalade continue après délai + 3 min (INV-144).
+- SMS avant l'appel (INV-134), SMS rattaché à son alarme (INV-154) : inchangés, à l'intérieur d'un même site.
+- **Pourquoi** : sans site, deux passerelles liraient la même file et enverraient chaque SMS et chaque appel deux fois.
+
+### INV-157 [H] ❌ Multi-site : contact sec agrégé et désaccord détecté site par site (révise INV-122/123)
+L'agrégation OU (INV-122), la détection de désaccord (INV-123) et la résolution automatique de l'alarme contact sec ne comparent que les passerelles **vivantes d'un même site**. Une alarme contact sec d'Izeron ne se résout qu'avec les passerelles d'Izeron.
+- **Pourquoi** : sinon, Beaufort ouvert et Izeron fermé passerait pour une panne de câblage (email « dissensus ») au lieu d'une alarme Beaufort, et la fermeture à Izeron pourrait résoudre l'alarme de Beaufort.
+
+### INV-158 [H] ❌ Multi-site : état du modem par passerelle
+`POST /internal/alarms/modem-status` est rangé par `gateway_id`, avec son site. `GET /api/system/modem-status` renvoie une **liste** `[{gateway_id, site, state, bars, tech, rsrp, updated_at}]` (règles d'INV-129 pour chaque élément). Le web et l'app affichent un indicateur de signal par site.
+- **Pourquoi** : une seule clé `modem_status`, écrasée par chaque passerelle, masquerait la panne du modem d'un site (cf. le `shortcut:` d'`alarms_internal.py`).
+
+### INV-159 [M] ❌ Multi-site : l'appel vocal annonce le site
+Le message de Jessica commence par le site : fichiers `alarme_izeron.wav` et `alarme_beaufort.wav` (même voix et réglages que `alarme.wav`, version A). Repli TTS du module : le texte nomme aussi le site. `alarme.wav` reste utilisé pour une alarme sans site.
+- **Pourquoi** : la même personne de garde couvre les deux sites ; elle doit savoir où intervenir dès le décroché.
 
 ### INV-147 [C] ✅ Résolution : chaque utilisateur notifié reçoit un push `alarm_resolved`
 Quand une alarme passe `resolved` — depuis le web ou l'app (`POST /api/alarms/{id}/resolve`) ou par la résolution automatique de la gateway (`/internal/alarms/report-state` à `closed`, INV-120) — le backend envoie, après le commit, un FCM haute priorité data-only à **chaque** utilisateur de `alarm_notifications` : `data = {type: "alarm_resolved", alarm_id, title: "Alarme resolue", body: <titre de l'alarme>}`. Best-effort : un échec FCM n'empêche pas la résolution. Le traitement côté téléphone est INV-ANDROID-210.
@@ -1001,6 +1031,8 @@ diffère.
   drop. Mode ADC déjà abandonné avant (ADC1 à GND >5 s freeze le firmware modem).
 
 ### INV-122 [H] ✅ Redondance hardware multi-gateway, agrégation OR fail-to-alarm
+> Multi-site : l'agrégation se fera **par site**, cf. INV-157 (révision en attente de validation).
+
 Deux (ou plus) gateways onsite reçoivent le **même contact NC physiquement
 splitté** sur leurs entrées respectives (Arduino en mode `host`, ou IO43 du
 modem en mode `modem` legacy). Le backend agrège leurs `state`
