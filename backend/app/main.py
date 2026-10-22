@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
@@ -66,7 +67,10 @@ def _migrate_alarm_original_created_at(engine):
         conn.commit()
 
 
-def _init_db_schema(engine):
+_schema_lock = threading.Lock()  # boot et promotion (INV-152) peuvent se croiser
+
+
+def _init_db_schema(engine) -> bool:
     """Init/migrate le schéma DB. À appeler sur TOUS les nodes (primary ET
     replica) — issue #144 / INV-056.
 
@@ -87,21 +91,27 @@ def _init_db_schema(engine):
     Au failover suivant, le nouveau primary tournait sans la table → 500
     en boucle. En rendant l'init inconditionnelle, au moins un node tente
     l'init avec succès dès qu'il est primary (ou le sera plus tard).
+
+    INV-152 : "plus tard" n'arrivait jamais (init seulement au boot). D'où le
+    second appel par leader_election_loop à chaque promotion. Renvoie False si
+    la base est en lecture seule (replica), True si le schéma est à jour.
     """
     from sqlalchemy.exc import OperationalError, InternalError
-    try:
-        Base.metadata.create_all(bind=engine)
-        run_migrations(engine)
-        _migrate_alarm_original_created_at(engine)
-        logger.info("Schema init OK (create_all + run_migrations + alarm migration)")
-    except (OperationalError, InternalError) as e:
-        msg = str(e)
-        if "read-only" in msg.lower() or "ReadOnlySqlTransaction" in msg:
-            logger.info(
-                "Schema init skip — replica Patroni read-only (%s)",
-                type(e).__name__,
-            )
-        else:
+    with _schema_lock:
+        try:
+            Base.metadata.create_all(bind=engine)
+            run_migrations(engine)
+            _migrate_alarm_original_created_at(engine)
+            logger.info("Schema init OK (create_all + run_migrations + alarm migration)")
+            return True
+        except (OperationalError, InternalError) as e:
+            msg = str(e)
+            if "read-only" in msg.lower() or "ReadOnlySqlTransaction" in msg:
+                logger.info(
+                    "Schema init skip — replica Patroni read-only (%s)",
+                    type(e).__name__,
+                )
+                return False
             raise
 
 
@@ -153,7 +163,9 @@ async def lifespan(app: FastAPI):
     logging.getLogger("uvicorn.access").addFilter(HeartbeatAccessLogFilter())
 
     # Demarrer le leader election en premier
-    election_task = asyncio.create_task(leader_election_loop(DATABASE_URL))
+    election_task = asyncio.create_task(
+        leader_election_loop(DATABASE_URL, on_promoted=lambda: _init_db_schema(engine))
+    )
 
     # Attendre que Patroni determine le role (max 30s)
     for _ in range(60):

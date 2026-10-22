@@ -27,18 +27,21 @@ PATRONI_URL = os.getenv("PATRONI_URL", "http://patroni:8008")
 is_leader = asyncio.Event()
 
 
-async def leader_election_loop(database_url: str):
+async def leader_election_loop(database_url: str, on_promoted=None):
     """Interroge Patroni en boucle pour determiner le role de ce noeud.
 
     - GET {PATRONI_URL}/primary : 200 = ce noeud est primary
     - 503 ou erreur = ce noeud est replica/indisponible
     - Si SQLite (dev local) : toujours primary, pas de Patroni
+    - on_promoted (INV-152) : migrations du schema, rejouees a chaque promotion
+      et retentees a chaque tour tant qu'elles n'ont pas renvoye True.
     """
     if not database_url.startswith("postgresql"):
         logger.info("SQLite detecte - pas de Patroni, noeud toujours PRIMAIRE")
         is_leader.set()
         return
 
+    schema_pending = True
     while True:
         correlation_id_var.set(str(uuid.uuid4()))
         try:
@@ -48,7 +51,13 @@ async def leader_election_loop(database_url: str):
                 if not is_leader.is_set():
                     logger.info("Patroni: ce noeud est maintenant PRIMAIRE")
                     log_event("leader_elected", role="primary")
+                    schema_pending = True
                 is_leader.set()
+                if on_promoted and schema_pending:
+                    try:
+                        schema_pending = not await asyncio.to_thread(on_promoted)
+                    except Exception:
+                        logger.exception("INV-152 : migrations en echec a la promotion, nouvel essai dans 5 s")
             else:
                 if is_leader.is_set():
                     logger.warning("Patroni: ce noeud passe en SECONDAIRE")
