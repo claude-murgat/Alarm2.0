@@ -685,6 +685,12 @@ POST /devices/fcm-token DELETE → retire de la base, plus de push reçu.
   - `test_delete_fcm_token_only_removes_target_device_inv078` (défense en profondeur : suppression scopée au `device_id`, pas de wipe massif)
 - **Note méthodo** : le 1er run bot avait abandonné (P5 strict sur cas ambigu — le body issue ne disait pas explicitement "verrouille en régression"). Issue #72 reformulée + PR #94 (`.github/ai-bot/prompt.md`) ajoute la section "Cas special : code deja conforme (regression lock)" pour éviter cette classe de faux-abandons sur le reste du backlog.
 
+### INV-148 [H] ⚠️ Rôle « test » : le téléphone d'un compte test ne sonne pas pour les alarmes (2026-10-22)
+Un utilisateur porte un booléen `is_test` (défaut `false`), cumulable avec `is_admin`, choisi à la création. Un compte test reçoit les alarmes (escalade, SMS, appels inchangés) mais son téléphone ne sonne pas (INV-ANDROID-008).
+- **Livré en deux temps** (cf `docs/CD_DESIGN.md`, migration de schéma) : (1) colonne `users.is_test BOOLEAN NOT NULL DEFAULT FALSE`, comptes existants à `false`, lue par aucun code ; (2) une fois la colonne créée par le leader en prod, le code qui la lit (API, web, app).
+- **Pourquoi** : demande du propriétaire du 2026-10-22 : un compte qui sert aux tests sans faire sonner le téléphone.
+- **Couverture** : Integration `test_user_is_test_inv148.py::test_migration_adds_is_test_false_to_existing_users` (étape 1).
+
 ---
 
 ## 8. Chaîne d'escalade et config
