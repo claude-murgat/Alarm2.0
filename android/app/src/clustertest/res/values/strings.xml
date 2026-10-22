@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- APK du cluster de test : nom distinct sur l'ecran d'accueil (cf build.gradle.kts, clustertest). -->
+<resources>
+    <string name="app_name">Alarme Murgat TEST</string>
+</resources>

@@ -103,6 +103,19 @@ android {
             buildConfigField("String", "FALLBACK_BACKEND_URL", "\"http://192.168.1.50:8000/\"")
             buildConfigField("String", "FALLBACK_BACKEND_URL_2", "\"http://192.168.1.51:8000/\"")
         }
+        // APK du cluster de TEST (alarm-1/alarm-2), installable a cote de l'app de prod :
+        // autre applicationId, nom "Alarme Murgat TEST" (src/clustertest/res). Choix
+        // proprietaire 2026-10-22 : une app separee plutot qu'un selecteur dans l'app de
+        // prod, pour qu'un telephone d'astreinte ne puisse pas rester pointe sur le test.
+        create("clustertest") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".test"
+            versionNameSuffix = "-test"
+            matchingFallbacks += "release"
+            buildConfigField("String", "PRIMARY_BACKEND_URL", "\"http://172.16.1.121:8000/\"")
+            buildConfigField("String", "FALLBACK_BACKEND_URL", "\"http://172.16.1.120:8000/\"")
+            buildConfigField("String", "FALLBACK_BACKEND_URL_2", "\"http://172.16.1.121:8000/\"")
+        }
     }
 
     compileOptions {
