@@ -96,6 +96,12 @@ Quand `heartbeatLostAlarm` ou `authErrorAlarm` passent true, `connectionLostSoun
 - **Couverture** : test09 vérifie l'affichage du bandeau, pas la sonnerie audio.
 - **Manque** : test qui vérifie l'état du MediaPlayer après `heartbeatLostAlarm=true`.
 
+### INV-ANDROID-008 [H] ✅ Compte test : l'alarme s'affiche mais le téléphone ne sonne pas (2026-10-22)
+Au login, l'app mémorise `user.is_test` (réponse de `POST /api/auth/login`, INV-151) dans `alarm_prefs`, clé `is_test` (absente → `false`). Si elle vaut `true`, une alarme active ne lance **pas** la sonnerie, ni depuis le service (app fermée), ni depuis le dashboard, ni depuis l'écran d'alarme. Le reste ne change pas : écran d'alarme plein écran, notification, bouton d'acquittement, heartbeat.
+- **Seule la sonnerie d'alarme est coupée** : les sonneries « connexion perdue » et « session expirée » (INV-ANDROID-007) sonnent toujours sur un compte test (choix du propriétaire).
+- **Pourquoi** : cf INV-151.
+- **Couverture** : Espresso `AlarmTestAccountTest` : compte test → alarme affichée (dashboard + écran d'alarme) sans sonnerie ; compte normal → sonne (témoin : prouve que le son marche sur l'appareil de test) ; login → `is_test` mémorisé.
+
 ---
 
 ## 2. Dashboard et UI principale

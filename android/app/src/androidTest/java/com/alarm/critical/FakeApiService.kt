@@ -26,7 +26,8 @@ class FakeApiService : ApiService {
     var myAlarmsResponses: MutableList<Response<List<AlarmResponse>>> = mutableListOf(
         Response.success(emptyList())
     )
-    private var myAlarmsCallCount = 0
+    var myAlarmsCallCount = 0
+        private set
 
     var acknowledgeResponse: Response<AlarmResponse> = Response.success(
         AlarmResponse(42, "Test", "msg", "critical", "acknowledged", 1, "2026-01-01T00:01:00", "user1", "2026-01-01T00:31:00", 0, "2026-01-01T00:00:00", ack_remaining_seconds = 1800)

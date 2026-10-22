@@ -89,7 +89,7 @@ def test_post_new_position_still_succeeds(client, admin_headers):
     used_user_ids = {e["user_id"] for e in existing}
     # admin/user1/user2 sont 3 users seed (main.py:43-47). On cree un autre user.
     r = client.post(
-        "/api/auth/register",
+        "/api/auth/register", headers=admin_headers,
         json={"name": f"probe{free_position}", "password": "probe123"},
     )
     assert r.status_code in (200, 201), r.text

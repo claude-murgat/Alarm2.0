@@ -205,7 +205,7 @@ class TestUserLogin:
 
     def test_register_rejects_spaces_in_name(self):
         """L'inscription doit refuser les noms avec des espaces."""
-        r = requests.post(f"{API}/auth/register", json={
+        r = requests.post(f"{API}/auth/register", headers=_admin_headers(), json={
             "name": "bad name",
             "password": "test123",
         })
@@ -222,7 +222,7 @@ class TestUserLogin:
             if u["name"] == "testcaseuser":
                 requests.delete(f"{API}/users/{u['id']}", headers=admin_h)
 
-        r = requests.post(f"{API}/auth/register", json={
+        r = requests.post(f"{API}/auth/register", headers=admin_h, json={
             "name": "TestCaseUser",
             "password": "test123",
         })
@@ -906,7 +906,7 @@ class TestDeletedUserDuringAlarm:
             requests.delete(f"{API}/users/{existing_id}", headers=admin_h)
 
         # Créer un utilisateur temporaire
-        r = requests.post(f"{API}/auth/register", json={
+        r = requests.post(f"{API}/auth/register", headers=admin_h, json={
             "name": "tempuser", "password": "temp123"
         })
         temp_id = r.json()["id"]

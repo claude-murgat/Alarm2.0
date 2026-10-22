@@ -130,6 +130,7 @@ class MainActivity : AppCompatActivity() {
                             .putString("refresh_token", tokenResponse.refresh_token)
                             .putString("user_name", tokenResponse.user.name)
                             .putInt("user_id", tokenResponse.user.id)
+                            .putBoolean("is_test", tokenResponse.user.is_test)  // INV-ANDROID-008
                             .putBoolean("is_oncall", isOncall)
                             .putInt("escalation_position", escalationPosition)
                             .putBoolean("started_by_fcm", false)

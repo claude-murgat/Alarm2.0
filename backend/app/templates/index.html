@@ -147,6 +147,21 @@
         .header .user-info .username { color: #94a3b8; font-size: 0.85rem; }
         .btn-logout { background: transparent; border: 1px solid #475569; color: #94a3b8; padding: 4px 12px; font-size: 0.8rem; }
         .btn-logout:hover { border-color: #ef4444; color: #ef4444; }
+        /* INV-150 : telephone. Sans effet a largeur ordinateur (tout y tient deja). */
+        .tabs { overflow-x: auto; scrollbar-width: none; }
+        .tab { flex: none; white-space: nowrap; }
+        .form-row { flex-wrap: wrap; }
+        @media (max-width: 700px) {
+            .header { flex-wrap: wrap; gap: 8px; padding: 12px 16px; }
+            .header .status { flex-wrap: wrap; align-items: center; gap: 10px; }
+            .tab { padding: 10px 14px; }
+            .content { padding: 12px; }
+            .card { padding: 14px; }
+            table { display: block; overflow-x: auto; }
+            .badge { white-space: nowrap; }
+            .form-group, input, select { min-width: 0; max-width: 100%; }
+            .login-box { width: calc(100% - 32px); padding: 24px; }
+        }
     </style>
 </head>
 <body>
@@ -216,13 +231,14 @@
                     <div class="form-group"><label>Nom (sans espaces)</label><input id="newUserName" placeholder="nom"></div>
                     <div class="form-group"><label>Mot de passe</label><input id="newUserPassword" type="password" placeholder="Mot de passe"></div>
                     <div class="form-group"><label>Admin</label><select id="newUserAdmin"><option value="false">Non</option><option value="true">Oui</option></select></div>
+                    <div class="form-group"><label>Test (ne sonne pas)</label><select id="newUserTest"><option value="false">Non</option><option value="true">Oui</option></select></div>
                     <div class="form-group"><label>Téléphone</label><input id="newUserPhone" type="tel" placeholder="+33612345678"></div>
                     <button class="btn-primary" onclick="addUser()">Ajouter</button>
                 </div>
             </div>
             <div class="card">
                 <h3>Utilisateurs</h3>
-                <table><thead><tr><th>ID</th><th>Nom</th><th>Admin</th><th>Statut</th><th>Téléphone</th><th>Actions</th></tr></thead>
+                <table><thead><tr><th>ID</th><th>Nom</th><th>Admin</th><th>Test</th><th>Statut</th><th>Téléphone</th><th>Actions</th></tr></thead>
                 <tbody id="usersTable"></tbody></table>
             </div>
         </div>
@@ -468,7 +484,7 @@
                 <div id="quorumBanner" style="padding:16px;border-radius:8px;font-size:1.2rem;font-weight:bold;text-align:center;margin-bottom:16px;background:#22c55e33;color:#22c55e;">
                     Chargement...
                 </div>
-                <div style="display:flex;gap:16px;margin-bottom:16px;">
+                <div style="display:flex;flex-wrap:wrap;gap:16px;margin-bottom:16px;">
                     <div class="card stat"><div class="value" id="clusterTotal">-</div><div class="label">Noeuds total</div></div>
                     <div class="card stat"><div class="value" id="clusterHealthy">-</div><div class="label">Noeuds sains</div></div>
                     <div class="card stat"><div class="value" id="clusterLocalNode">-</div><div class="label">Ce noeud</div></div>
@@ -742,6 +758,7 @@
             document.getElementById('usersTable').innerHTML = users.map(u => `
                 <tr><td>${u.id}</td><td>${u.name}</td>
                 <td>${u.is_admin ? 'Oui' : 'Non'}</td>
+                <td class="user-test">${u.is_test ? 'Oui' : 'Non'}</td>
                 <td>${presenceBadge(u, oncall)}</td>
                 <td>
                     <input class="user-phone" id="phone_${u.id}" type="tel" value="${u.phone_number || ''}" placeholder="+33612345678" style="width:130px">
@@ -854,6 +871,12 @@
             return '';
         }
 
+        function testBadge(userId) {
+            // INV-151 : un compte test ne sonne pas -> une vraie alarme y attend 15 min en silence.
+            const u = users.find(x => x.id === userId);
+            return u && u.is_test ? ' <span class="test-badge" style="background:#f59e0b;color:#111;font-size:11px;padding:1px 6px;border-radius:8px;margin-left:6px">test, ne sonne pas</span>' : '';
+        }
+
         async function loadEscalation() {
             // Ne pas ecraser si l'utilisateur est en train d'editer
             if (editingEscalation) return;
@@ -874,7 +897,7 @@
                 chainEl.innerHTML = esc.map((e, i) => `
                     <div class="esc-item" draggable="true" data-user-id="${e.user_id}"
                          style="padding:8px 12px;margin:4px 0;background:#2a2a3e;border-radius:6px;cursor:grab;display:flex;justify-content:space-between;align-items:center;color:#e2e8f0">
-                        <span><strong>${i+1}.</strong> ${getUserName(e.user_id)}${noPhoneBadge(e.user_id)}</span>
+                        <span><strong>${i+1}.</strong> ${getUserName(e.user_id)}${noPhoneBadge(e.user_id)}${testBadge(e.user_id)}</span>
                         <span class="esc-remove" onclick="removeFromChain(${e.user_id})" style="cursor:pointer;color:#ef4444;font-size:1.2em;padding:0 4px">&times;</span>
                     </div>
                 `).join('') || '<div style="text-align:center;color:#64748b;padding:16px">Aucun utilisateur</div>';
@@ -1056,6 +1079,7 @@
                 name: document.getElementById('newUserName').value,
                 password: document.getElementById('newUserPassword').value,
                 is_admin: document.getElementById('newUserAdmin').value === 'true',
+                is_test: document.getElementById('newUserTest').value === 'true',  // INV-151
                 phone_number: phoneRaw === '' ? null : phoneRaw,  // INV-069
             })});
             loadAll();

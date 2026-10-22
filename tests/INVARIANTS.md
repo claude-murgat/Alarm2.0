@@ -509,6 +509,11 @@ Toute écriture déclenchée depuis le web (POST/PUT/PATCH/DELETE via `api()` : 
 - **Pourquoi** : demande du propriétaire du 2026-10-19 : après un clic, rien n'indiquait si l'action avait réussi.
 - **Couverture** : Playwright `test_frontend.py::TestActionFeedback`.
 
+### INV-150 [M] ✅ Web : utilisable sur téléphone (2026-10-22)
+À 375 px de large (téléphone), **aucun onglet** ne fait défiler la page horizontalement, même avec une alarme en cours. Tous les onglets restent atteignables (la barre d'onglets défile sur elle-même), l'en-tête (dont « Déconnexion ») tient dans l'écran, les formulaires passent à la ligne et les tableaux larges défilent à l'intérieur de leur carte. L'affichage sur ordinateur ne change pas.
+- **Pourquoi** : demande du propriétaire du 2026-10-22. Mesuré avant correction : page de 1 039 px de large sur un écran de 375 px (barre des 9 onglets, en-tête, tableaux, formulaires).
+- **Couverture** : Playwright `test_frontend.py::TestMobileLayout`.
+
 ### INV-124 [H] ✅ Corps du SMS d'alarme : instruction d'acquittement + lien supervision
 Le corps du SMS d'alarme métier (escalade, `_enqueue_sms_for_user`) doit (a) instruire
 l'opérateur d'acquitter en **répondant `1`** au SMS, et (b) contenir le **lien de supervision
@@ -690,11 +695,22 @@ POST /devices/fcm-token DELETE → retire de la base, plus de push reçu.
   - `test_delete_fcm_token_only_removes_target_device_inv078` (défense en profondeur : suppression scopée au `device_id`, pas de wipe massif)
 - **Note méthodo** : le 1er run bot avait abandonné (P5 strict sur cas ambigu — le body issue ne disait pas explicitement "verrouille en régression"). Issue #72 reformulée + PR #94 (`.github/ai-bot/prompt.md`) ajoute la section "Cas special : code deja conforme (regression lock)" pour éviter cette classe de faux-abandons sur le reste du backlog.
 
-### INV-148 [H] ⚠️ Rôle « test » : le téléphone d'un compte test ne sonne pas pour les alarmes (2026-10-22)
-Un utilisateur porte un booléen `is_test` (défaut `false`), cumulable avec `is_admin`, choisi à la création. Un compte test reçoit les alarmes (escalade, SMS, appels inchangés) mais son téléphone ne sonne pas (INV-ANDROID-008).
-- **Livré en deux temps** (cf `docs/CD_DESIGN.md`, migration de schéma) : (1) colonne `users.is_test BOOLEAN NOT NULL DEFAULT FALSE`, comptes existants à `false`, lue par aucun code ; (2) une fois la colonne créée par le leader en prod, le code qui la lit (API, web, app).
-- **Pourquoi** : demande du propriétaire du 2026-10-22 : un compte qui sert aux tests sans faire sonner le téléphone.
-- **Couverture** : Integration `test_user_is_test_inv148.py::test_migration_adds_is_test_false_to_existing_users` (étape 1).
+### INV-151 [H] ✅ Rôle « test » : le téléphone d'un compte test ne sonne pas pour les alarmes (2026-10-22)
+Un utilisateur porte un booléen `is_test` (défaut `false`), cumulable avec `is_admin`. Comme `is_admin`, il se choisit **à la création** et ne se modifie pas ensuite (recréer le compte pour changer).
+- **Création (web)** : le formulaire « Ajouter un utilisateur » a un choix `#newUserTest` (Non/Oui) ; `addUser()` envoie `is_test` dans `POST /api/auth/register`.
+- **API** : `is_test` est renvoyé dans `UserResponse` : `GET /api/users/`, `GET /api/auth/me` et le `user` de `POST /api/auth/login` (c'est là que l'app le lit, cf INV-ANDROID-008). Un compte créé avant cet invariant vaut `false`.
+- **Onglet Utilisateurs** : colonne « Test », cellule `td.user-test` à « Oui » ou « Non ».
+- **Onglet Escalade** : tout membre de la chaîne avec `is_test` affiche un badge `.test-badge` « test, ne sonne pas ». Les autres membres n'en ont pas.
+- **Numéro** : livré d'abord sous « INV-148 » par #253, numéro déjà pris le même jour par la gateway (#252) → renuméroté INV-151.
+- **Livré en deux temps** (cf `docs/CD_DESIGN.md`, migration de schéma) : (1) PR #253, colonne `users.is_test BOOLEAN NOT NULL DEFAULT FALSE` lue par aucun code ; (2) une fois la colonne créée par le leader en prod, le code qui la lit (API, web, app).
+- **Rien d'autre ne change côté serveur** : un compte test reçoit les alarmes, l'escalade le traite comme les autres (15 min puis le suivant, INV-011), SMS et appels inchangés (pas de numéro → pas d'appel, INV-061).
+- **Pourquoi** : demande du propriétaire du 2026-10-22 : un compte qui sert aux tests (alarmes envoyées en prod, essais de l'app) sans faire sonner le téléphone. Le badge rend visible qu'une vraie alarme arrivée sur ce compte attend 15 min en silence avant de passer au suivant.
+- **Couverture** : Integration `test_user_is_test_inv151.py` (rôle posé à la création et renvoyé au login, défaut `false`, migration d'une base existante) ; Playwright `test_frontend.py::TestUsersTab::test_add_test_user_shows_test_column`, `::test_escalation_chain_flags_test_member`.
+
+### INV-149 [C] ✅ Seul un admin peut créer un compte (2026-10-22)
+`POST /api/auth/register` exige un jeton d'admin : sans jeton → refus (`401` ou `403`), jeton d'un non-admin → `403`. Dans les deux cas **aucun compte n'est créé**. L'admin crée les comptes depuis l'onglet Utilisateurs (déjà authentifié).
+- **Pourquoi** : décision du propriétaire du 2026-10-22. La route était publique : quiconque joignait l'API pouvait se créer un compte, y compris admin (`is_admin` dans le body), puis lire et modifier la chaîne d'escalade.
+- **Couverture** : Integration `test_register_admin_only_inv149.py` (sans jeton, non-admin).
 
 ---
 

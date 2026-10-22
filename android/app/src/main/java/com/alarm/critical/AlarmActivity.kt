@@ -71,7 +71,7 @@ class AlarmActivity : AppCompatActivity() {
 
         // Start alarm sound
         soundManager = AlarmSoundManager(this)
-        soundManager.startAlarmSound()
+        soundManager.startAlarmRing()
 
         // Start pulsation animations
         startPulseAnimations()

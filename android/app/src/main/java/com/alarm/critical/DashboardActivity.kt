@@ -564,7 +564,7 @@ class DashboardActivity : AppCompatActivity() {
                 if (soundManager == null) {
                     soundManager = AlarmSoundManager(this)
                 }
-                soundManager?.startAlarmSound()
+                soundManager?.startAlarmRing()
 
             } else if (alarm != null && isAcknowledged) {
                 // Alarme acquittee par nous

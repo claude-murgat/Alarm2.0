@@ -49,7 +49,7 @@ def _admin_user_id(client, admin_headers):
     raise AssertionError("admin user not found")
 
 
-def test_register_with_invalid_phone_returns_422(client):
+def test_register_with_invalid_phone_returns_422(client, admin_headers):
     """INV-069 §3 defense-in-depth : POST /api/auth/register avec un
     phone_number qui ne matche pas `^\\+?[0-9]{6,15}$` DOIT renvoyer 422.
 
@@ -65,7 +65,7 @@ def test_register_with_invalid_phone_returns_422(client):
         "password": "pass1234",
         "phone_number": "abcd!!",
     }
-    r = client.post("/api/auth/register", json=body)
+    r = client.post("/api/auth/register", json=body, headers=admin_headers)
     assert r.status_code == 422, (
         f"POST /api/auth/register avec phone='abcd!!' doit etre rejete au "
         f"boundary API (defense-in-depth INV-069 §3). Got {r.status_code}: "
@@ -73,7 +73,7 @@ def test_register_with_invalid_phone_returns_422(client):
     )
 
 
-def test_register_with_valid_phone_and_empty_phone_accepted(client):
+def test_register_with_valid_phone_and_empty_phone_accepted(client, admin_headers):
     """INV-069 §3 : phone_number vide ('') DOIT etre accepte et normalise
     vers None (efface, cf INV-061 « pas de SMS/appel si NULL »). Un format
     valide `+33612345678` DOIT passer et etre persiste tel quel.
@@ -83,7 +83,7 @@ def test_register_with_valid_phone_and_empty_phone_accepted(client):
     casserait l'efface-numero qui est un cas valide du formulaire.
     """
     n_valid = _fresh_name("okphone")
-    r = client.post("/api/auth/register", json={
+    r = client.post("/api/auth/register", headers=admin_headers, json={
         "name": n_valid, "password": "pass1234", "phone_number": "+33612345678",
     })
     assert r.status_code == 200, (
@@ -92,7 +92,7 @@ def test_register_with_valid_phone_and_empty_phone_accepted(client):
     assert r.json()["phone_number"] == "+33612345678"
 
     n_empty = _fresh_name("nophone")
-    r = client.post("/api/auth/register", json={
+    r = client.post("/api/auth/register", headers=admin_headers, json={
         "name": n_empty, "password": "pass1234", "phone_number": "",
     })
     assert r.status_code == 200, (
