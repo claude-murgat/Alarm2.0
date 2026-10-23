@@ -8,6 +8,7 @@ migrations en devenant leader -> colonne users.is_test absente des 3 noeuds.
 """
 import asyncio
 import tempfile
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
@@ -59,3 +60,61 @@ def test_node_promoted_after_boot_applies_pending_migrations(monkeypatch, client
     assert "is_test" in _user_columns(engine), (
         "Un noeud devenu leader doit jouer les migrations en attente (INV-152)"
     )
+
+
+class _Stop(Exception):
+    pass
+
+
+def _run_election(monkeypatch, outcomes, tours, replica_tours=()):
+    """Joue `tours` tours de leader_election_loop sans attendre les 5 s reelles.
+    outcomes : resultats successifs de on_promoted (une exception est levee).
+    Renvoie les numeros de tour (0, 1, ...) ou on_promoted a ete appele."""
+    from backend.app import leader_election as le
+
+    tour = 0
+    calls = []
+    results = iter(outcomes)
+
+    def on_promoted():
+        calls.append(tour)
+        result = next(results, True)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def urlopen(req, timeout=None):
+        if tour in replica_tours:
+            raise OSError("HTTP 503 : ce noeud est replica")  # urlopen leve sur un 503
+        return _Primary()
+
+    async def next_tour(_delay):
+        nonlocal tour
+        tour += 1
+        if tour == tours:
+            raise _Stop
+
+    monkeypatch.setattr(le.urllib.request, "urlopen", urlopen)
+    # sleep factice dans leader_election seulement : les taches de fond du TestClient gardent le vrai
+    monkeypatch.setattr(le, "asyncio", SimpleNamespace(**{**vars(asyncio), "sleep": next_tour}))
+    le.is_leader.clear()
+    try:
+        with pytest.raises(_Stop):
+            asyncio.run(le.leader_election_loop("postgresql://patroni/alarm", on_promoted=on_promoted))
+    finally:
+        le.is_leader.set()  # tier 2 = SQLite : le noeud est toujours leader
+    return calls
+
+
+def test_leader_retries_migrations_each_tour_until_success(monkeypatch):
+    """Migrations en echec (False puis exception) : retentees au tour suivant,
+    puis plus jamais rappelees une fois reussies (INV-152)."""
+    calls = _run_election(monkeypatch, [False, RuntimeError("base pas encore inscriptible"), True], tours=5)
+    assert calls == [0, 1, 2], f"on_promoted appele aux tours {calls}, attendu [0, 1, 2]"
+
+
+def test_node_promoted_again_reapplies_migrations(monkeypatch):
+    """Leader (migrations OK) -> replica -> leader a nouveau : les migrations
+    sont rejouees a la 2e promotion, jamais en replica (INV-152)."""
+    calls = _run_election(monkeypatch, [True, True], tours=4, replica_tours={1})
+    assert calls == [0, 2], f"on_promoted appele aux tours {calls}, attendu [0, 2]"
