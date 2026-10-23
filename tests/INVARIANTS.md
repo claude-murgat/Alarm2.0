@@ -193,6 +193,12 @@ L'agrégation OU (INV-122), la détection de désaccord (INV-123) et la résolut
 Le message de Jessica commence par le site : fichiers `alarme_izeron.wav` et `alarme_beaufort.wav` (même voix et réglages que `alarme.wav`, version A). Repli TTS du module : le texte nomme aussi le site. `alarme.wav` reste utilisé pour une alarme sans site.
 - **Pourquoi** : la même personne de garde couvre les deux sites ; elle doit savoir où intervenir dès le décroché.
 
+### INV-160 [C] ❌ Multi-site : la réponse « 1 » par SMS acquitte l'alarme du dernier SMS reçu (2026-10-23)
+Quand la gateway transmet une réponse d'acquittement par SMS (`POST /internal/alarms/active/ack-by-phone`, INV-124), l'alarme acquittée est celle du **dernier SMS d'alarme envoyé à ce numéro** (`sms_queue.sent_at` le plus récent) : l'alarme non résolue de son site (`sms_queue.site`, INV-156) pour laquelle l'utilisateur a été notifié. L'alarme de l'autre site n'est pas touchée et continue (escalade, sonnerie).
+- Aucun SMS envoyé à ce numéro pour une alarme en cours → comportement d'avant : la première alarme en cours pour laquelle l'utilisateur a été notifié.
+- La touche 1 pendant un appel acquitte déjà l'alarme de cet appel (`call_queue.alarm_id`) : inchangé.
+- **Pourquoi** : avec deux alarmes en cours (Izeron et Beaufort), « la première alarme trouvée » pouvait acquitter le mauvais site. Le SMS nomme son site (INV-155) : la personne de garde répond à celui qu'elle vient de lire. Choix du propriétaire du 2026-10-23.
+
 ### INV-147 [C] ✅ Résolution : chaque utilisateur notifié reçoit un push `alarm_resolved`
 Quand une alarme passe `resolved` — depuis le web ou l'app (`POST /api/alarms/{id}/resolve`) ou par la résolution automatique de la gateway (`/internal/alarms/report-state` à `closed`, INV-120) — le backend envoie, après le commit, un FCM haute priorité data-only à **chaque** utilisateur de `alarm_notifications` : `data = {type: "alarm_resolved", alarm_id, title: "Alarme resolue", body: <titre de l'alarme>}`. Best-effort : un échec FCM n'empêche pas la résolution. Le traitement côté téléphone est INV-ANDROID-210.
 - **Pourquoi** : prod 2026-10-21, alarme 886 résolue depuis le web. Le Pixel 9a de admin, verrouillé, a continué de sonner jusqu'à ce que le propriétaire le déverrouille ; le téléphone de timo a coupé le son mais gardé l'écran d'alarme. Aucun push n'était envoyé à la résolution : un téléphone en veille ne l'apprenait qu'à son prochain poll réussi, que Doze peut retarder indéfiniment.
