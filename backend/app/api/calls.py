@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import CallQueue, Alarm, AlarmNotification, User
 from ..clock import now as clock_now
+from ..escalation import contact_is_obsolete
 
 router = APIRouter(prefix="/internal", tags=["call-gateway"])
 
@@ -21,13 +22,15 @@ def get_pending_calls(
     db: Session = Depends(get_db),
     _: None = Depends(_check_gateway_key),
 ):
-    """Retourne les appels en attente (non traites, retries < 3)."""
+    """Retourne les appels en attente (non traites, retries < 3), sauf ceux d'une
+    alarme deja acquittee ou resolue (INV-154)."""
     rows = (
         db.query(CallQueue)
         .filter(CallQueue.called_at == None, CallQueue.retries < 3)
         .order_by(CallQueue.created_at)
         .all()
     )
+    rows = [r for r in rows if not contact_is_obsolete(db, r)]
     return [
         {
             "id": r.id,

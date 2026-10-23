@@ -101,6 +101,41 @@ def _alarms_awaiting_call(db: Session, alarms) -> set[int]:
     return awaiting
 
 
+LIVE_STATUSES = ("active", "escalated")
+CANCELLED_SMS_ERROR = "annulé : alarme acquittée ou résolue"
+
+
+def _sms_alarm(db: Session, sms: SmsQueue):
+    """INV-154 : alarme d'un SMS en file (sms_queue n'a pas d'alarm_id) = celle de la
+    derniere notification de son numero avant lui. None : SMS hors alarme."""
+    return (
+        db.query(Alarm)
+        .join(AlarmNotification, AlarmNotification.alarm_id == Alarm.id)
+        .join(User, User.id == AlarmNotification.user_id)
+        .filter(User.phone_number == sms.to_number, AlarmNotification.notified_at <= sms.created_at)
+        .order_by(AlarmNotification.notified_at.desc())
+        .first()
+    )
+
+
+def contact_is_obsolete(db: Session, row) -> bool:
+    """INV-154 : SMS ou appel en file d'une alarme deja acquittee ou resolue."""
+    alarm = db.get(Alarm, row.alarm_id) if isinstance(row, CallQueue) else _sms_alarm(db, row)
+    return alarm is not None and alarm.status not in LIVE_STATUSES
+
+
+def _cancel_obsolete_contacts(db: Session):
+    """INV-154 : retire de la file les SMS/appels d'alarmes acquittees ou resolues. Sans ca,
+    un SMS annule resterait « en attente » et bloquerait celui de l'alarme suivante (INV-062)."""
+    for sms in db.query(SmsQueue).filter(SmsQueue.sent_at == None, SmsQueue.retries < 3).all():
+        if contact_is_obsolete(db, sms):
+            sms.retries, sms.error = 3, CANCELLED_SMS_ERROR
+    for call in db.query(CallQueue).filter(CallQueue.called_at == None, CallQueue.retries < 3).all():
+        if contact_is_obsolete(db, call):
+            call.retries, call.result = 3, "cancelled"
+    db.commit()
+
+
 def _report_escalation_without_call(db: Session, alarm, decision):
     """INV-144 : l'appel de l'assigne n'est pas passe dans le delai + 3 min (passerelle ou
     modem en panne) -> escalade quand meme, tracee et signalee par email."""
@@ -159,7 +194,8 @@ def _enqueue_sms_for_user(db: Session, user: User, alarm: Alarm):
     )
     if existing:
         return  # SMS déjà en attente pour cet utilisateur/alarme
-    sms = SmsQueue(to_number=user.phone_number, body=body)
+    # INV-066 : horloge de l'app, comparee a notified_at (rattachement INV-154)
+    sms = SmsQueue(to_number=user.phone_number, body=body, created_at=clock_now())
     db.add(sms)
     logger.info(f"SMS enqueued for {user.name} ({user.phone_number}) — alarm {alarm.id}")
 
@@ -187,6 +223,7 @@ def _enqueue_call_for_user(db: Session, user: User, alarm: Alarm):
         alarm_id=alarm.id,
         user_id=user.id,
         tts_message=tts_message,
+        created_at=clock_now(),  # INV-066
     )
     db.add(call)
     logger.info(f"Call enqueued for {user.name} ({user.phone_number}) — alarm {alarm.id}")
@@ -251,6 +288,9 @@ async def escalation_loop():
                         notif.notified_at = now
                     log_event("escalation_timeout", db=db, alarm_id=alarm.id)
                     db.commit()
+
+                # --- 1b. INV-154 : plus de SMS/appel pour une alarme acquittee ou resolue ---
+                _cancel_obsolete_contacts(db)
 
                 # --- 2. Escalation of active/escalated alarms ---
                 # Logique de decision extraite dans logic/escalation.py (testee unit).
