@@ -16,6 +16,7 @@ from typing import Optional
 
 import requests
 from fastapi import APIRouter, Depends
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_user
@@ -23,6 +24,7 @@ from ..clock import now as clock_now
 from ..database import get_db
 from ..logic.modem_signal import modem_signal
 from ..models import SystemConfig, User
+from ..sites import default_site
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/system", tags=["system"])
@@ -124,6 +126,21 @@ def modem_status(
     _user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """INV-129 : barres de signal 4G du modem gateway (indicateur app + web)."""
-    row = db.query(SystemConfig).filter(SystemConfig.key == "modem_status").first()
-    return modem_signal(json.loads(row.value) if row else None, clock_now())
+    """INV-129/158 : barres de signal 4G du modem de chaque passerelle (app + web).
+    `gateways` : une entree par passerelle. Premier niveau : la plus mal en point
+    (app d'avant INV-158, qui lit un seul objet)."""
+    now = clock_now()
+    rows = db.query(SystemConfig).filter(
+        or_(SystemConfig.key == "modem_status", SystemConfig.key.like("modem_status:%"))).all()
+    gateways = []
+    for row in rows:
+        status = json.loads(row.value)
+        gw = {"gateway_id": status.get("gateway_id") or "legacy",
+              "site": status.get("site") or default_site(db), **modem_signal(status, now)}
+        # Ancienne passerelle muette : mise a jour depuis, elle rapporte sous son gateway_id
+        if gw["gateway_id"] != "legacy" or gw["state"] != "unknown":
+            gateways.append(gw)
+    gateways.sort(key=lambda g: (g["site"], g["gateway_id"]))
+    worst = min(gateways, key=lambda g: g["bars"],
+                default={"gateway_id": None, "site": None, **modem_signal(None, now)})
+    return {**worst, "gateways": gateways}

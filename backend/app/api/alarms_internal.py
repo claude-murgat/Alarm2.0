@@ -9,7 +9,8 @@ sec NC à intervalle régulier (5 s par défaut côté gateway) et POST son éta
 courant ("open" | "closed"). Le backend :
   1. UPSERT dans gateway_states (état courant par gateway).
   2. Compute should_be_active = any(g.state=="open" for g in alive_gateways)
-     où alive = last_seen > now - GATEWAY_LIVENESS_WINDOW_SECONDS (défaut 15s).
+     où alive = last_seen > now - GATEWAY_LIVENESS_WINDOW_SECONDS (défaut 15s)
+     et du même site que la gateway qui reporte (INV-157).
   3. Reconcile : CREATE/RESOLVE alarme source="gateway_dry_contact" selon
      should_be_active. Touche UNIQUEMENT les alarmes gateway (les alarmes
      "api"/"oncall" actives bloquent la création mais ne sont jamais resolved
@@ -32,6 +33,7 @@ from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..clock import now as clock_now
@@ -168,14 +170,14 @@ def _create_gateway_alarm(db: Session, site: str) -> Alarm:
 
     if plan.assigned_user_id is not None:
         try:
-            from ..fcm_service import send_fcm_to_user
+            from ..fcm_service import alarm_data, send_fcm_to_user
 
             send_fcm_to_user(
                 db,
                 plan.assigned_user_id,
                 alarm.title,
                 alarm.message,
-                {"alarm_id": str(alarm.id), "severity": alarm.severity},
+                alarm_data(alarm),
             )
         except Exception:
             logger.warning("FCM best-effort failed for gateway alarm", exc_info=True)
@@ -202,6 +204,7 @@ def _send_dissensus_email(
     db: Session,
     alive_gateways: list,
     elapsed: timedelta,
+    site: str,
 ) -> None:
     """INV-123 : email sysadmin (1 seul par épisode, garde-fou anti-spam
     porté par sensor_dissensus_email_sent_at côté caller)."""
@@ -211,7 +214,7 @@ def _send_dissensus_email(
         f"Les gateways on-site reportent des états divergents depuis "
         f"{int(elapsed.total_seconds() / 60)} minutes.",
         "",
-        "Gateways alive :",
+        f"Gateways alive du site {site.capitalize()} :",
     ]
     for g in alive_gateways:
         body_lines.append(
@@ -241,6 +244,7 @@ def report_state(
     """INV-120 V2 : reconciliation level-based de l'état physique avec
     l'état backend. Cf docstring du module pour la logique complète."""
     _now = clock_now()
+    site = payload.site or default_site(db)
 
     # 1. UPSERT gateway_states (la gateway dit son état courant)
     gs = (
@@ -253,18 +257,26 @@ def report_state(
             gateway_id=payload.gateway_id,
             state=payload.state,
             last_seen=_now,
+            site=site,
         )
         db.add(gs)
     else:
         gs.state = payload.state
         gs.last_seen = _now
+        gs.site = site
     db.flush()
 
     # 2. Compute alive_gateways + should_be_active (politique OR fail-to-alarm)
+    # INV-157 : seules les passerelles vivantes du même site (sans site -> default_site).
     liveness = _liveness_window_seconds()
     cutoff = _now - timedelta(seconds=liveness)
     alive_gateways = (
-        db.query(GatewayState).filter(GatewayState.last_seen > cutoff).all()
+        db.query(GatewayState)
+        .filter(
+            GatewayState.last_seen > cutoff,
+            func.coalesce(GatewayState.site, default_site(db)) == site,
+        )
+        .all()
     )
     alive_states = [g.state for g in alive_gateways]
     should_be_active = any(s == "open" for s in alive_states)
@@ -275,8 +287,6 @@ def report_state(
     # doit être no-op — sinon l'opérateur subit un cycle sonnerie/ack par tick
     # tant que la cause physique persiste (issue #118, INV-120 V2 + ack).
     # INV-001 : une alarme par site -> seule une alarme du site de la passerelle bloque.
-    # shortcut: should_be_active agrege encore toutes les passerelles (INV-157 a venir).
-    site = payload.site or default_site(db)
     any_active_alarm = (
         db.query(Alarm)
         .filter(Alarm.status.in_(["active", "escalated", "acknowledged"]), Alarm.site == site)
@@ -330,7 +340,7 @@ def report_state(
                     elapsed > DISSENSUS_EMAIL_THRESHOLD
                     and gateway_alarm.sensor_dissensus_email_sent_at is None
                 ):
-                    _send_dissensus_email(db, alive_gateways, elapsed)
+                    _send_dissensus_email(db, alive_gateways, elapsed, site)
                     gateway_alarm.sensor_dissensus_email_sent_at = _now
                     log_event(
                         "sensor_dissensus_email_sent",
@@ -359,6 +369,9 @@ class ModemStatusRequest(BaseModel):
     tech: Optional[str] = None
     rsrp: Optional[float] = None
     csq: int = 0  # 0-31, 0 = inconnu (AT+CSQ 99)
+    # INV-158 : un etat par passerelle. Absent (passerelle d'avant) -> "legacy".
+    gateway_id: Optional[str] = Field(None, max_length=128)
+    site: Optional[str] = Field(None, max_length=64)  # INV-155 : absent -> default_site
 
 
 @router.post("/modem-status")
@@ -367,14 +380,17 @@ def report_modem_status(
     db: Session = Depends(get_db),
     _: None = Depends(_check_gateway_key),
 ):
-    """INV-129 : dernier etat reseau du modem, lu par GET /api/system/modem-status.
-    shortcut: une seule cle 'modem_status' (un seul modem, sur onsite-2) ;
-    passer a une cle par gateway_id si un 2e modem est installe."""
-    value = json.dumps({**payload.model_dump(), "reported_at": clock_now().isoformat()})
-    row = db.query(SystemConfig).filter(SystemConfig.key == "modem_status").first()
+    """INV-129/158 : dernier etat reseau du modem de chaque passerelle, lu par
+    GET /api/system/modem-status. Cle 'modem_status:<gateway_id>' ; une passerelle
+    sans gateway_id garde l'ancienne cle 'modem_status' (entree "legacy")."""
+    key = f"modem_status:{payload.gateway_id}" if payload.gateway_id else "modem_status"
+    value = json.dumps({**payload.model_dump(), "gateway_id": payload.gateway_id or "legacy",
+                        "site": payload.site or default_site(db),
+                        "reported_at": clock_now().isoformat()})
+    row = db.query(SystemConfig).filter(SystemConfig.key == key).first()
     if row:
         row.value = value
     else:
-        db.add(SystemConfig(key="modem_status", value=value))
+        db.add(SystemConfig(key=key, value=value))
     db.commit()
     return {"status": "ok"}

@@ -72,7 +72,7 @@ def run_migrations(engine):
         # ── INV-079 : table refresh_tokens (auth Gmail-style, jamais expiré)
         _migrate_refresh_tokens(conn, is_sqlite)
 
-        # ── INV-155/156 : colonnes site (alarms, sms_queue, call_queue)
+        # ── INV-155/156/157 : colonnes site (alarms, sms_queue, call_queue, gateway_states)
         _migrate_site(conn, is_sqlite)
 
 
@@ -343,10 +343,11 @@ def _migrate_alarm_sensor_dissensus(conn, is_sqlite: bool):
 
 
 def _migrate_site(conn, is_sqlite: bool):
-    """INV-155/156 : alarms.site, sms_queue.site, call_queue.site (nullable).
-    Backfill : les alarmes d'avant le multi-site sont toutes d'Izeron, sauf les alarmes
-    d'astreinte (site vide). Les SMS/appels sans site partent par default_site (sms.py)."""
-    for table in ("alarms", "sms_queue", "call_queue"):
+    """INV-155/156/157 : alarms.site, sms_queue.site, call_queue.site, gateway_states.site
+    (nullable). Backfill : les alarmes d'avant le multi-site sont toutes d'Izeron, sauf les
+    alarmes d'astreinte (site vide). Les SMS/appels sans site partent par default_site
+    (sms.py) ; une passerelle sans site compte pour default_site (alarms_internal.py)."""
+    for table in ("alarms", "sms_queue", "call_queue", "gateway_states"):
         if is_sqlite:
             cols = [row[1] for row in conn.execute(text(f"PRAGMA table_info({table})")).fetchall()]
             if "site" not in cols:
@@ -357,7 +358,7 @@ def _migrate_site(conn, is_sqlite: bool):
         "UPDATE alarms SET site = 'izeron' WHERE site IS NULL AND COALESCE(is_oncall_alarm, FALSE) = FALSE"
     ))
     conn.commit()
-    logger.info("Migration: colonnes site verifiees/ajoutees (INV-155/156)")
+    logger.info("Migration: colonnes site verifiees/ajoutees (INV-155/156/157)")
 
 
 def _migrate_connectivity_events(conn, is_sqlite: bool):

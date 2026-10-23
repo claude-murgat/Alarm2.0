@@ -3,7 +3,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.orm import Session
 from ..database import get_db
-from ..models import CallQueue, Alarm, AlarmNotification, User
+from ..models import CallQueue, Alarm, AlarmNotification, SmsQueue, User
 from ..clock import now as clock_now
 from sqlalchemy import func
 from ..escalation import contact_is_obsolete
@@ -123,7 +123,8 @@ def ack_by_phone(
     db: Session = Depends(get_db),
     _: None = Depends(_check_gateway_key),
 ):
-    """Acquitte l'alarme active en matchant le numero de telephone → utilisateur.
+    """Acquitte l'alarme active en matchant le numero de telephone → utilisateur
+    (INV-160 : celle du site du dernier SMS envoye a ce numero).
     Idempotent : si deja acquittee, retourne 200."""
     phone = payload.get("phone_number", "").strip()
     if not phone:
@@ -140,6 +141,17 @@ def ack_by_phone(
         .filter(Alarm.status.in_(["active", "escalated", "acknowledged"]))
         .all()
     )
+    # INV-160 : « 1 » repond au dernier SMS envoye a ce numero -> les alarmes de son site
+    # d'abord (tri stable). Sans tel SMS : premiere alarme notifiee, comme avant.
+    last_sms = (
+        db.query(SmsQueue)
+        .filter(SmsQueue.to_number == phone, SmsQueue.sent_at != None)
+        .order_by(SmsQueue.sent_at.desc())
+        .first()
+    )
+    if last_sms is not None:
+        site = default_site(db)
+        active_alarms.sort(key=lambda a: (a.site or site) != (last_sms.site or site))
 
     target_alarm = None
     for alarm in active_alarms:

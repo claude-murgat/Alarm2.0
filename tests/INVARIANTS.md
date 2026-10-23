@@ -176,7 +176,8 @@ Sites connus : `SystemConfig sites`, par défaut `izeron,beaufort`. `SystemConfi
 - **Inchangé** : une seule chaîne d'escalade pour tous les sites (même équipe de garde). Délais, acquittement, expiration, INV-144/145/148 s'appliquent alarme par alarme.
 - **Pourquoi** : Izeron (aujourd'hui onsite-1/2, demain alarm-1/2) et Beaufort (alarm-3/4) formeront **un seul cluster de 5 nœuds**, avec la même APK et la même équipe de garde. Décision du propriétaire du 2026-10-22.
 - **Couverture** : Integration `test_multisite_inv155_156.py` : `test_izeron_and_beaufort_alarms_coexist`, `test_send_without_or_unknown_site_is_422` (sans site, site inconnu), `test_dry_contact_beaufort_while_izeron_active` (titre « — Beaufort »), `test_dry_contact_without_site_uses_default_site`, `test_sms_and_calls_carry_site_and_pending_filters_by_site` (`ALARME Izeron:`), `test_oncall_alarm_has_no_site_and_contacts_go_to_default_site`, `test_known_sites_exposed_for_web_form` (`GET /api/config/sites`, formulaire web).
-- **Reste** : le site dans le push et l'app Android (PR Android à venir). Le web affiche « Izeron · titre » (tableau de bord, alarmes, schéma d'escalade), non couvert par Playwright.
+- **Push** : tout push d'alarme (création, escalade, rappel, réveil, contact sec, `alarm_resolved`) porte `data["site"]` (`""` pour une alarme sans site). Integration `test_multisite_inv157_158_160.py::test_alarm_pushes_carry_site`.
+- **Reste** : le site dans l'app Android (PR Android à venir, elle lit `data["site"]`). Le web affiche « Izeron · titre » (tableau de bord, alarmes, schéma d'escalade), non couvert par Playwright.
 
 ### INV-156 [C] ✅ Multi-site : les SMS et appels d'une alarme partent par le modem de son site
 `sms_queue.site` et `call_queue.site` reçoivent le site de l'alarme (ou `default_site` pour une alarme sans site). `/internal/sms/pending?site=X` et `/internal/calls/pending?site=X` ne renvoient **que** les lignes du site X. Un SMS ou un appel n'est donc jamais remis à deux passerelles (plus de double envoi).
@@ -186,23 +187,31 @@ Sites connus : `SystemConfig sites`, par défaut `izeron,beaufort`. `SystemConfi
 - Une ligne sans site (créée avant la migration) part par `default_site`.
 - **Couverture** : Integration `test_multisite_inv155_156.py` : `test_sms_and_calls_carry_site_and_pending_filters_by_site` (site des lignes, filtre `?site=`, sans paramètre → `default_site`, liste `izeron,beaufort`), `test_oncall_alarm_has_no_site_and_contacts_go_to_default_site`.
 
-### INV-157 [H] ❌ Multi-site : contact sec agrégé et désaccord détecté site par site (révise INV-122/123)
+### INV-157 [H] ✅ Multi-site : contact sec agrégé et désaccord détecté site par site (révise INV-122/123)
 L'agrégation OU (INV-122), la détection de désaccord (INV-123) et la résolution automatique de l'alarme contact sec ne comparent que les passerelles **vivantes d'un même site**. Une alarme contact sec d'Izeron ne se résout qu'avec les passerelles d'Izeron.
+- Le site de la passerelle est rangé dans `gateway_states.site` (migration) à chaque `report-state` (champ `site`, absent → `default_site`). Une ligne sans site (écrite avant la migration) compte pour `default_site`.
+- La réponse `{alarm_active, dissensus}` et l'email de désaccord ne portent que sur le site de la passerelle qui rapporte ; l'email nomme le site.
 - **Pourquoi** : sinon, Beaufort ouvert et Izeron fermé passerait pour une panne de câblage (email « dissensus ») au lieu d'une alarme Beaufort, et la fermeture à Izeron pourrait résoudre l'alarme de Beaufort.
+- **Couverture** : Integration `test_multisite_inv157_158_160.py` : `test_beaufort_open_izeron_closed_is_not_a_dissensus` (pas d'alarme Izeron, pas de désaccord ; désaccord entre 2 passerelles de Beaufort toujours détecté), `test_closing_a_site_resolves_only_its_own_alarm` (dans les deux sens ; passerelle sans site = Izeron). RED avant le correctif : Izeron fermé créait une alarme Izeron et levait un désaccord ; Izeron fermé ne résolvait pas son alarme tant que Beaufort était ouvert.
 
-### INV-158 [H] ❌ Multi-site : état du modem par passerelle
-`POST /internal/alarms/modem-status` est rangé par `gateway_id`, avec son site. `GET /api/system/modem-status` renvoie une **liste** `[{gateway_id, site, state, bars, tech, rsrp, updated_at}]` (règles d'INV-129 pour chaque élément). Le web et l'app affichent un indicateur de signal par site.
-- **Pourquoi** : une seule clé `modem_status`, écrasée par chaque passerelle, masquerait la panne du modem d'un site (cf. le `shortcut:` d'`alarms_internal.py`).
+### INV-158 [H] ✅ Multi-site : état du modem par passerelle
+`POST /internal/alarms/modem-status` est rangé par `gateway_id`, avec son site (`{registered, tech, rsrp, csq, gateway_id, site}`, `site` absent → `default_site`). `GET /api/system/modem-status` renvoie la **liste** `gateways: [{gateway_id, site, state, bars, tech, rsrp, updated_at}]` (règles d'INV-129 pour chaque élément, triée par site puis `gateway_id`). Le web et l'app affichent un indicateur de signal par passerelle, nommé par son site (un par site quand chaque site a un modem).
+- **Forme de la réponse** (compatible avec l'app d'avant cet invariant, qui lit un objet) : `{gateway_id, site, state, bars, tech, rsrp, updated_at, gateways: [...]}`. Les champs de premier niveau reprennent l'entrée la **plus mal en point** (le moins de barres ; à égalité, la première de la liste), pour qu'une ancienne app signale la panne d'un modem au lieu de la masquer. Aucune passerelle : `gateways: []` et premier niveau `{gateway_id: null, site: null, state: "unknown", bars: 0, tech: null, rsrp: null, updated_at: null}`.
+- **Passerelle d'avant cet invariant** (sans `gateway_id`) : entrée `gateway_id = "legacy"` (ancienne clé `modem_status`, site du rapport ou `default_site`). Muette depuis plus de 180 s, elle n'est plus listée : c'est l'ancienne passerelle, mise à jour depuis, qui rapporte maintenant sous son `gateway_id`.
+- **Web** : `#modemSignal` contient un `.modem-signal` par entrée (`data-gateway`, `data-site`, `data-state`, `data-bars`, nom du site affiché, libellé « Izeron (alarm-1) : … dBm ») ; aucune entrée → un seul indicateur « inconnu ».
+- **Pourquoi** : une seule clé `modem_status`, écrasée par chaque passerelle, masquerait la panne du modem d'un site.
+- **Couverture** : Integration `test_multisite_inv157_158_160.py` : `test_modem_status_listed_per_gateway_with_its_site` (liste, site, premier niveau = la plus mal en point), `test_each_gateway_goes_unknown_on_its_own` (180 s par passerelle), `test_gateway_without_gateway_id_is_legacy` (réponse vide, `legacy`, `legacy` muette retirée) ; `test_modem_status_inv129.py` (inchangé, passerelle sans `gateway_id`). Playwright `test_frontend.py::TestModemSignalIndicator` (un indicateur par passerelle, nom du site). App Android : PR séparée.
 
 ### INV-159 [M] ❌ Multi-site : l'appel vocal annonce le site
 Le message de Jessica commence par le site : fichiers `alarme_izeron.wav` et `alarme_beaufort.wav` (même voix et réglages que `alarme.wav`, version A). Repli TTS du module : le texte nomme aussi le site. `alarme.wav` reste utilisé pour une alarme sans site.
 - **Pourquoi** : la même personne de garde couvre les deux sites ; elle doit savoir où intervenir dès le décroché.
 
-### INV-160 [C] ❌ Multi-site : la réponse « 1 » par SMS acquitte l'alarme du dernier SMS reçu (2026-10-23)
+### INV-160 [C] ✅ Multi-site : la réponse « 1 » par SMS acquitte l'alarme du dernier SMS reçu (2026-10-23)
 Quand la gateway transmet une réponse d'acquittement par SMS (`POST /internal/alarms/active/ack-by-phone`, INV-124), l'alarme acquittée est celle du **dernier SMS d'alarme envoyé à ce numéro** (`sms_queue.sent_at` le plus récent) : l'alarme non résolue de son site (`sms_queue.site`, INV-156) pour laquelle l'utilisateur a été notifié. L'alarme de l'autre site n'est pas touchée et continue (escalade, sonnerie).
 - Aucun SMS envoyé à ce numéro pour une alarme en cours → comportement d'avant : la première alarme en cours pour laquelle l'utilisateur a été notifié.
 - La touche 1 pendant un appel acquitte déjà l'alarme de cet appel (`call_queue.alarm_id`) : inchangé.
 - **Pourquoi** : avec deux alarmes en cours (Izeron et Beaufort), « la première alarme trouvée » pouvait acquitter le mauvais site. Le SMS nomme son site (INV-155) : la personne de garde répond à celui qu'elle vient de lire. Choix du propriétaire du 2026-10-23.
+- **Couverture** : Integration `test_multisite_inv157_158_160.py` : `test_sms_reply_acks_alarm_of_last_sms_received[izeron|beaufort]` (l'autre site reste en cours ; RED avant le correctif pour Beaufort : Izeron acquittée), `test_sms_reply_falls_back_when_last_sms_alarm_is_over` (alarme du dernier SMS résolue → repli). Repli sans SMS envoyé : E2E `test_sms_voice.py::TestAckByPhone`.
 
 ### INV-147 [C] ✅ Résolution : chaque utilisateur notifié reçoit un push `alarm_resolved`
 Quand une alarme passe `resolved` — depuis le web ou l'app (`POST /api/alarms/{id}/resolve`) ou par la résolution automatique de la gateway (`/internal/alarms/report-state` à `closed`, INV-120) — le backend envoie, après le commit, un FCM haute priorité data-only à **chaque** utilisateur de `alarm_notifications` : `data = {type: "alarm_resolved", alarm_id, title: "Alarme resolue", body: <titre de l'alarme>}`. Best-effort : un échec FCM n'empêche pas la résolution. Le traitement côté téléphone est INV-ANDROID-210.
@@ -455,7 +464,7 @@ La gateway ne tente un SMS ou un appel que si son dernier keepalive (60 s, contr
 - **Couverture** : Unit `test_modem_watchdog.py::TestMuteDetected`.
 
 ### INV-129 [H] ✅ Signal 4G du modem visible dans l'app et le web, « inconnu » si la gateway se tait
-La gateway envoie à chaque keepalive `POST /internal/alarms/modem-status` (`X-Gateway-Key`, INV-065) `{registered, tech, rsrp, csq}`. `GET /api/system/modem-status` (tout utilisateur connecté) renvoie `{state, bars, tech, rsrp, updated_at}` :
+La gateway envoie à chaque keepalive `POST /internal/alarms/modem-status` (`X-Gateway-Key`, INV-065) `{registered, tech, rsrp, csq}`. `GET /api/system/modem-status` (tout utilisateur connecté) renvoie `{state, bars, tech, rsrp, updated_at}` (multi-site : un état par passerelle, cf. INV-158) :
 - `state = unknown`, `bars = 0` si aucun rapport ou rapport de plus de **180 s** (3 keepalives manqués) ;
 - `state = no_network`, `bars = 0` si le modem n'est pas inscrit ;
 - sinon `state = ok`, barres tirées du RSRP en LTE (≥ −90 → 4, ≥ −100 → 3, ≥ −110 → 2, sinon 1), ou à défaut du CSQ (≥ 20 → 4, ≥ 15 → 3, ≥ 10 → 2, sinon 1).
@@ -1042,7 +1051,7 @@ diffère.
   drop. Mode ADC déjà abandonné avant (ADC1 à GND >5 s freeze le firmware modem).
 
 ### INV-122 [H] ✅ Redondance hardware multi-gateway, agrégation OR fail-to-alarm
-> Multi-site : l'agrégation se fera **par site**, cf. INV-157 (révision en attente de validation).
+> Multi-site : l'agrégation, le désaccord (INV-123) et la résolution automatique se font **par site**, cf. INV-157.
 
 Deux (ou plus) gateways onsite reçoivent le **même contact NC physiquement
 splitté** sur leurs entrées respectives (Arduino en mode `host`, ou IO43 du
@@ -1080,6 +1089,8 @@ mutation aurait peu de portée). À ajouter en E2E hardware (smoke
 PR2/déploiement) en débranchant un fil onsite.
 
 ### INV-123 [H] ✅ Détection dissensus capteurs HW + alerte sysadmin
+> Multi-site : `alive_gateways` = passerelles vivantes **du même site**, cf. INV-157.
+
 Si parmi les `alive_gateways` (cf INV-122), des gateways reportent des
 `state` divergents (au moins une `"open"` ET au moins une `"closed"`)
 pendant plus de **5 minutes**, le système alerte qu'un câblage HW est
