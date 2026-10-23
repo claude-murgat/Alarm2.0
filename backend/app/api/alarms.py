@@ -113,9 +113,8 @@ def send_alarm(
     # Envoyer FCM a l'utilisateur assigne (fire-and-forget)
     if plan.assigned_user_id is not None:
         try:
-            from ..fcm_service import send_fcm_to_user
-            send_fcm_to_user(db, plan.assigned_user_id, alarm.title, alarm.message,
-                             {"alarm_id": str(alarm.id), "severity": alarm.severity})
+            from ..fcm_service import alarm_data, send_fcm_to_user
+            send_fcm_to_user(db, plan.assigned_user_id, alarm.title, alarm.message, alarm_data(alarm))
         except Exception:
             pass  # FCM est best-effort
 

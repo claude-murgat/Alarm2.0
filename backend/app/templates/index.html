@@ -120,15 +120,17 @@
         /* Prod : routes /api/test/* coupees (INV-076) -> boutons de simulation masques */
         body.prod-mode .test-only { display: none; }
         body:not(.prod-mode) .prod-note, body:not(.prod-mode) .prod-only { display: none; }
-        /* INV-129 : signal 4G du modem gateway (4 barres, animees) */
+        /* INV-129 : signal 4G du modem gateway (4 barres, animees) ; INV-158 : un par passerelle */
+        .modem-signals { display: inline-flex; align-items: flex-end; gap: 10px; }
         .modem-signal { display: inline-flex; align-items: flex-end; gap: 2px; height: 20px; cursor: help; }
+        .modem-signal b { font-size: 0.7rem; font-weight: normal; color: #94a3b8; margin-right: 2px; align-self: center; }
         .modem-signal i { width: 5px; border-radius: 1px; background: #475569; transition: background 0.4s; }
-        .modem-signal i:nth-child(1) { height: 25%; } .modem-signal i:nth-child(2) { height: 50%; }
-        .modem-signal i:nth-child(3) { height: 75%; } .modem-signal i:nth-child(4) { height: 100%; }
+        .modem-signal i:nth-of-type(1) { height: 25%; } .modem-signal i:nth-of-type(2) { height: 50%; }
+        .modem-signal i:nth-of-type(3) { height: 75%; } .modem-signal i:nth-of-type(4) { height: 100%; }
         .modem-signal[data-state="ok"] i.on { background: #22c55e; animation: pulse 2.4s infinite; }
-        .modem-signal[data-state="ok"] i.on:nth-child(2) { animation-delay: 0.15s; }
-        .modem-signal[data-state="ok"] i.on:nth-child(3) { animation-delay: 0.3s; }
-        .modem-signal[data-state="ok"] i.on:nth-child(4) { animation-delay: 0.45s; }
+        .modem-signal[data-state="ok"] i.on:nth-of-type(2) { animation-delay: 0.15s; }
+        .modem-signal[data-state="ok"] i.on:nth-of-type(3) { animation-delay: 0.3s; }
+        .modem-signal[data-state="ok"] i.on:nth-of-type(4) { animation-delay: 0.45s; }
         .modem-signal[data-state="ok"][data-bars="1"] i.on { background: #f59e0b; }
         .modem-signal[data-state="no_network"] i { background: #ef4444; animation: pulse 1s infinite; }
         .modem-signal[data-state="unknown"] i { opacity: 0.4; }
@@ -185,8 +187,8 @@
     <div class="header">
         <h1>Alarme Murgat</h1>
         <div class="status">
-            <span id="modemSignal" class="modem-signal" data-state="unknown" data-bars="0" role="img"
-                  title="Signal 4G du modem : inconnu" aria-label="Signal 4G du modem : inconnu"><i></i><i></i><i></i><i></i></span>
+            <span id="modemSignal" class="modem-signals"><span class="modem-signal" data-state="unknown" data-bars="0" role="img"
+                  title="Signal 4G du modem : inconnu" aria-label="Signal 4G du modem : inconnu"><i></i><i></i><i></i><i></i></span></span>
             <span id="alarmCount" style="font-weight:bold">-</span>
             <div class="user-info">
                 <span class="username" id="currentUserName"></span>
@@ -1408,18 +1410,20 @@
         }
 
         // INV-129 : barres de signal du modem gateway (canal SMS/appel de secours)
+        // INV-158 : un indicateur par passerelle, nomme par son site ; aucune -> un seul « inconnu »
         async function loadModemSignal() {
             try {
                 const m = await api('/api/system/modem-status');
-                const el = document.getElementById('modemSignal');
-                el.dataset.state = m.state;
-                el.dataset.bars = m.bars;
-                el.querySelectorAll('i').forEach((b, i) => b.classList.toggle('on', i < m.bars));
-                const label = m.state === 'no_network' ? 'Modem sans réseau : SMS et appels de secours impossibles'
-                    : m.state === 'unknown' ? 'Signal du modem inconnu (passerelle sans nouvelles)'
-                    : `Signal ${m.tech || ''} du modem : ${m.bars}/4` + (m.rsrp != null ? ` (${m.rsrp} dBm)` : '');
-                el.title = label;
-                el.setAttribute('aria-label', label);
+                document.getElementById('modemSignal').innerHTML = (m.gateways?.length ? m.gateways : [m]).map(g => {
+                    const label = (g.site ? `${siteName(g.site)} (${g.gateway_id}) : ` : '')
+                        + (g.state === 'no_network' ? 'Modem sans réseau : SMS et appels de secours impossibles'
+                        : g.state === 'unknown' ? 'Signal du modem inconnu (passerelle sans nouvelles)'
+                        : `Signal ${g.tech || ''} du modem : ${g.bars}/4` + (g.rsrp != null ? ` (${g.rsrp} dBm)` : ''));
+                    return `<span class="modem-signal" data-site="${escHtml(g.site || '')}" data-gateway="${escHtml(g.gateway_id || '')}"`
+                        + ` data-state="${escHtml(g.state)}" data-bars="${g.bars}" role="img" title="${escHtml(label)}" aria-label="${escHtml(label)}">`
+                        + (g.site ? `<b>${escHtml(siteName(g.site))}</b>` : '')
+                        + [0, 1, 2, 3].map(i => `<i${i < g.bars ? ' class="on"' : ''}></i>`).join('') + '</span>';
+                }).join('');
             } catch (e) {}
         }
 

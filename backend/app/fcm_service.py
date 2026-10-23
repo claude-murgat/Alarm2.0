@@ -100,6 +100,11 @@ def send_fcm_to_user(db: Session, user_id: int, title: str, body: str, data: Opt
         _send_fcm_http(t.fcm_token, title, body, data or {})
 
 
+def alarm_data(alarm, **extra) -> dict:
+    """Donnees d'un push d'alarme. INV-155 : `site` ("" pour une alarme sans site)."""
+    return {"alarm_id": str(alarm.id), "severity": alarm.severity, "site": alarm.site or "", **extra}
+
+
 def push_alarm_resolved(db: Session, alarm):
     """INV-147 : previent chaque notifie que l'alarme est terminee (best-effort).
     Push haute priorite : un telephone en Doze coupe sa sonnerie et ferme l'ecran
@@ -109,7 +114,8 @@ def push_alarm_resolved(db: Session, alarm):
     for (uid,) in db.query(AlarmNotification.user_id).filter(AlarmNotification.alarm_id == alarm.id):
         try:
             send_fcm_to_user(db, uid, "Alarme resolue", alarm.title,
-                             {"type": "alarm_resolved", "alarm_id": str(alarm.id)})
+                             {"type": "alarm_resolved", "alarm_id": str(alarm.id),
+                              "site": alarm.site or ""})
         except Exception:
             logger.warning(f"FCM alarm_resolved failed for user {uid}", exc_info=True)
 

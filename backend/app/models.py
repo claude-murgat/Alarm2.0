@@ -166,6 +166,7 @@ class GatewayState(Base):
     gateway_id = Column(String, primary_key=True)
     state = Column(String, nullable=False)  # "open" | "closed"
     last_seen = Column(DateTime, nullable=False)
+    site = Column(String, nullable=True)  # INV-157 : agregation par site (vide -> default_site)
 
 
 class QuorumStateRow(Base):

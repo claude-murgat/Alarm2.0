@@ -947,7 +947,8 @@ def main():
                     send_at_command(ser, "AT+CPSI?", timeout=3),
                     send_at_command(ser, "AT+CSQ", timeout=3),
                 )
-            _post_to_backend("/internal/alarms/modem-status", {**net, "site": REPORT_SITE})  # INV-155
+            _post_to_backend("/internal/alarms/modem-status",
+                             {**net, "gateway_id": GATEWAY_ID, "site": REPORT_SITE})  # INV-155/158
             if sends_allowed(at_failures, net["registered"]):
                 modem_ready.set()
             else:

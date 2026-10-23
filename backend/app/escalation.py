@@ -9,7 +9,7 @@ from .database import SessionLocal
 from .models import Alarm, AlarmNotification, EscalationConfig, User, SystemConfig, SmsQueue, CallQueue
 from .clock import now as clock_now
 from .email_service import send_alert_email
-from .fcm_service import send_fcm_to_user
+from .fcm_service import alarm_data, send_fcm_to_user
 from .events import log_event
 from .sites import default_site
 from .logging_config import correlation_id_var
@@ -347,8 +347,7 @@ async def escalation_loop():
                         alarm = alarm_by_id[wake_up.alarm_id]
                         try:
                             send_fcm_to_user(db, wake_up.user_id, alarm.title, alarm.message,
-                                             {"alarm_id": str(alarm.id), "severity": alarm.severity,
-                                              "wake_up": "true"})
+                                             alarm_data(alarm, wake_up="true"))
                         except Exception:
                             pass  # FCM best-effort
 
@@ -391,8 +390,7 @@ async def escalation_loop():
                         for uid in notified_ids:
                             try:
                                 send_fcm_to_user(db, uid, alarm.title, alarm.message,
-                                                 {"alarm_id": str(alarm.id),
-                                                  "severity": alarm.severity})
+                                                 alarm_data(alarm))
                             except Exception:
                                 pass  # FCM best-effort
                     db.commit()
@@ -619,8 +617,7 @@ def escalate_active_alarms_now(db: Session, by_user: Optional[int] = None) -> in
                   to_user=next_user.user_id, notified_user_ids=notified_ids, **extra)
         for uid in notified_ids:  # FCM a tous les notifies (escalade cumulative)
             try:
-                send_fcm_to_user(db, uid, alarm.title, alarm.message,
-                                 {"alarm_id": str(alarm.id), "severity": alarm.severity})
+                send_fcm_to_user(db, uid, alarm.title, alarm.message, alarm_data(alarm))
             except Exception:
                 pass
     db.commit()

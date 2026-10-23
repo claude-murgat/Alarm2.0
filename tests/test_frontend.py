@@ -801,6 +801,7 @@ class TestConnectivityTab:
 
 # ---------------------------------------------------------------------------
 # INV-129 : indicateur de signal 4G du modem gateway (en-tete)
+# INV-158 : un indicateur par passerelle, nomme par son site
 # ---------------------------------------------------------------------------
 
 class TestModemSignalIndicator:
@@ -813,17 +814,21 @@ class TestModemSignalIndicator:
         assert r.status_code == 200, r.text
 
     def test_shows_bars_from_gateway_report(self, dashboard: Page, primary_url):
-        self._report(primary_url, registered=True, tech="LTE", rsrp=-115.7, csq=15)
-        icon = dashboard.locator("#modemSignal")
+        self._report(primary_url, gateway_id="e2e-izeron", site="izeron",
+                     registered=True, tech="LTE", rsrp=-115.7, csq=15)
+        icon = dashboard.locator('#modemSignal .modem-signal[data-gateway="e2e-izeron"]')
         expect(icon).to_have_attribute("data-state", "ok", timeout=8000)
         expect(icon).to_have_attribute("data-bars", "1")
-        expect(icon).to_have_attribute("title", re.compile(r"-115\.7 dBm"))
+        expect(icon).to_have_attribute("data-site", "izeron")
+        expect(icon).to_have_attribute("title", re.compile(r"Izeron.*-115\.7 dBm"))
 
     def test_no_network_is_flagged(self, dashboard: Page, primary_url):
-        self._report(primary_url, registered=False, tech=None, rsrp=None, csq=0)
-        icon = dashboard.locator("#modemSignal")
+        self._report(primary_url, gateway_id="e2e-beaufort", site="beaufort",
+                     registered=False, tech=None, rsrp=None, csq=0)
+        icon = dashboard.locator('#modemSignal .modem-signal[data-gateway="e2e-beaufort"]')
         expect(icon).to_have_attribute("data-state", "no_network", timeout=8000)
         expect(icon).to_have_attribute("data-bars", "0")
+        expect(icon).to_contain_text("Beaufort")
 
 
 # ---------------------------------------------------------------------------
