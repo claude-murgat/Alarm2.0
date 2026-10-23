@@ -163,7 +163,7 @@ Dès qu'une alarme est acquittée (quel que soit le moyen : web, app, touche 1, 
 - Si l'acquittement expire (INV-016), l'alarme repart avec de nouveaux SMS et appels (INV-017).
 - **Hors champ** : un SMS ou un appel déjà remis à la gateway et en cours d'envoi au moment de l'acquittement va au bout.
 - **Pourquoi** : prod 2026-10-22, alarme 923 : acquittée à 12:14:51 et résolue à 12:15:05 (UTC). Gênée par un modem instable (`AT_ERROR`), la gateway rejouait encore SMS et appel : SMS à 12:16:15, appel décroché à 12:16:28. Le propriétaire a reçu un SMS et un appel après l'acquittement : « ça ne doit pas être possible ».
-- **Couverture** : Integration `test_no_contact_after_ack_inv154.py`.
+- **Couverture** : Integration `test_no_contact_after_ack_inv154.py` ; expiration de l'ack : `test_ack_expiry_restarts_with_new_sms_and_call` (nouveaux SMS et appel remis à la gateway, ids différents) et `test_escalation_after_ack_expiry_waits_for_the_new_call` (INV-144 : l'appel annulé de l'ancien cycle ne compte pas comme passé ; RED avant le correctif : escalade avant le nouvel appel, issue #260).
 
 ### INV-155 [C] ✅ Multi-site : chaque passerelle et chaque alarme portent un site (2026-10-22)
 Sites connus : `SystemConfig sites`, par défaut `izeron,beaufort`. `SystemConfig default_site`, par défaut `izeron`.
