@@ -124,8 +124,16 @@ def test_escalation_waits_for_the_call_then_goes(setup):
     assert "escalation_without_call" not in _audit(client, h, alarm_id)
 
 
-def test_escalation_goes_anyway_three_minutes_after_delay(setup):
+def test_escalation_goes_anyway_three_minutes_after_delay(setup, monkeypatch):
     client, h, uid1 = setup
+    # Tous les emails de la boucle, pas seulement le dernier : en avancant l'horloge de 18 min,
+    # l'alerte « astreinte perdue » (user1 sans heartbeat) peut partir juste apres celle-ci.
+    import backend.app.escalation as esc
+    subjects, real_send = [], esc.send_alert_email
+    def _capture(subject, body, to):
+        subjects.append(subject)
+        return real_send(subject=subject, body=body, to=to)
+    monkeypatch.setattr(esc, "send_alert_email", _capture)
     alarm_id = _send(client, h, uid1)
     _advance(client, 17.5)  # delai + 2,5 min : toujours retenue
     _pending_call(client)
@@ -134,8 +142,7 @@ def test_escalation_goes_anyway_three_minutes_after_delay(setup):
     went = _wait(client, h, lambda a: a["escalation_count"] >= 1, 10)
     assert went["escalation_count"] == 1 and went["assigned_user_id"] != uid1
     assert "escalation_without_call" in _audit(client, h, alarm_id)
-    email = client.get("/api/test/last-email-sent").json()
-    assert "Escalade sans appel" in email.get("subject", ""), email
+    assert any("Escalade sans appel" in s for s in subjects), subjects
 
 
 def test_call_error_is_replayed_and_holds_escalation(setup):
