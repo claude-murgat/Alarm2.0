@@ -90,6 +90,9 @@ def _alarms_awaiting_call(db: Session, alarms) -> set[int]:
         done = db.query(CallQueue).filter(
             CallQueue.alarm_id == alarm.id,
             CallQueue.user_id == user.id,
+            # Palier courant seulement : apres expiration d'ack (INV-016), l'appel annule
+            # de l'ancien cycle (INV-154, retries=3) ne compte pas comme passe.
+            CallQueue.created_at >= alarm.created_at,
             or_(CallQueue.called_at.isnot(None), CallQueue.retries >= 3),
         ).first()
         sms_pending = db.query(SmsQueue).filter(

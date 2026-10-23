@@ -13,6 +13,8 @@ import androidx.core.app.NotificationCompat
 import com.alarm.critical.AlarmActivity
 import com.alarm.critical.api.ApiClient
 import com.alarm.critical.api.ApiProvider
+import com.alarm.critical.model.AlarmResponse
+import com.alarm.critical.model.sitesLabel
 import kotlinx.coroutines.*
 
 class AlarmPollingService : Service() {
@@ -36,27 +38,37 @@ class AlarmPollingService : Service() {
         var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
         var lastConnectionStatus = "Unknown"
         var lastHeartbeatOk = false
-        var activeAlarmCount = 0
-        var currentAlarm: com.alarm.critical.model.AlarmResponse? = null
+
+        // INV-ANDROID-009 : toutes les alarmes en cours (une par site), celles a acquitter en tete.
+        @Volatile
+        var alarms: List<AlarmResponse> = emptyList()
+
+        /** Alarme mise en avant (carte hero) : la premiere a acquitter, sinon la plus recente. */
+        var currentAlarm: AlarmResponse?
+            get() = alarms.firstOrNull()
+            set(value) { alarms = listOfNotNull(value) }
 
         // INV-ANDROID-209 : apres un ack reussi, un poll perime (copie d'avant
         // l'ack, ou requete partie juste avant) renvoie encore "active". Sans
         // garde, l'UI prend ca pour une expiration d'ack et refait sonner.
         // Une vraie reactivation n'arrive qu'apres 30 min : 15 s ne masque rien.
+        // Une garde par alarme : acquitter Beaufort ne doit pas annuler celle d'Izeron.
         const val ACK_GRACE_MS = 15_000L
-        private var ackGraceAlarmId = -1
-        private var ackGraceUntilElapsed = 0L
+        private val ackGrace = java.util.concurrent.ConcurrentHashMap<Int, Pair<AlarmResponse, Long>>()
 
-        fun onAckSucceeded(acked: com.alarm.critical.model.AlarmResponse?) {
+        fun onAckSucceeded(acked: AlarmResponse?) {
             acked ?: return
-            currentAlarm = acked
-            ackGraceAlarmId = acked.id
-            ackGraceUntilElapsed = android.os.SystemClock.elapsedRealtime() + ACK_GRACE_MS
+            ackGrace[acked.id] = acked to android.os.SystemClock.elapsedRealtime() + ACK_GRACE_MS
+            alarms = withAckGrace(alarms.filter { it.id != acked.id } + acked)
         }
 
-        fun withAckGrace(polled: com.alarm.critical.model.AlarmResponse?): com.alarm.critical.model.AlarmResponse? =
-            if (polled != null && polled.id == ackGraceAlarmId && polled.status != "acknowledged"
-                && android.os.SystemClock.elapsedRealtime() < ackGraceUntilElapsed) currentAlarm else polled
+        fun withAckGrace(polled: List<AlarmResponse>): List<AlarmResponse> {
+            val now = android.os.SystemClock.elapsedRealtime()
+            ackGrace.values.removeAll { now >= it.second }
+            return polled
+                .map { p -> ackGrace[p.id]?.takeIf { p.status != "acknowledged" }?.first ?: p }
+                .sortedBy { it.status == "acknowledged" }
+        }
         // INV-ANDROID-110 : dernier etat connu du modem gateway (icone de signal)
         var modemStatus: com.alarm.critical.model.ModemStatusResponse? = null
 
@@ -154,8 +166,8 @@ class AlarmPollingService : Service() {
         // Flag : service demarre par un push FCM (mode veille)
         var startedByFcm = false
 
-        // ID de l'alarme pour laquelle on a déjà lancé l'AlarmActivity
-        var alarmActivityLaunchedForId: Int = -1
+        // Alarmes deja montrees en plein ecran (l'ecran les liste toutes, INV-ANDROID-009)
+        val alarmScreenShownIds = mutableSetOf<Int>()
     }
 
     private val soundManager by lazy { AlarmSoundManager(applicationContext) }
@@ -286,12 +298,11 @@ class AlarmPollingService : Service() {
                             authErrorAlarm = false
                             authErrorMessage = null
                         }
-                        val alarms = response.body() ?: emptyList()
-                        activeAlarmCount = alarms.size
-                        currentAlarm = withAckGrace(alarms.firstOrNull())
+                        alarms = withAckGrace(response.body() ?: emptyList())
                         // Sonnerie portee par le service : sans ca, app fermee + ecran
                         // verrouille, seul l'ecran AlarmActivity sonnait (lance a l'ouverture).
-                        val shouldRing = currentAlarm?.let { it.status != "acknowledged" } == true
+                        // INV-ANDROID-009 : tant qu'une alarme (de n'importe quel site) reste a acquitter.
+                        val shouldRing = alarms.any { it.status != "acknowledged" }
                         if (shouldRing) {
                             soundManager.startAlarmRing()
                         } else if (serviceRinging) {
@@ -306,30 +317,31 @@ class AlarmPollingService : Service() {
                         } catch (_: Exception) { null }
 
                         if (alarms.isNotEmpty()) {
-                            val alarm = alarms.first()
-                            Log.i(TAG, "Active alarm detected: ${alarm.title}")
-                            com.alarm.critical.util.AppLogger.log("Alarme", "Detectee: ${alarm.title} (id=${alarm.id}, status=${alarm.status})")
+                            Log.i(TAG, "Active alarms detected: ${alarms.size}")
+                            com.alarm.critical.util.AppLogger.log("Alarme", "Detectees: " +
+                                alarms.joinToString { "${it.title} (id=${it.id}, site=${it.site}, status=${it.status})" })
 
-                            // Lancer l'AlarmActivity via full-screen notification (une seule fois par alarme)
-                            if (alarm.id != alarmActivityLaunchedForId && !AlarmActivity.isVisible) {
-                                alarmActivityLaunchedForId = alarm.id
-                                Log.w(TAG, "Launching AlarmActivity from service for alarm #${alarm.id}")
-                                launchAlarmActivity(
-                                    alarmId = alarm.id,
-                                    title = alarm.title,
-                                    message = alarm.message,
-                                    severity = alarm.severity
-                                )
+                            // Plein ecran une fois par alarme : une alarme d'un autre site le relance.
+                            // Ecran deja visible : il affiche deja la liste a jour.
+                            if (alarms.any { it.id !in alarmScreenShownIds }) {
+                                if (!AlarmActivity.isVisible) {
+                                    Log.w(TAG, "Launching AlarmActivity from service for alarms ${alarms.map { it.id }}")
+                                    launchAlarmActivity(alarms)
+                                }
+                                alarmScreenShownIds += alarms.map { it.id }
                             }
                         } else {
                             // Plus d'alarme active → reset du flag
-                            alarmActivityLaunchedForId = -1
+                            alarmScreenShownIds.clear()
                             // INV-ANDROID-210 : alarme terminee → fermer l'ecran plein ecran et sa notif
                             AlarmActivity.closeIfShowing()
                             getSystemService(NotificationManager::class.java).cancel(ALARM_NOTIFICATION_ID)
                         }
 
-                        updateNotification("Surveillance - ${alarms.size} alarme(s) active(s)")
+                        updateNotification(
+                            if (alarms.isEmpty()) "Surveillance - aucune alarme active"
+                            else "Alarme en cours : ${alarms.sitesLabel()}"
+                        )
 
                         // Mode veille : arreter le service quand plus d'alarme active
                         if (alarms.isEmpty() && startedByFcm) {
@@ -576,13 +588,16 @@ class AlarmPollingService : Service() {
         Log.e(TAG, "Échec du renouvellement de session — sonnerie d'alerte déclenchée")
     }
 
-    private fun launchAlarmActivity(alarmId: Int, title: String, message: String, severity: String) {
+    private fun launchAlarmActivity(alarms: List<AlarmResponse>) {
+        val alarm = alarms.first()
+        val alarmId = alarm.id
         val intent = Intent(this, AlarmActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra("alarm_id", alarmId)
-            putExtra("alarm_title", title)
-            putExtra("alarm_message", message)
-            putExtra("alarm_severity", severity)
+            putExtra("alarm_title", alarm.title)
+            putExtra("alarm_message", alarm.message)
+            putExtra("alarm_severity", alarm.severity)
+            putExtra("alarm_site", alarm.site)
             putExtra("token", token)
         }
 
@@ -608,8 +623,8 @@ class AlarmPollingService : Service() {
 
         val notification = NotificationCompat.Builder(this, alarmChannelId)
             .setSmallIcon(R.drawable.ic_stat_alarm)
-            .setContentTitle("ALARME CRITIQUE")
-            .setContentText(title)
+            .setContentTitle("ALARME CRITIQUE - ${alarms.sitesLabel()}")
+            .setContentText(alarm.title)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setFullScreenIntent(fullScreenPendingIntent, true)

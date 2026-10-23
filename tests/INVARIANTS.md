@@ -163,7 +163,7 @@ Dès qu'une alarme est acquittée (quel que soit le moyen : web, app, touche 1, 
 - Si l'acquittement expire (INV-016), l'alarme repart avec de nouveaux SMS et appels (INV-017).
 - **Hors champ** : un SMS ou un appel déjà remis à la gateway et en cours d'envoi au moment de l'acquittement va au bout.
 - **Pourquoi** : prod 2026-10-22, alarme 923 : acquittée à 12:14:51 et résolue à 12:15:05 (UTC). Gênée par un modem instable (`AT_ERROR`), la gateway rejouait encore SMS et appel : SMS à 12:16:15, appel décroché à 12:16:28. Le propriétaire a reçu un SMS et un appel après l'acquittement : « ça ne doit pas être possible ».
-- **Couverture** : Integration `test_no_contact_after_ack_inv154.py`.
+- **Couverture** : Integration `test_no_contact_after_ack_inv154.py` ; expiration de l'ack : `test_ack_expiry_restarts_with_new_sms_and_call` (nouveaux SMS et appel remis à la gateway, ids différents) et `test_escalation_after_ack_expiry_waits_for_the_new_call` (INV-144 : l'appel annulé de l'ancien cycle ne compte pas comme passé ; RED avant le correctif : escalade avant le nouvel appel, issue #260).
 
 ### INV-155 [C] ✅ Multi-site : chaque passerelle et chaque alarme portent un site (2026-10-22)
 Sites connus : `SystemConfig sites`, par défaut `izeron,beaufort`. `SystemConfig default_site`, par défaut `izeron`.
@@ -912,7 +912,7 @@ cas, sinon il casse la CI, qui lance 3 nœuds sur un host sans `ADVERTISE_HOST`.
 ### INV-152 [C] ✅ Un nœud qui devient leader applique les migrations de schéma en attente (2026-10-22)
 Les migrations (`create_all` + `run_migrations`, idempotentes) sont jouées **au démarrage** du backend **et à chaque fois que le nœud devient leader** Patroni. Si elles échouent (base pas encore inscriptible, erreur), le leader réessaie à chaque tour de l'élection (5 s) jusqu'à réussir.
 - **Pourquoi** : constaté en prod le 2026-10-22 (#253, colonne `users.is_test`). Le canary redémarre les backends **et** Patroni : le leader change pendant le déploiement (node2 → node3), chaque backend démarre en replica (`Schema init skip — replica read-only`) et aucun ne rejoue les migrations en devenant leader → colonne jamais créée sur aucun nœud. Le code qui l'aurait lue (#254) aurait renvoyé des 500 sur toute requête `users` (login, heartbeats) **sur les 3 nœuds**. Le correctif #144 supposait à tort qu'un nœud promu plus tard ferait l'init.
-- **Couverture** : Integration `test_schema_init_on_promotion_inv152.py`.
+- **Couverture** : Integration `test_schema_init_on_promotion_inv152.py` : 1re promotion (`test_node_promoted_after_boot_applies_pending_migrations`), retry jusqu'au succès après False puis exception puis plus rappelé (`test_leader_retries_migrations_each_tour_until_success`), re-promotion leader → replica → leader rejoue les migrations (`test_node_promoted_again_reapplies_migrations`) (#256).
 
 ---
 

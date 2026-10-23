@@ -106,7 +106,7 @@ Au login, l'app mémorise `user.is_test` (réponse de `POST /api/auth/login`, IN
 
 ## 2. Dashboard et UI principale
 
-### INV-ANDROID-009 [C] ❌ Multi-site : toutes les alarmes en cours sont affichées, chacune avec son site (2026-10-23)
+### INV-ANDROID-009 [C] ✅ Multi-site : toutes les alarmes en cours sont affichées, chacune avec son site (2026-10-23)
 L'app traite **la liste** des alarmes en cours (`GET /api/alarms/active`), pas seulement la première :
 - l'écran d'alarme plein écran affiche le **site en gros** (`site` de l'alarme, INV-155 ; « Astreinte » si vide) ;
 - avec deux alarmes ou plus, l'écran les **liste**, chacune avec son site, son titre et **son propre bouton d'acquittement** ;
@@ -114,6 +114,8 @@ L'app traite **la liste** des alarmes en cours (`GET /api/alarms/active`), pas s
 - le dashboard et la notification indiquent le site (et le nombre d'alarmes s'il y en a plusieurs) ;
 - le push FCM d'alarme porte `site` dans ses données.
 - **Pourquoi** : Izeron et Beaufort, une seule app et une seule équipe de garde (INV-155). Une alarme Beaufort pendant une alarme Izeron doit être vue et acquittée à part. Choix du propriétaire du 2026-10-23.
+- **Implémentation** : la liste vient de `GET /api/alarms/mine` (déjà une liste, alarmes à acquitter en tête). Un push `alarm_resolved` (INV-ANDROID-210) retire **son** alarme de la liste ; sonnerie coupée et écran fermé seulement s'il ne reste rien à acquitter / plus rien. Le dashboard garde une seule carte hero (la première alarme à acquitter, son bouton acquitte celle-là) ; sa ligne d'état donne les sites (« Alarme active · 2 alarmes : Izeron, Beaufort »). Backend sans `site` (d'avant INV-155) : toutes les alarmes s'affichent « Astreinte ».
+- **Couverture** : Espresso `AlarmMultiSiteTest` (une alarme → site en gros ; site vide → « Astreinte » ; deux alarmes listées, un bouton chacune ; acquitter Izeron → Beaufort reste et sonne ; acquitter les deux → plus de sonnerie ; résolution d'Izeron → Beaufort reste affichée et sonne ; dashboard + notifications → « 2 alarmes », Izeron, Beaufort). 7/7 verts sur émulateur (AVD alarm_repro, 2026-10-23), avec AlarmResolutionTest, AlarmTestAccountTest et AlarmEscalationPushTest sans régression.
 
 ### INV-ANDROID-100 [C] ⚠️ Carte hero reflète l'état courant : calm / active / acked
 `DashboardActivity.updateStatus()` (1Hz) synchronise la carte avec `AlarmPollingService.currentAlarm` :

@@ -121,3 +121,54 @@ def test_sms_without_alarm_still_delivered(setup):
     time.sleep(2.5)  # >= 2 ticks : le nettoyage ne doit pas le toucher
     pending = client.get("/internal/sms/pending", headers=GW).json()
     assert any(s["to_number"] == "+33600000999" for s in pending), "SMS hors alarme bloque"
+
+
+def _active(client, h):
+    alarms = client.get("/api/alarms/active", headers=h).json()
+    return alarms[0] if alarms else None
+
+
+def _ack_then_expire(client, admin_h, user1_h):
+    """Ack de user1, SMS/appel retires de la file, puis ack expire (30 min, INV-016)."""
+    alarm_id, sms_id, call_id = _alarm_with_contacts(client, admin_h)
+    assert client.post(f"/api/alarms/{alarm_id}/ack", headers=user1_h).status_code == 200
+    assert _wait_for(lambda: all(r[0] >= 3 for r in _rows(sms_id, call_id))), "SMS/appel non retires"
+    assert _pending(client, "sms") == [] and _pending(client, "calls") == []
+    client.post("/api/test/advance-clock", params={"seconds": 31 * 60, "peer": "false"})
+    assert _wait_for(lambda: _active(client, admin_h) is not None), "ack expire : alarme non reactivee"
+    return alarm_id, sms_id, call_id
+
+
+def test_ack_expiry_restarts_with_new_sms_and_call(setup):
+    """INV-154 + INV-016/017 : l'ack expire -> l'alarme repart avec de NOUVEAUX SMS et appel,
+    remis a la gateway (l'ancien SMS annule ne les bloque pas, INV-062)."""
+    client, admin_h, user1_h = setup
+    alarm_id, old_sms, old_call = _ack_then_expire(client, admin_h, user1_h)
+
+    client.post("/api/test/advance-clock", params={"seconds": 150, "peer": "false"})  # sms_call_delay 2 min
+    assert _wait_for(lambda: _pending(client, "sms") and _pending(client, "calls")), \
+        "pas de nouveaux SMS/appel apres expiration de l'ack"
+    sms, call = _pending(client, "sms"), _pending(client, "calls")
+    assert len(sms) == 1 and sms[0]["id"] != old_sms, sms
+    assert len(call) == 1 and call[0]["id"] != old_call and call[0]["alarm_id"] == alarm_id, call
+
+
+def test_escalation_after_ack_expiry_waits_for_the_new_call(setup):
+    """INV-144 : apres expiration de l'ack, l'escalade attend l'appel du palier COURANT ;
+    l'ancien appel annule (retries=3) ne compte pas comme passe."""
+    client, admin_h, user1_h = setup
+    _ack_then_expire(client, admin_h, user1_h)
+    before = _active(client, admin_h)["escalation_count"]
+
+    client.post("/api/test/advance-clock", params={"seconds": 15 * 60 + 30, "peer": "false"})  # delai 15 min
+    assert _wait_for(lambda: _pending(client, "calls")), "nouvel appel non cree"
+    time.sleep(2.5)  # >= 2 ticks de 1 s apres la creation de l'appel
+    assert _active(client, admin_h)["escalation_count"] == before, \
+        "escalade partie avant le nouvel appel de l'assigne"
+
+    sms, call = _pending(client, "sms")[0], _pending(client, "calls")[0]
+    assert client.post(f"/internal/sms/{sms['id']}/sent", headers=GW).status_code == 200
+    assert client.post(f"/internal/calls/{call['id']}/result", headers=GW,
+                       json={"result": "no_answer"}).status_code == 200
+    assert _wait_for(lambda: _active(client, admin_h)["escalation_count"] > before), \
+        "pas d'escalade une fois SMS et appel passes"
