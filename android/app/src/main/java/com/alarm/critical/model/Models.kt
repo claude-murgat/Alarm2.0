@@ -46,8 +46,19 @@ data class AlarmResponse(
     val suspended_until: String?,
     val escalation_count: Int,
     val created_at: String,
-    val ack_remaining_seconds: Int? = null
-)
+    val ack_remaining_seconds: Int? = null,
+    // INV-155 : "izeron" | "beaufort" ; null pour une alarme d'astreinte (ou un backend d'avant)
+    val site: String? = null
+) {
+    /** INV-ANDROID-009 : "Izeron", "Beaufort" ; « Astreinte » si vide. */
+    val siteName: String
+        get() = site?.takeIf { it.isNotBlank() }?.replaceFirstChar { it.uppercase() } ?: "Astreinte"
+}
+
+/** INV-ANDROID-009 : "Izeron", ou "2 alarmes : Izeron, Beaufort" s'il y en a plusieurs. */
+fun List<AlarmResponse>.sitesLabel(): String =
+    if (size <= 1) firstOrNull()?.siteName.orEmpty()
+    else "$size alarmes : " + joinToString(", ") { it.siteName }
 
 data class DeviceRegister(val device_token: String)
 

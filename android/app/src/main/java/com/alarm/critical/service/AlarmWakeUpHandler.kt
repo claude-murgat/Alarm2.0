@@ -16,8 +16,9 @@ object AlarmWakeUpHandler {
      * Appele quand un push FCM d'alarme arrive.
      * Demarre le foreground service avec le token sauvegarde.
      */
-    fun onAlarmPushReceived(context: Context, alarmId: String?, title: String?, severity: String?) {
-        Log.w(TAG, "FCM alarm push received: id=$alarmId, title=$title, severity=$severity")
+    fun onAlarmPushReceived(context: Context, alarmId: String?, title: String?, severity: String?, site: String? = null) {
+        // site (INV-ANDROID-009) : absent d'un backend d'avant le multi-site ; l'affichage vient du poll.
+        Log.w(TAG, "FCM alarm push received: id=$alarmId, site=$site, title=$title, severity=$severity")
 
         val prefs = context.getSharedPreferences("alarm_prefs", Context.MODE_PRIVATE)
         val token = prefs.getString("token", null)
@@ -49,13 +50,16 @@ object AlarmWakeUpHandler {
     fun onAlarmResolvedPushReceived(context: Context, alarmId: String?) {
         val id = alarmId?.toIntOrNull()
         com.alarm.critical.util.AppLogger.log("Alarme", "Push resolution recu (id=$alarmId)")
-        val current = AlarmPollingService.currentAlarm
+        val current = AlarmPollingService.alarms
         // Ne pas faire taire une autre alarme si ce push arrive en retard.
-        if (id != null && current != null && current.id != id) return
+        if (id != null && current.isNotEmpty() && current.none { it.id == id }) return
         // Sinon le dashboard (tick 1 s sur currentAlarm) relancerait la sonnerie.
-        AlarmPollingService.currentAlarm = null
-        AlarmPollingService.activeAlarmCount = 0
+        val remaining = if (id == null) emptyList() else current.filter { it.id != id }
+        AlarmPollingService.alarms = remaining
+        // INV-ANDROID-009 : les alarmes des autres sites continuent (sonnerie si non acquittee, ecran).
+        if (remaining.any { it.status != "acknowledged" }) return
         AlarmSoundManager(context).stopAlarmSound()
+        if (remaining.isNotEmpty()) return
         context.getSystemService(android.app.NotificationManager::class.java)
             .cancel(AlarmPollingService.ALARM_NOTIFICATION_ID)
         com.alarm.critical.AlarmActivity.closeIfShowing(id)
