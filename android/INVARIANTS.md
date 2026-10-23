@@ -106,6 +106,15 @@ Au login, l'app mémorise `user.is_test` (réponse de `POST /api/auth/login`, IN
 
 ## 2. Dashboard et UI principale
 
+### INV-ANDROID-009 [C] ❌ Multi-site : toutes les alarmes en cours sont affichées, chacune avec son site (2026-10-23)
+L'app traite **la liste** des alarmes en cours (`GET /api/alarms/active`), pas seulement la première :
+- l'écran d'alarme plein écran affiche le **site en gros** (`site` de l'alarme, INV-155 ; « Astreinte » si vide) ;
+- avec deux alarmes ou plus, l'écran les **liste**, chacune avec son site, son titre et **son propre bouton d'acquittement** ;
+- la **sonnerie continue tant qu'il reste au moins une alarme non acquittée**, et s'arrête quand toutes le sont (ou sont résolues, INV-ANDROID-210) ;
+- le dashboard et la notification indiquent le site (et le nombre d'alarmes s'il y en a plusieurs) ;
+- le push FCM d'alarme porte `site` dans ses données.
+- **Pourquoi** : Izeron et Beaufort, une seule app et une seule équipe de garde (INV-155). Une alarme Beaufort pendant une alarme Izeron doit être vue et acquittée à part. Choix du propriétaire du 2026-10-23.
+
 ### INV-ANDROID-100 [C] ⚠️ Carte hero reflète l'état courant : calm / active / acked
 `DashboardActivity.updateStatus()` (1Hz) synchronise la carte avec `AlarmPollingService.currentAlarm` :
 - pas d'alarme → `⚪ Tout est calme`, card drawable `card_calm`, dot vert, titre/message/duration/bouton GONE.
