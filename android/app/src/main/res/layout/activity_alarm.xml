@@ -56,6 +56,27 @@
             android:gravity="center"
             android:padding="32dp">
 
+            <!-- INV-ANDROID-009 : site en gros (« Astreinte » si vide), « N alarmes » s'il y en a plusieurs -->
+            <TextView
+                android:id="@+id/alarmSite"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Astreinte"
+                android:textSize="44sp"
+                android:textColor="#FFFFFF"
+                android:textStyle="bold"
+                android:textAlignment="center"
+                android:layout_marginBottom="8dp" />
+
+            <!-- INV-ANDROID-009 : une ligne par alarme (site, titre, bouton d'acquittement) -->
+            <LinearLayout
+                android:id="@+id/alarmList"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone"
+                android:layout_marginBottom="16dp" />
+
             <TextView
                 android:id="@+id/alarmTitle"
                 android:layout_width="wrap_content"

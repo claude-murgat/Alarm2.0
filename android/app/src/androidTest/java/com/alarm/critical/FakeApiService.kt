@@ -89,9 +89,14 @@ class FakeApiService : ApiService {
 
     override suspend fun getEscalationChain(): Response<List<EscalationEntry>> = escalationChainResponse
 
+    // INV-ANDROID-009 : une reponse par alarme (multi-site), sinon acknowledgeResponse
+    var acknowledgeResponses: Map<Int, Response<AlarmResponse>> = emptyMap()
+    val acknowledgedIds = mutableListOf<Int>()
+
     override suspend fun acknowledgeAlarm(auth: String, alarmId: Int): Response<AlarmResponse> {
         acknowledgeCalledWith = Pair(auth, alarmId)
-        return acknowledgeResponse
+        acknowledgedIds += alarmId
+        return acknowledgeResponses[alarmId] ?: acknowledgeResponse
     }
 
     // `days` ajoute a ApiService (GET /api/alarms/?days=N). Ignore ici : le fake

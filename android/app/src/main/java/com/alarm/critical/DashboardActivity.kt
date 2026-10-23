@@ -29,6 +29,7 @@ import com.alarm.critical.api.ApiProvider
 import com.alarm.critical.model.AlarmResponse
 import com.alarm.critical.model.FcmTokenRequest
 import com.alarm.critical.model.FcmTokenDeleteRequest
+import com.alarm.critical.model.sitesLabel
 import com.alarm.critical.service.AlarmPollingService
 import com.alarm.critical.service.AlarmSoundManager
 import com.alarm.critical.util.AppLogger
@@ -484,6 +485,8 @@ class DashboardActivity : AppCompatActivity() {
 
             // ========== CARTE ALARME HERO ==========
             val alarm = AlarmPollingService.currentAlarm
+            // INV-ANDROID-009 : site(s) et nombre d'alarmes en cours, ex. "2 alarmes : Izeron, Beaufort"
+            val sites = AlarmPollingService.alarms.sitesLabel()
             val alarmCard = findViewById<LinearLayout>(R.id.alarmCard)
             val alarmDot = findViewById<View>(R.id.alarmDot)
             val alarmLine = findViewById<TextView>(R.id.currentAlarmLine)
@@ -520,7 +523,7 @@ class DashboardActivity : AppCompatActivity() {
                 setCardState(alarmCard, alarmDot, "acked")
                 currentAlarm = alarm
                 val ackerName = alarm.acknowledged_by_name ?: "?"
-                alarmLine.text = "Alarme active"
+                alarmLine.text = "Alarme active \u00b7 $sites"
                 alarmLine.setTextColor(Color.parseColor("#22c55e"))
 
                 titleView.text = alarm.title
@@ -546,7 +549,7 @@ class DashboardActivity : AppCompatActivity() {
                 // Alarme active non acquittee
                 setCardState(alarmCard, alarmDot, "active")
                 currentAlarm = alarm
-                alarmLine.text = "Alarme active"
+                alarmLine.text = "Alarme active \u00b7 $sites"
                 alarmLine.setTextColor(Color.parseColor("#ef4444"))
 
                 titleView.text = alarm.title
@@ -571,7 +574,7 @@ class DashboardActivity : AppCompatActivity() {
                 // Alarme acquittee par nous
                 setCardState(alarmCard, alarmDot, "acked")
                 currentAlarm = alarm
-                alarmLine.text = "Acquittee"
+                alarmLine.text = "Acquittee \u00b7 $sites"
                 alarmLine.setTextColor(Color.parseColor("#22c55e"))
 
                 titleView.text = alarm.title
@@ -676,7 +679,10 @@ class DashboardActivity : AppCompatActivity() {
                 val response = ApiProvider.service.acknowledgeAlarm("Bearer $t", alarm.id)
                 if (response.isSuccessful) {
                     AlarmPollingService.onAckSucceeded(response.body())
-                    soundManager?.stopAlarmSound()
+                    // INV-ANDROID-009 : une alarme d'un autre site reste a acquitter -> on continue de sonner
+                    if (AlarmPollingService.alarms.none { it.status != "acknowledged" }) {
+                        soundManager?.stopAlarmSound()
+                    }
                     isAcknowledged = true
                     acknowledgedAlarmId = alarm.id
                     runOnUiThread {

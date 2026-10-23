@@ -60,7 +60,8 @@ class AlarmFirebaseService : FirebaseMessagingService() {
                 context = applicationContext,
                 alarmId = alarmId,
                 title = title,
-                severity = severity
+                severity = severity,
+                site = data["site"]
             )
         } else {
             Log.d(TAG, "FCM message without alarm_id, ignored")

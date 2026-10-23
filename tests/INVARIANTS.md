@@ -903,7 +903,7 @@ cas, sinon il casse la CI, qui lance 3 nœuds sur un host sans `ADVERTISE_HOST`.
 ### INV-152 [C] ✅ Un nœud qui devient leader applique les migrations de schéma en attente (2026-10-22)
 Les migrations (`create_all` + `run_migrations`, idempotentes) sont jouées **au démarrage** du backend **et à chaque fois que le nœud devient leader** Patroni. Si elles échouent (base pas encore inscriptible, erreur), le leader réessaie à chaque tour de l'élection (5 s) jusqu'à réussir.
 - **Pourquoi** : constaté en prod le 2026-10-22 (#253, colonne `users.is_test`). Le canary redémarre les backends **et** Patroni : le leader change pendant le déploiement (node2 → node3), chaque backend démarre en replica (`Schema init skip — replica read-only`) et aucun ne rejoue les migrations en devenant leader → colonne jamais créée sur aucun nœud. Le code qui l'aurait lue (#254) aurait renvoyé des 500 sur toute requête `users` (login, heartbeats) **sur les 3 nœuds**. Le correctif #144 supposait à tort qu'un nœud promu plus tard ferait l'init.
-- **Couverture** : Integration `test_schema_init_on_promotion_inv152.py`.
+- **Couverture** : Integration `test_schema_init_on_promotion_inv152.py` : 1re promotion (`test_node_promoted_after_boot_applies_pending_migrations`), retry jusqu'au succès après False puis exception puis plus rappelé (`test_leader_retries_migrations_each_tour_until_success`), re-promotion leader → replica → leader rejoue les migrations (`test_node_promoted_again_reapplies_migrations`) (#256).
 
 ---
 
