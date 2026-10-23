@@ -55,7 +55,7 @@ def test_non_admin_forbidden(client, user1, path):
 
 def test_escalate_now_moves_active_alarm_to_next_user(client, admin):
     sent = client.post("/api/alarms/send", headers=admin, json={
-        "title": "Alarme de test", "message": "INV-138", "severity": "critical",
+        "site": "izeron", "title": "Alarme de test", "message": "INV-138", "severity": "critical",
         "assigned_user_id": None,
     })
     assert sent.status_code == 200, sent.text

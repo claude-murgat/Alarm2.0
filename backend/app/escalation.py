@@ -11,6 +11,7 @@ from .clock import now as clock_now
 from .email_service import send_alert_email
 from .fcm_service import send_fcm_to_user
 from .events import log_event
+from .sites import default_site
 from .logging_config import correlation_id_var
 from .logic.ack_expiry import evaluate_ack_expiry
 from .logic.escalation import evaluate_escalation
@@ -178,8 +179,10 @@ def _enqueue_sms_for_user(db: Session, user: User, alarm: Alarm):
     # INV-124 : instruire l'acquittement par reponse SMS "1" + lien supervision.
     # Sans accent dans la partie statique → reste en GSM-7 (evite UCS-2 / 70 car.).
     # La gateway (SmsReceiverThread) acquitte sur reception d'un SMS "1"/"ok"/"oui"/"ack".
+    # INV-155 : le SMS commence par le site ; tiret long -> "-" pour rester en GSM-7.
+    prefix = f"ALARME {alarm.site.capitalize()}:" if alarm.site else "ALARME:"
     body = (
-        f"ALARME {alarm.severity.upper()}: {alarm.title}\n"
+        f"{prefix} {alarm.title.replace('—', '-')}\n"
         f"Repondez 1 pour acquitter ou https://supervision.charlesmurgat.com"
     )
     existing = (
@@ -195,7 +198,9 @@ def _enqueue_sms_for_user(db: Session, user: User, alarm: Alarm):
     if existing:
         return  # SMS déjà en attente pour cet utilisateur/alarme
     # INV-066 : horloge de l'app, comparee a notified_at (rattachement INV-154)
-    sms = SmsQueue(to_number=user.phone_number, body=body, created_at=clock_now())
+    # INV-156 : part par le modem du site de l'alarme (default_site si sans site)
+    sms = SmsQueue(to_number=user.phone_number, body=body, created_at=clock_now(),
+                   site=alarm.site or default_site(db))
     db.add(sms)
     logger.info(f"SMS enqueued for {user.name} ({user.phone_number}) — alarm {alarm.id}")
 
@@ -224,6 +229,7 @@ def _enqueue_call_for_user(db: Session, user: User, alarm: Alarm):
         user_id=user.id,
         tts_message=tts_message,
         created_at=clock_now(),  # INV-066
+        site=alarm.site or default_site(db),  # INV-156
     )
     db.add(call)
     logger.info(f"Call enqueued for {user.name} ({user.phone_number}) — alarm {alarm.id}")

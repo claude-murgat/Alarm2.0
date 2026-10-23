@@ -105,7 +105,7 @@ def _create_alarm(client, headers, user_id: int, title: str) -> int:
     r = client.post(
         "/api/alarms/send",
         json={
-            "title": title,
+            "site": "izeron", "title": title,
             "message": f"INV-018b stats test: {title}",
             "severity": "critical",
             "assigned_user_id": user_id,

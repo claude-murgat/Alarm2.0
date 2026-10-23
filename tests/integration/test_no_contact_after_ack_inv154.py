@@ -57,7 +57,7 @@ def _wait_for(cond, seconds=20):
 def _alarm_with_contacts(client, admin_h, title="INV-154"):
     """Alarme vers user1, SMS + appel crees par la boucle (delai SMS/appel 2 min)."""
     sent = client.post("/api/alarms/send", headers=admin_h, json={
-        "title": title, "message": "m", "severity": "critical", "assigned_user_id": None})
+        "site": "izeron", "title": title, "message": "m", "severity": "critical", "assigned_user_id": None})
     assert sent.status_code == 200, sent.text
     client.post("/api/test/advance-clock", params={"seconds": 150, "peer": "false"})
     assert _wait_for(lambda: _pending(client, "sms") and _pending(client, "calls")), "SMS/appel non crees"

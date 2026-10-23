@@ -203,7 +203,7 @@ class TestTestsTabInProd:
                               json={"name": "admin", "password": "admin123"}, timeout=5).json()["access_token"]
         hdr = {"Authorization": f"Bearer {token}"}
         sent = requests.post(f"{primary_url}/api/alarms/send", headers=hdr, timeout=5, json={
-            "title": "Alarme de test", "message": "INV-138", "severity": "critical", "assigned_user_id": None})
+            "site": "izeron", "title": "Alarme de test", "message": "INV-138", "severity": "critical", "assigned_user_id": None})
         assert sent.status_code == 200, sent.text
         page = self._prod_dashboard(page, primary_url)
         with page.expect_request(lambda r: r.url.endswith(f"/api/alarms/{sent.json()['id']}/resolve")):
@@ -839,7 +839,7 @@ class TestEscalationLiveDiagram:
 
     def _send_alarm(self, primary_url):
         r = requests.post(f"{primary_url}/api/alarms/send", headers=self._login(primary_url, "admin", "admin123"),
-                          json={"title": "Schema INV-136", "message": "test", "severity": "critical"}, timeout=10)
+                          json={"site": "izeron", "title": "Schema INV-136", "message": "test", "severity": "critical"}, timeout=10)
         r.raise_for_status()
         return r.json()["id"]
 
@@ -882,7 +882,7 @@ class TestMobileLayout:
         """INV-150 : a 375 px, aucun onglet ne deborde horizontalement (alarme en cours
         pour remplir les tableaux), et le bouton Deconnexion reste dans l'ecran."""
         r = requests.post(f"{primary_url}/api/alarms/send", headers=_admin_headers(primary_url), timeout=5,
-                          json={"title": "Pompe de relevage en defaut", "message": "INV-150", "severity": "critical"})
+                          json={"site": "izeron", "title": "Pompe de relevage en defaut", "message": "INV-150", "severity": "critical"})
         assert r.status_code == 200, r.text
 
         page.set_viewport_size({"width": 375, "height": 800})

@@ -44,12 +44,13 @@ plutôt que d'interpréter à partir du code (le code peut être buggy).
 
 ## 1. Alarme — état et cycle de vie
 
-### INV-001 [C] ❌ Une seule alarme active à la fois **par site**
+### INV-001 [C] ✅ Une seule alarme active à la fois **par site**
 À tout instant, il existe **au plus une** alarme avec `status IN ('active', 'escalated')` **par valeur de `site`** (INV-155). Les alarmes sans site (alarme d'astreinte, perte de heartbeat) forment leur propre périmètre : au plus une à la fois. Une 2e alarme sur le **même** site est refusée (`409` par l'API ; ignorée par le contact sec, comme aujourd'hui). Une alarme d'**un autre** site est créée normalement.
 - **Pourquoi** : design explicite (CLAUDE.md). Évite la surcharge cognitive de l'opérateur.
-- **Révision 2026-10-22 (multi-site, en attente de validation)** : Izeron et Beaufort seront couverts par la même app et la même équipe de garde. Avec l'ancienne règle globale, une alarme de Beaufort pendant une alarme d'Izeron était **perdue sans bruit** (`alarms_internal.py:273-288`). Choix du propriétaire : une alarme active par site.
+- **Révision 2026-10-22 (multi-site)** : Izeron et Beaufort seront couverts par la même app et la même équipe de garde. Avec l'ancienne règle globale, une alarme de Beaufort pendant une alarme d'Izeron était **perdue sans bruit** (`alarms_internal.py:273-288`). Choix du propriétaire : une alarme active par site.
 - **Couverture** :
   - E2E : `TestSingleAlarm::test_only_one_alarm_at_a_time` (409 sur 2e alarme)
+  - Integration `test_multisite_inv155_156.py` : `test_izeron_and_beaufort_alarms_coexist`, `test_second_alarm_same_site_is_409`, `test_dry_contact_beaufort_while_izeron_active`, `test_dry_contact_ignored_when_same_site_active`, `test_oncall_alarm_has_no_site_and_contacts_go_to_default_site` (périmètre sans site)
   - Unit : `test_oncall.py::test_regular_active_alarm_blocks_oncall_creation` (oncall respecte l'unicité)
 - **Manque** : test de concurrence réelle (2 POST //) — à ajouter avec threading.
 
@@ -164,7 +165,7 @@ Dès qu'une alarme est acquittée (quel que soit le moyen : web, app, touche 1, 
 - **Pourquoi** : prod 2026-10-22, alarme 923 : acquittée à 12:14:51 et résolue à 12:15:05 (UTC). Gênée par un modem instable (`AT_ERROR`), la gateway rejouait encore SMS et appel : SMS à 12:16:15, appel décroché à 12:16:28. Le propriétaire a reçu un SMS et un appel après l'acquittement : « ça ne doit pas être possible ».
 - **Couverture** : Integration `test_no_contact_after_ack_inv154.py`.
 
-### INV-155 [C] ❌ Multi-site : chaque passerelle et chaque alarme portent un site (2026-10-22, en attente de validation)
+### INV-155 [C] ✅ Multi-site : chaque passerelle et chaque alarme portent un site (2026-10-22)
 Sites connus : `SystemConfig sites`, par défaut `izeron,beaufort`. `SystemConfig default_site`, par défaut `izeron`.
 - **Passerelle** : variable `GATEWAY_SITE` (un site). Elle est envoyée dans `POST /internal/alarms/report-state`, `POST /internal/alarms/modem-status` et en paramètre `site` de `/internal/sms/pending` et `/internal/calls/pending`. Absente (passerelle d'avant cet invariant), elle vaut `default_site`. Une liste (`izeron,beaufort`) n'est admise que sur le cluster de test, pour qu'un seul modem joue les deux sites.
 - **Alarme** (`alarms.site`, migration) :
@@ -174,12 +175,16 @@ Sites connus : `SystemConfig sites`, par défaut `izeron,beaufort`. `SystemConfi
 - **Affichage** : le titre de l'alarme contact sec nomme le site (« Déclenchement contact sec — Izeron »). Le SMS commence par le site (`ALARME Izeron: …`). Le site apparaît dans le push, l'app (écran d'alarme, dashboard, notification) et le web (tableau de bord, historique).
 - **Inchangé** : une seule chaîne d'escalade pour tous les sites (même équipe de garde). Délais, acquittement, expiration, INV-144/145/148 s'appliquent alarme par alarme.
 - **Pourquoi** : Izeron (aujourd'hui onsite-1/2, demain alarm-1/2) et Beaufort (alarm-3/4) formeront **un seul cluster de 5 nœuds**, avec la même APK et la même équipe de garde. Décision du propriétaire du 2026-10-22.
+- **Couverture** : Integration `test_multisite_inv155_156.py` : `test_izeron_and_beaufort_alarms_coexist`, `test_send_without_or_unknown_site_is_422` (sans site, site inconnu), `test_dry_contact_beaufort_while_izeron_active` (titre « — Beaufort »), `test_dry_contact_without_site_uses_default_site`, `test_sms_and_calls_carry_site_and_pending_filters_by_site` (`ALARME Izeron:`), `test_oncall_alarm_has_no_site_and_contacts_go_to_default_site`, `test_known_sites_exposed_for_web_form` (`GET /api/config/sites`, formulaire web).
+- **Reste** : le site dans le push et l'app Android (PR Android à venir). Le web affiche « Izeron · titre » (tableau de bord, alarmes, schéma d'escalade), non couvert par Playwright.
 
-### INV-156 [C] ❌ Multi-site : les SMS et appels d'une alarme partent par le modem de son site
+### INV-156 [C] ✅ Multi-site : les SMS et appels d'une alarme partent par le modem de son site
 `sms_queue.site` et `call_queue.site` reçoivent le site de l'alarme (ou `default_site` pour une alarme sans site). `/internal/sms/pending?site=X` et `/internal/calls/pending?site=X` ne renvoient **que** les lignes du site X. Un SMS ou un appel n'est donc jamais remis à deux passerelles (plus de double envoi).
 - **Pas de secours croisé** (choix du propriétaire) : si le modem d'un site est en panne, ses SMS et appels attendent ce modem (INV-145), et l'escalade continue après délai + 3 min (INV-144).
 - SMS avant l'appel (INV-134), SMS rattaché à son alarme (INV-154) : inchangés, à l'intérieur d'un même site.
 - **Pourquoi** : sans site, deux passerelles liraient la même file et enverraient chaque SMS et chaque appel deux fois.
+- Une ligne sans site (créée avant la migration) part par `default_site`.
+- **Couverture** : Integration `test_multisite_inv155_156.py` : `test_sms_and_calls_carry_site_and_pending_filters_by_site` (site des lignes, filtre `?site=`, sans paramètre → `default_site`, liste `izeron,beaufort`), `test_oncall_alarm_has_no_site_and_contacts_go_to_default_site`.
 
 ### INV-157 [H] ❌ Multi-site : contact sec agrégé et désaccord détecté site par site (révise INV-122/123)
 L'agrégation OU (INV-122), la détection de désaccord (INV-123) et la résolution automatique de l'alarme contact sec ne comparent que les passerelles **vivantes d'un même site**. Une alarme contact sec d'Izeron ne se résout qu'avec les passerelles d'Izeron.
@@ -958,11 +963,11 @@ Réponse : `{"alarm_active": bool, "dissensus": bool}` (debug gateway).
    `should_be_active = any(g.state == "open" for g in alive_gateways)`.
 3. **Reconcile** (uniquement sur les alarmes `source = "gateway_dry_contact"`) :
    - `should_be_active=True` ET pas d'alarme `source="gateway_dry_contact"` active
-     ET pas d'autre alarme active (INV-001) → **CREATE** alarme `source="gateway_dry_contact"`,
+     ET pas d'autre alarme active **du même site** (INV-001, INV-155) → **CREATE** alarme `source="gateway_dry_contact"`,
      effet identique à `POST /api/alarms/send` : assignation pos 1 chaîne via
      `evaluate_alarm_creation_plan`, INV-080 chaîne vide, FCM, audit log,
      `original_created_at = clock_now()` (INV-018).
-   - `should_be_active=True` ET autre alarme active (`source != "gateway_dry_contact"`,
+   - `should_be_active=True` ET autre alarme active du même site (`source != "gateway_dry_contact"`,
      ex: `"api"` ou `"oncall"`) → **no-op** (INV-001 : 1 alarme suffit, le user est
      déjà notifié, on n'écrase pas l'autre source).
    - `should_be_active=False` ET alarme `source="gateway_dry_contact"` active →

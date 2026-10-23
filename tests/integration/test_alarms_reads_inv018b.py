@@ -150,7 +150,7 @@ def test_inv018b_alarms_days_filter_uses_original_created_at(client, admin_heade
         r = client.post(
             "/api/alarms/send",
             json={
-                "title": "INV-018b days-filter",
+                "site": "izeron", "title": "INV-018b days-filter",
                 "message": "verifie filtre /alarms/?days=N sur original_created_at",
                 "severity": "critical",
                 "assigned_user_id": user1_id,
@@ -248,7 +248,7 @@ def test_inv018b_list_order_by_original_created_at(client, admin_headers):
         r = client.post(
             "/api/alarms/send",
             json={
-                "title": "INV-018b A old",
+                "site": "izeron", "title": "INV-018b A old",
                 "message": "creee en premier",
                 "severity": "critical",
                 "assigned_user_id": user1_id,
@@ -267,7 +267,7 @@ def test_inv018b_list_order_by_original_created_at(client, admin_headers):
         r = client.post(
             "/api/alarms/send",
             json={
-                "title": "INV-018b B newer",
+                "site": "izeron", "title": "INV-018b B newer",
                 "message": "creee apres A",
                 "severity": "critical",
                 "assigned_user_id": user1_id,
@@ -375,7 +375,7 @@ def test_inv018b_active_order_by_original_created_at(client, admin_headers):
         r = client.post(
             "/api/alarms/send",
             json={
-                "title": "INV-018b /active A old",
+                "site": "izeron", "title": "INV-018b /active A old",
                 "message": "creee en premier",
                 "severity": "critical",
                 "assigned_user_id": user1_id,
@@ -394,7 +394,7 @@ def test_inv018b_active_order_by_original_created_at(client, admin_headers):
         r = client.post(
             "/api/alarms/send",
             json={
-                "title": "INV-018b /active B newer",
+                "site": "izeron", "title": "INV-018b /active B newer",
                 "message": "creee apres A",
                 "severity": "critical",
                 "assigned_user_id": user1_id,
@@ -486,7 +486,7 @@ def test_inv018b_alarm_response_exposes_original_created_at(client, admin_header
         r = client.post(
             "/api/alarms/send",
             json={
-                "title": "INV-018b expose schema",
+                "site": "izeron", "title": "INV-018b expose schema",
                 "message": "verifie AlarmResponse.original_created_at",
                 "severity": "critical",
                 "assigned_user_id": user1_id,

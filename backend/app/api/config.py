@@ -172,6 +172,13 @@ def save_escalation_chain_bulk(
     return db.query(EscalationConfig).order_by(EscalationConfig.position).all()
 
 
+@router.get("/sites")
+def get_sites(db: Session = Depends(get_db)):
+    """INV-155 : sites connus (formulaire d'envoi d'alarme du web)."""
+    from ..sites import known_sites, default_site
+    return {"sites": known_sites(db), "default_site": default_site(db)}
+
+
 @router.get("/system")
 def get_system_config(db: Session = Depends(get_db)):
     configs = db.query(SystemConfig).all()

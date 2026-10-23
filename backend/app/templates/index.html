@@ -250,6 +250,7 @@
                 <div class="form-row">
                     <div class="form-group"><label>Titre</label><input id="alarmTitle" placeholder="Titre de l'alarme"></div>
                     <div class="form-group"><label>Message</label><input id="alarmMessage" placeholder="Description" style="width:300px"></div>
+                    <div class="form-group"><label>Site</label><select id="alarmSite"></select></div>
 
                     <button class="btn-danger" onclick="sendAlarm()">Envoyer</button>
                 </div>
@@ -786,11 +787,22 @@
             loadAll();
         }
 
+        // INV-155 : le site devant le titre (alarme d'astreinte : pas de site)
+        const siteName = s => s.charAt(0).toUpperCase() + s.slice(1);
+        const siteTitle = a => a.site ? `${siteName(a.site)} · ${a.title}` : a.title;
+
+        async function loadSites() {
+            const sel = document.getElementById('alarmSite');
+            if (sel.options.length) return;  // une fois : ne pas ecraser le choix en cours
+            const s = await api('/api/config/sites');
+            sel.innerHTML = s.sites.map(x => `<option value="${x}"${x === s.default_site ? ' selected' : ''}>${siteName(x)}</option>`).join('');
+        }
+
         async function loadAlarms() {
             const alarms = await api('/api/alarms/');
             const active = alarms.filter(a => ['active', 'escalated'].includes(a.status));
             document.getElementById('activeAlarmsTable').innerHTML = active.map(a => `
-                <tr><td>${a.id}</td><td>${a.title}</td>
+                <tr><td>${a.id}</td><td>${siteTitle(a)}</td>
                 <td><span class="badge ${a.status}">${statusLabels[a.status] || a.status}</span></td>
                 <td>${getUserName(a.assigned_user_id)}</td>
                 <td>${a.acknowledged_by_name || '-'}</td>
@@ -798,7 +810,7 @@
                 <td><button class="btn-success btn-sm" onclick="resolveAlarm(${a.id})">Résoudre</button></td></tr>`).join('') || '<tr><td colspan="7" style="text-align:center;color:#94a3b8">Aucune alarme active</td></tr>';
 
             document.getElementById('allAlarmsTable').innerHTML = alarms.map(a => `
-                <tr><td>${a.id}</td><td>${a.title}</td><td>${a.message}</td>
+                <tr><td>${a.id}</td><td>${siteTitle(a)}</td><td>${a.message}</td>
                 <td><span class="badge ${a.status}">${statusLabels[a.status] || a.status}</span></td>
                 <td>${getUserName(a.assigned_user_id)}</td>
                 <td>${a.acknowledged_by_name || '-'}</td>
@@ -1092,6 +1104,7 @@
                 await api('/api/alarms/send', { method: 'POST', body: JSON.stringify({
                     title: document.getElementById('alarmTitle').value,
                     message: document.getElementById('alarmMessage').value,
+                    site: document.getElementById('alarmSite').value,  // INV-155
                     severity: 'critical',
                     assigned_user_id: null,
                 })});
@@ -1118,6 +1131,7 @@
                 // Vraie route (fonctionne aussi en prod, ou /api/test/* repond 404).
                 const r = await api('/api/alarms/send', { method: 'POST', body: JSON.stringify({
                     title: 'Alarme de test', message: "Déclenchée depuis l'onglet Tests",
+                    site: document.getElementById('alarmSite').value,  // INV-155
                     severity: 'critical', assigned_user_id: null,
                 })});
                 log(`Alarme envoyée ! ID: ${r.id}, Assignée à : ${getUserName(r.assigned_user_id)}`, 'success');
@@ -1383,6 +1397,7 @@
             loadStatus();
             loadUsers();
             loadAlarms();
+            loadSites().catch(() => {});
             loadDevices();
             loadEscalation();
             loadEscalationLive().catch(() => {});
@@ -1436,7 +1451,7 @@
             const card = document.getElementById('escalationLive');
             card.dataset.state = !a ? 'none' : running ? 'active' : 'acknowledged';
             document.getElementById('escLivePill').textContent =
-                !a ? 'Aucune alarme' : running ? `ALARME ACTIVE · ${a.title}` : 'ACQUITTÉE';
+                !a ? 'Aucune alarme' : running ? `ALARME ACTIVE · ${siteTitle(a)}` : 'ACQUITTÉE';
             document.getElementById('escLiveMeta').textContent = !a ? '' :
                 `#${a.id} · déclenchée à ${hhmm(parseUtc(a.original_created_at))} · ${a.escalation_count} escalade(s)`;
 

@@ -163,7 +163,7 @@ def _get_user_id(name):
 def _send_alarm(title="Test Alarm", assigned_user_id=None):
     """Cree une alarme et retourne son ID."""
     admin_h = _admin_headers()
-    payload = {"title": title, "message": "test", "severity": "critical"}
+    payload = {"site": "izeron", "title": title, "message": "test", "severity": "critical"}
     if assigned_user_id:
         payload["assigned_user_id"] = assigned_user_id
     r = requests.post(f"{API}/alarms/send", headers=admin_h, json=payload)
