@@ -249,7 +249,7 @@ jobs:
     name: Tier 2 — Integration (FastAPI TestClient + SQLite)
     needs: tier1_unit
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10  # suite ~4-5 min sur ubuntu-latest et elle grandit (5 coupait #267 a 5m14)
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -348,12 +348,20 @@ jobs:
         # Variables exportees via GITHUB_ENV : prennent precedence sur les valeurs
         # de --env-file .env.ci-w* lors de l'interpolation docker-compose.yml.
         run: |
-          SLOT=$(( ${{ github.run_id }} % 50 ))
-          OFFSET=$(( SLOT * 200 ))
           case "${{ matrix.worker }}" in
             1) BB=18000; BP=15432; BPA=18008; BEC=12379; BEP=12380; BMS=11025; BMW=18025 ;;
             2) BB=28000; BP=25432; BPA=28008; BEC=22379; BEP=22380; BMS=21025; BMW=28025 ;;
           esac
+          # Creneau deja pris par un run en cours (meme run_id % 50, ex. une relance qui
+          # garde son run_id : #269/#267 le 2026-10-23, "port is already allocated")
+          # -> creneau suivant libre. On teste les ports etcd et backend du creneau.
+          SLOT=$(( ${{ github.run_id }} % 50 ))
+          for _ in $(seq 50); do
+            O=$(( SLOT * 200 ))
+            ss -ltnH | awk '{print $4}' | grep -qE ":($(( BEC + O ))|$(( BB + O )))\$" || break
+            SLOT=$(( (SLOT + 1) % 50 ))
+          done
+          OFFSET=$(( SLOT * 200 ))
           BACKEND_PORT=$(( BB + OFFSET ))
           ETCD_CLIENT_PORT=$(( BEC + OFFSET ))
           ETCD_PEER_PORT=$(( BEP + OFFSET ))
