@@ -56,6 +56,8 @@ class Alarm(Base):
     sensor_dissensus_since = Column(DateTime, nullable=True)
     # INV-123 anti-spam : un seul email sysadmin par épisode de dissensus.
     sensor_dissensus_email_sent_at = Column(DateTime, nullable=True)
+    # INV-155 : site de l'alarme (izeron, beaufort...). NULL = alarme d'astreinte.
+    site = Column(String, nullable=True)
 
     assigned_user = relationship("User", back_populates="alarms", foreign_keys=[assigned_user_id])
     notifications = relationship("AlarmNotification", back_populates="alarm",
@@ -121,6 +123,7 @@ class SmsQueue(Base):
     sent_at = Column(DateTime, nullable=True)
     error = Column(String, nullable=True)
     retries = Column(Integer, default=0)
+    site = Column(String, nullable=True)  # INV-156 : modem (passerelle) qui l'envoie
 
 
 class CallQueue(Base):
@@ -134,6 +137,7 @@ class CallQueue(Base):
     called_at = Column(DateTime, nullable=True)
     result = Column(String, nullable=True)  # ack_dtmf|ack_sms|no_answer|busy|error|escalate
     retries = Column(Integer, default=0)
+    site = Column(String, nullable=True)  # INV-156 : modem (passerelle) qui l'appelle
 
     alarm = relationship("Alarm")
     user = relationship("User")

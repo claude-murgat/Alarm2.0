@@ -84,7 +84,7 @@ class TestEndpointAuth:
     def test_send_alarm_requires_auth(self):
         """POST /alarms/send sans token → 401."""
         r = requests.post(f"{API}/alarms/send", json={
-            "title": "Test", "message": "msg", "severity": "critical",
+            "site": "izeron", "title": "Test", "message": "msg", "severity": "critical",
         })
         assert r.status_code == 401, (
             f"POST /alarms/send devrait exiger auth, got {r.status_code}"
@@ -95,7 +95,7 @@ class TestEndpointAuth:
         # Créer une alarme d'abord (avec auth)
         headers = _admin_headers()
         r = requests.post(f"{API}/alarms/send", json={
-            "title": "To resolve", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "To resolve", "message": "m", "severity": "critical",
         }, headers=headers)
         alarm_id = r.json()["id"]
 
@@ -214,7 +214,7 @@ class TestEndpointAuth:
         headers = _admin_headers()
         requests.post(f"{API}/alarms/reset", headers=headers)
         r = requests.post(f"{API}/alarms/send", json={
-            "title": "Auth Test", "message": "msg", "severity": "critical",
+            "site": "izeron", "title": "Auth Test", "message": "msg", "severity": "critical",
         }, headers=headers)
         assert r.status_code == 200
         # Cleanup
@@ -287,7 +287,7 @@ class TestAlarmNotificationsTable:
     def test_alarm_response_has_notified_fields(self):
         """La réponse d'alarme doit contenir notified_user_ids (list[int]) et notified_user_names (list[str])."""
         r = requests.post(f"{API}/alarms/send", json={
-            "title": "Notif test", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Notif test", "message": "m", "severity": "critical",
         }, headers=self.admin_headers)
         assert r.status_code == 200
         data = r.json()
@@ -300,7 +300,7 @@ class TestAlarmNotificationsTable:
     def test_escalation_adds_to_notified(self):
         """Après escalade, le nouvel utilisateur est ajouté aux notifiés."""
         r = requests.post(f"{API}/alarms/send", json={
-            "title": "Escal notif", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Escal notif", "message": "m", "severity": "critical",
         }, headers=self.admin_headers)
         alarm_id = r.json()["id"]
         initial_notified = r.json()["notified_user_ids"]
@@ -317,7 +317,7 @@ class TestAlarmNotificationsTable:
     def test_notified_user_names_resolved(self):
         """notified_user_names doit contenir les vrais noms des utilisateurs."""
         r = requests.post(f"{API}/alarms/send", json={
-            "title": "Names test", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Names test", "message": "m", "severity": "critical",
         }, headers=self.admin_headers)
         data = r.json()
         assert len(data["notified_user_names"]) >= 1
@@ -329,7 +329,7 @@ class TestAlarmNotificationsTable:
         """GET /alarms/mine ne retourne que les alarmes où l'utilisateur est notifié."""
         # Envoyer une alarme assignée à user1
         r = requests.post(f"{API}/alarms/send", json={
-            "title": "Mine filter", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Mine filter", "message": "m", "severity": "critical",
             "assigned_user_id": self.uid1,
         }, headers=self.admin_headers)
         assert r.status_code == 200
@@ -450,7 +450,7 @@ class TestInputValidation:
     def test_alarm_rejects_invalid_severity(self):
         """Une alarme avec une sévérité invalide doit être refusée (422)."""
         r = requests.post(f"{API}/alarms/send", json={
-            "title": "Test", "message": "m", "severity": "banana",
+            "site": "izeron", "title": "Test", "message": "m", "severity": "banana",
         }, headers=self.headers)
         assert r.status_code == 422, (
             f"severity='banana' devrait être refusée, got {r.status_code}"
@@ -459,7 +459,7 @@ class TestInputValidation:
     def test_alarm_rejects_too_long_title(self):
         """Un titre d'alarme trop long (>200 chars) doit être refusé."""
         r = requests.post(f"{API}/alarms/send", json={
-            "title": "A" * 201, "message": "m", "severity": "critical",
+            "site": "izeron", "title": "A" * 201, "message": "m", "severity": "critical",
         }, headers=self.headers)
         assert r.status_code == 422, (
             f"Un titre de 201 chars devrait être refusé, got {r.status_code}"
@@ -469,7 +469,7 @@ class TestInputValidation:
         """Les sévérités valides doivent être acceptées."""
         for sev in ["low", "medium", "high", "critical"]:
             r = requests.post(f"{API}/alarms/send", json={
-                "title": f"Test {sev}", "message": "m", "severity": sev,
+                "site": "izeron", "title": f"Test {sev}", "message": "m", "severity": sev,
             }, headers=self.headers)
             assert r.status_code in [200, 409], (
                 f"severity='{sev}' devrait être acceptée, got {r.status_code}"

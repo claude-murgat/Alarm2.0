@@ -44,7 +44,7 @@ def _resolved_pushes(client, alarm_id):
 def test_web_resolve_pushes_every_notified_user(client, setup):
     admin_h, users = setup
     sent = client.post("/api/alarms/send", headers=admin_h, json={
-        "title": "INV-147", "message": "resolution poussee", "severity": "critical",
+        "site": "izeron", "title": "INV-147", "message": "resolution poussee", "severity": "critical",
         "assigned_user_id": None,
     })
     assert sent.status_code == 200, sent.text

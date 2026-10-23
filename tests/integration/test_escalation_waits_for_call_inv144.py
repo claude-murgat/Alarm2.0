@@ -72,7 +72,7 @@ def _wait(client, h, pred, seconds):
 
 def _send(client, h, uid1):
     sent = client.post("/api/alarms/send", headers=h, json={
-        "title": "INV-144", "message": "m", "severity": "critical", "assigned_user_id": None})
+        "site": "izeron", "title": "INV-144", "message": "m", "severity": "critical", "assigned_user_id": None})
     assert sent.status_code == 200, sent.text
     assert sent.json()["assigned_user_id"] == uid1
     return sent.json()["id"]

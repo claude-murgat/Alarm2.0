@@ -64,7 +64,7 @@ def admin():
 
 def _send_alarm(admin):
     r = requests.post(f"{API}/alarms/send", headers=admin,
-                      json={"title": "INV-136", "message": "test", "severity": "critical"}, timeout=10)
+                      json={"site": "izeron", "title": "INV-136", "message": "test", "severity": "critical"}, timeout=10)
     assert r.status_code == 200, r.text
     return r.json()["id"]
 

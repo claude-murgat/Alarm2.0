@@ -24,7 +24,7 @@ import requests
 import serial
 
 from config import (
-    ALL_NODE_URLS, GATEWAY_ID, GATEWAY_KEY, MODEM_AT_PORT, MODEM_BAUD_RATE,
+    ALL_NODE_URLS, GATEWAY_ID, GATEWAY_KEY, GATEWAY_SITE, MODEM_AT_PORT, MODEM_BAUD_RATE,
     POLL_INTERVAL_SECONDS, HEALTH_CHECK_INTERVAL_SECONDS,
     ALERT_COOLDOWN_SECONDS, HTTP_TIMEOUT_SECONDS, ALERT_RECIPIENTS,
     DRY_CONTACT_ENABLED, DRY_CONTACT_GPIO_PIN,
@@ -70,6 +70,12 @@ def _find_primary_url() -> str | None:
         except Exception:
             continue
     return None
+
+
+# INV-156 : ne recevoir que les SMS/appels de son site (vide -> default_site cote backend)
+SITE_QUERY = f"?site={GATEWAY_SITE}" if GATEWAY_SITE else ""
+# Contact sec et modem appartiennent a un seul site : le 1er d'une liste (cluster de test)
+REPORT_SITE = GATEWAY_SITE.split(",")[0].strip()
 
 
 def _get_from_backend(path: str) -> list | None:
@@ -128,7 +134,7 @@ class SmsSenderThread(threading.Thread):
         logger.info("SmsSenderThread demarre")
         while self.running:
             try:
-                pending = _get_from_backend("/internal/sms/pending")
+                pending = _get_from_backend("/internal/sms/pending" + SITE_QUERY)
                 if pending and not modem_ready.is_set():
                     logger.warning(f"{len(pending)} SMS en attente : modem hors reseau, pas d'essai (INV-145)")
                 elif pending:
@@ -241,12 +247,12 @@ class CallSenderThread(threading.Thread):
         logger.info("CallSenderThread demarre")
         while self.running:
             try:
-                pending = _get_from_backend("/internal/calls/pending")
+                pending = _get_from_backend("/internal/calls/pending" + SITE_QUERY)
                 if pending and not modem_ready.is_set():
                     logger.warning(f"{len(pending)} appel(s) en attente : modem hors reseau, pas d'essai (INV-145)")
                 elif pending:
                     # INV-134 : le SMS de detail part avant l'appel vers le meme numero.
-                    sms_pending = _get_from_backend("/internal/sms/pending")
+                    sms_pending = _get_from_backend("/internal/sms/pending" + SITE_QUERY)
                     for call in pending:
                         if call_deferred_for_sms(call["to_number"], sms_pending):
                             logger.info(f"Call {call['id']} differe : SMS en attente pour {call['to_number']}")
@@ -579,7 +585,7 @@ def _report_dry_contact_state(gateway_id: str, state: str):
     """POST /internal/alarms/report-state {gateway_id, state}. Erreurs HTTP
     swallowed — le prochain poll retransmet (idempotent côté backend).
     Partagé par les moniteurs modem et hôte."""
-    body = {"gateway_id": gateway_id, "state": state}
+    body = {"gateway_id": gateway_id, "state": state, "site": REPORT_SITE}  # INV-155
     try:
         result = _post_to_backend("/internal/alarms/report-state", json_data=body)
         if result is None:
@@ -941,7 +947,7 @@ def main():
                     send_at_command(ser, "AT+CPSI?", timeout=3),
                     send_at_command(ser, "AT+CSQ", timeout=3),
                 )
-            _post_to_backend("/internal/alarms/modem-status", net)
+            _post_to_backend("/internal/alarms/modem-status", {**net, "site": REPORT_SITE})  # INV-155
             if sends_allowed(at_failures, net["registered"]):
                 modem_ready.set()
             else:

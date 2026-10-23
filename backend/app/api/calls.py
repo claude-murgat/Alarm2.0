@@ -5,7 +5,9 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import CallQueue, Alarm, AlarmNotification, User
 from ..clock import now as clock_now
+from sqlalchemy import func
 from ..escalation import contact_is_obsolete
+from ..sites import default_site, requested_sites
 
 router = APIRouter(prefix="/internal", tags=["call-gateway"])
 
@@ -19,14 +21,17 @@ def _check_gateway_key(x_gateway_key: Optional[str] = Header(None)):
 
 @router.get("/calls/pending")
 def get_pending_calls(
+    site: Optional[str] = None,
     db: Session = Depends(get_db),
     _: None = Depends(_check_gateway_key),
 ):
     """Retourne les appels en attente (non traites, retries < 3), sauf ceux d'une
-    alarme deja acquittee ou resolue (INV-154)."""
+    alarme deja acquittee ou resolue (INV-154). INV-156 : seulement ceux du ou des sites
+    demandes (`site` absent -> default_site ; ligne d'avant INV-156 sans site -> default_site)."""
     rows = (
         db.query(CallQueue)
-        .filter(CallQueue.called_at == None, CallQueue.retries < 3)
+        .filter(CallQueue.called_at == None, CallQueue.retries < 3,
+                func.coalesce(CallQueue.site, default_site(db)).in_(requested_sites(db, site)))
         .order_by(CallQueue.created_at)
         .all()
     )

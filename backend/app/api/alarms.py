@@ -10,6 +10,7 @@ from ..auth import get_current_user, get_current_admin
 from ..events import log_event
 from ..logic.alarm_creation import evaluate_alarm_creation_plan
 from ..escalation import CANCELLED_SMS_ERROR
+from ..sites import known_sites
 from ..logic.ack_authorization import evaluate_ack_authorization
 from ..logic.models import EscalationChainEntry, UserSnapshot
 
@@ -39,12 +40,16 @@ def send_alarm(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Send a new alarm. Only one active alarm at a time.
+    """Send a new alarm. Une seule alarme active par site (INV-001).
     Logique de decision (INV-080 chaine vide, fallback assignation) extraite
     dans logic/alarm_creation.py (testee unit)."""
-    existing = db.query(Alarm).filter(Alarm.status.in_(["active", "escalated"])).first()
+    if alarm_data.site not in known_sites(db):
+        raise HTTPException(status_code=422, detail=f"Site inconnu : {alarm_data.site}")
+    existing = db.query(Alarm).filter(
+        Alarm.status.in_(["active", "escalated"]), Alarm.site == alarm_data.site
+    ).first()
     if existing:
-        raise HTTPException(status_code=409, detail="Une alarme est déjà active")
+        raise HTTPException(status_code=409, detail="Une alarme est déjà active sur ce site")
 
     # Snapshots pour la fonction pure
     chain_orm = db.query(EscalationConfig).order_by(EscalationConfig.position).all()
@@ -89,6 +94,7 @@ def send_alarm(
         message=alarm_data.message,
         severity=alarm_data.severity,
         assigned_user_id=plan.assigned_user_id,
+        site=alarm_data.site,
         original_created_at=_now,
         created_at=_now,
     )
@@ -232,6 +238,7 @@ def active_escalation(
         "alarm": None if not alarm else {
             "id": alarm.id,
             "title": alarm.title,
+            "site": alarm.site,  # INV-155
             "status": alarm.status,
             "assigned_user_id": alarm.assigned_user_id,
             "escalation_count": alarm.escalation_count,

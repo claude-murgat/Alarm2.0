@@ -118,7 +118,7 @@ def test_get_alarms_days_clamp_to_valid_range(
         r = client.post(
             "/api/alarms/send",
             json={
-                "title": f"INV-110 {zone}",
+                "site": "izeron", "title": f"INV-110 {zone}",
                 "message": f"clamp test days={days_query}",
                 "severity": "critical",
                 "assigned_user_id": user1_id,

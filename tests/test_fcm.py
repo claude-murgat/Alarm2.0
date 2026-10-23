@@ -203,7 +203,7 @@ class TestFcmOnAlarm:
     def test_alarm_sends_fcm(self):
         """Envoyer une alarme declenche un FCM vers l'utilisateur assigne."""
         r = requests.post(f"{API}/alarms/send", json={
-            "title": "FCM Test", "message": "test", "severity": "critical",
+            "site": "izeron", "title": "FCM Test", "message": "test", "severity": "critical",
             "assigned_user_id": self.uid1,
         }, headers=self.admin_headers)
         assert r.status_code == 200
@@ -222,7 +222,7 @@ class TestFcmOnAlarm:
     def test_escalation_sends_fcm(self):
         """L'escalade envoie un FCM au nouvel utilisateur."""
         requests.post(f"{API}/alarms/send", json={
-            "title": "Esc FCM", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Esc FCM", "message": "m", "severity": "critical",
             "assigned_user_id": self.uid1,
         }, headers=self.admin_headers)
 
@@ -241,7 +241,7 @@ class TestFcmOnAlarm:
     def test_fcm_sent_to_all_notified_users(self):
         """Apres escalade, FCM envoye a TOUS les notifies (cumulative)."""
         requests.post(f"{API}/alarms/send", json={
-            "title": "Cumul FCM", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Cumul FCM", "message": "m", "severity": "critical",
             "assigned_user_id": self.uid1,
         }, headers=self.admin_headers)
 
@@ -262,7 +262,7 @@ class TestFcmOnAlarm:
         }, headers=self.headers1)
 
         r = requests.post(f"{API}/alarms/send", json={
-            "title": "No Token", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "No Token", "message": "m", "severity": "critical",
             "assigned_user_id": self.uid1,
         }, headers=self.admin_headers)
         assert r.status_code == 200, (
@@ -314,7 +314,7 @@ class TestEscalationWithFcm:
         requests.post(f"{API}/devices/heartbeat", headers=self.headers1)
 
         r = requests.post(f"{API}/alarms/send", json={
-            "title": "Offline Esc", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Offline Esc", "message": "m", "severity": "critical",
             "assigned_user_id": self.uid1,
         }, headers=self.admin_headers)
         alarm_id = r.json()["id"]
@@ -336,7 +336,7 @@ class TestEscalationWithFcm:
         Remplace l'ancien test_escalation_fast_for_veille_user qui presupposait un split 15/2."""
         # Assigner l'alarme a user2 (position 2 = "veille" dans le vocabulaire Android)
         r = requests.post(f"{API}/alarms/send", json={
-            "title": "No Fast Esc", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "No Fast Esc", "message": "m", "severity": "critical",
             "assigned_user_id": self.uid2,
         }, headers=self.admin_headers)
         alarm_id = r.json()["id"]
@@ -360,7 +360,7 @@ class TestEscalationWithFcm:
         (Test conserve, semantique inchangee apres INV-011 car 5 < 15.)"""
         # Assigner l'alarme a user1 (position 1 = astreinte)
         r = requests.post(f"{API}/alarms/send", json={
-            "title": "Slow Esc", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Slow Esc", "message": "m", "severity": "critical",
             "assigned_user_id": self.uid1,
         }, headers=self.admin_headers)
         alarm_id = r.json()["id"]

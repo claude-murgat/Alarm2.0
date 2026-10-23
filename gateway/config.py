@@ -69,6 +69,10 @@ DRY_CONTACT_ENABLED = os.getenv("DRY_CONTACT_ENABLED", "false").lower() in ("tru
 # 2 nœuds onsite identifiés par leur nom de host).
 GATEWAY_ID = os.getenv("GATEWAY_ID", socket.gethostname())
 
+# INV-155 : site de cette gateway (izeron, beaufort). Vide = default_site du backend.
+# Une liste "izeron,beaufort" n'est admise que sur le cluster de test (un modem, deux sites).
+GATEWAY_SITE = os.getenv("GATEWAY_SITE", "").strip()
+
 # Numéro de GPIO module SIM7600. Sur le HAT Waveshare SIM7600X : 43 = label
 # IO43 (mapping validé 2026-05-13). Pins addressables découvertes sur
 # firmware SIM7600M22_V2.0.1 : 3, 6, 41, 43, 44, 77 (40=STATUS réservé).

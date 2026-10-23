@@ -39,6 +39,7 @@ from ..database import get_db
 from ..events import log_event
 from ..logic.alarm_creation import evaluate_alarm_creation_plan
 from ..logic.models import EscalationChainEntry, UserSnapshot
+from ..sites import default_site
 from ..models import (
     Alarm,
     AlarmNotification,
@@ -55,7 +56,8 @@ router = APIRouter(prefix="/internal/alarms", tags=["alarms-gateway"])
 
 # Defaults appliqués quand la gateway crée une alarme (pas de title/message
 # dans le body /report-state — la gateway ne sait que "open" ou "closed").
-DEFAULT_TITLE = "Déclenchement contact sec local"
+# INV-155 : le titre nomme le site (« Déclenchement contact sec — Izeron »).
+TITLE_TEMPLATE = "Déclenchement contact sec — {}"
 DEFAULT_MESSAGE = (
     "Alarme déclenchée par capteur câblé NC sur la gateway on-site (SIM7600)."
 )
@@ -68,6 +70,8 @@ class ReportStateRequest(BaseModel):
     """Body du POST /report-state. La gateway envoie son état courant."""
     gateway_id: str = Field(..., min_length=1, max_length=128)
     state: Literal["open", "closed"]
+    # INV-155 : site de la passerelle (GATEWAY_SITE). Absent/vide -> default_site.
+    site: Optional[str] = Field(None, max_length=64)
 
 
 def _check_gateway_key(x_gateway_key: Optional[str] = Header(None)):
@@ -88,7 +92,7 @@ def _alert_email(db: Session) -> str:
     return cfg.value if cfg else "direction_technique@charlesmurgat.com"
 
 
-def _create_gateway_alarm(db: Session) -> Alarm:
+def _create_gateway_alarm(db: Session, site: str) -> Alarm:
     """Crée une alarme `source="gateway_dry_contact"`. Logique alignée sur
     POST /api/alarms/send (assignation pos 1 chaîne, INV-080 chaîne vide,
     FCM, audit log, INV-018, INV-066)."""
@@ -132,11 +136,12 @@ def _create_gateway_alarm(db: Session) -> Alarm:
 
     _now = clock_now()
     alarm = Alarm(
-        title=DEFAULT_TITLE,
+        title=TITLE_TEMPLATE.format(site.capitalize()),
         message=DEFAULT_MESSAGE,
         severity="critical",
         assigned_user_id=plan.assigned_user_id,
         source="gateway_dry_contact",
+        site=site,
         original_created_at=_now,
         created_at=_now,
     )
@@ -269,9 +274,12 @@ def report_state(
     # n'est pas terminale (resolved/cancelled), un re-poll du contact ouvert
     # doit être no-op — sinon l'opérateur subit un cycle sonnerie/ack par tick
     # tant que la cause physique persiste (issue #118, INV-120 V2 + ack).
+    # INV-001 : une alarme par site -> seule une alarme du site de la passerelle bloque.
+    # shortcut: should_be_active agrege encore toutes les passerelles (INV-157 a venir).
+    site = payload.site or default_site(db)
     any_active_alarm = (
         db.query(Alarm)
-        .filter(Alarm.status.in_(["active", "escalated", "acknowledged"]))
+        .filter(Alarm.status.in_(["active", "escalated", "acknowledged"]), Alarm.site == site)
         .first()
     )
     gateway_alarm = None
@@ -282,7 +290,7 @@ def report_state(
     if should_be_active:
         if any_active_alarm is None:
             # Pas d'alarme active → CREATE
-            gateway_alarm = _create_gateway_alarm(db)
+            gateway_alarm = _create_gateway_alarm(db, site)
         # Sinon : no-op (idempotence boucle si gateway_alarm, ou INV-001 si autre source)
     else:
         if gateway_alarm is not None:
@@ -307,6 +315,7 @@ def report_state(
         .filter(
             Alarm.status.in_(["active", "escalated"]),
             Alarm.source == "gateway_dry_contact",
+            Alarm.site == site,
         )
         .first()
     )

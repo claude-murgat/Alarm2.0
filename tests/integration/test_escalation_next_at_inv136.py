@@ -72,7 +72,7 @@ def test_inv136_next_escalation_at_slides_after_trigger_escalation(client, admin
         r = client.post(
             "/api/alarms/send",
             json={
-                "title": "INV-136 next_escalation_at slide",
+                "site": "izeron", "title": "INV-136 next_escalation_at slide",
                 "message": "verifie que trigger-escalation reset created_at",
                 "severity": "critical",
             },

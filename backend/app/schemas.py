@@ -119,6 +119,7 @@ class AlarmCreate(BaseModel):
     message: str = Field(..., max_length=2000)
     severity: Literal["low", "medium", "high", "critical"] = "critical"
     assigned_user_id: Optional[int] = None
+    site: str  # INV-155 : obligatoire, parmi SystemConfig `sites` (422 sinon)
 
 
 class AlarmResponse(BaseModel):
@@ -136,6 +137,7 @@ class AlarmResponse(BaseModel):
     notified_user_ids: list[int] = []
     notified_user_names: list[str] = []
     is_oncall_alarm: bool = False
+    site: Optional[str] = None  # INV-155 : NULL = alarme d'astreinte
     escalation_count: int
     created_at: datetime
     # INV-018b : date d'evenement immuable (vs created_at = timer reset par escalade).
@@ -185,6 +187,7 @@ class AlarmResponse(BaseModel):
             notified_user_ids=parsed_ids,
             notified_user_names=names,
             is_oncall_alarm=alarm.is_oncall_alarm or False,
+            site=alarm.site,
             escalation_count=alarm.escalation_count,
             created_at=alarm.created_at,
             original_created_at=alarm.original_created_at,
