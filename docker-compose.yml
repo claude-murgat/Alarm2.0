@@ -46,7 +46,9 @@ services:
       ETCD_ADVERTISE_CLIENT_URLS: http://${ADVERTISE_HOST:-host.docker.internal}:${ETCD_CLIENT_PORT}
       ETCD_INITIAL_ADVERTISE_PEER_URLS: http://${ADVERTISE_HOST:-host.docker.internal}:${ETCD_PEER_PORT}
       ETCD_INITIAL_CLUSTER: ${ETCD_INITIAL_CLUSTER}
-      ETCD_INITIAL_CLUSTER_STATE: new
+      # `existing` au 1er demarrage d'un noeud de remplacement (cf docs/REPLACE_ONSITE_NODE.md) ;
+      # sans effet une fois /etcd-data initialise.
+      ETCD_INITIAL_CLUSTER_STATE: ${ETCD_INITIAL_CLUSTER_STATE:-new}
       ETCD_INITIAL_CLUSTER_TOKEN: alarm-ha-cluster
     volumes:
       - etcd_data:/etcd-data
