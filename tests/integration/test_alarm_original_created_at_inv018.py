@@ -111,7 +111,7 @@ def test_original_created_at_set_at_creation(client, admin_headers):
         r = client.post(
             "/api/alarms/send",
             json={
-                "title": "INV-018 set-at-creation",
+                "site": "izeron", "title": "INV-018 set-at-creation",
                 "message": "verifie ecriture initiale original_created_at",
                 "severity": "critical",
                 "assigned_user_id": user1_id,
@@ -165,7 +165,7 @@ def test_original_created_at_immutable_after_escalation(client, admin_headers):
         r = client.post(
             "/api/alarms/send",
             json={
-                "title": "INV-018 immutable",
+                "site": "izeron", "title": "INV-018 immutable",
                 "message": "verifie immuabilite apres escalade+ack",
                 "severity": "critical",
                 "assigned_user_id": user1_id,
@@ -247,7 +247,7 @@ def test_original_created_at_uses_clock_now(client, admin_headers):
         r = client.post(
             "/api/alarms/send",
             json={
-                "title": "INV-018 clock_now",
+                "site": "izeron", "title": "INV-018 clock_now",
                 "message": "verifie usage clock_now (vs datetime.utcnow)",
                 "severity": "critical",
                 "assigned_user_id": user1_id,

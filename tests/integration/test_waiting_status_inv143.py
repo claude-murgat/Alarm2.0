@@ -50,7 +50,7 @@ def test_escalation_steps_carry_has_device(client, admin):
     client.post("/api/devices/fcm-token", headers=u2,
                 json={"token": "tok-user2-inv143", "device_id": "dev-user2-inv143"})
     sent = client.post("/api/alarms/send", headers=admin, json={
-        "title": "INV-143", "message": "m", "severity": "critical", "assigned_user_id": None})
+        "site": "izeron", "title": "INV-143", "message": "m", "severity": "critical", "assigned_user_id": None})
     assert sent.status_code == 200, sent.text
     steps = {s["name"]: s for s in client.get("/api/alarms/active/escalation", headers=admin).json()["steps"]}
     assert steps["user2"]["has_device"] is True

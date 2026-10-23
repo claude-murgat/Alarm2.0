@@ -5,7 +5,9 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import SmsQueue
 from ..clock import now as clock_now
+from sqlalchemy import func
 from ..escalation import contact_is_obsolete
+from ..sites import default_site, requested_sites
 
 router = APIRouter(prefix="/internal/sms", tags=["sms-gateway"])
 
@@ -20,14 +22,17 @@ def _check_gateway_key(x_gateway_key: Optional[str] = Header(None)):
 
 @router.get("/pending")
 def get_pending(
+    site: Optional[str] = None,
     db: Session = Depends(get_db),
     _: None = Depends(_check_gateway_key),
 ):
     """Retourne les SMS en attente d'envoi (non envoyés, retries < 3), sauf ceux d'une
-    alarme déjà acquittée ou résolue (INV-154)."""
+    alarme déjà acquittée ou résolue (INV-154). INV-156 : seulement ceux du ou des sites
+    demandés (`site` absent -> default_site ; ligne d'avant INV-156 sans site -> default_site)."""
     rows = (
         db.query(SmsQueue)
-        .filter(SmsQueue.sent_at == None, SmsQueue.retries < 3)
+        .filter(SmsQueue.sent_at == None, SmsQueue.retries < 3,
+                func.coalesce(SmsQueue.site, default_site(db)).in_(requested_sites(db, site)))
         .order_by(SmsQueue.created_at)
         .all()
     )

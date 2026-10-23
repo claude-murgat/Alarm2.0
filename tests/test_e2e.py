@@ -252,7 +252,7 @@ class TestSingleAlarm:
     def test_send_alarm(self):
         """Envoyer une alarme crée bien une alarme active."""
         r = requests.post(f"{API}/alarms/send", headers=self.headers, json={
-            "title": "Panne serveur",
+            "site": "izeron", "title": "Panne serveur",
             "message": "Le serveur ne répond plus",
             "severity": "critical",
         })
@@ -262,23 +262,23 @@ class TestSingleAlarm:
     def test_only_one_alarm_at_a_time(self):
         """Envoyer une 2e alarme alors qu'une est active doit être refusé (409)."""
         requests.post(f"{API}/alarms/send", headers=self.headers, json={
-            "title": "Alarme 1", "message": "msg", "severity": "critical",
+            "site": "izeron", "title": "Alarme 1", "message": "msg", "severity": "critical",
         })
         r = requests.post(f"{API}/alarms/send", headers=self.headers, json={
-            "title": "Alarme 2", "message": "msg2", "severity": "high",
+            "site": "izeron", "title": "Alarme 2", "message": "msg2", "severity": "high",
         })
         assert r.status_code == 409
 
     def test_can_send_after_resolve(self):
         """Après résolution, on peut envoyer une nouvelle alarme."""
         r = requests.post(f"{API}/alarms/send", headers=self.headers, json={
-            "title": "Alarme A", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Alarme A", "message": "m", "severity": "critical",
         })
         alarm_id = r.json()["id"]
         requests.post(f"{API}/alarms/{alarm_id}/resolve", headers=self.headers)
 
         r = requests.post(f"{API}/alarms/send", headers=self.headers, json={
-            "title": "Alarme B", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Alarme B", "message": "m", "severity": "critical",
         })
         assert r.status_code == 200
         assert r.json()["title"] == "Alarme B"
@@ -286,7 +286,7 @@ class TestSingleAlarm:
     def test_alarm_received_by_user(self):
         """L'utilisateur reçoit l'alarme active via /mine."""
         requests.post(f"{API}/alarms/send", headers=self.headers, json={
-            "title": "Test reception",
+            "site": "izeron", "title": "Test reception",
             "message": "msg",
             "severity": "critical",
             "assigned_user_id": self.user1_id,
@@ -319,7 +319,7 @@ class TestAlarmAcknowledgement:
 
     def test_acknowledge_alarm(self):
         r = requests.post(f"{API}/alarms/send", headers=self.headers, json={
-            "title": "Ack Test", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Ack Test", "message": "m", "severity": "critical",
             "assigned_user_id": self.user1_id,
         })
         alarm_id = r.json()["id"]
@@ -333,7 +333,7 @@ class TestAlarmAcknowledgement:
     def test_suspended_alarm_visible_in_mine_as_acknowledged(self):
         """Une alarme acquittée reste visible dans /mine avec status acknowledged."""
         r = requests.post(f"{API}/alarms/send", headers=self.headers, json={
-            "title": "Suspend", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Suspend", "message": "m", "severity": "critical",
             "assigned_user_id": self.user1_id,
         })
         alarm_id = r.json()["id"]
@@ -347,7 +347,7 @@ class TestAlarmAcknowledgement:
     def test_acknowledge_stores_user_name(self):
         """L'acquittement doit enregistrer le nom de l'utilisateur."""
         r = requests.post(f"{API}/alarms/send", headers=self.headers, json={
-            "title": "Ack Name Test", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Ack Name Test", "message": "m", "severity": "critical",
             "assigned_user_id": self.user1_id,
         })
         alarm_id = r.json()["id"]
@@ -400,7 +400,7 @@ class TestAlarmAcknowledgement:
         """#1 — Après expiration de la suspension (30min), l'alarme redevient active."""
         self._ensure_clean_state()
         r = requests.post(f"{API}/alarms/send", headers=self.headers, json={
-            "title": "Expiry Test", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Expiry Test", "message": "m", "severity": "critical",
             "assigned_user_id": self.user1_id,
         })
         alarm_id = r.json()["id"]
@@ -432,7 +432,7 @@ class TestAlarmAcknowledgement:
         """#3 — Après réactivation post-ack, l'alarme est escaladable."""
         self._ensure_clean_state()
         r = requests.post(f"{API}/alarms/send", headers=self.headers, json={
-            "title": "Ack+Esc Test", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Ack+Esc Test", "message": "m", "severity": "critical",
             "assigned_user_id": self.user1_id,
         })
         alarm_id = r.json()["id"]
@@ -487,7 +487,7 @@ class TestEscalation:
         admin_h = _admin_headers()
 
         r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Escalade", "message": "test", "severity": "critical",
+            "site": "izeron", "title": "Escalade", "message": "test", "severity": "critical",
             "assigned_user_id": user1_id,
         })
         alarm_id = r.json()["id"]
@@ -507,7 +507,7 @@ class TestEscalation:
         admin_h = _admin_headers()
 
         requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Double escalade", "message": "test", "severity": "critical",
+            "site": "izeron", "title": "Double escalade", "message": "test", "severity": "critical",
             "assigned_user_id": user1_id,
         })
 
@@ -524,7 +524,7 @@ class TestEscalation:
         admin_h = _admin_headers()
 
         r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Ack avant escalade", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Ack avant escalade", "message": "m", "severity": "critical",
             "assigned_user_id": user1_id,
         })
         alarm_id = r.json()["id"]
@@ -554,7 +554,7 @@ class TestEscalation:
         admin_h = _admin_headers()
 
         requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Wrap around", "message": "test", "severity": "critical",
+            "site": "izeron", "title": "Wrap around", "message": "test", "severity": "critical",
             "assigned_user_id": user1_id,
         })
 
@@ -577,7 +577,7 @@ class TestEscalation:
         admin_h = _admin_headers()
 
         requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Multi wrap", "message": "test", "severity": "critical",
+            "site": "izeron", "title": "Multi wrap", "message": "test", "severity": "critical",
             "assigned_user_id": user1_id,
         })
 
@@ -649,7 +649,7 @@ class TestEscalationWithClock:
         admin_h = _admin_headers()
 
         r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Timing no-esc", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Timing no-esc", "message": "m", "severity": "critical",
             "assigned_user_id": user1_id,
         })
         alarm_id = r.json()["id"]
@@ -674,7 +674,7 @@ class TestEscalationWithClock:
         admin_h = _admin_headers()
 
         r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Timing esc-16", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Timing esc-16", "message": "m", "severity": "critical",
             "assigned_user_id": user1_id,
         })
         alarm_id = r.json()["id"]
@@ -699,7 +699,7 @@ class TestEscalationWithClock:
         admin_h = _admin_headers()
 
         r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Boundary-15", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Boundary-15", "message": "m", "severity": "critical",
             "assigned_user_id": user1_id,
         })
         alarm_id = r.json()["id"]
@@ -848,7 +848,7 @@ class TestEscalationReachesOffline:
 
         # Envoyer alarme a user1
         requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Reach offline", "message": "test", "severity": "critical",
+            "site": "izeron", "title": "Reach offline", "message": "test", "severity": "critical",
             "assigned_user_id": user1_id,
         })
 
@@ -872,7 +872,7 @@ class TestEscalationReachesOffline:
         requests.post(f"{API}/devices/heartbeat", headers={"Authorization": f"Bearer {r.json()['access_token']}"})
 
         requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "All offline", "message": "test", "severity": "critical",
+            "site": "izeron", "title": "All offline", "message": "test", "severity": "critical",
             "assigned_user_id": user1_id,
         })
 
@@ -913,7 +913,7 @@ class TestDeletedUserDuringAlarm:
 
         # Envoyer alarme à tempuser
         requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Delete test", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Delete test", "message": "m", "severity": "critical",
             "assigned_user_id": temp_id,
         })
 
@@ -958,7 +958,7 @@ class TestEmptyEscalationChainAlert:
 
         # Envoyer une alarme
         r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "No chain", "message": "Chaîne vide", "severity": "critical",
+            "site": "izeron", "title": "No chain", "message": "Chaîne vide", "severity": "critical",
         })
         assert r.status_code == 200
 
@@ -1214,7 +1214,7 @@ class TestPersistenceAfterCrash:
 
         # Créer une alarme
         requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Persistence Test", "message": "Survive restart", "severity": "critical",
+            "site": "izeron", "title": "Persistence Test", "message": "Survive restart", "severity": "critical",
         })
 
         # Vérifier avant restart
@@ -1282,7 +1282,7 @@ class TestEmailViaMailhog:
 
         # Envoyer alarme → déclenche l'email
         requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Mailhog Test", "message": "Test SMTP réel", "severity": "critical",
+            "site": "izeron", "title": "Mailhog Test", "message": "Test SMTP réel", "severity": "critical",
         })
 
         time.sleep(2)  # Laisser le temps au SMTP
@@ -1340,7 +1340,7 @@ class TestCumulativeEscalation:
 
         # Envoyer alarme (va à user1)
         requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Cumul Test", "message": "test", "severity": "critical",
+            "site": "izeron", "title": "Cumul Test", "message": "test", "severity": "critical",
         })
 
         # Vérifier que user1 la voit
@@ -1370,7 +1370,7 @@ class TestCumulativeEscalation:
         admin_h = _admin_headers()
 
         requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Ack Cumul", "message": "test", "severity": "critical",
+            "site": "izeron", "title": "Ack Cumul", "message": "test", "severity": "critical",
         })
 
         # Escalader
@@ -1390,7 +1390,7 @@ class TestCumulativeEscalation:
         """L'alarme doit contenir la liste des utilisateurs notifiés."""
         admin_h = _admin_headers()
         requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Notif List", "message": "test", "severity": "critical",
+            "site": "izeron", "title": "Notif List", "message": "test", "severity": "critical",
         })
 
         # Avant escalade : seul user1 est notifié
@@ -1603,7 +1603,7 @@ class TestNotifiedUsersVisibility:
         admin_h = _admin_headers()
 
         requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Noms notifiés", "message": "test", "severity": "critical",
+            "site": "izeron", "title": "Noms notifiés", "message": "test", "severity": "critical",
         })
 
         r = requests.get(f"{API}/alarms/mine", headers={"Authorization": f"Bearer {token1}"})
@@ -1649,7 +1649,7 @@ class TestAckedAlarmVisibility:
         admin_h = _admin_headers()
         # Créer alarme assignée à user1
         r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Visible Ack", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Visible Ack", "message": "m", "severity": "critical",
             "assigned_user_id": self.user1_id,
         })
         alarm_id = r.json()["id"]
@@ -1676,7 +1676,7 @@ class TestAckedAlarmVisibility:
         """Le champ ack_remaining_seconds doit être présent et décompter avec le temps."""
         admin_h = _admin_headers()
         r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Countdown Test", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Countdown Test", "message": "m", "severity": "critical",
             "assigned_user_id": self.user1_id,
         })
         alarm_id = r.json()["id"]
@@ -1706,7 +1706,7 @@ class TestAckedAlarmVisibility:
         """L'utilisateur qui a acquitté doit aussi voir l'alarme dans /mine."""
         admin_h = _admin_headers()
         r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Self Ack Visible", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Self Ack Visible", "message": "m", "severity": "critical",
             "assigned_user_id": self.user1_id,
         })
         alarm_id = r.json()["id"]
@@ -1726,13 +1726,13 @@ class TestAckedAlarmVisibility:
         acquittable car #525 (acquittée) restait en tête de liste."""
         admin_h = _admin_headers()
         first = requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Premiere", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Premiere", "message": "m", "severity": "critical",
             "assigned_user_id": self.user1_id,
         }).json()["id"]
         requests.post(f"{API}/alarms/{first}/ack", headers=self.headers1)
 
         r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Seconde", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Seconde", "message": "m", "severity": "critical",
             "assigned_user_id": self.user1_id,
         })
         assert r.status_code == 200, f"INV-001 : une alarme acquittée ne bloque pas une nouvelle, got {r.status_code}"
@@ -1746,7 +1746,7 @@ class TestAckedAlarmVisibility:
 
     def _send_and_ack(self, title):
         alarm_id = requests.post(f"{API}/alarms/send", headers=_admin_headers(), json={
-            "title": title, "message": "m", "severity": "critical",
+            "site": "izeron", "title": title, "message": "m", "severity": "critical",
             "assigned_user_id": self.user1_id,
         }).json()["id"]
         requests.post(f"{API}/alarms/{alarm_id}/ack", headers=self.headers1)
@@ -1874,7 +1874,7 @@ class TestSmsAndHealth:
 
         # Envoyer une alarme assignée à user1
         requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "SMS Test", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "SMS Test", "message": "m", "severity": "critical",
             "assigned_user_id": user1_id,
         })
 
@@ -2093,7 +2093,7 @@ class TestRedundancy:
         # Creer une alarme avant le failover
         headers = _admin_headers(f"{primary_url}/api")
         r = requests.post(f"{primary_url}/api/alarms/send", json={
-            "title": "Failover Test", "message": "doit survivre", "severity": "critical",
+            "site": "izeron", "title": "Failover Test", "message": "doit survivre", "severity": "critical",
         }, headers=headers)
         alarm_id = r.json()["id"]
 
@@ -2148,7 +2148,7 @@ class TestRedundancy:
         """Une alarme créée via backend1 est immédiatement visible sur backend2."""
         admin_h = _admin_headers()
         r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Redondance Test", "message": "visible des deux côtés", "severity": "critical",
+            "site": "izeron", "title": "Redondance Test", "message": "visible des deux côtés", "severity": "critical",
         })
         assert r.status_code == 200
         alarm_id = r.json()["id"]
@@ -2163,7 +2163,7 @@ class TestRedundancy:
         """Une alarme résolue sur backend1 est immédiatement marquée resolved sur backend2."""
         admin_h = _admin_headers()
         r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Resolve Sync", "message": "test", "severity": "critical",
+            "site": "izeron", "title": "Resolve Sync", "message": "test", "severity": "critical",
         })
         alarm_id = r.json()["id"]
 
@@ -2181,7 +2181,7 @@ class TestRedundancy:
         user1_id = self._get_user_id(USER1_NAME)
         admin_h = _admin_headers()
         r = requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Ack Sync", "message": "test", "severity": "critical",
+            "site": "izeron", "title": "Ack Sync", "message": "test", "severity": "critical",
             "assigned_user_id": user1_id,
         })
         alarm_id = r.json()["id"]
@@ -2298,7 +2298,7 @@ class TestRedundancy:
         requests.patch(f"{API}/users/{user1_id}", headers=admin_h, json={"phone_number": "+33699000099"})
 
         requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Anti-dup Test", "message": "test", "severity": "critical",
+            "site": "izeron", "title": "Anti-dup Test", "message": "test", "severity": "critical",
             "assigned_user_id": user1_id,
         })
         # Avancer l'horloge sur les DEUX nœuds — le primaire (qui exécute la boucle)
@@ -2741,7 +2741,7 @@ class TestEscalationDelayGlobal:
                         if u["name"] == USER1_NAME)
 
         requests.post(f"{API}/alarms/send", headers=admin_h, json={
-            "title": "Delay Test", "message": "m", "severity": "critical",
+            "site": "izeron", "title": "Delay Test", "message": "m", "severity": "critical",
             "assigned_user_id": user1_id,
         })
 
@@ -2980,7 +2980,7 @@ class TestAuditTrail:
         """L'envoi d'une alarme doit créer un événement audit alarm_created."""
         admin_h = _admin_headers()
         r = requests.post(f"{API}/alarms/send", json={
-            "title": "Audit test", "message": "msg", "severity": "critical"
+            "site": "izeron", "title": "Audit test", "message": "msg", "severity": "critical"
         }, headers=admin_h)
         assert r.status_code == 200
         alarm_id = r.json()["id"]
@@ -3001,7 +3001,7 @@ class TestAuditTrail:
         admin_id = next(u["id"] for u in users if u["name"] == ADMIN_NAME)
 
         r = requests.post(f"{API}/alarms/send", json={
-            "title": "Lifecycle", "message": "msg", "severity": "critical",
+            "site": "izeron", "title": "Lifecycle", "message": "msg", "severity": "critical",
             "assigned_user_id": admin_id,  # INV-031 : admin doit etre notifie pour ACK
         }, headers=admin_h)
         alarm_id = r.json()["id"]
@@ -3020,7 +3020,7 @@ class TestAuditTrail:
         """L'escalade d'une alarme doit créer un événement alarm_escalated."""
         admin_h = _admin_headers()
         r = requests.post(f"{API}/alarms/send", json={
-            "title": "Escalade audit", "message": "msg", "severity": "critical"
+            "site": "izeron", "title": "Escalade audit", "message": "msg", "severity": "critical"
         }, headers=admin_h)
         alarm_id = r.json()["id"]
 
@@ -3070,7 +3070,7 @@ class TestAuditTrail:
         """Le filtrage par event_type ne retourne que les événements de ce type."""
         admin_h = _admin_headers()
         requests.post(f"{API}/alarms/send", json={
-            "title": "Filter test", "message": "msg", "severity": "critical"
+            "site": "izeron", "title": "Filter test", "message": "msg", "severity": "critical"
         }, headers=admin_h)
 
         audit = requests.get(f"{API}/audit/", params={"event_type": "alarm_created"}, headers=admin_h)
@@ -3082,7 +3082,7 @@ class TestAuditTrail:
         """Le filtrage par date retourne les événements dans la plage."""
         admin_h = _admin_headers()
         requests.post(f"{API}/alarms/send", json={
-            "title": "Date test", "message": "msg", "severity": "critical"
+            "site": "izeron", "title": "Date test", "message": "msg", "severity": "critical"
         }, headers=admin_h)
 
         # Plage large pour capturer tout
@@ -3112,7 +3112,7 @@ class TestAuditTrail:
         # Créer plusieurs événements
         for i in range(3):
             requests.post(f"{API}/alarms/send", json={
-                "title": f"Page test {i}", "message": "msg", "severity": "critical"
+                "site": "izeron", "title": f"Page test {i}", "message": "msg", "severity": "critical"
             }, headers=admin_h)
             # Résoudre pour pouvoir créer la suivante
             active = requests.get(f"{API}/alarms/active", headers=admin_h).json()
@@ -3131,7 +3131,7 @@ class TestAuditTrail:
         """Les événements audit doivent avoir un correlation_id non-null."""
         admin_h = _admin_headers()
         r = requests.post(f"{API}/alarms/send", json={
-            "title": "Corr test", "message": "msg", "severity": "critical"
+            "site": "izeron", "title": "Corr test", "message": "msg", "severity": "critical"
         }, headers=admin_h)
         alarm_id = r.json()["id"]
 
@@ -3145,7 +3145,7 @@ class TestAuditTrail:
         """POST /test/reset doit aussi effacer les audit events."""
         admin_h = _admin_headers()
         requests.post(f"{API}/alarms/send", json={
-            "title": "Reset test", "message": "msg", "severity": "critical"
+            "site": "izeron", "title": "Reset test", "message": "msg", "severity": "critical"
         }, headers=admin_h)
 
         # Vérifier qu'il y a des events

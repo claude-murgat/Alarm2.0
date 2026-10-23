@@ -148,6 +148,9 @@ def seed_data():
             # INV-084 (issue #75) : ticks paramétrables (2 clés séparées, défauts 10s / 30s).
             db.add(SystemConfig(key="escalation_tick_seconds", value="10"))
             db.add(SystemConfig(key="watchdog_tick_seconds", value="30"))
+            # INV-155 : sites connus + site par defaut (passerelle sans GATEWAY_SITE)
+            db.add(SystemConfig(key="sites", value="izeron,beaufort"))
+            db.add(SystemConfig(key="default_site", value="izeron"))
             db.commit()
             logger.info("Seed data created: 3 users, escalation chain configured")
     finally:

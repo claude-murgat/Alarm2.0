@@ -47,7 +47,7 @@ def setup(client):
 def test_loop_escalation_pushes_the_new_assignee(client, setup):
     admin_h, users = setup
     sent = client.post("/api/alarms/send", headers=admin_h, json={
-        "title": "INV-142", "message": "push au nouvel assigne", "severity": "critical",
+        "site": "izeron", "title": "INV-142", "message": "push au nouvel assigne", "severity": "critical",
         "assigned_user_id": None,
     })
     assert sent.status_code == 200, sent.text

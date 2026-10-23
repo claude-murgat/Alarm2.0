@@ -62,7 +62,7 @@ def test_resolved_alarm_excluded_from_active(client, admin_headers):
     r = client.post(
         "/api/alarms/send",
         json={
-            "title": "INV-007 active",
+            "site": "izeron", "title": "INV-007 active",
             "message": "exclusion resolved /active",
             "severity": "critical",
             "assigned_user_id": user1_id,
@@ -114,7 +114,7 @@ def test_resolved_alarm_excluded_from_mine(client, admin_headers):
     r = client.post(
         "/api/alarms/send",
         json={
-            "title": "INV-007 mine",
+            "site": "izeron", "title": "INV-007 mine",
             "message": "exclusion resolved /mine",
             "severity": "critical",
             "assigned_user_id": user1_id,

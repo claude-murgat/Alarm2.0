@@ -9,6 +9,7 @@ from .. import clock as clock_module
 from ..database import get_db
 from ..models import Alarm, AlarmNotification, User, EscalationConfig, SmsQueue, CallQueue
 from ..events import log_event
+from ..sites import default_site
 
 ENABLE_TEST_ENDPOINTS = os.getenv("ENABLE_TEST_ENDPOINTS", "false").lower() in ("true", "1", "yes")
 
@@ -71,6 +72,7 @@ def send_test_alarm(db: Session = Depends(get_db)):
         title="TEST ALARM",
         message="This is a test alarm triggered from the admin panel.",
         severity="critical",
+        site=default_site(db),  # INV-155
         assigned_user_id=user_id,
         original_created_at=_now,
         created_at=_now,
@@ -346,6 +348,7 @@ def insert_sms(payload: dict, db: Session = Depends(get_db)):
     row = SmsQueue(
         to_number=payload["to_number"],
         body=payload["body"],
+        site=payload.get("site"),  # INV-156 : absent -> default_site a la lecture
     )
     db.add(row)
     db.commit()
@@ -371,6 +374,7 @@ def insert_call(payload: dict, db: Session = Depends(get_db)):
         alarm_id=payload["alarm_id"],
         user_id=payload["user_id"],
         tts_message=payload["tts_message"],
+        site=payload.get("site"),  # INV-156 : absent -> default_site a la lecture
     )
     db.add(row)
     db.commit()
