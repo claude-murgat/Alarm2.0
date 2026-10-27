@@ -497,7 +497,7 @@
             <div class="card">
                 <h3>Membres du cluster</h3>
                 <table>
-                    <thead><tr><th>Nom</th><th>Role</th><th>Etat</th><th>Host</th><th>Port</th><th>Timeline</th><th>Lag</th></tr></thead>
+                    <thead><tr><th>Nom</th><th>Lieu</th><th>Role</th><th>Etat</th><th>Host</th><th>Port</th><th>Timeline</th><th>Lag</th></tr></thead>
                     <tbody id="clusterMembers"></tbody>
                 </table>
             </div>
@@ -1238,7 +1238,10 @@
                 }
                 document.getElementById('clusterTotal').textContent = q.total || '-';
                 document.getElementById('clusterHealthy').textContent = q.healthy || '-';
-                document.getElementById('clusterLocalNode').textContent = data.local_node || '-';
+                // INV-161 : lieu du noeud (izeron/beaufort/ovh)
+                const place = l => l ? ({ ovh: 'OVH' }[l] || l.charAt(0).toUpperCase() + l.slice(1)) : '-';
+                document.getElementById('clusterLocalNode').textContent =
+                    (data.local_node || '-') + (data.local_location ? ` (${place(data.local_location)})` : '');
                 document.getElementById('clusterLocalRole').textContent = data.local_role || '-';
 
                 const tbody = document.getElementById('clusterMembers');
@@ -1249,6 +1252,7 @@
                     const lag = m.lag != null ? m.lag : '-';
                     return `<tr style="color:${color}">
                         <td><strong>${m.name || '-'}</strong></td>
+                        <td>${place(m.location)}</td>
                         <td><span class="badge" style="background:${isLeader ? '#22c55e33' : '#33415533'};color:${color}">${m.role || '-'}</span></td>
                         <td>${m.state || '-'}</td>
                         <td>${m.host || '-'}</td>

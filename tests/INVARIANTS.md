@@ -914,6 +914,13 @@ Les migrations (`create_all` + `run_migrations`, idempotentes) sont jouées **au
 - **Pourquoi** : constaté en prod le 2026-10-22 (#253, colonne `users.is_test`). Le canary redémarre les backends **et** Patroni : le leader change pendant le déploiement (node2 → node3), chaque backend démarre en replica (`Schema init skip — replica read-only`) et aucun ne rejoue les migrations en devenant leader → colonne jamais créée sur aucun nœud. Le code qui l'aurait lue (#254) aurait renvoyé des 500 sur toute requête `users` (login, heartbeats) **sur les 3 nœuds**. Le correctif #144 supposait à tort qu'un nœud promu plus tard ferait l'init.
 - **Couverture** : Integration `test_schema_init_on_promotion_inv152.py` : 1re promotion (`test_node_promoted_after_boot_applies_pending_migrations`), retry jusqu'au succès après False puis exception puis plus rappelé (`test_leader_retries_migrations_each_tour_until_success`), re-promotion leader → replica → leader rejoue les migrations (`test_node_promoted_again_reapplies_migrations`) (#256).
 
+### INV-161 [M] ✅ Cluster : chaque nœud affiche son lieu (Izeron, Beaufort, OVH) (2026-10-27)
+`GET /api/cluster` ajoute à chaque membre un champ `location`, et renvoie `local_location` pour le nœud qui répond. Le lieu vient de `SystemConfig node_locations` (`nom:lieu` séparés par des virgules). Par défaut, y compris sur une base déjà en service : `node1:izeron,node2:izeron,node3:ovh,node4:beaufort,node5:beaufort`. Un nœud absent de la liste a `location = null`.
+- **Web** (onglet Cluster) : colonne « Lieu » (« Izeron », « Beaufort », « OVH » ; « - » si inconnu), et lieu du nœud local à côté de son nom.
+- **Changement de lieu** : on modifie `node_locations`, sans redéploiement. Exemple : quand alarm-1/2 (node4/5) partiront à Izeron.
+- **Pourquoi** : cluster de prod à 5 nœuds sur 3 lieux depuis le 2026-10-27 (NODE3 OVH, onsite-1/2 Izeron, alarm-1/2 « Beaufort »). Le propriétaire veut voir d'un coup d'œil où se trouve chaque nœud.
+- **Couverture** : Integration `test_cluster_location_inv161.py`.
+
 ---
 
 ## 10. Observabilité et audit
