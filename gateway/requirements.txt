@@ -1,7 +1,9 @@
-# Versions epinglees pour reproductibilite CI.
-# Si tu mets a jour : ajuster aussi backend/requirements.txt si la dep est commune
-# (ex: requests doit rester aligne entre les deux).
+# Plages et non versions exactes : alarm-gateway-sync fait un pip install sur l'hote,
+# ou Debian fournit deja ces paquets. Epingler en dur cassait le deploiement sur
+# Debian 13 (alarm-1, 2026-10-27) : requests 2.32.3 Debian non desinstallable par pip,
+# et numpy 1.26.4 sans wheel Python 3.13 (compilation depuis les sources).
+# Les versions Debian 13 (requests 2.32.3, pyserial 3.5, numpy 2.2.4) satisfont ces plages.
 
-requests==2.31.0
-pyserial==3.5
-numpy==1.26.4
+requests>=2.31,<3
+pyserial>=3.5,<4
+numpy>=1.26,<3
