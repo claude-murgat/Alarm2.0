@@ -5,13 +5,13 @@
 # nouveau :stable depuis le dernier deploiement reussi).
 #
 # 15 min : compromis entre reactivite et budget chaine canary. Une chaine
-# complete prend ~30 min (3 etapes × 10 min soak), donc 15 min entre 2 fires
+# complete prend ~25 min (5 etapes × restart + soak 2 min), donc 15 min entre 2 fires
 # laisse un cycle entier pour terminer + le lock empeche les overlaps.
 # Plus court (ex: 5 min comme alarm-cd-pull) augmente le risque de tick
 # pendant un soak en cours et n'apporte rien (la promo :stable est rare).
 
 [Unit]
-Description=Timer pour orchestrer la chaine canary 3 -> 2 -> 1 (CD V1.5)
+Description=Timer pour orchestrer la chaine canary 3 -> 5 -> 4 -> 2 -> 1 (CD V1.5)
 Documentation=https://github.com/claude-murgat/Alarm2.0/blob/master/docs/CD_DESIGN.md
 
 [Timer]

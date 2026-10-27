@@ -1,10 +1,16 @@
 #!/bin/bash
 # Wrapper de bring-up cluster Patroni en mode PROD cross-machine.
 #
-# Usage : ./scripts/start-prod-node.sh <1|2|3>
+# Usage : ./scripts/start-prod-node.sh <1|2|3|4|5>
 #   sur onsite-1 (192.168.1.50) : ./scripts/start-prod-node.sh 1
 #   sur onsite-2 (192.168.1.51) : ./scripts/start-prod-node.sh 2
 #   sur NODE3 cloud (10.99.0.1) : ./scripts/start-prod-node.sh 3
+#   sur alarm-1 (10.99.0.4)     : ./scripts/start-prod-node.sh 4   (non votant)
+#   sur alarm-2 (10.99.0.5)     : ./scripts/start-prod-node.sh 5   (non votant)
+#
+# Nœuds 4/5 NON VOTANTS etcd : Patroni + backend seulement, AUCUN conteneur etcd
+# local (`up --no-deps patroni backend`). Ils utilisent les 3 etcd votants
+# (10.99.0.1/.2/.3) via WG, cf ETCD_HOSTS de .env.prod.node4/5.
 #
 # Pourquoi ce wrapper :
 # - Evite la confusion entre .env.node1 (DEV/CI mono-host) et .env.prod.node1
@@ -30,13 +36,14 @@ for arg in "$@"; do
     --build)
       MODE="build"  # explicite, meme si c'est le defaut
       ;;
-    [1-3])
+    [1-5])
       NODE="$arg"
       ;;
     *)
       echo "Argument inconnu : $arg"
-      echo "Usage : $0 [--pull|--build] <1|2|3>"
+      echo "Usage : $0 [--pull|--build] <1|2|3|4|5>"
       echo "  1 = onsite-1 (10.99.0.2), 2 = onsite-2 (10.99.0.3), 3 = NODE3 cloud (10.99.0.1)"
+      echo "  4 = alarm-1 (10.99.0.4), 5 = alarm-2 (10.99.0.5) : non votants, sans etcd local"
       echo "  --pull  : pull l'image depuis GHCR (PROD V1+, cf docs/CD_DESIGN.md §3)"
       echo "  --build : build l'image localement (defaut, retro-compat avant CD V1)"
       exit 1
@@ -44,13 +51,22 @@ for arg in "$@"; do
   esac
 done
 
-if [[ -z "${NODE:-}" || ! "$NODE" =~ ^[1-3]$ ]]; then
-  echo "Usage : $0 [--pull|--build] <1|2|3>"
+if [[ -z "${NODE:-}" || ! "$NODE" =~ ^[1-5]$ ]]; then
+  echo "Usage : $0 [--pull|--build] <1|2|3|4|5>"
   exit 1
 fi
 
 ENV_FILE=".env.prod.node${NODE}"
 PROJECT="node${NODE}"
+
+# Votants 1-3 : tous les services (etcd inclus), commande inchangee (tableaux vides).
+# Non votants 4/5 : Patroni + backend seuls, --no-deps -> jamais de conteneur etcd.
+SERVICES=()
+NO_DEPS=()
+if [[ "$NODE" =~ ^[45]$ ]]; then
+  SERVICES=(patroni backend)
+  NO_DEPS=(--no-deps)
+fi
 
 # Pre-requis 1 : le bon repertoire (clone de /opt/alarm)
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -141,11 +157,11 @@ if [[ "$MODE" == "pull" ]]; then
     echo "    IMAGE_TAG=stable"
     exit 1
   fi
-  echo "→ docker compose pull..."
-  docker compose --env-file "$ENV_FILE" -p "$PROJECT" pull
-  echo "→ docker compose up -d (sans --build)..."
-  exec docker compose --env-file "$ENV_FILE" -p "$PROJECT" up -d
+  echo "→ docker compose pull ${SERVICES[*]}..."
+  docker compose --env-file "$ENV_FILE" -p "$PROJECT" pull "${SERVICES[@]}"
+  echo "→ docker compose up -d ${NO_DEPS[*]} ${SERVICES[*]} (sans --build)..."
+  exec docker compose --env-file "$ENV_FILE" -p "$PROJECT" up -d "${NO_DEPS[@]}" "${SERVICES[@]}"
 else
   # Mode dev/CI ou retro-compat : build local.
-  exec docker compose --env-file "$ENV_FILE" -p "$PROJECT" up --build -d
+  exec docker compose --env-file "$ENV_FILE" -p "$PROJECT" up --build -d "${NO_DEPS[@]}" "${SERVICES[@]}"
 fi

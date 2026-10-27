@@ -1,13 +1,13 @@
 #!/bin/bash
-# alarm-cd-orchestrate.sh — chaine canary 3 -> 2 -> 1 automatique (V1.5).
+# alarm-cd-orchestrate.sh — chaine canary 3 -> 5 -> 4 -> 2 -> 1 automatique (V1.5).
 #
 # Cf docs/CD_DESIGN.md §4 (ordre canary) et §8 (plan PR 9 — "promotion canary
-# auto apres soak vert"). Wraps alarm-cd-canary.sh pour les 3 noeuds en sequence,
+# auto apres soak vert"). Wraps alarm-cd-canary.sh pour les 5 noeuds en sequence,
 # halt immediat sur le premier echec (l'auto-rollback du noeud cible est gere
 # par alarm-cd-canary.sh -> alarm-cd-rollback.sh).
 #
 # Tourne via timer systemd `alarm-cd-orchestrate.timer` sur NODE3 cloud
-# (le seul noeud qui voit les 3 cibles via le mesh WG). Le timer est livre
+# (le seul noeud qui voit les 5 cibles via le mesh WG). Le timer est livre
 # **disable** par defaut — l'operateur l'active explicitement apres avoir
 # valide 5 cycles canary manuels (cf §4 doc "V1.5 a activer apres 5
 # deploiements clean").
@@ -21,9 +21,9 @@
 #     (anti-boucle si :stable est casse).
 #
 # Pre-requis (cf docs/CD_DESIGN.md §3 + §4) :
-#   - alarm-cd-pull.timer actif sur les 3 noeuds (pour que les images soient
+#   - alarm-cd-pull.timer actif sur les 5 noeuds (pour que les images soient
 #     en cache local AVANT l'orchestration).
-#   - Cle SSH alarm@10.99.0.{1,2,3} fonctionnelle depuis NODE3.
+#   - Cle SSH alarm@10.99.0.{1,2,3,4,5} fonctionnelle depuis NODE3.
 #   - GATEWAY_KEY definie via /etc/alarm/cd.env (lu par le unit systemd).
 #
 # Sortie :
@@ -52,22 +52,24 @@ COOLDOWN_AFTER_FAIL=3600
 # Soak entre etapes (override possible via env). 120 s depuis le 2026-10-20 (choix proprietaire :
 # ~10 min de deploiement au lieu de ~35) ; toujours un noeud a la fois, rollback auto conserve.
 SOAK="${SOAK:-120}"
-# Ordre canary fige : NODE3 (cloud, le moins critique) -> onsite-2 (Celeron,
-# maillon faible) -> onsite-1 (i5, le plus puissant et souvent primary).
-# Cf §4 doc — justification de l'ordre.
-NODES_ORDER=(3 2 1)
+# Ordre canary fige : NODE3 (cloud, le moins critique) -> node5 alarm-2 puis
+# node4 alarm-1 (nouveaux, non votants etcd : un echec n'entame pas le quorum)
+# -> onsite-2 (Celeron, maillon faible) -> onsite-1 (i5, le plus puissant et
+# souvent primary). node1 reste le dernier (son canary_promoted = fin de chaine,
+# cf backend/app/api/deployments.py). Cf §4 doc — justification de l'ordre.
+NODES_ORDER=(3 5 4 2 1)
 
 log() {
   # stderr seul -> systemd capture via StandardError=journal (cf unit file).
   echo "[alarm-cd-orchestrate] $*" >&2
 }
 
-# Decouvre le leader Patroni via GET /health role=primary sur les 3 IPs WG.
+# Decouvre le leader Patroni via GET /health role=primary sur les 5 IPs WG.
 # POST /api/deployments/events (par canary) requiert le leader (replicas -> 503).
 # Sans ce bloc, --api-base default = 10.99.0.1 = NODE3 souvent replica.
 discover_leader() {
   local ip role
-  for ip in 10.99.0.1 10.99.0.2 10.99.0.3; do
+  for ip in 10.99.0.1 10.99.0.2 10.99.0.3 10.99.0.4 10.99.0.5; do
     role=$(curl -fsS --max-time 3 "http://${ip}:8000/health" 2>/dev/null \
       | python3 -c "import sys,json;print(json.load(sys.stdin).get('role',''))" 2>/dev/null \
       || echo "")
@@ -154,8 +156,8 @@ export GATEWAY_KEY
 
 # Preflight : SSH joignable vers chaque noeud cible. Defaillance ici =
 # pas la peine de commencer.
-log "Preflight SSH vers les 3 noeuds..."
-for ip in 10.99.0.1 10.99.0.2 10.99.0.3; do
+log "Preflight SSH vers les 5 noeuds..."
+for ip in 10.99.0.1 10.99.0.2 10.99.0.3 10.99.0.4 10.99.0.5; do
   if ! ssh -o BatchMode=yes -o ConnectTimeout=10 \
        -o StrictHostKeyChecking=accept-new \
        "alarm@$ip" "true" 2>/dev/null; then
@@ -164,7 +166,7 @@ for ip in 10.99.0.1 10.99.0.2 10.99.0.3; do
     exit 1
   fi
 done
-log "Preflight SSH OK pour les 3 noeuds"
+log "Preflight SSH OK pour les 5 noeuds"
 
 # Resolution du chemin de alarm-cd-canary.sh : meme dossier que ce script.
 CANARY="${SCRIPT_DIR}/alarm-cd-canary.sh"
@@ -203,6 +205,6 @@ for NODE in "${NODES_ORDER[@]}"; do
   log "Etape canary node${NODE} OK"
 done
 
-log "Chaine canary complete : $LOCAL_DIGEST deploye sur les 3 noeuds"
+log "Chaine canary complete : $LOCAL_DIGEST deploye sur les 5 noeuds"
 printf '%s\t%s\t%s\n' "$LOCAL_DIGEST" "success" "$NOW" > "$STATE_FILE"
 exit 0

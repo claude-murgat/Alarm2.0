@@ -10,6 +10,16 @@ restent sur leurs machines respectives uniquement (`/etc/wireguard/privatekey` m
 | `10.99.0.1` | NODE3 cloud (hors-site) | _hostname OVH_ | `51.210.105.102:51820` |
 | `10.99.0.2` | NODE1 onsite-1 (1ère baie) | onsite-1.alarm.local | `192.168.1.50:51820` |
 | `10.99.0.3` | NODE2 onsite-2 (2ème baie) | onsite-2.alarm.local | `192.168.1.51:51820` |
+| `10.99.0.4` | node4 alarm-1 (site beaufort, gateway) — **non votant etcd** | alarm-1 | derrière NAT `92.103.41.246`, relayé par NODE3 |
+| `10.99.0.5` | node5 alarm-2 (site beaufort) — **non votant etcd** | alarm-2 | derrière NAT `92.103.41.246`, relayé par NODE3 |
+
+> **Relais NODE3 (nœuds 4/5, 2026-10-27)** : le site beaufort ne joint pas directement le
+> LAN des onsite. Tout le trafic inter-sites passe par NODE3 en étoile : NODE3 route
+> `wg0 → wg0` (`net.ipv4.ip_forward=1` + forward iptables autorisé sur `wg0`), et chaque
+> spoke déclare le peer NODE3 avec `AllowedIPs = 10.99.0.0/24` (au lieu de `10.99.0.1/32`).
+> Seul NODE3 déclare les peers `10.99.0.4/32` et `10.99.0.5/32` (pas d'`Endpoint =`,
+> apprentissage par `PersistentKeepalive` depuis le site NAT'd). Un peer plus spécifique
+> (`/32`, ex. lien LAN direct onsite-1 ↔ onsite-2) reste prioritaire sur le `/24` du relais.
 
 > **Déménagement de site (2026-06)** : les onsite sont passés du LAN `172.16.0.0/16`
 > (endpoints `172.16.1.120/.121`) au LAN `192.168.1.0/24`. IP désormais **statiques et

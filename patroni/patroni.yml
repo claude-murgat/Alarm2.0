@@ -29,8 +29,10 @@ bootstrap:
       parameters:
         wal_level: replica
         hot_standby: "on"
-        max_wal_senders: 5
-        max_replication_slots: 5
+        # 10 = 4 replicas (cluster 5 nœuds) + marge clonage (basebackup). Bootstrap
+        # seulement : sur le cluster live, `patronictl edit-config` (cf ci-dessus).
+        max_wal_senders: 10
+        max_replication_slots: 10
         wal_keep_size: 64MB
 
   initdb:
