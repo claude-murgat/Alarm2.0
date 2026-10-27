@@ -3,8 +3,8 @@
 # Cf docs/CD_DESIGN.md §4 (canary V1.5 — promotion auto entre etapes apres
 # soak vert). Wrapper systemd pour /usr/local/bin/alarm-cd-orchestrate.
 #
-# DEPLOIEMENT : uniquement sur NODE3 cloud (le seul noeud qui voit les 3 cibles
-# via le mesh WG). Les onsite-1 / onsite-2 n'ont QUE alarm-cd-pull (ils sont
+# DEPLOIEMENT : uniquement sur NODE3 cloud (le seul noeud qui voit les 5 cibles
+# via le mesh WG). Les autres noeuds n'ont QUE alarm-cd-pull (ils sont
 # pilotes par NODE3).
 #
 # ACTIVATION : ce service est livre **disable** par defaut. L'operateur l'active
@@ -12,7 +12,7 @@
 #   sudo systemctl enable --now alarm-cd-orchestrate.timer
 
 [Unit]
-Description=Orchestre la chaine canary 3 -> 2 -> 1 (CD V1.5)
+Description=Orchestre la chaine canary 3 -> 5 -> 4 -> 2 -> 1 (CD V1.5)
 Documentation=https://github.com/claude-murgat/Alarm2.0/blob/master/docs/CD_DESIGN.md
 After=docker.service network-online.target alarm-cd-pull.service
 Wants=network-online.target
@@ -44,8 +44,8 @@ RuntimeDirectory=alarm-cd-orchestrate
 # /var/lib/alarm/cd/ : partage avec alarm-cd-pull (digests.tsv + orchestrate.state).
 # Cree owner alarm:alarm.
 StateDirectory=alarm/cd
-# Limite de temps : 3 etapes canary × (restart + soak 2 min) + preflight +
-# overhead ~= 15 min. 1 h de marge avant kill brutal (couvre un SOAK plus long en override).
+# Limite de temps : 5 etapes canary × (restart + soak 2 min) + preflight +
+# overhead ~= 25 min. 1 h de marge avant kill brutal (couvre un SOAK plus long en override).
 TimeoutStartSec=3600
 ExecStart=/usr/local/bin/alarm-cd-orchestrate
 # Pas de Restart= (Type=oneshot). Le timer relance toutes les 15 min de toute

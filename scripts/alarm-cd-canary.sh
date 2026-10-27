@@ -10,11 +10,14 @@
 #   6. Si soak rouge -> POST kind=rollback (PR 6 enrichit avec l'action),
 #      halt canary, exit 2.
 #
-# Designe pour tourner sur NODE3 cloud OVH (le seul qui voit les 3 noeuds via WG).
-# L'humain enchaine les 3 commandes manuellement V1 :
+# Designe pour tourner sur NODE3 cloud OVH (le seul qui voit les 5 noeuds via WG).
+# L'humain enchaine les 5 commandes manuellement V1 (ordre de alarm-cd-orchestrate.sh) :
 #   ./scripts/alarm-cd-canary.sh --node 3   # NODE3 d'abord
+#   ./scripts/alarm-cd-canary.sh --node 5   # alarm-2 (non votant)
+#   ./scripts/alarm-cd-canary.sh --node 4   # alarm-1 (non votant)
 #   ./scripts/alarm-cd-canary.sh --node 2   # onsite-2 ensuite
 #   ./scripts/alarm-cd-canary.sh --node 1   # onsite-1 en dernier (le plus critique)
+# Noeuds 4/5 : start-prod-node.sh ne relance que Patroni + backend (pas d'etcd local).
 #
 # V1.5 (cf doc) : promotion auto entre etapes apres 5 deploiements clean.
 #
@@ -49,10 +52,10 @@ while [[ $# -gt 0 ]]; do
     --dry-run)     DRY_RUN=1; shift ;;
     -h|--help)
       cat <<'HELP'
-Usage : alarm-cd-canary.sh --node <1|2|3> [options]
+Usage : alarm-cd-canary.sh --node <1-5> [options]
 
 Options :
-  --node <1|2|3>     Numero du noeud cible (requis).
+  --node <1-5>       Numero du noeud cible (requis).
   --soak <secs>      Duree du soak post-restart (default: 600 = 10 min).
   --api-base <url>   API backend pour POST events (default: http://10.99.0.1:8000).
   --gateway-key <k>  X-Gateway-Key pour POST events (sinon lit env GATEWAY_KEY).
@@ -64,8 +67,8 @@ HELP
   esac
 done
 
-if [[ -z "$NODE" || ! "$NODE" =~ ^[1-3]$ ]]; then
-  echo "ERREUR : --node <1|2|3> requis" >&2
+if [[ -z "$NODE" || ! "$NODE" =~ ^[1-5]$ ]]; then
+  echo "ERREUR : --node <1-5> requis" >&2
   exit 1
 fi
 
@@ -74,14 +77,18 @@ if [[ -z "$GATEWAY_KEY" ]]; then
   exit 1
 fi
 
-# Mapping node -> IP WG. Cohérent avec .env.prod.node{1,2,3} :
+# Mapping node -> IP WG. Cohérent avec .env.prod.node{1..5} :
 #   node1 -> onsite-1 -> 10.99.0.2
 #   node2 -> onsite-2 -> 10.99.0.3
 #   node3 -> NODE3 cloud -> 10.99.0.1
+#   node4 -> alarm-1 -> 10.99.0.4 (non votant)
+#   node5 -> alarm-2 -> 10.99.0.5 (non votant)
 case "$NODE" in
   1) WG_IP="10.99.0.2"; NODE_NAME="node1" ;;
   2) WG_IP="10.99.0.3"; NODE_NAME="node2" ;;
   3) WG_IP="10.99.0.1"; NODE_NAME="node3" ;;
+  4) WG_IP="10.99.0.4"; NODE_NAME="node4" ;;
+  5) WG_IP="10.99.0.5"; NODE_NAME="node5" ;;
 esac
 
 TARGET_HEALTH="http://${WG_IP}:8000/health"
@@ -104,11 +111,11 @@ ssh_target() {
       "${SSH_USER}@${WG_IP}" "$@"
 }
 
-# Decouvre le leader Patroni via GET /health role=primary sur les 3 IPs WG.
+# Decouvre le leader Patroni via GET /health role=primary sur les 5 IPs WG.
 # POST /api/deployments/events requiert le leader (replicas -> 503 'replica').
 discover_leader() {
   local ip role
-  for ip in 10.99.0.1 10.99.0.2 10.99.0.3; do
+  for ip in 10.99.0.1 10.99.0.2 10.99.0.3 10.99.0.4 10.99.0.5; do
     role=$(curl -fsS --max-time 3 "http://${ip}:8000/health" 2>/dev/null \
       | python3 -c "import sys,json;print(json.load(sys.stdin).get('role',''))" 2>/dev/null \
       || echo "")

@@ -37,10 +37,10 @@ while [[ $# -gt 0 ]]; do
     --trigger)     TRIGGER="$2"; shift 2 ;;
     -h|--help)
       cat <<'HELP'
-Usage : alarm-cd-rollback.sh --node <1|2|3> [options]
+Usage : alarm-cd-rollback.sh --node <1-5> [options]
 
 Options :
-  --node <1|2|3>     Noeud cible (requis).
+  --node <1-5>       Noeud cible (requis).
   --image <name>     Image a rollback (default: alarm-backend ; pas alarm-patroni
                      par defaut, cf §5 doc — Postgres rollback trop risque).
   --api-base <url>   API backend pour POST events.
@@ -53,7 +53,7 @@ HELP
   esac
 done
 
-if [[ -z "$NODE" || ! "$NODE" =~ ^[1-3]$ ]]; then
+if [[ -z "$NODE" || ! "$NODE" =~ ^[1-5]$ ]]; then
   echo "ERREUR : --node requis" >&2
   exit 1
 fi
@@ -62,20 +62,25 @@ if [[ -z "$GATEWAY_KEY" ]]; then
   exit 1
 fi
 
+# UP_SERVICES : vide pour les votants 1-3 (commande compose inchangee) ; Patroni +
+# backend seuls pour les non votants 4/5 (--no-deps : jamais de conteneur etcd).
+UP_SERVICES=""
 case "$NODE" in
   1) WG_IP="10.99.0.2"; NODE_NAME="node1" ;;
   2) WG_IP="10.99.0.3"; NODE_NAME="node2" ;;
   3) WG_IP="10.99.0.1"; NODE_NAME="node3" ;;
+  4) WG_IP="10.99.0.4"; NODE_NAME="node4"; UP_SERVICES=" --no-deps patroni backend" ;;
+  5) WG_IP="10.99.0.5"; NODE_NAME="node5"; UP_SERVICES=" --no-deps patroni backend" ;;
 esac
 
 log() { echo "[rollback-$NODE_NAME] $*" >&2; }
 
-# Decouvre le leader Patroni via GET /health role=primary sur les 3 IPs WG.
+# Decouvre le leader Patroni via GET /health role=primary sur les 5 IPs WG.
 # POST /api/deployments/events requiert le leader (replicas -> 503 'replica').
 # Quand appele depuis canary.sh, --api-base est deja resolu -> on skip ce bloc.
 discover_leader() {
   local ip role
-  for ip in 10.99.0.1 10.99.0.2 10.99.0.3; do
+  for ip in 10.99.0.1 10.99.0.2 10.99.0.3 10.99.0.4 10.99.0.5; do
     role=$(curl -fsS --max-time 3 "http://${ip}:8000/health" 2>/dev/null \
       | python3 -c "import sys,json;print(json.load(sys.stdin).get('role',''))" 2>/dev/null \
       || echo "")
@@ -149,8 +154,8 @@ ssh_target "docker tag ${REGISTRY}/${IMAGE}:stable-prev ${REGISTRY}/${IMAGE}:sta
 # --- 3. Restart les containers via compose ---
 # docker compose up -d (sans pull, sans build) re-cree les containers avec
 # l'image actuelle (qui est maintenant :stable-prev re-taggee :stable).
-log "docker compose up -d (sans pull, sans build)..."
-ssh_target "cd $REMOTE_REPO && docker compose --env-file .env.prod.node${NODE} -p node${NODE} up -d"
+log "docker compose up -d${UP_SERVICES} (sans pull, sans build)..."
+ssh_target "cd $REMOTE_REPO && docker compose --env-file .env.prod.node${NODE} -p node${NODE} up -d${UP_SERVICES}"
 
 # --- 4. POST event ---
 DETAILS=$(cat <<JSON
