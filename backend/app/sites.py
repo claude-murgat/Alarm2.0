@@ -31,3 +31,12 @@ def requested_sites(db: Session, site: str | None) -> list[str]:
     """Parametre `site` de /internal/{sms,calls}/pending : absent -> default_site
     (passerelle d'avant INV-155), liste separee par des virgules admise."""
     return _split(site or "") or [default_site(db)]
+
+
+# INV-161 : lieu de chaque noeud du cluster (onglet Cluster). nom:lieu separes par des virgules.
+DEFAULT_NODE_LOCATIONS = "node1:izeron,node2:izeron,node3:ovh,node4:beaufort,node5:beaufort"
+
+
+def node_locations(db: Session) -> dict[str, str]:
+    pairs = (p.split(":", 1) for p in _split(_config(db, "node_locations", DEFAULT_NODE_LOCATIONS)))
+    return {name.strip(): loc.strip() for name, loc in (p for p in pairs if len(p) == 2)}

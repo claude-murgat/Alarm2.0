@@ -27,6 +27,7 @@ from .escalation import escalation_loop
 from .quorum_monitor import quorum_monitor_loop
 from .watchdog import watchdog_loop
 from .leader_election import leader_election_loop, is_leader
+from .sites import node_locations
 from .replica_proxy import ReplicaWriteProxyMiddleware
 from .database import DATABASE_URL
 
@@ -348,9 +349,19 @@ async def cluster_status():
     healthy_count = sum(1 for m in members if m.get("state") in ("running", "streaming"))
     total_count = len(members)
 
+    # INV-161 : lieu de chaque noeud (Izeron, Beaufort, OVH)
+    db = SessionLocal()
+    try:
+        locations = node_locations(db)
+    finally:
+        db.close()
+    for m in members:
+        m["location"] = locations.get(m.get("name"))
+
     return {
         "local_node": node_name,
         "local_role": local_role,
+        "local_location": locations.get(node_name),
         "quorum": {
             "total": total_count,
             "healthy": healthy_count,
