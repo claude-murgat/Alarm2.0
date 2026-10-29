@@ -120,3 +120,29 @@ class TestSendsAllowed:
 
     def test_mute_modem_does_not_send(self):
         assert _mh.sends_allowed(at_failures=1, registered=True) is False
+
+
+class TestPcmRebootAllowed:
+    """INV-169 : canal audio bloque -> redemarrage du modem (AT+CFUN=1,1) au plus une fois
+    par 30 min. Encore bloque dans la fenetre -> pas de redemarrage (repli TTS), sinon
+    la gateway relancee par systemd redemarrerait le modem en boucle."""
+
+    NOW = 1_800_000_000.0
+
+    def test_window_is_30_min(self):
+        assert _mh.PCM_REBOOT_MIN_INTERVAL_S == 30 * 60
+
+    def test_never_rebooted(self):
+        assert _mh.pcm_reboot_allowed(None, self.NOW) is True
+
+    @pytest.mark.parametrize("ago", [0, 60, 29 * 60])
+    def test_rebooted_recently_is_refused(self, ago):
+        assert _mh.pcm_reboot_allowed(self.NOW - ago, self.NOW) is False
+
+    @pytest.mark.parametrize("ago", [30 * 60, 3600])
+    def test_rebooted_long_ago_is_allowed(self, ago):
+        assert _mh.pcm_reboot_allowed(self.NOW - ago, self.NOW) is True
+
+    def test_timestamp_in_the_future_does_not_block_forever(self):
+        # Horloge recalee en arriere : la trace ne doit pas bloquer l'auto-reparation des heures.
+        assert _mh.pcm_reboot_allowed(self.NOW + 3600, self.NOW) is True

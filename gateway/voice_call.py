@@ -1,4 +1,4 @@
-"""Logique pure de l'appel vocal d'alarme (INV-131 a INV-134, INV-159).
+"""Logique pure de l'appel vocal d'alarme (INV-131 a INV-134, INV-159, INV-169).
 
 Aucun import : testable en tier 1 sans pyserial (cf tests/unit/test_gateway_voice_call.py).
 Les entrees sont le texte brut lu sur le port AT du SIM7600 (reponses + URC).
@@ -115,3 +115,31 @@ def call_deferred_for_sms(to_number: str, pending_sms: list | None) -> bool:
     l'a bloque ~3 min, jusqu'apres l'escalade. File illisible (None) -> ne jamais bloquer."""
     return any(s.get("to_number") == to_number and not s.get("retries")
                for s in pending_sms or [])
+
+
+def _cpcmreg(text: str) -> str | None:
+    """Valeur lue dans `+CPCMREG: <n>` (avec ou sans espace), None si absente."""
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("+CPCMREG:"):
+            return line[len("+CPCMREG:"):].strip()
+    return None
+
+
+def pcm_registered(text: str) -> bool:
+    """INV-132/169 : le canal audio PCM est ouvert (`AT+CPCMREG?` vaut 1)."""
+    return _cpcmreg(text) == "1"
+
+
+def pcm_wedged(query: str, close: str, requery: str) -> bool:
+    """INV-169 : canal audio bloque = CPCMREG a 1 hors appel et AT+CPCMREG=0 refuse (ERROR)
+    ou sans effet (toujours 1). Relecture a 0 ou reponses vides -> pas de preuve, False :
+    on ne redemarre jamais le modem sur un doute."""
+    after = _cpcmreg(requery)
+    return pcm_registered(query) and after != "0" and (after == "1" or "ERROR" in close)
+
+
+def voice_fallback_due(urc: str) -> bool:
+    """INV-169 : voix PCM interrompue -> synthese du module si l'appel continue et
+    qu'aucune touche n'est arrivee (l'appele qui a raccroche n'a plus rien a entendre)."""
+    return not call_ended(urc) and not dtmf_key(urc)

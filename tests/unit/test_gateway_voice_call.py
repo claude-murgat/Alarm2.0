@@ -251,3 +251,70 @@ class TestSiteVoice:
             fmt = (w.getframerate(), w.getsampwidth(), w.getnchannels())
             assert fmt == (ref.getframerate(), ref.getsampwidth(), ref.getnchannels())
             assert w.getnframes() > ref.getnframes() * 0.8  # le message entier, pas un fragment
+
+
+# --- INV-169 : canal audio PCM bloque (incident onsite-2 Izeron, 2026-10-20 -> 2026-10-29) ---
+
+REG_1 = "+CPCMREG: 1\nOK"
+REG_0 = "+CPCMREG: 0\nOK"
+
+
+class TestPcmWedged:
+    """INV-169 : bloque = CPCMREG a 1 hors appel, et AT+CPCMREG=0 refuse (ERROR) ou sans
+    effet (toujours 1). Sur onsite-2, tous les appels decroches etaient muets ; le modem
+    de Beaufort (meme modele et firmware) repond 0 hors appel."""
+
+    def test_onsite2_incident_is_wedged(self):
+        assert _vc.pcm_wedged(REG_1, "ERROR", REG_1) is True
+
+    def test_close_accepted_but_still_1_is_wedged(self):
+        assert _vc.pcm_wedged(REG_1, "OK", REG_1) is True
+
+    @pytest.mark.parametrize("close", ["ERROR", "+CME ERROR: 3"])
+    def test_close_refused_without_reread_is_wedged(self, close):
+        assert _vc.pcm_wedged(REG_1, close, "") is True
+
+    def test_reply_without_space_is_read(self):
+        assert _vc.pcm_wedged("+CPCMREG:1\nOK", "ERROR", "+CPCMREG:1\nOK") is True
+
+    @pytest.mark.parametrize("close", ["OK", "ERROR"])
+    def test_back_to_0_is_not_wedged(self, close):
+        assert _vc.pcm_wedged(REG_1, close, REG_0) is False
+
+    def test_healthy_modem_is_not_wedged(self):
+        # Beaufort : 0 hors appel, rien a fermer.
+        assert _vc.pcm_wedged(REG_0, "", "") is False
+
+    @pytest.mark.parametrize("query", ["", "ERROR"])
+    def test_no_evidence_is_not_wedged(self, query):
+        # Port muet (INV-126) ou modem pas pret : jamais de redemarrage sur un doute.
+        assert _vc.pcm_wedged(query, "", "") is False
+
+    def test_close_accepted_without_reread_is_not_wedged(self):
+        assert _vc.pcm_wedged(REG_1, "OK", "") is False
+
+    @pytest.mark.parametrize("text,registered", [
+        (REG_1, True), ("+CPCMREG:1", True), (REG_0, False), ("ERROR", False), ("", False),
+    ])
+    def test_pcm_registered(self, text, registered):
+        # Decide s'il faut tenter AT+CPCMREG=0 (avant l'appel et au controle hors appel).
+        assert _vc.pcm_registered(text) is registered
+
+
+class TestVoiceFallback:
+    """INV-169 : l'injection PCM s'arrete en cours de message (Write timeout) alors que
+    l'appel continue -> synthese du module, l'appele entend au moins quelque chose.
+    Avant : repli seulement si la voix n'avait jamais demarre -> silence total."""
+
+    def test_pcm_stopped_while_call_up_falls_back(self):
+        assert _vc.voice_fallback_due("VOICE CALL: BEGIN\n+CPCMREG: 1\nOK\n") is True
+
+    @pytest.mark.parametrize("urc", [
+        "VOICE CALL: BEGIN\nVOICE CALL: END: 000012\nNO CARRIER\n",
+        "VOICE CALL: BEGIN\nNO CARRIER\n",
+    ])
+    def test_callee_hung_up_no_fallback(self, urc):
+        assert _vc.voice_fallback_due(urc) is False
+
+    def test_key_already_received_no_fallback(self):
+        assert _vc.voice_fallback_due("VOICE CALL: BEGIN\n+RXDTMF: 1\n") is False

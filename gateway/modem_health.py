@@ -50,3 +50,17 @@ def sends_allowed(at_failures: int, registered: bool) -> bool:
     """INV-145 : un SMS/appel n'est tente que modem joignable ET inscrit ; sinon il
     echouerait a coup sur et consommerait un des 3 essais (INV-064)."""
     return at_failures == 0 and registered
+
+
+# INV-169 : canal audio bloque -> AT+CFUN=1,1 au plus une fois par 30 min (anti-boucle : la
+# gateway sort apres chaque redemarrage et systemd la relance).
+PCM_REBOOT_MIN_INTERVAL_S = 30 * 60
+# Le SIM7600 quitte l'USB puis revient en ~15-25 s apres AT+CFUN=1,1 : sortir avant ferait
+# echouer la re-detection en boucle (relances comptees par le watchdog INV-146).
+MODEM_REBOOT_WAIT_S = 30
+
+
+def pcm_reboot_allowed(last_reboot_at: float | None, now: float) -> bool:
+    """INV-169 : redemarrage permis si aucun dans les 30 dernieres minutes. Une trace
+    dans le futur (horloge recalee en arriere) ne bloque pas."""
+    return last_reboot_at is None or not 0 <= now - last_reboot_at < PCM_REBOOT_MIN_INTERVAL_S

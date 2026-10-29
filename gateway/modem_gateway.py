@@ -36,13 +36,14 @@ from modem_detect import detect_modem_port, send_at_command
 from locks import at_lock  # RLock reentrant partage du port AT (cf locks.py)
 from dry_contact import parse_dc_line, raw_to_state, decide_report  # logique pure (cf dry_contact.py)
 from modem_health import (  # logique pure (cf modem_health.py)
-    MAX_AT_FAILURES, at_failures_after, call_was_dialed, parse_network, reregister_due,
-    sends_allowed,
+    MAX_AT_FAILURES, MODEM_REBOOT_WAIT_S, at_failures_after, call_was_dialed, parse_network,
+    pcm_reboot_allowed, reregister_due, sends_allowed,
 )
 from voice_call import (  # logique pure (cf voice_call.py)
     DTMF_WAIT_S, FRAME_S, HANG_UP_COMMANDS, LEAD_SILENCE_S, alarm_voice_file, call_answered,
     call_deferred_for_sms, call_rang, call_ended, call_result, confirmation_file, cpcmfrm_for,
-    dtmf_key, is_audio_port, lead_silence, pcm_frames, tts_text,
+    dtmf_key, is_audio_port, lead_silence, pcm_frames, pcm_registered, pcm_wedged, tts_text,
+    voice_fallback_due,
 )
 
 logging.basicConfig(
@@ -56,6 +57,9 @@ GATEWAY_HEADERS = {"X-Gateway-Key": GATEWAY_KEY}
 # INV-145 : pose par le keepalive (modem joignable + inscrit) ; les threads SMS/appel
 # n'essaient rien tant qu'il n'est pas pose, pour ne pas bruler les 3 essais (INV-064).
 modem_ready = threading.Event()
+# INV-169 : pose par CallSender (canal audio bloque, file d'appels vide) ; la boucle
+# principale redemarre alors le modem et sort.
+pcm_reboot = threading.Event()
 
 
 # ── Helpers HTTP ─────────────────────────────────────────────────────────────
@@ -236,25 +240,76 @@ def _load_voice(voice_dir: str = VOICE_DIR) -> dict | None:
         return None
 
 
+# INV-169 : heure du dernier redemarrage du modem pour canal audio bloque (anti-boucle).
+# Repertoire de la gateway : le seul ou elle ecrit (/opt/alarm-gateway, a son user).
+PCM_REBOOT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pcm_reboot_at")
+
+
+def _pcm_wedged_now(ser: serial.Serial) -> bool:
+    """INV-169 : hors appel (port AT verrouille par l'appelant), CPCMREG doit valoir 0.
+    A 1 : tente AT+CPCMREG=0 puis relit."""
+    query = send_at_command(ser, "AT+CPCMREG?", timeout=3)
+    if not pcm_registered(query):
+        return False
+    close = send_at_command(ser, "AT+CPCMREG=0", timeout=3)
+    requery = send_at_command(ser, "AT+CPCMREG?", timeout=3)
+    wedged = pcm_wedged(query, close, requery)
+    logger.warning(f"CPCMREG=1 hors appel, fermeture {close.split()} relecture {requery.split()} : "
+                   f"{'canal audio bloque' if wedged else 'debloque'} (INV-169)")
+    return wedged
+
+
+def _reboot_modem_for_pcm(ser: serial.Serial) -> bool:
+    """INV-169 : AT+CFUN=1,1 si aucun redemarrage depuis 30 min. L'heure est ecrite AVANT :
+    sans trace, chaque relance de la gateway redemarrerait le modem."""
+    try:
+        with open(PCM_REBOOT_FILE) as f:
+            last = float(f.read())
+    except (OSError, ValueError):
+        last = None
+    now = time.time()
+    if not pcm_reboot_allowed(last, now):
+        logger.error("Canal audio bloque (CPCMREG=1), modem deja redemarre il y a moins de 30 min : "
+                     "pas de nouveau redemarrage, repli TTS du module (INV-169)")
+        return False
+    try:
+        with open(PCM_REBOOT_FILE, "w") as f:
+            f.write(str(now))
+    except OSError as e:
+        logger.error(f"Canal audio bloque (CPCMREG=1), {PCM_REBOOT_FILE} non inscriptible ({e}) : "
+                     "pas de redemarrage automatique (INV-169)")
+        return False
+    logger.critical("Canal audio bloque (CPCMREG=1) : redemarrage du modem")
+    with at_lock:  # aucun SMS/appel tente pendant le redemarrage : aucun essai consomme (INV-064)
+        r = send_at_command(ser, "AT+CFUN=1,1", timeout=5)
+        time.sleep(MODEM_REBOOT_WAIT_S)
+    logger.critical(f"AT+CFUN=1,1 {r.split()} : sortie pour relance systemd et re-detection des ports")
+    return True
+
+
 class CallSenderThread(threading.Thread):
     """Poll /internal/calls/pending et passe les appels : ATD, voix francaise
     injectee par le port audio USB (repli TTS module), touche 1/2 confirmee."""
 
-    def __init__(self, ser: serial.Serial, audio_port: str | None = None):
+    def __init__(self, ser: serial.Serial, audio_port: str | None = None, pcm_wedged: bool = False):
         super().__init__(daemon=True, name="CallSender")
         self.ser = ser
         self.audio_port = audio_port
         self.voice = _load_voice()
         self.running = True
         self._urc = ""
-        self._voice_started = False
+        self.pcm_wedged = pcm_wedged  # INV-169 : redemarrage du modem a la prochaine file vide
 
     def run(self):
         logger.info("CallSenderThread demarre")
         while self.running:
             try:
                 pending = _get_from_backend("/internal/calls/pending" + SITE_QUERY)
-                if pending and not modem_ready.is_set():
+                if self.pcm_wedged and not pending:
+                    # INV-169 : aucun appel en attente, le redemarrage du modem n'en retarde aucun.
+                    self.pcm_wedged = False
+                    pcm_reboot.set()
+                elif pending and not modem_ready.is_set():
                     logger.warning(f"{len(pending)} appel(s) en attente : modem hors reseau, pas d'essai (INV-145)")
                 elif pending:
                     # INV-134 : le SMS de detail part avant l'appel vers le meme numero.
@@ -306,13 +361,17 @@ class CallSenderThread(threading.Thread):
                         logger.warning(f"Voix PCM en echec ({e})")
                         self._poll()
                         key = dtmf_key(self._urc)
-                        # Repli seulement si le message n'a pas pu demarrer.
-                        if not self._voice_started and not call_ended(self._urc) and not key:
+                        # INV-169 : voix jamais demarree ou interrompue (Write timeout), appel
+                        # toujours en cours -> l'appele entend au moins la synthese du module.
+                        if voice_fallback_due(self._urc):
                             logger.warning("Repli TTS du module")
                             key = self._play_tts(tts_message)
                 else:
                     key = self._play_tts(tts_message)
                 self._hang_up()
+                # INV-169 : controle hors appel, port audio ferme ; le redemarrage attend une file vide.
+                if self.voice and self.audio_port and _pcm_wedged_now(self.ser):
+                    self.pcm_wedged = True
                 logger.info(f"Touche recue : {key}")
                 return call_result(key)
 
@@ -372,13 +431,12 @@ class CallSenderThread(threading.Thread):
         """INV-132/133 : voix preenregistree injectee par le port audio USB. INV-159 : le
         message annonce le site de l'alarme."""
         rate = self.voice["rate"]
-        self._voice_started = False
         # Ordre de l'exemple SIMCom (usb_audio_test.py) : port audio ouvert AVANT
         # AT+CPCMREG=1 et ferme APRES AT+CPCMREG=0. Dans l'ordre inverse, l'appel
         # suivant partait dans le vide (constate le 2026-10-15 sur alarm-1).
         with serial.Serial(self.audio_port, 115200, timeout=0, write_timeout=2) as audio:
             prev = self._at("AT+CPCMREG?")
-            if "+CPCMREG: 1" in prev:
+            if pcm_registered(prev):
                 logger.warning(f"Port audio reste ouvert, fermeture : {self._at('AT+CPCMREG=0').split()}")
             frm = self._at(f"AT+CPCMFRM={cpcmfrm_for(rate)}")
             reg = self._at("AT+CPCMREG=1")
@@ -387,7 +445,6 @@ class CallSenderThread(threading.Thread):
                 raise RuntimeError("AT+CPCMREG=1 refuse")
             try:
                 audio.reset_input_buffer()
-                self._voice_started = True
                 message = alarm_voice_file(site, self.voice)
                 logger.info(f"Lecture de {message} (site {site or '-'})")
                 state = self._stream(audio, lead_silence(rate) + self.voice[message], rate)
@@ -865,6 +922,12 @@ def main():
         logger.info(f"Port audio detecte : {audio_port} (voix injectee dans l'appel)")
     else:
         logger.warning("Port audio non detecte — message par synthese du module (AT+CDTAM=1)")
+    # INV-169 : canal audio reste bloque (onsite-2, 2026-10) -> redemarrage du modem des que la
+    # file d'appels est vide (CallSender), jamais pendant un appel.
+    pcm_stuck = False
+    if audio_port:
+        with at_lock:
+            pcm_stuck = _pcm_wedged_now(ser)
 
     # Verifier la connectivite backend
     primary = _find_primary_url()
@@ -876,7 +939,7 @@ def main():
     # Demarrer les threads
     threads = [
         SmsSenderThread(ser),
-        CallSenderThread(ser, audio_port=audio_port),
+        CallSenderThread(ser, audio_port=audio_port, pcm_wedged=pcm_stuck),
         SmsReceiverThread(ser),
         HealthMonitorThread(ser),
     ]
@@ -931,7 +994,11 @@ def main():
     delay = 0  # 1er controle immediat : modem_ready est pose avant le 1er envoi (INV-145)
     try:
         while True:
-            time.sleep(delay)
+            # INV-169 : un redemarrage du modem demande par CallSender interrompt l'attente.
+            if pcm_reboot.wait(delay):
+                pcm_reboot.clear()
+                if _reboot_modem_for_pcm(ser):
+                    return 1
             delay = 60
             # Verifier que le modem repond toujours
             with at_lock:
