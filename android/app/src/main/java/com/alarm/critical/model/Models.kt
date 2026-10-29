@@ -31,7 +31,9 @@ data class UserResponse(
     val is_admin: Boolean,
     val is_active: Boolean,
     // INV-151 : compte test -> l'alarme ne sonne pas (INV-ANDROID-008)
-    val is_test: Boolean = false
+    val is_test: Boolean = false,
+    // INV-ANDROID-011 : ecran Equipe (GET /api/users/)
+    val phone_number: String? = null
 )
 
 data class AlarmResponse(
@@ -78,5 +80,54 @@ data class ModemStatusResponse(
     val bars: Int,
     val tech: String?,
     val rsrp: Double?,
-    val updated_at: String?
+    val updated_at: String?,
+    // INV-158 : une entree par passerelle (meme forme) ; null sur un backend d'avant
+    val gateway_id: String? = null,
+    val site: String? = null,
+    val gateways: List<ModemStatusResponse>? = null
 )
+
+/** INV-ANDROID-012 : GET /health. `version` (sha court) absent sur un ancien backend. */
+data class HealthResponse(val version: String? = null)
+
+/** INV-ANDROID-011 : GET /api/alarms/active/escalation (INV-136). `alarm` n'a que
+ *  title/site/status/escalation_count/acknowledged_by_name parmi les champs d'AlarmResponse. */
+data class ActiveEscalationResponse(
+    val alarm: AlarmResponse?,
+    val escalation_delay_minutes: Double?,
+    val steps: List<EscalationStep>?
+)
+
+/** role : "current" (appele en ce moment) | "notified" (deja appele) | "upcoming". */
+data class EscalationStep(val position: Int, val user_id: Int, val name: String, val role: String, val acked: Boolean)
+
+/** POST /api/auth/register (admin, INV-149). */
+data class UserCreateRequest(
+    val name: String,
+    val password: String,
+    val phone_number: String?,
+    val is_admin: Boolean,
+    val is_test: Boolean
+)
+
+/** PATCH /api/users/{id} : "" efface le numero (le backend le ramene a NULL). */
+data class PhoneUpdate(val phone_number: String)
+
+/** POST /api/config/escalation/bulk : la chaine complete, dans l'ordre. */
+data class EscalationBulkRequest(val user_ids: List<Int>)
+
+/** GET /api/cluster (INV-161). */
+data class ClusterResponse(val local_node: String?, val local_location: String?, val members: List<ClusterMember>?)
+
+data class ClusterMember(val name: String, val role: String?, val state: String?, val location: String?)
+
+/** GET /api/stats/kpi. */
+data class KpiResponse(
+    val total_alarms: Int,
+    val escalation_rate: Double,
+    val mttr_minutes: Double,
+    val hors_heures_only: Boolean
+)
+
+/** GET /api/audit/ (admin). */
+data class AuditEvent(val event_type: String, val user_id: Int?, val timestamp: String?, val details: Any?)

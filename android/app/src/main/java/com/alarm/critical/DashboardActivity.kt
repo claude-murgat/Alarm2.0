@@ -137,6 +137,25 @@ class DashboardActivity : AppCompatActivity() {
             performLogout()
         }
 
+        // INV-ANDROID-011 : entrees du menu ; "Tableau de bord" ferme juste le tiroir
+        findViewById<View>(R.id.drawerHome).setOnClickListener { drawerLayout.close() }
+        mapOf(
+            R.id.drawerAlarms to AlarmsActivity::class.java,
+            R.id.drawerEscalation to EscalationActivity::class.java,
+            R.id.drawerModems to ModemsActivity::class.java,
+            R.id.drawerTeam to TeamActivity::class.java,
+            R.id.drawerChain to ChainActivity::class.java,
+            R.id.drawerSupervision to SupervisionActivity::class.java,
+        ).forEach { (id, screen) ->
+            findViewById<View>(id).setOnClickListener {
+                drawerLayout.close()
+                startActivity(Intent(this, screen))
+            }
+        }
+        updateAdminMenu()
+        refreshAdminRole()
+        showVersions()
+
         // Bouton reconnexion (dans alerte)
         findViewById<Button>(R.id.reconnectButton).setOnClickListener {
             performLogout()
@@ -218,6 +237,36 @@ class DashboardActivity : AppCompatActivity() {
         }
     }
 
+    /** INV-ANDROID-010/011 : entrees admin visibles selon `is_admin` (memorise au login). */
+    private fun updateAdminMenu() {
+        val isAdmin = getSharedPreferences("alarm_prefs", MODE_PRIVATE).getBoolean("is_admin", false)
+        findViewById<View>(R.id.drawerAdminSection).visibility = if (isAdmin) View.VISIBLE else View.GONE
+    }
+
+    /** INV-ANDROID-010 : le role a pu changer depuis le login ; relu une fois au demarrage. */
+    private fun refreshAdminRole() {
+        lifecycleScope.launch {
+            try {
+                val me = ApiProvider.service.getMe("Bearer $token").body() ?: return@launch
+                getSharedPreferences("alarm_prefs", MODE_PRIVATE).edit()
+                    .putBoolean("is_admin", me.is_admin).apply()
+                updateAdminMenu()
+            } catch (e: Exception) {
+                Log.w("Dashboard", "Role admin non relu : ${e.message}")
+            }
+        }
+    }
+
+    /** INV-ANDROID-012 : version de l'app et du serveur ("?" si /health ne la donne pas). */
+    private fun showVersions() {
+        val versionText = findViewById<TextView>(R.id.drawerVersion)
+        versionText.text = "App ${BuildConfig.VERSION_NAME} · serveur ?"
+        lifecycleScope.launch {
+            val server = try { ApiProvider.service.health().body()?.version } catch (e: Exception) { null }
+            versionText.text = "App ${BuildConfig.VERSION_NAME} · serveur ${server ?: "?"}"
+        }
+    }
+
     private fun performLogout() {
         val prefs = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
         val t = token
@@ -239,7 +288,7 @@ class DashboardActivity : AppCompatActivity() {
             }
         }
 
-        prefs.edit().clear().apply()
+        prefs.edit().clear().apply()  // dont is_admin (INV-ANDROID-010)
         // Vider les logs collectes pendant la session, sinon un user suivant
         // qui clique "Envoyer les logs" sur l'ecran de login (cf INV-ANDROID-108)
         // exporterait les events de la session precedente — fuite cross-user.
@@ -847,21 +896,6 @@ class DashboardActivity : AppCompatActivity() {
             }
         } catch (_: Exception) {
             "depuis un moment"
-        }
-    }
-
-    private fun formatDate(dateStr: String?): String {
-        if (dateStr == null) return "?"
-        return try {
-            val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault())
-            // INV-ANDROID-112 : le backend envoie de l'UTC sans suffixe ; l'affichage
-            // reste dans le fuseau du telephone (sinon 13:32 au lieu de 15:32 a Paris).
-            sdf.timeZone = TimeZone.getTimeZone("UTC")
-            val display = SimpleDateFormat("dd/MM HH:mm", Locale.getDefault())
-            val date = sdf.parse(dateStr)
-            display.format(date!!)
-        } catch (_: Exception) {
-            dateStr.take(16)
         }
     }
 

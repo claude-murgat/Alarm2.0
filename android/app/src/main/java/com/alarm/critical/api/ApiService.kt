@@ -51,6 +51,80 @@ interface ApiService {
         @Body request: FcmTokenRequest
     ): Response<Map<String, String>>
 
+    // ===== INV-ANDROID-011/012 : menu (ecrans Alarmes, Escalade, Sites, admin) =====
+
+    @GET("health")
+    suspend fun health(): Response<HealthResponse>
+
+    @GET("api/auth/me")
+    suspend fun getMe(@Header("Authorization") auth: String): Response<UserResponse>
+
+    @GET("api/alarms/active/escalation")
+    suspend fun getActiveEscalation(@Header("Authorization") auth: String): Response<ActiveEscalationResponse>
+
+    @GET("api/users/")
+    suspend fun getUsers(@Header("Authorization") auth: String): Response<List<UserResponse>>
+
+    @POST("api/auth/register")
+    suspend fun registerUser(
+        @Header("Authorization") auth: String,
+        @Body request: UserCreateRequest
+    ): Response<UserResponse>
+
+    @DELETE("api/users/{id}")
+    suspend fun deleteUser(
+        @Header("Authorization") auth: String,
+        @Path("id") userId: Int
+    ): Response<Map<String, String>>
+
+    @PATCH("api/users/{id}")
+    suspend fun updateUserPhone(
+        @Header("Authorization") auth: String,
+        @Path("id") userId: Int,
+        @Body request: PhoneUpdate
+    ): Response<UserResponse>
+
+    @POST("api/config/escalation/bulk")
+    suspend fun saveEscalationChain(
+        @Header("Authorization") auth: String,
+        @Body request: EscalationBulkRequest
+    ): Response<List<EscalationEntry>>
+
+    /** {"minutes": 15.0} */
+    @GET("api/config/escalation-delay")
+    suspend fun getEscalationDelay(): Response<Map<String, Double>>
+
+    @POST("api/config/escalation-delay")
+    suspend fun setEscalationDelay(
+        @Header("Authorization") auth: String,
+        @Body request: Map<String, Double>
+    ): Response<Map<String, Double>>
+
+    /** {"delay_minutes": 2.0} */
+    @GET("api/config/sms-call-delay")
+    suspend fun getSmsCallDelay(): Response<Map<String, Double>>
+
+    @POST("api/config/sms-call-delay")
+    suspend fun setSmsCallDelay(
+        @Header("Authorization") auth: String,
+        @Body request: Map<String, Double>
+    ): Response<Map<String, Double>>
+
+    @GET("api/cluster")
+    suspend fun getCluster(): Response<ClusterResponse>
+
+    @GET("api/stats/kpi")
+    suspend fun getKpi(
+        @Header("Authorization") auth: String,
+        @Query("weeks") weeks: Int = 8
+    ): Response<KpiResponse>
+
+    @GET("api/audit/")
+    suspend fun getAudit(
+        @Header("Authorization") auth: String,
+        @Query("page_size") pageSize: Int = 50
+    ): Response<List<AuditEvent>>
+
     @HTTP(method = "DELETE", path = "api/devices/fcm-token", hasBody = true)
     suspend fun deleteFcmToken(
         @Header("Authorization") auth: String,
