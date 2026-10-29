@@ -152,7 +152,8 @@ jobs:
           # Version recalculee comme le fait build.gradle.kts (INV-ANDROID-109),
           # plutot que lue avec aapt : meme source de verite, pas de dependance
           # a un binaire du SDK dont le nom change selon les build-tools.
-          VER="1.0.$(git rev-list --count HEAD)-$(git rev-parse --short HEAD)"
+          VER="$(git describe --tags --match 'v*' --dirty)"
+          VER="${VER#v}"
           OUT="alarme-murgat-${GITHUB_REF_NAME}-${VER}.apk"
           cp "$APK" "$OUT"
           {

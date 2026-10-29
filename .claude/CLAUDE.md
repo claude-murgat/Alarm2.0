@@ -166,7 +166,7 @@ adb shell am start -n com.alarm.critical/.MainActivity
 # Verifier la version du build (versionName auto-derive de git, cf INV-ANDROID-109)
 /opt/android-sdk/build-tools/34.0.0/aapt dump badging \
   android/app/build/outputs/apk/debug/app-debug.apk | grep versionName
-# Affiche par ex : versionName='1.0.188-b95d44b' (-dirty si arbre modifie)
+# Affiche par ex : versionName='1.6.0' sur le tag v1.6.0, '1.6.0-3-gabc1234' apres (-dirty si arbre modifie)
 
 # Emulateur avec reseau fonctionnel
 # Utiliser AVD "alarm_explore" (alarm_test a le reseau casse)
@@ -181,7 +181,7 @@ produit automatiquement une version unique tracable au sha. La version
 apparait dans l'export `AppLogger.exportLogs()` (en-tete) et dans le
 manifest APK.
 
-Format : `1.0.<commit_count>-<short_sha>[-dirty]`.
+Format : `<tag v* sans le v>[-<n>-g<short_sha>][-dirty]` (git describe), ex. `1.6.0` = release GitHub v1.6.0.
 
 Cela rend impossible la classe de bugs "j'ai oublie de bumper la
 version" : si tu modifies le code, ton APK aura un sha different,
