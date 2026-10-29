@@ -11,6 +11,7 @@ AUDITABLE_EVENTS = {
     "user_login", "user_login_failed", "config_changed",
     "user_created", "user_deleted", "escalation_timeout", "watchdog_offline",
     "escalation_without_call",  # INV-144
+    "replica_reinitialized",  # INV-168
 }
 
 
