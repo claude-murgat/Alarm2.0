@@ -73,6 +73,8 @@ jobs:
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
           echo "short=${SHORT}" >> "$GITHUB_OUTPUT"
           echo "image_ref=${REGISTRY}/${IMAGE_OWNER}/${{ matrix.image }}:sha-${SHORT}" >> "$GITHUB_OUTPUT"
+          # INV-164 : numero de release affiche par /health (vide si le sha construit n'a pas de VERSION).
+          echo "app_version=$(cat VERSION 2>/dev/null)" >> "$GITHUB_OUTPUT"
           echo "Building ${{ matrix.image }} from sha ${SHORT}"
 
       - name: Set up Docker Buildx
@@ -93,10 +95,11 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.image_ref }}
-          # INV-164 : /health du backend expose ce sha (version = 7 premiers caracteres).
-          # Les autres images ne declarent pas l'ARG : ignore.
+          # INV-164 : /health du backend expose la release (fichier VERSION) et ce sha.
+          # Les autres images ne declarent pas ces ARG : ignores.
           build-args: |
             GIT_SHA=${{ steps.meta.outputs.sha }}
+            APP_VERSION=${{ steps.meta.outputs.app_version }}
           # Cache GHA partage entre runs pour ne pas re-build les couches inchangees.
           # Scope par image -> pas de pollution croisee (les Dockerfile partagent rien
           # de pertinent : backend = python:3.12-slim ; patroni = postgres:16-alpine).

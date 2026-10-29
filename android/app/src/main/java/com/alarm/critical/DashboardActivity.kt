@@ -257,13 +257,14 @@ class DashboardActivity : AppCompatActivity() {
         }
     }
 
-    /** INV-ANDROID-012 : version de l'app et du serveur ("?" si /health ne la donne pas). */
+    /** INV-ANDROID-012 : version de l'app et noeud qui repond ("?" si /api/cluster ne le donne pas). */
     private fun showVersions() {
         val versionText = findViewById<TextView>(R.id.drawerVersion)
-        versionText.text = "App ${BuildConfig.VERSION_NAME} · serveur ?"
+        versionText.text = "Version ${BuildConfig.VERSION_NAME} · nœud ?"
         lifecycleScope.launch {
-            val server = try { ApiProvider.service.health().body()?.version } catch (e: Exception) { null }
-            versionText.text = "App ${BuildConfig.VERSION_NAME} · serveur ${server ?: "?"}"
+            val cluster = try { ApiProvider.service.getCluster().body() } catch (e: Exception) { null }
+            versionText.text = "Version ${BuildConfig.VERSION_NAME} · nœud ${cluster?.local_node ?: "?"}" +
+                (cluster?.local_location?.takeIf { it.isNotBlank() }?.let { " (${place(it)})" } ?: "")
         }
     }
 

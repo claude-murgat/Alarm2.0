@@ -592,7 +592,7 @@ Après connexion, le web lit `user.is_admin` dans la réponse de `/api/auth/logi
 - **Couverture** : Playwright `test_frontend.py::TestRoleBasedUI` (joué en local, hors CI).
 
 ### INV-166 [L] ✅ Web : pied de page avec la version du serveur et le nœud (2026-10-29)
-Chaque onglet affiche en pied de page `Alarme Murgat · serveur <version> · nœud <local_node> (<Lieu>)` : `version` (sha court) vient de `/health` du nœud qui sert la page, `local_node` et `local_location` de `/api/cluster` (public, lieu au format INV-161). Version absente (backend plus ancien) → `?` ; nœud inconnu → `?` ; lieu inconnu → pas de parenthèses.
+Chaque onglet affiche en pied de page `Version <version> · nœud <local_node> (<Lieu>)` (format du propriétaire, 2026-10-29 : « uniquement le nœud et la bonne version ») : `version` (numéro de release, ex. `1.6.1`, INV-164) vient de `/health` du nœud qui sert la page, `local_node` et `local_location` de `/api/cluster` (public, lieu au format INV-161). Version absente (backend plus ancien) → `?` ; nœud inconnu → `?` ; lieu inconnu → pas de parenthèses.
 - **Pourquoi** : plan du 2026-10-29. Savoir d'un coup d'œil quelle version tourne et quel nœud répond, sans ouvrir l'onglet Cluster (réservé aux admins, INV-165).
 - **Couverture** : Playwright `test_frontend.py::TestFooter` (joué en local, hors CI).
 
@@ -996,9 +996,9 @@ Si `last_tick_at < now - 120s` → `/health` renvoie 503 avec `escalation_loop: 
 - **Couverture** : E2E `TestSmsAndHealth::test_health_endpoint_returns_503_if_loop_stalled` (5 runs consécutifs passés).
 
 ### INV-164 [M] ✅ /health donne la version déployée (2026-10-29)
-`/health` (réponse `200` comme `503`) renvoie `commit` = sha git complet de l'image et `version` = ses 7 premiers caractères, lus dans la variable d'environnement `GIT_SHA`. Sans `GIT_SHA` (build local, dev, tests) : `version = commit = "dev"`. L'image backend reçoit `GIT_SHA` au build (`ARG`/`ENV` du `backend/Dockerfile`, `build-args` de `cd-build.yml` = sha construit, le même que le tag `sha-<court>`). La version OpenAPI de FastAPI vaut la même `version`.
+`/health` (réponse `200` comme `503`) renvoie `commit` = sha git complet de l'image (variable `GIT_SHA`) et `version` = **numéro de release** lu dans `APP_VERSION` (ex. `1.6.1`). Sans `APP_VERSION` : `version` = 7 premiers caractères de `GIT_SHA` ; sans les deux (build local, dev, tests) : `version = commit = "dev"`. L'image backend reçoit les deux au build (`ARG`/`ENV` du `backend/Dockerfile`, `build-args` de `cd-build.yml` : `GIT_SHA` = sha construit, le même que le tag `sha-<court>` ; `APP_VERSION` = contenu du fichier `VERSION` à la racine). Le fichier `VERSION` est bumpé dans la PR de release, avant le tag : l'image construite au merge porte déjà le numéro, alors que le tag n'existe pas encore. La version OpenAPI de FastAPI vaut la même `version`.
 - **Pourquoi** : plan du propriétaire du 2026-10-29 : savoir quel commit tourne sur chaque nœud sans `docker inspect`.
-- **Couverture** : Integration `test_version_permissions_inv162_164.py` : `test_health_version_dev_without_git_sha`, `test_health_version_from_git_sha` (RED avant le correctif : champs absents).
+- **Couverture** : Integration `test_version_permissions_inv162_164.py` : `test_health_version_dev_without_git_sha`, `test_health_version_from_git_sha` (RED avant le correctif : champs absents), `test_health_version_is_release_number_from_app_version` (RED avant `APP_VERSION` : sha court renvoyé).
 
 ---
 

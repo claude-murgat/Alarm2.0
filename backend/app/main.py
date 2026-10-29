@@ -215,8 +215,9 @@ async def lifespan(app: FastAPI):
     quorum_task.cancel()
 
 
-# INV-164 : GIT_SHA (sha complet) pose au build de l'image (cd-build.yml) ; "dev" sinon.
-app = FastAPI(title="Alarme Murgat", version=(os.getenv("GIT_SHA") or "dev")[:7], lifespan=lifespan)
+# INV-164 : APP_VERSION (fichier VERSION) et GIT_SHA (sha complet) poses au build de l'image
+# (cd-build.yml) ; sans APP_VERSION -> sha court ; sans les deux -> "dev".
+app = FastAPI(title="Alarme Murgat", version=os.getenv("APP_VERSION") or (os.getenv("GIT_SHA") or "dev")[:7], lifespan=lifespan)
 
 # CORS : origines autorisées depuis la variable d'env ALLOWED_ORIGINS (comma-separated).
 # En dev, "*" est toléré mais déconseillé en production.
@@ -319,7 +320,7 @@ async def health():
         "role": role,
         "test_endpoints_enabled": ENABLE_TEST_ENDPOINTS,
         "secret_key_default": secret_key_default,
-        "version": commit[:7],
+        "version": os.getenv("APP_VERSION") or commit[:7],
         "commit": commit,
     }
 

@@ -643,12 +643,12 @@
             }
             PRIMARY_API = '';  // fallback
         }
-        // INV-166 : « Alarme Murgat · serveur <version> · nœud <nom> (<lieu>) ». /api/cluster est public ;
+        // INV-166 : « Version <version> · nœud <nom> (<lieu>) ». /api/cluster est public ;
         // sans Patroni il repond 503 mais donne encore local_node. Backend d'avant /health.version -> « ? ».
         async function loadFooter(h) {
             let c = {};
             try { c = await (await fetch(API + '/api/cluster')).json(); } catch (_) {}
-            document.getElementById('footer').textContent = `Alarme Murgat · serveur ${h.version || '?'} · nœud ${c.local_node || '?'}`
+            document.getElementById('footer').textContent = `Version ${h.version || '?'} · nœud ${c.local_node || '?'}`
                 + (c.local_location ? ` (${place(c.local_location)})` : '');
         }
         detectPrimary();

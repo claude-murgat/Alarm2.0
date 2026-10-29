@@ -1063,21 +1063,21 @@ class TestFooter:
         return handler
 
     def test_footer_shows_version_node_and_place(self, page: Page, primary_url):
-        page.route("**/health", self._health("abc1234"))
+        page.route("**/health", self._health("1.6.1"))
         page.route("**/api/cluster", self._cluster)
         _login(page, primary_url)
-        expect(page.locator("#footer")).to_have_text("Alarme Murgat · serveur abc1234 · nœud node2 (Izeron)", timeout=8000)
+        expect(page.locator("#footer")).to_have_text("Version 1.6.1 · nœud node2 (Izeron)", timeout=8000)
 
     def test_footer_without_version_shows_question_mark(self, page: Page, primary_url):
         """Backend d'avant /health.version : « ? »."""
         page.route("**/health", self._health(None))
         page.route("**/api/cluster", self._cluster)
         _login(page, primary_url)
-        expect(page.locator("#footer")).to_have_text("Alarme Murgat · serveur ? · nœud node2 (Izeron)", timeout=8000)
+        expect(page.locator("#footer")).to_have_text("Version ? · nœud node2 (Izeron)", timeout=8000)
 
     def test_footer_visible_for_a_non_admin_on_every_tab(self, page: Page, primary_url):
         _login(page, primary_url, "user1", "user123")
         for tab in page.locator(".tab:visible").all():
             tab.click()
             expect(page.locator("#footer")).to_be_visible()
-            expect(page.locator("#footer")).to_contain_text("Alarme Murgat · serveur ")
+            expect(page.locator("#footer")).to_contain_text("Version ")

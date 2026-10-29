@@ -3,8 +3,8 @@ Tier 2 integration : INV-162, INV-163, INV-164 (decisions du proprietaire du 202
 
 - INV-162 : resoudre une alarme (POST /api/alarms/{id}/resolve) est reserve aux admins.
 - INV-163 : GET /api/config/system (alert_email, chaine, etat modem...) exige un jeton d'admin.
-- INV-164 : /health renvoie la version deployee (`version` = sha court, `commit` = sha complet,
-  lus dans GIT_SHA ; "dev" pour les deux sans GIT_SHA).
+- INV-164 : /health renvoie la version deployee (`version` = APP_VERSION = numero de release du
+  fichier VERSION, sinon sha court ; `commit` = sha complet lu dans GIT_SHA ; "dev" sans les deux).
 """
 import pytest
 
@@ -87,16 +87,27 @@ def test_system_config_for_admin(client, admin_headers, system_config):
 # ── INV-164 ────────────────────────────────────────────────────────────────
 
 def test_health_version_dev_without_git_sha(client, monkeypatch):
-    """INV-164 : sans GIT_SHA -> version = commit = "dev" (200 ou 503, le corps les porte)."""
+    """INV-164 : sans GIT_SHA ni APP_VERSION -> version = commit = "dev" (200 ou 503, le corps les porte)."""
     monkeypatch.delenv("GIT_SHA", raising=False)
+    monkeypatch.delenv("APP_VERSION", raising=False)
     body = client.get("/health").json()
     assert body.get("version") == "dev", body
     assert body.get("commit") == "dev", body
 
 
 def test_health_version_from_git_sha(client, monkeypatch):
-    """INV-164 : GIT_SHA = sha complet -> version = 7 premiers caracteres, commit = sha complet."""
+    """INV-164 : GIT_SHA seul = sha complet -> version = 7 premiers caracteres, commit = sha complet."""
     monkeypatch.setenv("GIT_SHA", FULL_SHA)
+    monkeypatch.delenv("APP_VERSION", raising=False)
     body = client.get("/health").json()
     assert body.get("version") == FULL_SHA[:7], body
+    assert body.get("commit") == FULL_SHA, body
+
+
+def test_health_version_is_release_number_from_app_version(client, monkeypatch):
+    """INV-164 : APP_VERSION (fichier VERSION au build) -> version = numero de release, commit = sha."""
+    monkeypatch.setenv("GIT_SHA", FULL_SHA)
+    monkeypatch.setenv("APP_VERSION", "1.6.1")
+    body = client.get("/health").json()
+    assert body.get("version") == "1.6.1", body
     assert body.get("commit") == FULL_SHA, body

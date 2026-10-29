@@ -87,9 +87,6 @@ data class ModemStatusResponse(
     val gateways: List<ModemStatusResponse>? = null
 )
 
-/** INV-ANDROID-012 : GET /health. `version` (sha court) absent sur un ancien backend. */
-data class HealthResponse(val version: String? = null)
-
 /** INV-ANDROID-011 : GET /api/alarms/active/escalation (INV-136). `alarm` n'a que
  *  title/site/status/escalation_count/acknowledged_by_name parmi les champs d'AlarmResponse. */
 data class ActiveEscalationResponse(
