@@ -569,8 +569,32 @@ Toute écriture déclenchée depuis le web (POST/PUT/PATCH/DELETE via `api()` : 
 
 ### INV-150 [M] ✅ Web : utilisable sur téléphone (2026-10-22)
 À 375 px de large (téléphone), **aucun onglet** ne fait défiler la page horizontalement, même avec une alarme en cours. Tous les onglets restent atteignables (la barre d'onglets défile sur elle-même), l'en-tête (dont « Déconnexion ») tient dans l'écran, les formulaires passent à la ligne et les tableaux larges défilent à l'intérieur de leur carte. L'affichage sur ordinateur ne change pas.
-- **Pourquoi** : demande du propriétaire du 2026-10-22. Mesuré avant correction : page de 1 039 px de large sur un écran de 375 px (barre des 9 onglets, en-tête, tableaux, formulaires).
-- **Couverture** : Playwright `test_frontend.py::TestMobileLayout`.
+- **Complément du 2026-10-29** (plan validé par le propriétaire) :
+  - **Tablette** : à 768 et 1 024 px non plus, aucun onglet ne fait défiler la page (un contenu trop large défile dans sa carte).
+  - **Sous 700 px**, les tableaux de l'alarme en cours (tableau de bord), des Utilisateurs, des Alarmes, du Log et du Cluster deviennent des **cartes empilées** : une carte par ligne, le nom de la colonne devant chaque valeur. Le bouton « Résoudre » de l'alarme en cours est dans l'écran sans défilement horizontal.
+  - **Sous 700 px**, tout bouton fait au moins **44 px** de haut (« Déconnexion », petits boutons et boutons de la chaîne compris) ; champs et listes en **16 px** (pas de zoom automatique d'iOS). Les graphes sont moins hauts.
+  - Aucun champ n'a une largeur fixe qui dépasse l'écran ; les groupes champ + « Sauvegarder » passent à la ligne. Les deux colonnes de la chaîne d'escalade passent l'une sous l'autre.
+  - Chaque membre de la chaîne a des boutons **▲ / ▼** qui le montent ou le descendent (le glisser-déposer ne marche pas au doigt) ; comme le glisser-déposer (conservé), « Sauvegarder » enregistre l'ordre.
+  - La barre d'onglets montre qu'il reste des onglets à droite (bord estompé).
+- **Pourquoi** : demande du propriétaire du 2026-10-22. Mesuré avant correction : page de 1 039 px de large sur un écran de 375 px (barre des 9 onglets, en-tête, tableaux, formulaires). Le 2026-10-29 : à 768 px, les onglets Alarmes (784 px) et Log (900 px) débordaient ; à 375 px, « Résoudre » était à x = 543 px, au bout d'un tableau à faire défiler.
+- **Couverture** : Playwright `test_frontend.py::TestMobileLayout` (375, 768, 1 024 px ; « Résoudre » dans l'écran), `::TestEscalationDragDrop::test_move_down_button_reorders_chain_for_save` (joués en local, hors CI).
+
+### INV-165 [H] ✅ Web : un non-admin ne voit que le suivi, pas l'administration (2026-10-29)
+Après connexion, le web lit `user.is_admin` dans la réponse de `/api/auth/login`. Pour un utilisateur **non admin** :
+- **Onglets visibles** : Tableau de bord, Escalade (lecture seule : schéma d'escalade en cours, INV-136), Alarmes, Statistiques.
+- **Onglets masqués** : Utilisateurs, Tests, Log, Disponibilité, Cluster.
+- **Actions masquées** : configuration de l'escalade (chaîne, délai, email d'alerte), « Résoudre », « Envoyer une alarme », et tout ce que portent les onglets masqués (« Supprimer », « Réinitialiser », actions de l'onglet Tests).
+- **Aucun GET réservé aux admins** n'est appelé pour lui (`/api/config/system`, `/api/audit/`, `/api/stats/connectivity`), ni surveillé par le WebSocket live (INV-135) : pas de `403` dans la console. Il reste connecté après le chargement initial.
+- **`401` seul déconnecte** (jeton expiré ou invalide). Un `403` (droit manquant) ne déconnecte pas : l'action échoue avec « Réservé aux administrateurs » (snackbar rouge pour une écriture, INV-139).
+- Un **admin** voit tout, comme avant. Si la session précédente avait laissé un onglet admin ouvert, un non-admin revient au tableau de bord.
+- **Masquer n'est pas une sécurité** : chaque route admin refuse elle-même un non-admin (`403`) côté serveur (`/api/alarms/{id}/resolve`, `GET /api/config/system`, etc., PR backend #274 du même plan).
+- **Pourquoi** : plan validé par le propriétaire le 2026-10-29. Les opérateurs d'astreinte doivent pouvoir suivre une alarme depuis le web sans voir ni toucher la configuration.
+- **Couverture** : Playwright `test_frontend.py::TestRoleBasedUI` (joué en local, hors CI).
+
+### INV-166 [L] ✅ Web : pied de page avec la version du serveur et le nœud (2026-10-29)
+Chaque onglet affiche en pied de page `Alarme Murgat · serveur <version> · nœud <local_node> (<Lieu>)` : `version` (sha court) vient de `/health` du nœud qui sert la page, `local_node` et `local_location` de `/api/cluster` (public, lieu au format INV-161). Version absente (backend plus ancien) → `?` ; nœud inconnu → `?` ; lieu inconnu → pas de parenthèses.
+- **Pourquoi** : plan du 2026-10-29. Savoir d'un coup d'œil quelle version tourne et quel nœud répond, sans ouvrir l'onglet Cluster (réservé aux admins, INV-165).
+- **Couverture** : Playwright `test_frontend.py::TestFooter` (joué en local, hors CI).
 
 ### INV-124 [H] ✅ Corps du SMS d'alarme : instruction d'acquittement + lien supervision
 Le corps du SMS d'alarme métier (escalade, `_enqueue_sms_for_user`) doit (a) instruire

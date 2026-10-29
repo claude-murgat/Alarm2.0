@@ -120,6 +120,18 @@
         /* Prod : routes /api/test/* coupees (INV-076) -> boutons de simulation masques */
         body.prod-mode .test-only { display: none; }
         body:not(.prod-mode) .prod-note, body:not(.prod-mode) .prod-only { display: none; }
+        /* INV-165 : un non-admin ne voit ni les onglets ni les actions d'administration */
+        body.non-admin .admin-only { display: none !important; }
+        /* INV-166 : version du serveur et noeud qui repond */
+        .footer { max-width: 1200px; margin: 0 auto; padding: 8px 24px 24px; color: #64748b; font-size: 0.8rem; text-align: center; overflow-wrap: anywhere; }
+        .chart { height: 300px; }
+        .chart.sm { height: 250px; }
+        .inline-save { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+        .esc-ctrl { display: flex; gap: 2px; flex: none; }
+        .esc-ctrl button { background: transparent; color: #94a3b8; padding: 2px 8px; font-size: 1rem; }
+        .esc-ctrl button:hover { color: #e2e8f0; }
+        .esc-ctrl .esc-remove { color: #ef4444; font-size: 1.2em; }
+        .no-phone-badge, .test-badge { white-space: nowrap; }
         /* INV-129 : signal 4G du modem gateway (4 barres, animees) ; INV-158 : un par passerelle */
         .modem-signals { display: inline-flex; align-items: flex-end; gap: 10px; }
         .modem-signal { display: inline-flex; align-items: flex-end; gap: 2px; height: 20px; cursor: help; }
@@ -152,17 +164,36 @@
         /* INV-150 : telephone. Sans effet a largeur ordinateur (tout y tient deja). */
         .tabs { overflow-x: auto; scrollbar-width: none; }
         .tab { flex: none; white-space: nowrap; }
+        /* Indice de defilement : bord droit estompe tant qu'il reste des onglets a droite (tabsHint) */
+        .tabs.more { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 56px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 56px), transparent); }
         .form-row { flex-wrap: wrap; }
+        /* Tablette : un contenu trop large defile dans sa carte, jamais la page */
+        @media (max-width: 1024px) {
+            .card { overflow-x: auto; }
+        }
         @media (max-width: 700px) {
             .header { flex-wrap: wrap; gap: 8px; padding: 12px 16px; }
             .header .status { flex-wrap: wrap; align-items: center; gap: 10px; }
             .tab { padding: 10px 14px; }
             .content { padding: 12px; }
+            .footer { padding: 4px 16px 16px; }
             .card { padding: 14px; }
             table { display: block; overflow-x: auto; }
             .badge { white-space: nowrap; }
             .form-group, input, select { min-width: 0; max-width: 100%; }
             .login-box { width: calc(100% - 32px); padding: 24px; }
+            /* Cibles tactiles 44 px ; 16 px evite le zoom automatique d'iOS sur les champs */
+            button { min-height: 44px; }
+            .esc-ctrl button { min-width: 44px; }
+            input, select { font-size: 16px; }
+            .chart, .chart.sm { height: 200px; }
+            /* Tableaux en cartes empilees : une ligne = une carte, libelle de colonne devant chaque valeur */
+            table.cards, table.cards tbody, table.cards tr, table.cards td { display: block; }
+            table.cards thead { display: none; }
+            table.cards tr { border: 1px solid #334155; border-radius: 6px; padding: 4px 10px; margin-bottom: 8px; }
+            table.cards td { border: none; padding: 5px 0; max-width: none !important; overflow-wrap: anywhere; }
+            table.cards td[data-label]::before { content: attr(data-label); display: inline-block; min-width: 8em; margin-right: 8px;
+                color: #94a3b8; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; }
         }
     </style>
 </head>
@@ -201,12 +232,12 @@
         <div class="tab active" data-tab="dashboard">Tableau de bord</div>
         <div class="tab" data-tab="escalation">Escalade</div>
         <div class="tab" data-tab="stats">Statistiques</div>
-        <div class="tab" data-tab="users">Utilisateurs</div>
+        <div class="tab admin-only" data-tab="users">Utilisateurs</div>
         <div class="tab" data-tab="alarms">Alarmes</div>
-        <div class="tab" data-tab="tests">Tests</div>
-        <div class="tab" data-tab="audit">Log</div>
-        <div class="tab" data-tab="connectivity">Disponibilité</div>
-        <div class="tab" data-tab="cluster">Cluster</div>
+        <div class="tab admin-only" data-tab="tests">Tests</div>
+        <div class="tab admin-only" data-tab="audit">Log</div>
+        <div class="tab admin-only" data-tab="connectivity">Disponibilité</div>
+        <div class="tab admin-only" data-tab="cluster">Cluster</div>
     </div>
 
     <div class="content">
@@ -215,7 +246,7 @@
             <div class="grid" id="statsGrid"></div>
             <div class="card">
                 <h3>Alarme en cours</h3>
-                <table><thead><tr><th>ID</th><th>Titre</th><th>Statut</th><th>Assignée à</th><th>Acquittée par</th><th>Créée</th><th>Actions</th></tr></thead>
+                <table class="cards"><thead><tr><th>ID</th><th>Titre</th><th>Statut</th><th>Assignée à</th><th>Acquittée par</th><th>Créée</th><th class="admin-only">Actions</th></tr></thead>
                 <tbody id="activeAlarmsTable"></tbody></table>
             </div>
             <div class="card">
@@ -226,7 +257,7 @@
         </div>
 
         <!-- Utilisateurs -->
-        <div class="panel" id="users">
+        <div class="panel admin-only" id="users">
             <div class="card">
                 <h3>Ajouter un utilisateur</h3>
                 <div class="form-row">
@@ -240,18 +271,18 @@
             </div>
             <div class="card">
                 <h3>Utilisateurs</h3>
-                <table><thead><tr><th>ID</th><th>Nom</th><th>Admin</th><th>Test</th><th>Statut</th><th>Téléphone</th><th>Actions</th></tr></thead>
+                <table class="cards"><thead><tr><th>ID</th><th>Nom</th><th>Admin</th><th>Test</th><th>Statut</th><th>Téléphone</th><th>Actions</th></tr></thead>
                 <tbody id="usersTable"></tbody></table>
             </div>
         </div>
 
         <!-- Alarmes -->
         <div class="panel" id="alarms">
-            <div class="card">
+            <div class="card admin-only">
                 <h3>Envoyer une alarme</h3>
                 <div class="form-row">
                     <div class="form-group"><label>Titre</label><input id="alarmTitle" placeholder="Titre de l'alarme"></div>
-                    <div class="form-group"><label>Message</label><input id="alarmMessage" placeholder="Description" style="width:300px"></div>
+                    <div class="form-group"><label>Message</label><input id="alarmMessage" placeholder="Description" style="width:300px;max-width:100%"></div>
                     <div class="form-group"><label>Site</label><select id="alarmSite"></select></div>
 
                     <button class="btn-danger" onclick="sendAlarm()">Envoyer</button>
@@ -259,7 +290,7 @@
             </div>
             <div class="card">
                 <h3>Toutes les alarmes</h3>
-                <table><thead><tr><th>ID</th><th>Titre</th><th>Message</th><th>Statut</th><th>Assignée</th><th>Acquittée par</th><th>Créée</th><th>Actions</th></tr></thead>
+                <table class="cards"><thead><tr><th>ID</th><th>Titre</th><th>Message</th><th>Statut</th><th>Assignée</th><th>Acquittée par</th><th>Créée</th><th class="admin-only">Actions</th></tr></thead>
                 <tbody id="allAlarmsTable"></tbody></table>
             </div>
         </div>
@@ -275,36 +306,40 @@
                 <div id="escLiveBanner"></div>
                 <div id="escLiveLanes"></div>
             </div>
-            <div class="card">
+            <div class="card admin-only">
                 <h3>Configuration</h3>
                 <div class="form-row" style="align-items:center;gap:24px;flex-wrap:wrap">
                     <div class="form-group">
                         <label>Delai entre chaque escalade (min)</label>
-                        <input id="escalationDelay" type="number" min="1" max="60" step="1" value="15" style="width:80px">
-                        <button class="btn-primary" onclick="saveDelay()" style="margin-left:8px">Sauvegarder</button>
+                        <div class="inline-save">
+                            <input id="escalationDelay" type="number" min="1" max="60" step="1" value="15" style="width:80px">
+                            <button class="btn-primary" onclick="saveDelay()">Sauvegarder</button>
+                        </div>
                     </div>
                     <div class="form-group">
                         <label>Email d'alerte (direction technique)</label>
-                        <input id="alertEmail" type="email" placeholder="email@exemple.com" style="width:280px">
-                        <button class="btn-primary" onclick="saveAlertEmail()" style="margin-left:8px">Sauvegarder</button>
+                        <div class="inline-save">
+                            <input id="alertEmail" type="email" placeholder="email@exemple.com" style="width:280px;max-width:100%">
+                            <button class="btn-primary" onclick="saveAlertEmail()">Sauvegarder</button>
+                        </div>
                     </div>
                 </div>
             </div>
-            <div class="card">
+            <div class="card admin-only">
                 <h3>Chaine d'escalade</h3>
-                <div style="display:flex;gap:24px;margin-bottom:16px">
-                    <div style="flex:1">
+                <div style="display:flex;flex-wrap:wrap;gap:24px;margin-bottom:16px">
+                    <div style="flex:1 1 280px;min-width:0">
                         <h4 style="color:#94a3b8;margin-bottom:8px">Utilisateurs disponibles</h4>
                         <div id="availableUsers" style="min-height:60px;background:#1a1a2e;border:2px dashed #334155;border-radius:8px;padding:8px">
                         </div>
                     </div>
-                    <div style="flex:1">
+                    <div style="flex:1 1 280px;min-width:0">
                         <h4 style="color:#94a3b8;margin-bottom:8px">Chaine d'escalade (ordre)</h4>
                         <div id="escalationChain" style="min-height:60px;background:#1a1a2e;border:2px solid #22c55e44;border-radius:8px;padding:8px">
                         </div>
                     </div>
                 </div>
-                <div style="display:flex;gap:8px">
+                <div style="display:flex;flex-wrap:wrap;gap:8px">
                     <button class="btn-primary" id="saveEscalation" onclick="saveEscalationChain()">Sauvegarder</button>
                     <button class="btn-warning" id="cancelEscalation" onclick="cancelEscalationEdit()">Annuler</button>
                 </div>
@@ -335,12 +370,12 @@
             </div>
             <div class="card">
                 <h3 id="weeklyChartTitle">Alarmes par semaine</h3>
-                <div style="height:300px"><canvas id="weeklyChart"></canvas></div>
+                <div class="chart"><canvas id="weeklyChart"></canvas></div>
             </div>
             <div style="display:flex;gap:16px;flex-wrap:wrap">
                 <div class="card" style="flex:1;min-width:300px">
                     <h3>Repartition escalade</h3>
-                    <div style="height:250px;display:flex;justify-content:center"><canvas id="escalationChart"></canvas></div>
+                    <div class="chart sm" style="display:flex;justify-content:center"><canvas id="escalationChart"></canvas></div>
                 </div>
                 <div class="card" style="flex:1;min-width:300px">
                     <h3>Top alarmes recurrentes</h3>
@@ -351,7 +386,7 @@
         </div>
 
         <!-- Disponibilite operateurs (INV-056) -->
-        <div class="panel" id="connectivity">
+        <div class="panel admin-only" id="connectivity">
             <div class="card">
                 <h3>Disponibilité des opérateurs</h3>
                 <p style="color:#94a3b8;font-size:0.9rem;margin-bottom:16px">
@@ -386,7 +421,7 @@
             </div>
             <div class="card" id="connectivityHistoryCard" style="display:none">
                 <h3 id="connectivityHistoryTitle">Historique détaillé</h3>
-                <div style="height:300px"><canvas id="connectivityChart"></canvas></div>
+                <div class="chart"><canvas id="connectivityChart"></canvas></div>
                 <table style="margin-top:16px">
                     <thead><tr><th>Horodatage</th><th>Événement</th></tr></thead>
                     <tbody id="connectivityHistoryTable"></tbody>
@@ -395,7 +430,7 @@
         </div>
 
         <!-- Tests -->
-        <div class="panel" id="tests">
+        <div class="panel admin-only" id="tests">
             <div class="card">
                 <h3>Contrôles de test</h3>
                 <div class="test-buttons">
@@ -422,7 +457,7 @@
         </div>
 
         <!-- Cluster / Quorum -->
-        <div class="panel" id="audit">
+        <div class="panel admin-only" id="audit">
             <div class="card">
                 <h3>Filtres</h3>
                 <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:end;">
@@ -460,7 +495,7 @@
             </div>
             <div class="card">
                 <h3>Evenements (<span id="auditTotal">0</span>)</h3>
-                <table>
+                <table class="cards">
                     <thead>
                         <tr>
                             <th>Date</th>
@@ -481,7 +516,7 @@
             </div>
         </div>
 
-        <div class="panel" id="cluster">
+        <div class="panel admin-only" id="cluster">
             <div class="card">
                 <h3>Quorum</h3>
                 <div id="quorumBanner" style="padding:16px;border-radius:8px;font-size:1.2rem;font-weight:bold;text-align:center;margin-bottom:16px;background:#22c55e33;color:#22c55e;">
@@ -496,13 +531,15 @@
             </div>
             <div class="card">
                 <h3>Membres du cluster</h3>
-                <table>
+                <table class="cards">
                     <thead><tr><th>Nom</th><th>Lieu</th><th>Role</th><th>Etat</th><th>Host</th><th>Port</th><th>Timeline</th><th>Lag</th></tr></thead>
                     <tbody id="clusterMembers"></tbody>
                 </table>
             </div>
         </div>
     </div>
+
+    <div class="footer" id="footer">Alarme Murgat</div>
 
     <div id="snackbar" role="status" aria-live="polite"></div>
 
@@ -539,6 +576,7 @@
                 sessionStorage.setItem('currentUserInfo', JSON.stringify(currentUserInfo));
                 document.getElementById('loginOverlay').classList.add('hidden');
                 document.getElementById('currentUserName').textContent = currentUserInfo.name;
+                applyRole();
                 loadAll();
             } catch (e) {
                 errEl.textContent = 'Serveur injoignable';
@@ -557,6 +595,25 @@
             if (liveWs) liveWs.close();
         }
 
+        // INV-165 : interface selon le role. Masquer n'est pas une securite : le serveur refuse (403)
+        // chaque route admin. Mais un GET admin en 403 deconnecterait le non-admin (apiCall).
+        const isAdmin = () => !!currentUserInfo?.is_admin;
+        function applyRole() {
+            document.body.classList.toggle('non-admin', !isAdmin());
+            // Onglet admin laisse ouvert par la session precedente -> retour au tableau de bord
+            if (!isAdmin() && document.querySelector('.tab.active.admin-only')) document.querySelector('.tab').click();
+            tabsHint();
+        }
+
+        // Barre d'onglets : bord estompe tant qu'il reste des onglets caches a droite
+        const tabsEl = document.querySelector('.tabs');
+        function tabsHint() {
+            tabsEl.classList.toggle('more', tabsEl.scrollLeft + tabsEl.clientWidth < tabsEl.scrollWidth - 1);
+        }
+        tabsEl.addEventListener('scroll', tabsHint);
+        window.addEventListener('resize', tabsHint);
+        tabsHint();
+
         // Soumettre le login avec Entree
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !document.getElementById('loginOverlay').classList.contains('hidden')) {
@@ -571,6 +628,7 @@
                 const r = await fetch('/health');
                 const h = await r.json();
                 document.body.classList.toggle('prod-mode', h.test_endpoints_enabled === false);
+                loadFooter(h);
                 if (h.role === 'primary') { PRIMARY_API = ''; return; }
             } catch(e) {}
             // Sinon chercher parmi les backends connus
@@ -584,6 +642,14 @@
                 } catch(e) {}
             }
             PRIMARY_API = '';  // fallback
+        }
+        // INV-166 : « Alarme Murgat · serveur <version> · nœud <nom> (<lieu>) ». /api/cluster est public ;
+        // sans Patroni il repond 503 mais donne encore local_node. Backend d'avant /health.version -> « ? ».
+        async function loadFooter(h) {
+            let c = {};
+            try { c = await (await fetch(API + '/api/cluster')).json(); } catch (_) {}
+            document.getElementById('footer').textContent = `Alarme Murgat · serveur ${h.version || '?'} · nœud ${c.local_node || '?'}`
+                + (c.local_location ? ` (${place(c.local_location)})` : '');
         }
         detectPrimary();
 
@@ -633,10 +699,12 @@
                 ...opts,
                 headers: authHeaders,
             });
-            if (res.status === 401 || res.status === 403) {
+            if (res.status === 401) {
                 doLogout();
                 throw new Error('Session expiree');
             }
+            // INV-165 : 403 = droit manquant, pas session finie -> message (snackbar des ecritures), pas de deconnexion
+            if (res.status === 403) throw new Error('Réservé aux administrateurs');
             if (!res.ok) {
                 // Si c'est une erreur write, re-detecter le primary et retenter
                 if (res.status === 500 && isWrite) {
@@ -759,16 +827,16 @@
             if ([...document.querySelectorAll('#usersTable input.user-phone')].some(isEditing)) return;
             // Assignation alarme supprimee (toujours auto-escalade)
             document.getElementById('usersTable').innerHTML = users.map(u => `
-                <tr><td>${u.id}</td><td>${u.name}</td>
-                <td>${u.is_admin ? 'Oui' : 'Non'}</td>
-                <td class="user-test">${u.is_test ? 'Oui' : 'Non'}</td>
-                <td>${presenceBadge(u, oncall)}</td>
-                <td>
+                <tr><td data-label="ID">${u.id}</td><td data-label="Nom">${u.name}</td>
+                <td data-label="Admin">${u.is_admin ? 'Oui' : 'Non'}</td>
+                <td data-label="Test" class="user-test">${u.is_test ? 'Oui' : 'Non'}</td>
+                <td data-label="Statut">${presenceBadge(u, oncall)}</td>
+                <td data-label="Téléphone">
                     <input class="user-phone" id="phone_${u.id}" type="tel" value="${u.phone_number || ''}" placeholder="+33612345678" style="width:130px">
                     <button class="btn-sm save-phone-btn" onclick="savePhone(${u.id})" style="margin-left:4px">Enregistrer</button>
                     <div class="phone-error" id="phoneError_${u.id}" style="display:none;color:#ef4444;font-size:12px;margin-top:2px">Numéro invalide (ex: +33612345678)</div>
                 </td>
-                <td><button class="btn-danger btn-sm" onclick="deleteUser(${u.id})">Supprimer</button></td></tr>`).join('');
+                <td data-label="Actions"><button class="btn-danger btn-sm" onclick="deleteUser(${u.id})">Supprimer</button></td></tr>`).join('');
         }
 
         async function savePhone(id) {
@@ -792,6 +860,8 @@
         // INV-155 : le site devant le titre (alarme d'astreinte : pas de site)
         const siteName = s => s.charAt(0).toUpperCase() + s.slice(1);
         const siteTitle = a => a.site ? `${siteName(a.site)} · ${a.title}` : a.title;
+        // INV-161 : lieu d'un noeud (izeron/beaufort/ovh)
+        const place = l => l ? ({ ovh: 'OVH' }[l] || l.charAt(0).toUpperCase() + l.slice(1)) : '-';
 
         async function loadSites() {
             const sel = document.getElementById('alarmSite');
@@ -804,20 +874,20 @@
             const alarms = await api('/api/alarms/');
             const active = alarms.filter(a => ['active', 'escalated'].includes(a.status));
             document.getElementById('activeAlarmsTable').innerHTML = active.map(a => `
-                <tr><td>${a.id}</td><td>${siteTitle(a)}</td>
-                <td><span class="badge ${a.status}">${statusLabels[a.status] || a.status}</span></td>
-                <td>${getUserName(a.assigned_user_id)}</td>
-                <td>${a.acknowledged_by_name || '-'}</td>
-                <td>${timeAgo(a.created_at)}</td>
-                <td><button class="btn-success btn-sm" onclick="resolveAlarm(${a.id})">Résoudre</button></td></tr>`).join('') || '<tr><td colspan="7" style="text-align:center;color:#94a3b8">Aucune alarme active</td></tr>';
+                <tr><td data-label="ID">${a.id}</td><td data-label="Titre">${siteTitle(a)}</td>
+                <td data-label="Statut"><span class="badge ${a.status}">${statusLabels[a.status] || a.status}</span></td>
+                <td data-label="Assignée à">${getUserName(a.assigned_user_id)}</td>
+                <td data-label="Acquittée par">${a.acknowledged_by_name || '-'}</td>
+                <td data-label="Créée">${timeAgo(a.created_at)}</td>
+                <td data-label="Actions" class="admin-only"><button class="btn-success btn-sm" onclick="resolveAlarm(${a.id})">Résoudre</button></td></tr>`).join('') || '<tr><td colspan="7" style="text-align:center;color:#94a3b8">Aucune alarme active</td></tr>';
 
             document.getElementById('allAlarmsTable').innerHTML = alarms.map(a => `
-                <tr><td>${a.id}</td><td>${siteTitle(a)}</td><td>${a.message}</td>
-                <td><span class="badge ${a.status}">${statusLabels[a.status] || a.status}</span></td>
-                <td>${getUserName(a.assigned_user_id)}</td>
-                <td>${a.acknowledged_by_name || '-'}</td>
-                <td>${timeAgo(a.created_at)}</td>
-                <td>${a.status !== 'resolved' ? `<button class="btn-success btn-sm" onclick="resolveAlarm(${a.id})">Résoudre</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="8" style="text-align:center;color:#94a3b8">Aucune alarme</td></tr>';
+                <tr><td data-label="ID">${a.id}</td><td data-label="Titre">${siteTitle(a)}</td><td data-label="Message">${a.message}</td>
+                <td data-label="Statut"><span class="badge ${a.status}">${statusLabels[a.status] || a.status}</span></td>
+                <td data-label="Assignée">${getUserName(a.assigned_user_id)}</td>
+                <td data-label="Acquittée par">${a.acknowledged_by_name || '-'}</td>
+                <td data-label="Créée">${timeAgo(a.created_at)}</td>
+                <td data-label="Actions" class="admin-only">${a.status !== 'resolved' ? `<button class="btn-success btn-sm" onclick="resolveAlarm(${a.id})">Résoudre</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="8" style="text-align:center;color:#94a3b8">Aucune alarme</td></tr>';
         }
 
         async function loadDevices() {
@@ -912,7 +982,7 @@
                     <div class="esc-item" draggable="true" data-user-id="${e.user_id}"
                          style="padding:8px 12px;margin:4px 0;background:#2a2a3e;border-radius:6px;cursor:grab;display:flex;justify-content:space-between;align-items:center;color:#e2e8f0">
                         <span><strong>${i+1}.</strong> ${getUserName(e.user_id)}${noPhoneBadge(e.user_id)}${testBadge(e.user_id)}</span>
-                        <span class="esc-remove" onclick="removeFromChain(${e.user_id})" style="cursor:pointer;color:#ef4444;font-size:1.2em;padding:0 4px">&times;</span>
+                        ${chainControls(e.user_id)}
                     </div>
                 `).join('') || '<div style="text-align:center;color:#64748b;padding:16px">Aucun utilisateur</div>';
 
@@ -976,16 +1046,7 @@
                         draggedEl.style.justifyContent = 'space-between';
                         draggedEl.style.alignItems = 'center';
                         // Nettoyer et reconstruire (evite le doublon de nom)
-                        draggedEl.innerHTML = '';
-                        const nameSpan = document.createElement('span');
-                        nameSpan.innerHTML = `<strong>.</strong> ${getUserName(uid)}`;
-                        draggedEl.appendChild(nameSpan);
-                        const cross = document.createElement('span');
-                        cross.className = 'esc-remove';
-                        cross.style.cssText = 'cursor:pointer;color:#ef4444;font-size:1.2em;padding:0 4px';
-                        cross.innerHTML = '&times;';
-                        cross.onclick = () => removeFromChain(uid);
-                        draggedEl.appendChild(cross);
+                        draggedEl.innerHTML = `<span><strong>.</strong> ${getUserName(uid)}</span>${chainControls(uid)}`;
                     }
                     // Si depose dans les disponibles, reconstruire simple
                     if (container.id === 'availableUsers') {
@@ -1022,6 +1083,22 @@
                 }
             });
             highlightChanges();
+        }
+
+        // Monter / descendre / retirer un membre. Le drag & drop HTML5 ne marche pas au doigt (telephone).
+        const chainControls = uid => `<div class="esc-ctrl">
+            <button class="esc-move" onclick="moveInChain(${uid}, -1)" aria-label="Monter" title="Monter">&#x25B2;</button>
+            <button class="esc-move" onclick="moveInChain(${uid}, 1)" aria-label="Descendre" title="Descendre">&#x25BC;</button>
+            <button class="esc-remove" onclick="removeFromChain(${uid})" aria-label="Retirer" title="Retirer">&times;</button></div>`;
+
+        // Comme le drag & drop : change l'ordre affiche, « Sauvegarder » l'enregistre.
+        function moveInChain(userId, dir) {
+            const item = document.querySelector(`#escalationChain [data-user-id="${userId}"]`);
+            const other = dir < 0 ? item?.previousElementSibling : item?.nextElementSibling;
+            if (!other) return;
+            editingEscalation = true;
+            dir < 0 ? other.before(item) : other.after(item);
+            updateChainNumbers();
         }
 
         function removeFromChain(userId) {
@@ -1069,6 +1146,7 @@
         }
 
         async function loadAlertEmail() {
+            if (!isAdmin()) return;  // INV-165 : GET /api/config/system reserve aux admins
             try {
                 const config = await api('/api/config/system');
                 const email = config.alert_email || '';
@@ -1238,8 +1316,6 @@
                 }
                 document.getElementById('clusterTotal').textContent = q.total || '-';
                 document.getElementById('clusterHealthy').textContent = q.healthy || '-';
-                // INV-161 : lieu du noeud (izeron/beaufort/ovh)
-                const place = l => l ? ({ ovh: 'OVH' }[l] || l.charAt(0).toUpperCase() + l.slice(1)) : '-';
                 document.getElementById('clusterLocalNode').textContent =
                     (data.local_node || '-') + (data.local_location ? ` (${place(data.local_location)})` : '');
                 document.getElementById('clusterLocalRole').textContent = data.local_role || '-';
@@ -1251,14 +1327,14 @@
                     const color = isLeader ? '#22c55e' : isDown ? '#ef4444' : '#94a3b8';
                     const lag = m.lag != null ? m.lag : '-';
                     return `<tr style="color:${color}">
-                        <td><strong>${m.name || '-'}</strong></td>
-                        <td>${place(m.location)}</td>
-                        <td><span class="badge" style="background:${isLeader ? '#22c55e33' : '#33415533'};color:${color}">${m.role || '-'}</span></td>
-                        <td>${m.state || '-'}</td>
-                        <td>${m.host || '-'}</td>
-                        <td>${m.port || '-'}</td>
-                        <td>${m.timeline || '-'}</td>
-                        <td>${lag}</td>
+                        <td data-label="Nom"><strong>${m.name || '-'}</strong></td>
+                        <td data-label="Lieu">${place(m.location)}</td>
+                        <td data-label="Role"><span class="badge" style="background:${isLeader ? '#22c55e33' : '#33415533'};color:${color}">${m.role || '-'}</span></td>
+                        <td data-label="Etat">${m.state || '-'}</td>
+                        <td data-label="Host">${m.host || '-'}</td>
+                        <td data-label="Port">${m.port || '-'}</td>
+                        <td data-label="Timeline">${m.timeline || '-'}</td>
+                        <td data-label="Lag">${lag}</td>
                     </tr>`;
                 }).join('');
             } catch (e) {
@@ -1307,12 +1383,12 @@
                     const det = ev.details ? JSON.stringify(ev.details) : '';
                     const corrShort = ev.correlation_id ? ev.correlation_id.substring(0, 8) + '...' : '-';
                     return `<tr>
-                        <td style="white-space:nowrap">${ts}</td>
-                        <td><span class="badge" style="background:${color}33;color:${color}">${ev.event_type}</span></td>
-                        <td>${ev.user_id || '-'}</td>
-                        <td>${ev.alarm_id || '-'}</td>
-                        <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${det.replace(/"/g,'&quot;')}">${det || '-'}</td>
-                        <td title="${ev.correlation_id || ''}">${corrShort}</td>
+                        <td data-label="Date" style="white-space:nowrap">${ts}</td>
+                        <td data-label="Type"><span class="badge" style="background:${color}33;color:${color}">${ev.event_type}</span></td>
+                        <td data-label="Utilisateur">${ev.user_id || '-'}</td>
+                        <td data-label="Alarme">${ev.alarm_id || '-'}</td>
+                        <td data-label="Details" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${det.replace(/"/g,'&quot;')}">${det || '-'}</td>
+                        <td data-label="Correlation ID" title="${ev.correlation_id || ''}">${corrShort}</td>
                     </tr>`;
                 }).join('');
             } catch (err) { console.error('Audit load error', err); }
@@ -1564,6 +1640,7 @@
             '/api/cluster': [loadCluster],
             '/api/system/modem-status': [loadModemSignal],
         };
+        const ADMIN_ONLY_GETS = ['/api/config/system'];  // INV-165 : 403 pour un non-admin
         let liveWs = null, liveRetry = 0, livePending = new Set(), liveFlush = null;
 
         function connectLive() {
@@ -1571,7 +1648,7 @@
             const ws = liveWs = new WebSocket((API || location.origin).replace(/^http/, 'ws') + '/api/ws');
             ws.onopen = () => {
                 liveRetry = 0;
-                ws.send(JSON.stringify({ token: authToken, paths: Object.keys(LIVE_WATCH) }));
+                ws.send(JSON.stringify({ token: authToken, paths: Object.keys(LIVE_WATCH).filter(p => isAdmin() || !ADMIN_ONLY_GETS.includes(p)) }));
             };
             ws.onmessage = (ev) => {
                 (LIVE_WATCH[JSON.parse(ev.data).changed] || []).forEach(fn => livePending.add(fn));
@@ -1721,6 +1798,7 @@
         if (authToken && currentUserInfo) {
             document.getElementById('loginOverlay').classList.add('hidden');
             document.getElementById('currentUserName').textContent = currentUserInfo.name;
+            applyRole();
             loadAll();
         }
     </script>
