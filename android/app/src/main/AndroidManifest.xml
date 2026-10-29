@@ -41,6 +41,20 @@
             android:screenOrientation="portrait"
             android:configChanges="orientation|screenSize" />
 
+        <!-- INV-ANDROID-011 : ecrans du menu (les 3 derniers : admin) -->
+        <activity android:name=".AlarmsActivity" android:exported="false"
+            android:screenOrientation="portrait" android:configChanges="orientation|screenSize" />
+        <activity android:name=".EscalationActivity" android:exported="false"
+            android:screenOrientation="portrait" android:configChanges="orientation|screenSize" />
+        <activity android:name=".ModemsActivity" android:exported="false"
+            android:screenOrientation="portrait" android:configChanges="orientation|screenSize" />
+        <activity android:name=".TeamActivity" android:exported="false"
+            android:screenOrientation="portrait" android:configChanges="orientation|screenSize" />
+        <activity android:name=".ChainActivity" android:exported="false"
+            android:screenOrientation="portrait" android:configChanges="orientation|screenSize" />
+        <activity android:name=".SupervisionActivity" android:exported="false"
+            android:screenOrientation="portrait" android:configChanges="orientation|screenSize" />
+
         <activity
             android:name=".AlarmActivity"
             android:exported="false"

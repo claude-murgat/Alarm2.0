@@ -476,11 +476,55 @@
                 android:layout_marginTop="4dp" />
         </LinearLayout>
 
-        <!-- Spacer -->
-        <View
+        <!-- INV-ANDROID-011 : entrees du menu (defile si l'ecran est petit) -->
+        <ScrollView
             android:layout_width="match_parent"
             android:layout_height="0dp"
-            android:layout_weight="1" />
+            android:layout_weight="1">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingTop="8dp">
+
+                <TextView android:id="@+id/drawerHome" style="@style/DrawerItem"
+                    android:text="Tableau de bord" android:drawableStart="@android:drawable/ic_menu_view" />
+                <TextView android:id="@+id/drawerAlarms" style="@style/DrawerItem"
+                    android:text="Alarmes" android:drawableStart="@android:drawable/ic_menu_recent_history" />
+                <TextView android:id="@+id/drawerEscalation" style="@style/DrawerItem"
+                    android:text="Escalade" android:drawableStart="@android:drawable/ic_menu_call" />
+                <TextView android:id="@+id/drawerModems" style="@style/DrawerItem"
+                    android:text="Sites et modems" android:drawableStart="@android:drawable/ic_menu_mapmode" />
+
+                <!-- Entrees admin : GONE pour les autres (le serveur reste le vrai garde, 403) -->
+                <LinearLayout
+                    android:id="@+id/drawerAdminSection"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:visibility="gone">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="ADMINISTRATION"
+                        android:textSize="11sp"
+                        android:textStyle="bold"
+                        android:textColor="#64748b"
+                        android:paddingStart="24dp"
+                        android:paddingTop="16dp"
+                        android:paddingBottom="4dp" />
+
+                    <TextView android:id="@+id/drawerTeam" style="@style/DrawerItem"
+                        android:text="Équipe" android:drawableStart="@android:drawable/ic_menu_myplaces" />
+                    <TextView android:id="@+id/drawerChain" style="@style/DrawerItem"
+                        android:text="Chaîne d'escalade" android:drawableStart="@android:drawable/ic_menu_sort_by_size" />
+                    <TextView android:id="@+id/drawerSupervision" style="@style/DrawerItem"
+                        android:text="Supervision" android:drawableStart="@android:drawable/ic_menu_manage" />
+                </LinearLayout>
+            </LinearLayout>
+        </ScrollView>
 
         <!-- Bouton deconnexion en bas -->
         <LinearLayout
@@ -510,9 +554,17 @@
                 android:textColor="#ef4444" />
         </LinearLayout>
 
-        <View
+        <!-- INV-ANDROID-012 : "App <versionName> · serveur <sha ou ?>" -->
+        <TextView
+            android:id="@+id/drawerVersion"
             android:layout_width="match_parent"
-            android:layout_height="24dp" />
+            android:layout_height="wrap_content"
+            android:paddingStart="24dp"
+            android:paddingEnd="24dp"
+            android:paddingTop="4dp"
+            android:paddingBottom="20dp"
+            android:textSize="11sp"
+            android:textColor="#64748b" />
 
     </LinearLayout>
 

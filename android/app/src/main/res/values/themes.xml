@@ -8,4 +8,20 @@
         <item name="colorOnSecondary">#FFFFFF</item>
         <item name="android:statusBarColor">#B71C1C</item>
     </style>
+
+    <!-- INV-ANDROID-011 : entree du menu lateral -->
+    <style name="DrawerItem">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">48dp</item>
+        <item name="android:gravity">center_vertical</item>
+        <item name="android:paddingStart">24dp</item>
+        <item name="android:paddingEnd">24dp</item>
+        <item name="android:drawablePadding">16dp</item>
+        <item name="android:drawableTint">#94a3b8</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:textColor">#FFFFFF</item>
+        <item name="android:background">?attr/selectableItemBackground</item>
+        <item name="android:clickable">true</item>
+        <item name="android:focusable">true</item>
+    </style>
 </resources>

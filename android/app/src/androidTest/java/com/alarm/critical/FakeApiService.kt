@@ -99,9 +99,12 @@ class FakeApiService : ApiService {
         return acknowledgeResponses[alarmId] ?: acknowledgeResponse
     }
 
-    // `days` ajoute a ApiService (GET /api/alarms/?days=N). Ignore ici : le fake
-    // rend `alarmHistoryResponse` tel quel, le filtrage est teste cote backend.
+    // `days` ajoute a ApiService (GET /api/alarms/?days=N). Le fake rend
+    // `alarmHistoryResponse` tel quel, le filtrage est teste cote backend.
+    var lastHistoryDays: Int? = null
+
     override suspend fun getAlarmHistory(auth: String, days: Int): Response<List<AlarmResponse>> {
+        lastHistoryDays = days
         return alarmHistoryResponse
     }
 
@@ -136,6 +139,97 @@ class FakeApiService : ApiService {
         fcmTokenDeleted = request
         return Response.success(mapOf("status" to "ok"))
     }
+
+    // ===== INV-ANDROID-010/011/012 : menu et ecrans admin =====
+    // Donnees : 2 sites (Izeron, Beaufort), 3 utilisateurs, 5 noeuds.
+
+    var healthResponse: Response<HealthResponse> = Response.success(HealthResponse(version = "abc1234"))
+    override suspend fun health(): Response<HealthResponse> = healthResponse
+
+    var meResponse: Response<UserResponse> = Response.success(
+        UserResponse(1, "user1@alarm.local", "user1", false, true)
+    )
+    override suspend fun getMe(auth: String): Response<UserResponse> = meResponse
+
+    var activeEscalationResponse: Response<ActiveEscalationResponse> = Response.success(
+        ActiveEscalationResponse(
+            alarm = AlarmResponse(7, "Déclenchement contact sec — Beaufort", "", "critical", "escalated", 2,
+                null, null, null, 1, "2026-10-29T08:00:00", site = "beaufort"),
+            escalation_delay_minutes = 15.0,
+            steps = listOf(
+                EscalationStep(1, 1, "user1", "notified", false),
+                EscalationStep(2, 2, "user2", "current", false),
+                EscalationStep(3, 3, "admin", "upcoming", false),
+            )
+        )
+    )
+    override suspend fun getActiveEscalation(auth: String): Response<ActiveEscalationResponse> = activeEscalationResponse
+
+    var usersResponse: Response<List<UserResponse>> = Response.success(listOf(
+        UserResponse(1, "", "user1", false, true, phone_number = "+33611111111"),
+        UserResponse(2, "", "user2", false, true, phone_number = "+33622222222"),
+        UserResponse(3, "", "admin", true, true),
+    ))
+    override suspend fun getUsers(auth: String): Response<List<UserResponse>> = usersResponse
+
+    var registeredUser: UserCreateRequest? = null
+    override suspend fun registerUser(auth: String, request: UserCreateRequest): Response<UserResponse> {
+        registeredUser = request
+        return Response.success(UserResponse(4, "", request.name, request.is_admin, true, request.is_test, request.phone_number))
+    }
+
+    var deletedUserId: Int? = null
+    override suspend fun deleteUser(auth: String, userId: Int): Response<Map<String, String>> {
+        deletedUserId = userId
+        return Response.success(mapOf("status" to "deleted"))
+    }
+
+    var phoneUpdate: Pair<Int, PhoneUpdate>? = null
+    override suspend fun updateUserPhone(auth: String, userId: Int, request: PhoneUpdate): Response<UserResponse> {
+        phoneUpdate = userId to request
+        return Response.success(UserResponse(userId, "", "user$userId", false, true, phone_number = request.phone_number))
+    }
+
+    var savedChain: List<Int>? = null
+    override suspend fun saveEscalationChain(auth: String, request: EscalationBulkRequest): Response<List<EscalationEntry>> {
+        savedChain = request.user_ids
+        return Response.success(request.user_ids.mapIndexed { i, uid -> EscalationEntry(i + 1, uid) })
+    }
+
+    var escalationDelay = 15.0
+    override suspend fun getEscalationDelay(): Response<Map<String, Double>> = Response.success(mapOf("minutes" to escalationDelay))
+    override suspend fun setEscalationDelay(auth: String, request: Map<String, Double>): Response<Map<String, Double>> {
+        escalationDelay = request.getValue("minutes")
+        return Response.success(request)
+    }
+
+    var smsCallDelay = 2.0
+    override suspend fun getSmsCallDelay(): Response<Map<String, Double>> = Response.success(mapOf("delay_minutes" to smsCallDelay))
+    override suspend fun setSmsCallDelay(auth: String, request: Map<String, Double>): Response<Map<String, Double>> {
+        smsCallDelay = request.getValue("delay_minutes")
+        return Response.success(request)
+    }
+
+    var clusterResponse: Response<ClusterResponse> = Response.success(ClusterResponse(
+        local_node = "node1", local_location = "izeron",
+        members = listOf(
+            ClusterMember("node1", "leader", "running", "izeron"),
+            ClusterMember("node2", "replica", "streaming", "izeron"),
+            ClusterMember("node3", "replica", "streaming", "ovh"),
+            ClusterMember("node4", "replica", "streaming", "beaufort"),
+            ClusterMember("node5", "sync_standby", "streaming", "beaufort"),
+        )
+    ))
+    override suspend fun getCluster(): Response<ClusterResponse> = clusterResponse
+
+    var kpiResponse: Response<KpiResponse> = Response.success(KpiResponse(12, 25.0, 18.5, true))
+    override suspend fun getKpi(auth: String, weeks: Int): Response<KpiResponse> = kpiResponse
+
+    var auditResponse: Response<List<AuditEvent>> = Response.success(listOf(
+        AuditEvent("config_changed", 3, "2026-10-29T07:59:00.123456", mapOf("key" to "escalation_chain")),
+        AuditEvent("user_login", 1, "2026-10-29T07:58:00", mapOf("name" to "user1")),
+    ))
+    override suspend fun getAudit(auth: String, pageSize: Int): Response<List<AuditEvent>> = auditResponse
 
     /** Reset le compteur d'appels pour réutiliser avec un nouvel IdlingResource */
     fun resetCallCount() {
