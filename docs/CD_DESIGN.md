@@ -262,6 +262,21 @@ L'orchestration tourne **depuis NODE3 cloud** (`alarm-cd-orchestrator.service` q
 - **Q4.3** Si onsite-2 est **simultanément** le primary Patroni au moment où on veut l'updater (étape 2/3), même question — switchover préventif ? Ou bien on fait confiance à INV-091 (failover < 60 s tolérable) ?
 - **Q4.4** Comment gérer un déploiement qui touche **uniquement le backend** vs un qui touche **patroni** (Postgres) ? Le restart patroni nécessite un pg_basebackup au boot du replica (cf compose `start_period: 60s`). Le canary doit tolérer cette fenêtre. Proposition : critère soak `replication lag` reporté de 90 s pour les déploiements qui touchent l'image patroni.
 
+### Déploiement indépendant par site (2026-10-29, INV-167)
+
+**Incident** : node4/node5 (site Beaufort, non votants) hors ligne ~2 jours. Le préflight SSH de l'orchestrateur faisait `exit 1` sur 10.99.0.4 : **aucun** nœud de prod mis à jour pendant 2 jours (4 versions promues jamais déployées), plus 1 h de cooldown à chaque tour. Exigence du propriétaire : « On doit pouvoir déployer sur les deux sites indépendamment sans être bloqué ».
+
+Sites : node1 + node2 = Izeron, node3 = OVH, node4 + node5 = Beaufort. Votants etcd : node1, node2, node3.
+
+- **État par nœud** : `/var/lib/alarm/cd/node<N>.digest` = digest déployé avec succès sur node N (écrit après son canary OK). Chaque tick, un nœud déjà au digest courant est sauté. Les 5 à jour → no-op silencieux.
+- **Nœud injoignable** (SSH, mêmes options qu'avant) → `WARN node<N> (site) injoignable : reporté au prochain passage`, la chaîne **continue** avec les suivants.
+- **Quorum etcd** : un votant n'est redémarré que si **les 3 votants** répondent au préflight (redémarrer un votant pendant qu'un autre est absent perdrait le quorum, INV-090). Sinon aucun votant ce passage, mais les non votants 4/5 joignables sont déployés.
+- **Canary en échec** (health KO → rollback, ou tout exit ≠ 0 du canary) → halt, `failure`, cooldown 1 h, comme avant : une image cassée ne se propage pas.
+- **`orchestrate.state`** : `<digest>\t<outcome>\t<ts>`, outcome = `success` (5 nœuds à jour) | `partial` (nœuds en attente) | `failure`. `partial` **n'a pas de cooldown** : le tick suivant (15 min) reprend aussitôt les seuls nœuds en attente. Un nœud qui revient reçoit le digest **courant** (rattrapage), même s'il n'a pas changé depuis.
+- **Codes de sortie** : `0` rien à faire / cooldown / `success` / `partial` ; `1` erreur de config (`GATEWAY_KEY`, canary introuvable) ; `2` canary en échec.
+- **Forcer le redéploiement d'un nœud** : `rm /var/lib/alarm/cd/node<N>.digest` puis `sudo systemctl start alarm-cd-orchestrate.service`. Un nœud retiré durablement doit sortir de `NODES_ORDER`, sinon chaque tick le signale injoignable.
+- **Couverture** : `tests/unit/test_cd_orchestrate.py` (vrai script, faux `ssh`/`docker`/canary).
+
 ---
 
 ## 5. Auto-rollback
@@ -738,7 +753,8 @@ sudo systemctl stop alarm-cd-orchestrate.service
 **Diagnostic** :
 ```bash
 # Voir l'etat dernier deploiement orchestre :
-cat /var/lib/alarm/cd/orchestrate.state   # <digest>\t<outcome>\t<unix_ts>
+cat /var/lib/alarm/cd/orchestrate.state   # <digest>\t<success|partial|failure>\t<unix_ts>
+grep . /var/lib/alarm/cd/node*.digest      # digest deploye par noeud (INV-167)
 # Voir les events CD cross-noeud :
 curl -fsS http://10.99.0.1:8000/api/deployments/state -H "Authorization: Bearer <admin_token>"
 # Forcer un cycle (apres mise a jour du :stable sans attendre le tick timer) :
@@ -875,3 +891,4 @@ Dans ce flux, on a remplacé 8 h de service KO + nuit blanche pour l'humain par 
 - **2026-05-22** — **CD V1.5 livré (PR 9 §8)** : `scripts/alarm-cd-orchestrate.sh` + units systemd `alarm-cd-orchestrate.{service,timer}` chaînent automatiquement `alarm-cd-canary.sh` pour les 3 nœuds dans l'ordre §4. Idempotence par state file + cooldown 1 h post-fail. Patch couplé sur `alarm-cd-canary.sh` (check du container en cours d'exécution, pas seulement du cache vs registry — sinon no-op silencieux après pull-timer). Timer `alarm-cd-orchestrate.timer` livré **disable**, à activer explicitement par l'opérateur après 5 cycles canary manuels validés (`sudo systemctl enable --now alarm-cd-orchestrate.timer` sur NODE3). Sudoers `infra/onsite/sudoers/alarm-cd` étendu en miroir (`ALARM_CD_INSTALL`, `ALARM_CD_SYSTEMCTL`, `ALARM_CD_JOURNAL`). Smoke test `cd-install-smoke.yml` étend le job au nouvel orchestrateur (RuntimeDirectory/StateDirectory/EnvironmentFile présents, timer disable par défaut, pas de Permission denied, pas de duplication logs).
 - **2026-05-22 (vérif live)** — état prod inspecté par SSH avant merge de PR 9. **Constat** : les 3 nœuds tournent `:stable` sha-de1131ac (promu 2026-05-19) depuis 3 jours, `alarm-cd-pull.timer` enabled + active partout, cluster Patroni sain (leader `node1`=onsite-1, replicas sync lag=0). **Pré-requis SSH-from-NODE3 manquants** : (a) `ufw` onsite n'autorise SSH que depuis LAN 172.16.0.0/16 — ajouter règle `from 10.99.0.0/24` ; (b) `/home/alarm/.ssh/` sur NODE3 n'a pas de keypair outbound ; (c) sshd NODE3 écoute `Port 50922` (adaptation cloud), nécessite `~/.ssh/config` pour le self-loop canary `--node 3`. Ces 3 prérequis ajoutés au runbook §9bis. Sans eux, l'orchestrate `Preflight SSH` exit 1 proprement (pas de risque de chaîne incomplète).
 - **2026-10-27** — **5 nœuds** : ajout de node4 (alarm-1, 10.99.0.4) et node5 (alarm-2, 10.99.0.5), **non votants** etcd (Patroni + backend, pas d'etcd local). Ordre canary §4 `(3 5 4 2 1)`. `alarm-cd-canary.sh`, `alarm-cd-rollback.sh` et `start-prod-node.sh` acceptent les nœuds 1 à 5. Pour 4/5, ils lancent `up --no-deps patroni backend`. Le preflight SSH de l'orchestrateur couvre les 5 IP : n'installer cette version sur NODE3 qu'une fois node4/5 en service.
+- **2026-10-29** — **Déploiement indépendant par site** (§4, INV-167) après l'incident node4/5 hors ligne 2 jours (préflight `exit 1` → aucun déploiement, 4 versions bloquées). État par nœud `node<N>.digest`, nœud injoignable reporté sans bloquer les autres ni déclencher de cooldown (outcome `partial`), votants redémarrés seulement si les 3 répondent. Remplace la consigne du 2026-10-27 ci-dessus.
