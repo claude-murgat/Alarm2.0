@@ -328,9 +328,10 @@ def escalate_now(
 @router.post("/{alarm_id}/resolve", response_model=AlarmResponse)
 def resolve_alarm(
     alarm_id: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin),
     db: Session = Depends(get_db),
 ):
+    """INV-162 : admins uniquement (la resolution auto gateway, INV-120, passe par /internal)."""
     alarm = db.query(Alarm).filter(Alarm.id == alarm_id).first()
     if not alarm:
         raise HTTPException(status_code=404, detail="Alarm not found")

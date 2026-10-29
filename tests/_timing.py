@@ -17,7 +17,11 @@ def escalation_tick_seconds() -> float:
     if _tick is None:
         url = os.getenv("BACKEND_URL", "http://localhost:8000").rstrip("/")
         try:
-            value = requests.get(f"{url}/api/config/system", timeout=5).json().get("escalation_tick_seconds")
+            # INV-163 : la config systeme est reservee aux admins.
+            token = requests.post(f"{url}/api/auth/login", json={"name": "admin", "password": "admin123"},
+                                  timeout=5).json()["access_token"]
+            value = requests.get(f"{url}/api/config/system", headers={"Authorization": f"Bearer {token}"},
+                                 timeout=5).json().get("escalation_tick_seconds")
             _tick = float(value) if value else 10.0
         except Exception:
             _tick = 10.0  # backend du defaut : jamais plus court que l'ancien sleep(12)

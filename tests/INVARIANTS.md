@@ -777,6 +777,17 @@ Un utilisateur porte un booléen `is_test` (défaut `false`), cumulable avec `is
 - **Pourquoi** : décision du propriétaire du 2026-10-22. La route était publique : quiconque joignait l'API pouvait se créer un compte, y compris admin (`is_admin` dans le body), puis lire et modifier la chaîne d'escalade.
 - **Couverture** : Integration `test_register_admin_only_inv149.py` (sans jeton, non-admin).
 
+### INV-162 [C] ✅ Seul un admin peut résoudre une alarme (2026-10-29)
+`POST /api/alarms/{id}/resolve` exige un jeton d'admin : jeton d'un non-admin → `403` et l'alarme **reste dans son état** (pas de `resolved`) ; sans jeton → refus (`401` ou `403`). Un admin résout comme avant : audit `alarm_resolved` et push `alarm_resolved` à chaque notifié (INV-147).
+- **Non concerné** : la résolution automatique par la gateway (`/internal/alarms/report-state` à `closed`, INV-120), authentifiée par `X-Gateway-Key`, et l'acquittement (INV-031), toujours ouvert aux notifiés.
+- **Pourquoi** : décision du propriétaire du 2026-10-29 : « résoudre une alarme : admins uniquement ». Tout utilisateur connecté pouvait résoudre n'importe quelle alarme, donc arrêter l'escalade et la sonnerie de tous.
+- **Couverture** : Integration `test_version_permissions_inv162_164.py` : `test_non_admin_cannot_resolve` (user1 notifié → 403, alarme toujours `active` ; RED avant le correctif : 200), `test_admin_resolves`.
+
+### INV-163 [H] ✅ Seul un admin peut lire la configuration système (2026-10-29)
+`GET /api/config/system` (toutes les clés `SystemConfig` : `alert_email`, états modem, réglages d'escalade et de watchdog…) exige un jeton d'admin : sans jeton → refus (`401` ou `403`), jeton d'un non-admin → `403`, aucune valeur renvoyée. L'écriture (`POST /api/config/system`) l'exigeait déjà (INV-077). La chaîne d'escalade publique (`GET /api/config/escalation`) et l'état du modem (`GET /api/system/modem-status`) ne changent pas.
+- **Pourquoi** : décision du propriétaire du 2026-10-29. La route était publique : quiconque joignait l'API lisait l'adresse d'alerte et les réglages internes.
+- **Couverture** : Integration `test_version_permissions_inv162_164.py` : `test_system_config_refused_without_token`, `test_system_config_refused_for_non_admin` (RED avant le correctif : 200 avec les valeurs), `test_system_config_for_admin`.
+
 ---
 
 ## 8. Chaîne d'escalade et config
@@ -936,6 +947,11 @@ Si `last_tick_at < now - 120s` → `/health` renvoie 503 avec `escalation_loop: 
 - **Pourquoi** : monitoring externe doit détecter le blocage.
 - **Fix** : PR0 (a8e1e66). Flag `_simulate_stall` dans `escalation.py` qui bloque la mise à jour de `last_tick_at` pendant le test → plus de race avec le tick concurrent. Endpoint `/test/clear-loop-stall` ajouté pour le teardown propre.
 - **Couverture** : E2E `TestSmsAndHealth::test_health_endpoint_returns_503_if_loop_stalled` (5 runs consécutifs passés).
+
+### INV-164 [M] ✅ /health donne la version déployée (2026-10-29)
+`/health` (réponse `200` comme `503`) renvoie `commit` = sha git complet de l'image et `version` = ses 7 premiers caractères, lus dans la variable d'environnement `GIT_SHA`. Sans `GIT_SHA` (build local, dev, tests) : `version = commit = "dev"`. L'image backend reçoit `GIT_SHA` au build (`ARG`/`ENV` du `backend/Dockerfile`, `build-args` de `cd-build.yml` = sha construit, le même que le tag `sha-<court>`). La version OpenAPI de FastAPI vaut la même `version`.
+- **Pourquoi** : plan du propriétaire du 2026-10-29 : savoir quel commit tourne sur chaque nœud sans `docker inspect`.
+- **Couverture** : Integration `test_version_permissions_inv162_164.py` : `test_health_version_dev_without_git_sha`, `test_health_version_from_git_sha` (RED avant le correctif : champs absents).
 
 ---
 

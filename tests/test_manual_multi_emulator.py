@@ -644,7 +644,7 @@ def _run_phases(emu1_serial, emu2_serial, emu3_serial, diag):
                 f"Meme alarme id={alarm_id} (replication OK)")
 
     # Le nouveau primary accepte les ecritures
-    resolve_alarm(alarm_id, tokens["user1"], base=new_primary_url)
+    resolve_alarm(alarm_id, tokens["admin"], base=new_primary_url)  # INV-162 : admins uniquement
     print("  Ecriture OK sur le nouveau primary (alarme resolue)")
 
     # Creer une nouvelle alarme
