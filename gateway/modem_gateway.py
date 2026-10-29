@@ -40,9 +40,9 @@ from modem_health import (  # logique pure (cf modem_health.py)
     sends_allowed,
 )
 from voice_call import (  # logique pure (cf voice_call.py)
-    DTMF_WAIT_S, FRAME_S, HANG_UP_COMMANDS, LEAD_SILENCE_S, call_answered, call_deferred_for_sms, call_rang,
-    call_ended, call_result, confirmation_file, cpcmfrm_for, dtmf_key, is_audio_port,
-    lead_silence, pcm_frames,
+    DTMF_WAIT_S, FRAME_S, HANG_UP_COMMANDS, LEAD_SILENCE_S, alarm_voice_file, call_answered,
+    call_deferred_for_sms, call_rang, call_ended, call_result, confirmation_file, cpcmfrm_for,
+    dtmf_key, is_audio_port, lead_silence, pcm_frames, tts_text,
 )
 
 logging.basicConfig(
@@ -205,6 +205,8 @@ class SmsSenderThread(threading.Thread):
 
 VOICE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "voice")
 VOICE_FILES = ("alarme.wav", "acquittee.wav", "escaladee.wav")
+# INV-159 : message par site, facultatif (absent -> alarme.wav, cf alarm_voice_file)
+SITE_VOICE_FILES = ("alarme_izeron.wav", "alarme_beaufort.wav")
 
 
 def _load_voice(voice_dir: str = VOICE_DIR) -> dict | None:
@@ -213,8 +215,12 @@ def _load_voice(voice_dir: str = VOICE_DIR) -> dict | None:
     repli sur la synthese du module."""
     try:
         voice, rates = {}, set()
-        for name in VOICE_FILES:
-            with wave.open(os.path.join(voice_dir, name)) as w:
+        for name in VOICE_FILES + SITE_VOICE_FILES:
+            path = os.path.join(voice_dir, name)
+            if name in SITE_VOICE_FILES and not os.path.exists(path):
+                logger.warning(f"{name} absent : message sans le site (INV-159)")
+                continue
+            with wave.open(path) as w:
                 if (w.getsampwidth(), w.getnchannels()) != (2, 1):
                     raise ValueError(f"{name} : PCM 16 bits mono attendu")
                 rates.add(w.getframerate())
@@ -260,6 +266,7 @@ class CallSenderThread(threading.Thread):
                         result = self._make_call(
                             call["to_number"],
                             call["tts_message"],
+                            call.get("site"),  # INV-159 ; absent (backend d'avant) -> alarme.wav
                         )
                         _post_to_backend(
                             f"/internal/calls/{call['id']}/result",
@@ -270,9 +277,10 @@ class CallSenderThread(threading.Thread):
                 logger.error(f"CallSender erreur : {e}")
             time.sleep(POLL_INTERVAL_SECONDS)
 
-    def _make_call(self, to_number: str, tts_message: str) -> str:
-        """Passe un appel, joue le message, ecoute la touche, confirme, raccroche.
-        Retourne : ack_dtmf | escalate | no_answer | error"""
+    def _make_call(self, to_number: str, tts_message: str, site: str | None = None) -> str:
+        """Passe un appel, joue le message (qui annonce le site, INV-159), ecoute la touche,
+        confirme, raccroche. Retourne : ack_dtmf | escalate | no_answer | error"""
+        tts_message = tts_text(site, tts_message)
         try:
             with at_lock:
                 r = send_at_command(self.ser, f"ATD{to_number};", timeout=5)
@@ -293,7 +301,7 @@ class CallSenderThread(threading.Thread):
                 key = None
                 if self.voice and self.audio_port:
                     try:
-                        key = self._play_voice()
+                        key = self._play_voice(site)
                     except Exception as e:
                         logger.warning(f"Voix PCM en echec ({e})")
                         self._poll()
@@ -360,8 +368,9 @@ class CallSenderThread(threading.Thread):
 
     # ── Message + touche ──
 
-    def _play_voice(self) -> str | None:
-        """INV-132/133 : voix preenregistree injectee par le port audio USB."""
+    def _play_voice(self, site: str | None = None) -> str | None:
+        """INV-132/133 : voix preenregistree injectee par le port audio USB. INV-159 : le
+        message annonce le site de l'alarme."""
         rate = self.voice["rate"]
         self._voice_started = False
         # Ordre de l'exemple SIMCom (usb_audio_test.py) : port audio ouvert AVANT
@@ -379,7 +388,9 @@ class CallSenderThread(threading.Thread):
             try:
                 audio.reset_input_buffer()
                 self._voice_started = True
-                state = self._stream(audio, lead_silence(rate) + self.voice["alarme.wav"], rate)
+                message = alarm_voice_file(site, self.voice)
+                logger.info(f"Lecture de {message} (site {site or '-'})")
+                state = self._stream(audio, lead_silence(rate) + self.voice[message], rate)
                 logger.info(f"Message : {state}")
                 if state == "fin":
                     state = self._stream(audio, bytes(int(rate * DTMF_WAIT_S) * 2), rate)

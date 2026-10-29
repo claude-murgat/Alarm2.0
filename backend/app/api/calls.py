@@ -43,6 +43,9 @@ def get_pending_calls(
             "alarm_id": r.alarm_id,
             "user_id": r.user_id,
             "tts_message": r.tts_message,
+            # INV-159 : site annonce par Jessica = celui de l'alarme (vide pour une alarme
+            # d'astreinte -> alarme.wav), pas r.site qui est le modem qui appelle (INV-156).
+            "site": r.alarm.site if r.alarm else None,
             "retries": r.retries,
             "created_at": str(r.created_at),
         }

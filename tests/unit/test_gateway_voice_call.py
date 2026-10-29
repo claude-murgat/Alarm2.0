@@ -211,3 +211,43 @@ class TestCallRang:
 
     def test_nothing_never_rang(self):
         assert _vc.call_rang("") is False
+
+
+class TestSiteVoice:
+    """INV-159 : le message de Jessica annonce le site de l'alarme (meme personne de garde
+    pour Izeron et Beaufort). Alarme sans site -> `alarme.wav`."""
+
+    LOADED = {"alarme.wav", "alarme_izeron.wav", "alarme_beaufort.wav", "acquittee.wav", "escaladee.wav"}
+
+    @pytest.mark.parametrize("site,name", [
+        ("izeron", "alarme_izeron.wav"),
+        ("beaufort", "alarme_beaufort.wav"),
+        (None, "alarme.wav"),   # alarme d'astreinte
+        ("", "alarme.wav"),
+        ("lyon", "alarme.wav"),  # site sans message enregistre
+    ])
+    def test_message_of_the_alarm_site(self, site, name):
+        assert _vc.alarm_voice_file(site, self.LOADED) == name
+
+    def test_voice_dir_without_site_messages_falls_back(self):
+        # Voix d'avant INV-159 encore en place (deploiement en cours) : alarme.wav, pas de KeyError.
+        assert _vc.alarm_voice_file("izeron", {"alarme.wav", "acquittee.wav", "escaladee.wav"}) == "alarme.wav"
+
+    @pytest.mark.parametrize("site,text", [
+        ("izeron", "Site Izeron. Alarme critique: Pompe."),
+        ("beaufort", "Site Beaufort. Alarme critique: Pompe."),
+        (None, "Alarme critique: Pompe."),
+        ("", "Alarme critique: Pompe."),
+    ])
+    def test_tts_fallback_names_the_site(self, site, text):
+        assert _vc.tts_text(site, "Alarme critique: Pompe.") == text
+
+    @pytest.mark.parametrize("name", ["alarme_izeron.wav", "alarme_beaufort.wav"])
+    def test_site_messages_shipped_in_the_format_of_alarme_wav(self, name):
+        # Une frequence differente ferait tomber toute la voix en repli TTS (_load_voice).
+        import wave
+        voice = _PATH.parent / "voice"
+        with wave.open(str(voice / "alarme.wav")) as ref, wave.open(str(voice / name)) as w:
+            fmt = (w.getframerate(), w.getsampwidth(), w.getnchannels())
+            assert fmt == (ref.getframerate(), ref.getsampwidth(), ref.getnchannels())
+            assert w.getnframes() > ref.getnframes() * 0.8  # le message entier, pas un fragment
