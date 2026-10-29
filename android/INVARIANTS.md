@@ -207,8 +207,9 @@ Textes du bandeau :
 ### INV-ANDROID-109 [H] ❌ Version de build dérivée automatiquement de git (anti-bump-manquant) — 2026-06-12
 `versionCode` et `versionName` du `defaultConfig` Gradle sont calculés au build time depuis git, pas hardcodés :
 - `versionCode = git rev-list --count HEAD` (nombre total de commits, monotone)
-- `versionName = "${baseVersion}.${gitCommitCount}-${gitShortSha}[-dirty]"` (ex: `1.0.188-b95d44b` ou `1.0.188-b95d44b-dirty` si l'arbre n'est pas propre)
-- Si git inaccessible (rare, build hors repo) : fallback `versionCode=1`, `versionName="1.0-unknown"`
+- `versionName` = **le tag de release GitHub sans le `v`** (`git describe --tags --match 'v*' --dirty`) : `1.6.0` pour l'APK de la release `v1.6.0`, `1.6.0-3-gabc1234` pour un build 3 commits après, suffixe `-dirty` si un fichier suivi est modifié (2026-10-29 : avant, `1.0.<commits>-<sha>` ne ressemblait jamais à la version affichée sur GitHub)
+- Sans tag `v*` accessible (checkout shallow) : `versionName = "1.0.${gitCommitCount}-${gitShortSha}[-dirty]"`
+- Si git inaccessible (rare, build hors repo) : fallback `versionCode=1`, `versionName="1.0.1-unknown"`
 
 La version apparaît dans **toutes les exports `AppLogger.exportLogs()`** via l'en-tête (cf INV-ANDROID-107/108). Permet de tracer une session loguée à un commit exact.
 - **Pourquoi** : élimine la classe entière de bugs « j'ai oublié de bumper la version dans build.gradle » — chaque commit produit automatiquement une version distincte et traçable. Avant, `versionCode=1` et `versionName="1.0"` étaient hardcodés : deux APK construits à des moments différents avaient la même version, impossible de savoir lequel produisait les logs ou les remontées Crashlytics.

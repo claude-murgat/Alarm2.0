@@ -11,9 +11,11 @@ plugins {
 // version — tout commit produit une version distincte et tracable au sha.
 //
 // - versionCode = nombre total de commits sur la branche courante (monotone)
-// - versionName = "<base>.<commits>-<shortSha>[-dirty]"
+// - versionName = tag de release GitHub sans le "v" : "1.6.0" sur le tag,
+//   "1.6.0-3-gabc1234" 3 commits apres, suffixe "-dirty" si arbre modifie
+//   (git describe). Sans tag v* (checkout shallow) : "1.0.<commits>-<shortSha>[-dirty]".
 //
-// Si le repo n'est pas accessible (CI sans git, etc.), fallback sur 1 / "1.0-unknown".
+// Si le repo n'est pas accessible (CI sans git, etc.), fallback sur 1 / "1.0.1-unknown".
 fun gitOutput(vararg args: String): String? {
     return try {
         val stdout = ByteArrayOutputStream()
@@ -36,7 +38,7 @@ val gitShortSha: String = gitOutput("rev-parse", "--short", "HEAD") ?: "unknown"
 // caches, etc.) pour ne marquer "dirty" QUE si un fichier suivi est modifie.
 val gitDirty: Boolean = !gitOutput("status", "--porcelain", "--untracked-files=no").isNullOrBlank()
 val baseVersion = "1.0"
-val computedVersionName = buildString {
+val computedVersionName = gitOutput("describe", "--tags", "--match", "v*", "--dirty")?.removePrefix("v") ?: buildString {
     append("$baseVersion.$gitCommitCount-$gitShortSha")
     if (gitDirty) append("-dirty")
 }
