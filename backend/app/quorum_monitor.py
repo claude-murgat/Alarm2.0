@@ -24,12 +24,16 @@ Architecture (cf #80 + #81) :
 
 La séparation `_run_quorum_check` / loop permet de tester le comportement
 sans démarrer la background task (tier 2 avec snapshot injecté).
+
+3. INV-168 : même tick, `_run_replica_reinit_check` re-clone un replica Patroni bloqué
+   (logique pure `logic/replica_reinit.py`).
 """
 import asyncio
 import json
 import logging
 import os
-from datetime import datetime, timedelta
+import urllib.request
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -37,6 +41,7 @@ from sqlalchemy.orm import Session
 from .clock import now as clock_now
 from .database import SessionLocal
 from .email_service import send_alert_email
+from .events import log_event
 from .leader_election import is_leader
 from .logic.quorum_detection import (
     ClusterSnapshot,
@@ -46,6 +51,7 @@ from .logic.quorum_detection import (
     should_send_initial_email,
     should_send_reminder,
 )
+from .logic.replica_reinit import decide_reinit, reinit_after, reinit_url
 from .models import QuorumStateRow, SystemConfig
 
 
@@ -189,20 +195,22 @@ def _run_quorum_check(
     db.commit()
 
 
+def _patroni_cluster() -> dict:
+    """GET {PATRONI_URL}/cluster du Patroni local (bloquant). Lève si injoignable."""
+    patroni_url = os.getenv("PATRONI_URL", "http://patroni:8008")
+    req = urllib.request.Request(f"{patroni_url}/cluster", method="GET")
+    resp = urllib.request.urlopen(req, timeout=3)
+    return json.loads(resp.read().decode("utf-8"))
+
+
 def _build_snapshot_sync(now: datetime) -> ClusterSnapshot:
     """Lit Patroni REST API pour construire un snapshot courant.
 
     Reproduit la logique de `/api/cluster` (main.py:cluster_status). Bloquant ;
     appelé via `asyncio.to_thread` depuis la loop.
     """
-    import urllib.request
-    import json as _json
-
-    patroni_url = os.getenv("PATRONI_URL", "http://patroni:8008")
     try:
-        req = urllib.request.Request(f"{patroni_url}/cluster", method="GET")
-        resp = urllib.request.urlopen(req, timeout=3)
-        cluster = _json.loads(resp.read().decode("utf-8"))
+        cluster = _patroni_cluster()
     except Exception as e:
         logger.warning("INV-085 : Patroni injoignable depuis ce noeud (%s)", e)
         return ClusterSnapshot(
@@ -216,6 +224,76 @@ def _build_snapshot_sync(now: datetime) -> ClusterSnapshot:
     return ClusterSnapshot(
         has_quorum=has_quorum, patroni_reachable=True, timestamp=now
     )
+
+
+# INV-168 : état tenu en mémoire par le leader. `_stuck_since` est vidé dès que ce nœud
+# n'est plus leader (série d'observations rompue). Un autre nœud devenu leader repart de
+# zéro : 10 min d'observation avant tout reinit, cooldowns oubliés.
+_stuck_since: dict[str, datetime] = {}
+_last_handled: dict[str, datetime] = {}
+
+
+def _alert(alert_email: Optional[str], subject: str, body: str) -> None:
+    if alert_email is None:
+        logger.warning("INV-168 : SystemConfig.alert_email vide, email non envoyé : %s", subject)
+        return
+    send_alert_email(subject=subject, body=body, to=alert_email)
+
+
+def _run_replica_reinit_check(now: datetime) -> None:
+    """INV-168 : un tick (bloquant, via `asyncio.to_thread`, leader seul).
+
+    Re-clone au plus un replica bloqué (POST /reinitialize sur SON Patroni), audit + email.
+    Un échec HTTP est tracé, pas levé ; le membre attend alors 1 h avant un nouvel essai.
+    """
+    try:
+        cluster = _patroni_cluster()
+    except Exception as e:
+        logger.warning("INV-168 : Patroni injoignable, contrôle des replicas sauté (%s)", e)
+        return
+    db = SessionLocal()
+    try:
+        raw = db.query(SystemConfig.value).filter(
+            SystemConfig.key == "replica_reinit_after_minutes").scalar()
+        alert_email = _get_alert_email(db)
+    finally:
+        db.close()
+
+    d = decide_reinit(cluster, _stuck_since, _last_handled, now, reinit_after(raw))
+    _stuck_since.clear()
+    _stuck_since.update(d.stuck_since)
+
+    if d.blocked:
+        for name in d.blocked:
+            _last_handled[name] = now
+        names = ", ".join(d.blocked)
+        logger.error("INV-168 : plus de la moitié des replicas bloqués (%s), aucun reinit", names)
+        _alert(alert_email, "[Alarme Murgat] Replicas bloqués, pas de re-clonage automatique", (
+            f"Plus de la moitié des replicas ne suivent plus le leader ({names}). "
+            f"Cela ressemble à un problème côté leader ou réseau : aucun re-clonage "
+            f"automatique n'est lancé.\n\nIntervention manuelle requise : patronictl list, "
+            f"puis patronictl reinit alarm-cluster <nœud> --force si nécessaire."))
+        return
+
+    if d.target is None:
+        return
+    name = d.target["name"]
+    _last_handled[name] = now  # avant le POST : un échec ne réessaie pas à chaque tick
+    error = None
+    try:
+        req = urllib.request.Request(
+            reinit_url(d.target["api_url"]), data=json.dumps({"force": True}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        urllib.request.urlopen(req, timeout=10).read()
+    except Exception as e:
+        error = str(e)
+    log_event("replica_reinitialized", member=name, reason=d.reason, ok=error is None, error=error)
+    outcome = "lancé" if error is None else f"ÉCHEC ({error}), nouvel essai dans 1 h"
+    _alert(alert_email, f"[Alarme Murgat] Replica {name} re-cloné automatiquement", (
+        f"Le replica {name} ne suit plus le leader depuis {d.stuck_since[name].isoformat()} "
+        f"({d.reason}). Re-clonage demandé à son Patroni (POST /reinitialize, force) : "
+        f"{outcome}.\n\nSes données locales sont remplacées par une copie du leader. "
+        f"Vérifier dans l'onglet Cluster qu'il repasse en « streaming »."))
 
 
 async def quorum_monitor_loop() -> None:
@@ -247,6 +325,7 @@ async def quorum_monitor_loop() -> None:
             # Pas leader → on ne tient même pas d'historique (sera vide
             # quand on deviendra leader, warming up de 3 min). Acceptable.
             history = []
+            _stuck_since.clear()
             continue
 
         try:
@@ -266,3 +345,10 @@ async def quorum_monitor_loop() -> None:
                 db.close()
         except Exception:
             logger.exception("quorum_monitor_loop : erreur dans le tick (continue)")
+
+        # INV-168 : horloge réelle, pas clock_now() — `advance-clock` des tests E2E ne doit
+        # pas pouvoir re-cloner un replica.
+        try:
+            await asyncio.to_thread(_run_replica_reinit_check, datetime.now(timezone.utc))
+        except Exception:
+            logger.exception("INV-168 : erreur dans le contrôle des replicas (continue)")
