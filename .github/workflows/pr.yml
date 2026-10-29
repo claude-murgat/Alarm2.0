@@ -428,7 +428,7 @@ jobs:
             | python -c "import json,sys; print(json.load(sys.stdin)['access_token'])")
           curl -sf -X POST "$BACKEND_URL/api/config/system" -H "Authorization: Bearer $TOKEN" \
             -H 'Content-Type: application/json' -d '{"key":"escalation_tick_seconds","value":"1"}'
-          curl -sf "$BACKEND_URL/api/config/system" \
+          curl -sf "$BACKEND_URL/api/config/system" -H "Authorization: Bearer $TOKEN" \
             | python -c "import json,sys; assert json.load(sys.stdin)['escalation_tick_seconds'] == '1'"
           sleep 11
 

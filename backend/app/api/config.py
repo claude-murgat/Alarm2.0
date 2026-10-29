@@ -180,7 +180,11 @@ def get_sites(db: Session = Depends(get_db)):
 
 
 @router.get("/system")
-def get_system_config(db: Session = Depends(get_db)):
+def get_system_config(
+    current_user: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """INV-163 : admins uniquement (alert_email, etat modem, reglages internes)."""
     configs = db.query(SystemConfig).all()
     return {c.key: c.value for c in configs}
 

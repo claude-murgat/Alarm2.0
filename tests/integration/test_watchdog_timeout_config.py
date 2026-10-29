@@ -81,7 +81,7 @@ def test_watchdog_timeout_config_30s_marks_user_offline_at_35s(client, admin_hea
     assert r.status_code == 200, r.text
 
     # Sanity : la config est bien persistee
-    r = client.get("/api/config/system")
+    r = client.get("/api/config/system", headers=admin_headers)
     assert r.status_code == 200
     assert r.json().get("watchdog_timeout_seconds") == "30", (
         f"config doit etre persistee a '30', got "
@@ -182,7 +182,7 @@ def test_watchdog_timeout_config_120s_keeps_user_online_at_70s(client, admin_hea
     assert r.status_code == 200, r.text
 
     # Sanity : la config est bien persistee
-    r = client.get("/api/config/system")
+    r = client.get("/api/config/system", headers=admin_headers)
     assert r.status_code == 200
     assert r.json().get("watchdog_timeout_seconds") == "120", (
         f"config doit etre persistee a '120', got "
