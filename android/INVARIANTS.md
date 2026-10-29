@@ -132,10 +132,10 @@ Le menu latéral du dashboard propose :
 - **Pourquoi** : plan du propriétaire du 2026-10-29 : retrouver dans l'app ce que le web montre, sans ouvrir un navigateur en astreinte.
 - **Couverture** : Espresso `AlarmMenuAdminTest` : `non_admin_ne_voit_pas_les_entrees_admin`, `admin_voit_les_entrees_admin`, `chaque_entree_du_menu_ouvre_son_ecran`, `ecran_alarmes_tous_les_sites_filtre_par_site_et_periode`, `ecran_escalade_alarme_palier_et_chaine`, `ecran_sites_et_modems_une_ligne_par_passerelle`, `ecran_equipe_liste_et_suppression_apres_confirmation`, `ecran_equipe_creation_et_telephone`, `ecran_chaine_reordonne_enregistre_et_regle_les_delais`, `ecran_supervision_cluster_kpi_et_audit`, `ecran_admin_ferme_sur_403`. Verts sur émulateur (AVD alarm_repro, 2026-10-29) : 16/16, sans régression sur AlarmMultiSiteTest, AlarmResolutionTest, AlarmTestAccountTest, LogoutDeviceTest.
 
-### INV-ANDROID-012 [M] ✅ Versions de l'app et du serveur en bas du menu (2026-10-29)
-Sous « Se déconnecter » : « App `<BuildConfig.VERSION_NAME>` · serveur `<version>` ». `VERSION_NAME` vient de git (INV-ANDROID-109). La version du serveur est le champ `version` (sha court) de `GET /health`, lu une fois au démarrage du dashboard ; absente (backend d'avant), réponse en erreur (dont 503 « degraded ») ou serveur injoignable → « ? ».
-- **Pourquoi** : savoir d'un coup d'œil quelle app et quel backend tournent, par exemple pendant une bascule ou pour un rapport de bug.
-- **Couverture** : Espresso `AlarmMenuAdminTest::version_app_et_serveur_en_bas_du_menu`, `::version_serveur_absente_affiche_point_d_interrogation`. Verts sur émulateur (AVD alarm_repro, 2026-10-29).
+### INV-ANDROID-012 [M] ✅ Version de l'app et nœud qui répond en bas du menu (2026-10-29)
+Sous « Se déconnecter » : « Version `<BuildConfig.VERSION_NAME>` · nœud `<local_node>` (`<Lieu>`) ». `VERSION_NAME` = numéro de la release GitHub (`1.6.1` pour l'APK de `v1.6.1`, INV-ANDROID-109). `local_node` et `local_location` viennent de `GET /api/cluster` (public, lieu au format INV-161), lu une fois au démarrage du dashboard ; réponse en erreur (dont 503 sans Patroni) ou serveur injoignable → « nœud ? » ; lieu inconnu → pas de parenthèses. Plus de version du serveur ici : elle est dans le pied de page web (INV-166).
+- **Pourquoi** : décision du propriétaire du 2026-10-29 (« uniquement le nœud et la bonne version ») : la version affichée doit être celle de la release GitHub installée, et le nœud indique quel backend répond pendant une bascule ou pour un rapport de bug.
+- **Couverture** : Espresso `AlarmMenuAdminTest::version_et_noeud_en_bas_du_menu`, `::noeud_inconnu_affiche_point_d_interrogation`. Verts sur émulateur (AVD alarm_repro, 2026-10-29, classe complète 16/16).
 
 ### INV-ANDROID-100 [C] ⚠️ Carte hero reflète l'état courant : calm / active / acked
 `DashboardActivity.updateStatus()` (1Hz) synchronise la carte avec `AlarmPollingService.currentAlarm` :
@@ -208,6 +208,7 @@ Textes du bandeau :
 `versionCode` et `versionName` du `defaultConfig` Gradle sont calculés au build time depuis git, pas hardcodés :
 - `versionCode = git rev-list --count HEAD` (nombre total de commits, monotone)
 - `versionName` = **le tag de release GitHub sans le `v`** (`git describe --tags --match 'v*' --dirty`) : `1.6.0` pour l'APK de la release `v1.6.0`, `1.6.0-3-gabc1234` pour un build 3 commits après, suffixe `-dirty` si un fichier suivi est modifié (2026-10-29 : avant, `1.0.<commits>-<sha>` ne ressemblait jamais à la version affichée sur GitHub)
+- La release `vX.Y.Z` n'est publiée que si le fichier `VERSION` à la racine vaut `X.Y.Z` (garde de `android-release.yml`) : le serveur affiche ce fichier (INV-164), l'app et le web annoncent donc la même version.
 - Sans tag `v*` accessible (checkout shallow) : `versionName = "1.0.${gitCommitCount}-${gitShortSha}[-dirty]"`
 - Si git inaccessible (rare, build hors repo) : fallback `versionCode=1`, `versionName="1.0.1-unknown"`
 

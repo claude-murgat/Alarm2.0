@@ -143,8 +143,6 @@ class FakeApiService : ApiService {
     // ===== INV-ANDROID-010/011/012 : menu et ecrans admin =====
     // Donnees : 2 sites (Izeron, Beaufort), 3 utilisateurs, 5 noeuds.
 
-    var healthResponse: Response<HealthResponse> = Response.success(HealthResponse(version = "abc1234"))
-    override suspend fun health(): Response<HealthResponse> = healthResponse
 
     var meResponse: Response<UserResponse> = Response.success(
         UserResponse(1, "user1@alarm.local", "user1", false, true)

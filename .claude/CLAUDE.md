@@ -183,6 +183,10 @@ manifest APK.
 
 Format : `<tag v* sans le v>[-<n>-g<short_sha>][-dirty]` (git describe), ex. `1.6.0` = release GitHub v1.6.0.
 
+**Faire une release** : bumper le fichier `VERSION` (racine) dans une PR, merger, puis
+`git tag vX.Y.Z <merge> && git push origin vX.Y.Z`. Le serveur affiche `VERSION` (INV-164),
+l'APK le tag ; `android-release.yml` refuse de publier s'ils different.
+
 Cela rend impossible la classe de bugs "j'ai oublie de bumper la
 version" : si tu modifies le code, ton APK aura un sha different,
 donc une version different. Pour un test propre, garde le working

@@ -554,7 +554,7 @@
                 android:textColor="#ef4444" />
         </LinearLayout>
 
-        <!-- INV-ANDROID-012 : "App <versionName> · serveur <sha ou ?>" -->
+        <!-- INV-ANDROID-012 : "Version <versionName> · nœud <nom> (<lieu>)" -->
         <TextView
             android:id="@+id/drawerVersion"
             android:layout_width="match_parent"

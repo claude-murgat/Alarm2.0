@@ -53,9 +53,6 @@ interface ApiService {
 
     // ===== INV-ANDROID-011/012 : menu (ecrans Alarmes, Escalade, Sites, admin) =====
 
-    @GET("health")
-    suspend fun health(): Response<HealthResponse>
-
     @GET("api/auth/me")
     suspend fun getMe(@Header("Authorization") auth: String): Response<UserResponse>
 

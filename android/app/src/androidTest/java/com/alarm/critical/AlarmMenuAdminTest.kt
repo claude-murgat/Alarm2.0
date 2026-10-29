@@ -38,7 +38,6 @@ import androidx.test.runner.lifecycle.Stage
 import com.alarm.critical.api.ApiProvider
 import com.alarm.critical.model.AlarmResponse
 import com.alarm.critical.model.EscalationEntry
-import com.alarm.critical.model.HealthResponse
 import com.alarm.critical.model.ModemStatusResponse
 import com.alarm.critical.model.PhoneUpdate
 import com.alarm.critical.model.TokenResponse
@@ -57,7 +56,7 @@ import retrofit2.Response
  * INV-ANDROID-010 : role admin memorise au login, relu par /api/auth/me, efface au logout.
  * INV-ANDROID-011 : menu lateral (entrees admin masquees aux autres) et ses 6 ecrans ;
  *                   un 403 du serveur ferme l'ecran admin.
- * INV-ANDROID-012 : version de l'app et du serveur en bas du menu.
+ * INV-ANDROID-012 : version de l'app et noeud qui repond en bas du menu.
  */
 @RunWith(AndroidJUnit4::class)
 class AlarmMenuAdminTest {
@@ -215,23 +214,23 @@ class AlarmMenuAdminTest {
         }
     }
 
-    // ===== INV-ANDROID-012 : versions =====
+    // ===== INV-ANDROID-012 : version et noeud =====
 
     @Test
-    fun version_app_et_serveur_en_bas_du_menu() {
+    fun version_et_noeud_en_bas_du_menu() {
         launchDashboard(saved = false)
 
         onView(withId(R.id.drawerVersion))
-            .check(matches(withText("App ${BuildConfig.VERSION_NAME} · serveur abc1234")))
+            .check(matches(withText("Version ${BuildConfig.VERSION_NAME} · nœud node1 (Izeron)")))
     }
 
     @Test
-    fun version_serveur_absente_affiche_point_d_interrogation() {
-        fakeApi.healthResponse = Response.success(HealthResponse(version = null))  // backend d'avant
+    fun noeud_inconnu_affiche_point_d_interrogation() {
+        fakeApi.clusterResponse = Response.error(503, okhttp3.ResponseBody.create(null, ""))  // Patroni KO / serveur en erreur
         launchDashboard(saved = false)
 
         onView(withId(R.id.drawerVersion))
-            .check(matches(withText("App ${BuildConfig.VERSION_NAME} · serveur ?")))
+            .check(matches(withText("Version ${BuildConfig.VERSION_NAME} · nœud ?")))
     }
 
     // ===== INV-ANDROID-011 : ecrans pour tous =====

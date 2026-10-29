@@ -154,6 +154,12 @@ jobs:
           # a un binaire du SDK dont le nom change selon les build-tools.
           VER="$(git describe --tags --match 'v*' --dirty)"
           VER="${VER#v}"
+          # Le serveur affiche le fichier VERSION (INV-164), l'app le tag : ils doivent
+          # concorder, sinon le web et l'app annoncent deux versions differentes.
+          if [ "$VER" != "$(cat VERSION)" ]; then
+            echo "::error::tag $GITHUB_REF_NAME (version $VER) different du fichier VERSION ($(cat VERSION)) — bumper VERSION avant de tagger."
+            exit 1
+          fi
           OUT="alarme-murgat-${GITHUB_REF_NAME}-${VER}.apk"
           cp "$APK" "$OUT"
           {
