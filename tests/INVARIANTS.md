@@ -956,6 +956,17 @@ Les migrations (`create_all` + `run_migrations`, idempotentes) sont jouées **au
 - **Pourquoi** : cluster de prod à 5 nœuds sur 3 lieux depuis le 2026-10-27 (NODE3 OVH, onsite-1/2 Izeron, alarm-1/2 « Beaufort »). Le propriétaire veut voir d'un coup d'œil où se trouve chaque nœud.
 - **Couverture** : Integration `test_cluster_location_inv161.py`.
 
+### INV-167 [C] ✅ CD : un nœud injoignable ne bloque pas le déploiement des autres sites (2026-10-29)
+`alarm-cd-orchestrate` (NODE3, ordre `3 5 4 2 1`) déploie chaque nœud indépendamment :
+- **État par nœud** `/var/lib/alarm/cd/node<N>.digest` = digest déployé avec succès sur node N (écrit après son canary OK). Un nœud déjà au digest courant est sauté ; les 5 à jour → rien à faire.
+- **Nœud injoignable** (SSH) → `WARN node<N> (site) injoignable : reporté au prochain passage`, la chaîne **continue** avec les nœuds suivants.
+- **Quorum etcd** (INV-090) : un votant (node1, node2, node3) n'est redémarré que si **les 3 votants** répondent au préflight. Sinon aucun votant ce passage, mais les non votants node4/node5 joignables sont déployés.
+- **Canary en échec** (health KO → rollback) → la chaîne s'arrête, `failure` + cooldown 1 h : une image cassée ne se propage pas.
+- `orchestrate.state` (`<digest>\t<outcome>\t<ts>`) : `success` (5 nœuds à jour), `partial` (nœuds en attente) ou `failure`. Un passage `partial` **ne déclenche pas de cooldown** : le tick suivant reprend aussitôt les seuls nœuds en attente. Un nœud qui revient reçoit le digest courant, même inchangé depuis le dernier passage réussi.
+- **Codes de sortie** : `0` rien à faire / cooldown / `success` / `partial` ; `1` erreur de config ; `2` canary en échec.
+- **Pourquoi** : incident du 2026-10-29. alarm-1/alarm-2 (node4/node5, site Beaufort, non votants) hors ligne ~2 jours : le préflight SSH faisait `exit 1` sur 10.99.0.4, donc **aucun** nœud de prod n'a été mis à jour (4 versions jamais déployées), avec 1 h de cooldown à chaque tour. Exigence du propriétaire : « On doit pouvoir déployer sur les deux sites indépendamment sans être bloqué ».
+- **Couverture** : Unit `tests/unit/test_cd_orchestrate.py` (vrai script, faux `ssh` / `docker` / canary) : Beaufort injoignable → 3, 2, 1 déployés, `partial`, puis 5, 4 au tick suivant → `success` ; node2 injoignable → aucun votant, 5 et 4 déployés ; canary node3 en échec → halt, `failure`, cooldown respecté puis retenté ; tous à jour → rien ; nœud en retard rattrapé après un `success`. RED sur le script d'origine (4 sur 5).
+
 ---
 
 ## 10. Observabilité et audit

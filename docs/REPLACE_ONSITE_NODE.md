@@ -106,6 +106,6 @@ Un nœud non votant n'a **aucun conteneur etcd** : son Patroni utilise les 3 etc
    curl -s http://10.99.0.X:8000/health                     # role replica
    ```
 5. **Passerelle (alarm-1)** : comme un nœud passerelle du §0, avec `GATEWAY_SITE=beaufort` dans `/etc/alarm-gateway.env`. `install.sh` y ajoute `NODE4_URL` / `NODE5_URL` s'ils manquent.
-6. **CD** : l'orchestrateur suit `NODES_ORDER=(3 5 4 2 1)` et teste d'abord SSH vers les 5 IP. **Si node4 ou node5 ne répond pas, toute la chaîne s'arrête** (exit 1, aucun nœud redémarré). N'installer la nouvelle version de `alarm-cd-orchestrate` sur NODE3 (`docs/CD_DESIGN.md` §9bis, étape B) qu'une fois les deux nœuds en service.
+6. **CD** : l'orchestrateur suit `NODES_ORDER=(3 5 4 2 1)`. Depuis le 2026-10-29 (INV-167), un node4 ou node5 qui ne répond pas est **reporté au prochain passage** sans bloquer les autres nœuds ; il reçoit la version courante dès qu'il revient (`docs/CD_DESIGN.md` §4, « Déploiement indépendant par site »).
 
 **Retrait** : `docker compose --env-file .env.prod.nodeN -p nodeN down` sur le nœud. Aucun geste etcd. Patroni oublie le membre au bout du TTL.

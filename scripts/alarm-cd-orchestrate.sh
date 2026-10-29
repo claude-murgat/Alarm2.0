@@ -12,36 +12,45 @@
 # valide 5 cycles canary manuels (cf §4 doc "V1.5 a activer apres 5
 # deploiements clean").
 #
-# Idempotence :
-#   - Compare le digest courant de :stable cache localement au digest du
-#     dernier deploiement reussi (state file /var/lib/alarm/cd/orchestrate.state)
-#   - Si meme digest + outcome=success precedent -> no-op silencieux (95 %
-#     des ticks du timer).
-#   - Si meme digest + outcome=failure precedent + cooldown < 1 h -> skip
-#     (anti-boucle si :stable est casse).
+# Idempotence + deploiement independant par site (INV-167, incident 2026-10-29) :
+#   - Etat par noeud : /var/lib/alarm/cd/node<N>.digest = digest deploye avec
+#     succes sur node<N> (ecrit apres son canary OK). Un noeud deja au digest
+#     courant de :stable (cache local NODE3) est saute.
+#   - Les 5 noeuds au digest courant -> no-op silencieux (95 % des ticks).
+#   - Noeud injoignable (SSH) -> WARN, reporte au prochain passage, la chaine
+#     CONTINUE avec les suivants. Un votant etcd (1, 2, 3) n'est redemarre que
+#     si les 3 votants repondent (quorum) ; sinon seuls 4/5 sont deployes.
+#   - Etat global /var/lib/alarm/cd/orchestrate.state : <digest>\t<outcome>\t<ts>,
+#     outcome = success (5 noeuds a jour) | partial (noeuds en attente, repris
+#     au tick suivant, SANS cooldown) | failure (un canary a fail).
+#   - Meme digest + outcome=failure + cooldown < 1 h -> skip (anti-boucle si
+#     :stable est casse).
 #
 # Pre-requis (cf docs/CD_DESIGN.md §3 + §4) :
 #   - alarm-cd-pull.timer actif sur les 5 noeuds (pour que les images soient
 #     en cache local AVANT l'orchestration).
-#   - Cle SSH alarm@10.99.0.{1,2,3,4,5} fonctionnelle depuis NODE3.
+#   - Cle SSH alarm@10.99.0.{1,2,3,4,5} fonctionnelle depuis NODE3 (un noeud
+#     injoignable est reporte, il ne bloque plus les autres).
 #   - GATEWAY_KEY definie via /etc/alarm/cd.env (lu par le unit systemd).
 #
 # Sortie :
-#   exit 0  -> rien a faire OU chaine canary complete reussie
-#   exit 1  -> erreur preflight (SSH KO, GATEWAY_KEY manquante, etc.)
-#   exit 2  -> chaine canary halt (au moins un noeud a fail/rollback) — l'event
-#              est deja loggue par alarm-cd-canary.sh / alarm-cd-rollback.sh
+#   exit 0  -> rien a faire, cooldown en cours, chaine complete (success) OU
+#              partielle (partial : noeuds injoignables reportes au tick suivant)
+#   exit 1  -> erreur de config (GATEWAY_KEY manquante, canary introuvable)
+#   exit 2  -> chaine canary halt (un noeud a fail/rollback) — l'event est deja
+#              loggue par alarm-cd-canary.sh / alarm-cd-rollback.sh
 
 set -euo pipefail
 
 REGISTRY="${REGISTRY:-ghcr.io/claude-murgat}"
 TAG="${TAG:-stable}"
 IMAGE="${IMAGE:-alarm-backend}"
-STATE_DIR="/var/lib/alarm/cd"
+# STATE_DIR / LOCK_FILE surchargeables pour les tests (tests/unit/test_cd_orchestrate.py).
+STATE_DIR="${STATE_DIR:-/var/lib/alarm/cd}"
 STATE_FILE="${STATE_DIR}/orchestrate.state"
 # /run/alarm-cd-orchestrate/ est cree par systemd (RuntimeDirectory= dans le
 # unit) avec owner alarm:alarm. Symetrique a alarm-cd-pull (cf service file).
-LOCK_FILE="/run/alarm-cd-orchestrate/lock"
+LOCK_FILE="${LOCK_FILE:-/run/alarm-cd-orchestrate/lock}"
 API_BASE_DEFAULT="http://10.99.0.1:8000"
 API_BASE="${API_BASE:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -58,6 +67,9 @@ SOAK="${SOAK:-120}"
 # souvent primary). node1 reste le dernier (son canary_promoted = fin de chaine,
 # cf backend/app/api/deployments.py). Cf §4 doc — justification de l'ordre.
 NODES_ORDER=(3 5 4 2 1)
+# IP WG (cf alarm-cd-canary.sh) et site (logs seulement). Votants etcd = 1, 2, 3.
+NODE_IP=([1]=10.99.0.2 [2]=10.99.0.3 [3]=10.99.0.1 [4]=10.99.0.4 [5]=10.99.0.5)
+NODE_SITE=([1]=Izeron [2]=Izeron [3]=OVH [4]=Beaufort [5]=Beaufort)
 
 log() {
   # stderr seul -> systemd capture via StandardError=journal (cf unit file).
@@ -126,13 +138,25 @@ if [[ -f "$STATE_FILE" ]]; then
 fi
 NOW=$(date +%s)
 
-# No-op : meme digest deja deploye avec succes la derniere fois.
-if [[ "$LOCAL_DIGEST" == "$LAST_DIGEST" && "$LAST_OUTCOME" == "success" ]]; then
+# Noeuds a deployer = ceux dont node<N>.digest != digest courant. Un noeud
+# revenu apres une absence est donc rattrape au tick suivant, meme si le
+# digest n'a pas change depuis.
+TODO=()
+for NODE in "${NODES_ORDER[@]}"; do
+  if [[ "$(cat "${STATE_DIR}/node${NODE}.digest" 2>/dev/null || true)" != "$LOCAL_DIGEST" ]]; then
+    TODO+=("$NODE")
+  fi
+done
+is_todo() { [[ " ${TODO[*]} " == *" $1 "* ]]; }
+
+# No-op : les 5 noeuds sont deja au digest courant.
+if (( ${#TODO[@]} == 0 )); then
   # Pas de log par tour (idem Q6.1 doc — 95 % des tours sont des no-op).
   exit 0
 fi
 
-# Cooldown : meme digest deja tente, fail recemment.
+# Cooldown : meme digest deja tente, un canary a fail recemment. Un passage
+# partial (noeuds injoignables) ne declenche PAS de cooldown.
 if [[ "$LOCAL_DIGEST" == "$LAST_DIGEST" && "$LAST_OUTCOME" == "failure" ]]; then
   AGE=$((NOW - LAST_TS))
   if (( AGE < COOLDOWN_AFTER_FAIL )); then
@@ -143,7 +167,7 @@ if [[ "$LOCAL_DIGEST" == "$LAST_DIGEST" && "$LAST_OUTCOME" == "failure" ]]; then
   log "Cooldown ($COOLDOWN_AFTER_FAIL s) expire, retente $LOCAL_DIGEST"
 fi
 
-log "Nouveau digest detecte : $LOCAL_DIGEST (precedent: ${LAST_DIGEST:-none})"
+log "Digest $LOCAL_DIGEST (precedent: ${LAST_DIGEST:-none}${LAST_OUTCOME:+ $LAST_OUTCOME}) — noeuds a deployer : ${TODO[*]}"
 
 # GATEWAY_KEY obligatoire (alarm-cd-canary.sh refuse de tourner sans).
 # Sourcable depuis /etc/alarm/cd.env via EnvironmentFile dans le unit.
@@ -154,19 +178,37 @@ if [[ -z "${GATEWAY_KEY:-}" ]]; then
 fi
 export GATEWAY_KEY
 
-# Preflight : SSH joignable vers chaque noeud cible. Defaillance ici =
-# pas la peine de commencer.
-log "Preflight SSH vers les 5 noeuds..."
-for ip in 10.99.0.1 10.99.0.2 10.99.0.3 10.99.0.4 10.99.0.5; do
+# Preflight SSH : les noeuds a deployer, plus les 3 votants des que l'un d'eux
+# est a deployer. Un noeud injoignable n'arrete plus la chaine : jusqu'au
+# 2026-10-29, node4/5 hors ligne 2 jours -> exit 1 a chaque tour, aucune des 4
+# versions promues n'a ete deployee, sur aucun site.
+DOWN=" "
+VOTER_TODO=0
+if is_todo 1 || is_todo 2 || is_todo 3; then VOTER_TODO=1; fi
+for NODE in "${NODES_ORDER[@]}"; do
+  if ! is_todo "$NODE" && ! (( VOTER_TODO && NODE <= 3 )); then
+    continue
+  fi
   if ! ssh -o BatchMode=yes -o ConnectTimeout=10 \
        -o StrictHostKeyChecking=accept-new \
-       "alarm@$ip" "true" 2>/dev/null; then
-    log "ERREUR : SSH alarm@$ip echoue (cle manquante ? noeud down ?). Halt."
-    printf '%s\t%s\t%s\n' "$LOCAL_DIGEST" "failure" "$NOW" > "$STATE_FILE"
-    exit 1
+       "alarm@${NODE_IP[$NODE]}" "true" 2>/dev/null; then
+    DOWN+="$NODE "
   fi
 done
-log "Preflight SSH OK pour les 5 noeuds"
+# Quorum etcd (INV-090) : redemarrer un votant pendant qu'un autre est absent
+# ne laisserait qu'un etcd sur 3 -> quorum perdu. Les 3 votants ou aucun.
+VOTERS_OK=1
+for NODE in 1 2 3; do
+  if [[ "$DOWN" == *" $NODE "* ]]; then VOTERS_OK=0; fi
+done
+if [[ "$DOWN" == " " ]]; then
+  log "Preflight SSH OK"
+else
+  log "Preflight SSH : injoignables :${DOWN% }"
+fi
+if (( VOTER_TODO && ! VOTERS_OK )); then
+  log "WARN : votant etcd injoignable : aucun votant (1, 2, 3) redemarre ce passage (quorum etcd), seuls les non votants 4/5 sont deployes"
+fi
 
 # Resolution du chemin de alarm-cd-canary.sh : meme dossier que ce script.
 CANARY="${SCRIPT_DIR}/alarm-cd-canary.sh"
@@ -176,10 +218,22 @@ if [[ ! -x "$CANARY" ]]; then
   exit 1
 fi
 
-log "Lance la chaine canary ${NODES_ORDER[*]} (soak ${SOAK}s par etape)"
+log "Lance la chaine canary ${TODO[*]} (soak ${SOAK}s par etape)"
 
-# Chaine sequentielle. Halt sur premier exit code != 0.
-for NODE in "${NODES_ORDER[@]}"; do
+# Chaine sequentielle. Noeud injoignable -> reporte (PENDING), on continue.
+# Canary en echec -> halt (une image cassee ne doit pas se propager).
+PENDING=()
+for NODE in "${TODO[@]}"; do
+  if [[ "$DOWN" == *" $NODE "* ]]; then
+    log "WARN : node${NODE} (${NODE_SITE[$NODE]}) injoignable : reporte au prochain passage"
+    PENDING+=("$NODE")
+    continue
+  fi
+  if (( NODE <= 3 && ! VOTERS_OK )); then
+    log "WARN : node${NODE} (${NODE_SITE[$NODE]}, votant) reporte au prochain passage : un votant etcd est injoignable"
+    PENDING+=("$NODE")
+    continue
+  fi
   log "--- Etape canary node${NODE} ---"
   # `--api-base` et `--gateway-key` heritage explicite pour eviter qu'un
   # changement d'env entre les etapes ne casse les POST events. GATEWAY_KEY
@@ -197,14 +251,20 @@ for NODE in "${NODES_ORDER[@]}"; do
     --gateway-key "$GATEWAY_KEY" || rc=$?
   if (( rc != 0 )); then
     log "ERREUR : canary node${NODE} a fail (exit $rc). Halt chaine."
-    log "  -> les noeuds restants ${NODES_ORDER[*]} (apres node${NODE}) NE sont PAS updates."
+    log "  -> les noeuds restants de ${TODO[*]} (apres node${NODE}) NE sont PAS updates."
     log "  -> consulter deployment_events pour le detail (rollback ou abort deja loggue)."
     printf '%s\t%s\t%s\n' "$LOCAL_DIGEST" "failure" "$NOW" > "$STATE_FILE"
     exit 2
   fi
+  printf '%s\n' "$LOCAL_DIGEST" > "${STATE_DIR}/node${NODE}.digest"
   log "Etape canary node${NODE} OK"
 done
 
+if (( ${#PENDING[@]} > 0 )); then
+  log "Chaine canary partielle : $LOCAL_DIGEST deploye, en attente : ${PENDING[*]} (repris au prochain passage, sans cooldown)"
+  printf '%s\t%s\t%s\n' "$LOCAL_DIGEST" "partial" "$NOW" > "$STATE_FILE"
+  exit 0
+fi
 log "Chaine canary complete : $LOCAL_DIGEST deploye sur les 5 noeuds"
 printf '%s\t%s\t%s\n' "$LOCAL_DIGEST" "success" "$NOW" > "$STATE_FILE"
 exit 0
