@@ -55,7 +55,7 @@ def test_oncall_delay_read_from_system_config_not_hardcoded(client, admin_header
     assert r.status_code == 200, r.text
 
     # Sanity (reproduction issue #24, etape 3 : GET confirme)
-    r = client.get("/api/config/system")
+    r = client.get("/api/config/system", headers=admin_headers)
     assert r.status_code == 200
     assert r.json().get("oncall_offline_delay_minutes") == "2", (
         f"la config doit etre persistee a '2', got {r.json().get('oncall_offline_delay_minutes')!r}"

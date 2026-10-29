@@ -93,6 +93,10 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.image_ref }}
+          # INV-164 : /health du backend expose ce sha (version = 7 premiers caracteres).
+          # Les autres images ne declarent pas l'ARG : ignore.
+          build-args: |
+            GIT_SHA=${{ steps.meta.outputs.sha }}
           # Cache GHA partage entre runs pour ne pas re-build les couches inchangees.
           # Scope par image -> pas de pollution croisee (les Dockerfile partagent rien
           # de pertinent : backend = python:3.12-slim ; patroni = postgres:16-alpine).

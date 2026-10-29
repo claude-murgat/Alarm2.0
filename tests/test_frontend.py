@@ -25,7 +25,10 @@ from playwright.sync_api import Page, expect
 
 @pytest.fixture(scope="session")
 def primary_url():
-    """Trouve le primary backend."""
+    """Trouve le primary backend. FRONTEND_URL force un backend precis
+    (ex. uvicorn SQLite local : FRONTEND_URL=http://127.0.0.1:8765)."""
+    if os.environ.get("FRONTEND_URL"):
+        return os.environ["FRONTEND_URL"]
     for port in [8000, 8001, 8002]:
         try:
             r = requests.get(f"http://localhost:{port}/health", timeout=2)
@@ -549,6 +552,18 @@ class TestEscalationDragDrop:
         chain_after = dashboard.locator("#escalationChain .esc-item").count()
         assert chain_after == chain_before, "Annuler doit restaurer la chaine"
 
+    def test_move_down_button_reorders_chain_for_save(self, dashboard: Page):
+        """INV-150 : ▼ descend un membre (sans glisser-deposer), Sauvegarder envoie le nouvel ordre."""
+        self._go_to_escalation(dashboard)
+        chain = dashboard.locator("#escalationChain .esc-item")
+        before = [int(i) for i in chain.evaluate_all("els => els.map(e => e.dataset.userId)")]
+        assert len(before) >= 2, before
+
+        chain.first.locator("button[aria-label='Descendre']").click()
+        with dashboard.expect_request("**/api/config/escalation/bulk") as req_info:
+            dashboard.locator("#saveEscalation").click()
+        assert req_info.value.post_data_json["user_ids"] == [before[1], before[0], *before[2:]]
+
     def test_autorefresh_does_not_overwrite_edits(self, dashboard: Page):
         """Pendant une edition, l'autorefresh ne doit pas ecraser les changements."""
         self._go_to_escalation(dashboard)
@@ -881,30 +896,188 @@ class TestEscalationLiveDiagram:
 # INV-150 : web utilisable sur telephone
 # ---------------------------------------------------------------------------
 
+def _send_alarm(primary_url, title="Pompe de relevage en defaut", message="Niveau haut cuve 3, intervention requise"):
+    r = requests.post(f"{primary_url}/api/alarms/send", headers=_admin_headers(primary_url), timeout=5,
+                      json={"site": "izeron", "title": title, "message": message, "severity": "critical"})
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
+def _login(page: Page, primary_url, name="admin", password="admin123", width=None):
+    if width:
+        page.set_viewport_size({"width": width, "height": 800})
+    page.goto(primary_url, wait_until="domcontentloaded", timeout=15000)
+    page.locator("#loginName").fill(name)
+    page.locator("#loginPassword").fill(password)
+    page.locator("button:has-text('Se connecter')").click()
+    expect(page.locator("#loginOverlay")).to_be_hidden(timeout=15000)
+    return page
+
+
 class TestMobileLayout:
 
-    def test_no_tab_scrolls_the_page_horizontally_on_a_phone(self, page: Page, primary_url):
-        """INV-150 : a 375 px, aucun onglet ne deborde horizontalement (alarme en cours
-        pour remplir les tableaux), et le bouton Deconnexion reste dans l'ecran."""
-        r = requests.post(f"{primary_url}/api/alarms/send", headers=_admin_headers(primary_url), timeout=5,
-                          json={"site": "izeron", "title": "Pompe de relevage en defaut", "message": "INV-150", "severity": "critical"})
-        assert r.status_code == 200, r.text
-
-        page.set_viewport_size({"width": 375, "height": 800})
-        page.goto(primary_url, wait_until="domcontentloaded", timeout=15000)
-        page.locator("#loginName").fill("admin")
-        page.locator("#loginPassword").fill("admin123")
-        page.locator("button:has-text('Se connecter')").click()
-        expect(page.locator("#loginOverlay")).to_be_hidden(timeout=15000)
+    @pytest.mark.parametrize("width", [375, 768, 1024])
+    def test_no_tab_scrolls_the_page_horizontally(self, page: Page, primary_url, width):
+        """INV-150 : a 375 (telephone), 768 et 1024 px (tablette), aucun onglet ne deborde
+        horizontalement (alarme en cours pour remplir les tableaux), et le bouton
+        Deconnexion reste dans l'ecran."""
+        _send_alarm(primary_url)
+        _login(page, primary_url, width=width)
 
         logout = page.locator("button:has-text('Déconnexion')").bounding_box()
-        assert logout and logout["x"] + logout["width"] <= 375, f"Deconnexion hors ecran : {logout}"
+        assert logout and logout["x"] + logout["width"] <= width, f"Deconnexion hors ecran : {logout}"
 
         overflowing = {}
-        for tab in page.locator(".tab").all():
+        for tab in page.locator(".tab:visible").all():
             tab.click()
             page.wait_for_timeout(500)
-            width = page.evaluate("document.documentElement.scrollWidth")
-            if width > 375:
-                overflowing[tab.inner_text()] = width
-        assert not overflowing, f"Onglets qui debordent a 375 px (largeur de page) : {overflowing}"
+            scroll = page.evaluate("document.documentElement.scrollWidth")
+            if scroll > width:
+                overflowing[tab.inner_text()] = scroll
+        assert not overflowing, f"Onglets qui debordent a {width} px (largeur de page) : {overflowing}"
+
+    def test_resolve_button_inside_the_screen_on_a_phone(self, page: Page, primary_url):
+        """INV-150 : a 375 px, le bouton « Résoudre » de l'alarme en cours est dans l'ecran
+        (tableau en cartes empilees), sans defilement horizontal, et fait 44 px de haut."""
+        _send_alarm(primary_url)
+        _login(page, primary_url, width=375)
+        btn = page.locator("#activeAlarmsTable button:has-text('Résoudre')")
+        expect(btn).to_be_visible(timeout=8000)
+        box = btn.bounding_box()
+        assert box["x"] >= 0 and box["x"] + box["width"] <= 375, f"Résoudre hors ecran : {box}"
+        assert box["height"] >= 44, f"Cible tactile trop petite : {box}"
+
+
+# ---------------------------------------------------------------------------
+# INV-165 : un non-admin ne voit que le suivi
+# ---------------------------------------------------------------------------
+
+ADMIN_TABS = ["Utilisateurs", "Tests", "Log", "Disponibilité", "Cluster"]
+VIEWER_TABS = ["Tableau de bord", "Escalade", "Statistiques", "Alarmes"]
+
+
+class TestRoleBasedUI:
+
+    NAME, PASSWORD = "lecteur165", "lecteur123"
+
+    @pytest.fixture
+    def viewer(self, primary_url):
+        """Compte non admin cree par l'admin (INV-149), supprime apres le test."""
+        _delete_user(primary_url, self.NAME)
+        r = requests.post(f"{primary_url}/api/auth/register", headers=_admin_headers(primary_url), timeout=5,
+                          json={"name": self.NAME, "password": self.PASSWORD, "is_admin": False})
+        assert r.status_code == 200, r.text
+        yield
+        _delete_user(primary_url, self.NAME)
+
+    def test_non_admin_sees_only_the_monitoring_tabs(self, page: Page, primary_url, viewer):
+        _login(page, primary_url, self.NAME, self.PASSWORD)
+        expect(page.locator(".tab:visible")).to_have_text(VIEWER_TABS)
+        for label in ADMIN_TABS:
+            expect(page.locator(f".tab:text-is('{label}')")).to_be_hidden()
+
+    def test_non_admin_sees_no_admin_action(self, page: Page, primary_url, viewer):
+        _send_alarm(primary_url)
+        _login(page, primary_url, self.NAME, self.PASSWORD)
+        expect(page.locator("#activeAlarmsTable tr")).to_contain_text("Pompe de relevage", timeout=8000)
+        expect(page.locator("button:visible:has-text('Résoudre')")).to_have_count(0)
+
+        page.locator(".tab[data-tab='alarms']").click()
+        expect(page.locator("#allAlarmsTable tr")).to_contain_text("Pompe de relevage", timeout=8000)
+        expect(page.locator("#alarms button:visible")).to_have_count(0)  # ni « Envoyer » ni « Résoudre »
+
+        page.locator(".tab[data-tab='escalation']").click()
+        expect(page.locator("#escalationLive")).to_have_attribute("data-state", "active", timeout=8000)
+        for sel in ["#escalationDelay", "#alertEmail", "#escalationChain", "#saveEscalation"]:
+            expect(page.locator(sel)).to_be_hidden()
+        expect(page.locator("#escalation button:visible")).to_have_count(0)
+
+    def test_non_admin_triggers_no_admin_only_get(self, page: Page, primary_url, viewer):
+        """Ni /api/config/system ni /api/audit, ni en direct ni dans le WebSocket live,
+        aucun 401/403, et le non-admin reste connecte apres le chargement initial."""
+        urls, refused, ws_frames = [], [], []
+        page.on("request", lambda r: urls.append(r.url))
+        page.on("response", lambda r: refused.append(f"{r.status} {r.url}") if r.status in (401, 403) else None)
+        page.on("websocket", lambda ws: ws.on("framesent", lambda payload: ws_frames.append(payload)))
+        _login(page, primary_url, self.NAME, self.PASSWORD)
+        page.wait_for_function("liveWs && liveWs.readyState === WebSocket.OPEN", timeout=10000)
+        for tab in page.locator(".tab:visible").all():
+            tab.click()
+        page.wait_for_timeout(2000)
+
+        assert not [u for u in urls if "/api/config/system" in u or "/api/audit" in u], urls
+        assert ws_frames and "/api/alarms/active/escalation" in ws_frames[0], ws_frames
+        assert "/api/config/system" not in ws_frames[0], ws_frames[0]
+        assert refused == []
+        expect(page.locator("#loginOverlay")).to_be_hidden()
+
+    def test_403_shows_error_without_logging_out(self, page: Page, primary_url, viewer):
+        """403 = droit manquant (routes admin de #274), pas session expiree : message, pas de deconnexion.
+        Lecture refusee (stats) puis ecriture refusee (resolve, appelee comme le ferait le bouton)."""
+        page.route("**/api/stats/kpi*", lambda route: route.fulfill(status=403, json={"detail": "Accès réservé aux administrateurs"}))
+        page.route("**/api/alarms/*/resolve", lambda route: route.fulfill(status=403, json={"detail": "Accès réservé aux administrateurs"}))
+        _login(page, primary_url, self.NAME, self.PASSWORD)
+        page.locator(".tab[data-tab='stats']").click()
+        page.locator("#statsWeeks").select_option("4")  # relance loadStats -> 403
+        page.evaluate("resolveAlarm(1).catch(() => {})")
+        expect(page.locator("#snackbar.show.error")).to_contain_text("Réservé aux administrateurs", timeout=5000)
+        page.wait_for_timeout(500)
+        expect(page.locator("#loginOverlay")).to_be_hidden()
+
+    def test_admin_still_sees_every_tab_and_action(self, page: Page, primary_url):
+        _send_alarm(primary_url)
+        _login(page, primary_url)
+        expect(page.locator(".tab:visible")).to_have_count(len(VIEWER_TABS) + len(ADMIN_TABS))
+        expect(page.locator("#activeAlarmsTable button:has-text('Résoudre')")).to_be_visible(timeout=8000)
+        page.locator(".tab[data-tab='escalation']").click()
+        expect(page.locator("#saveEscalation")).to_be_visible()
+
+    def test_non_admin_left_on_an_admin_tab_returns_to_dashboard(self, page: Page, primary_url, viewer):
+        _login(page, primary_url)
+        page.locator(".tab[data-tab='users']").click()
+        page.locator("button.btn-logout").click()
+        page.locator("#loginName").fill(self.NAME)
+        page.locator("#loginPassword").fill(self.PASSWORD)
+        page.locator("button:has-text('Se connecter')").click()
+        expect(page.locator("#dashboard")).to_be_visible(timeout=10000)
+        expect(page.locator("#users")).to_be_hidden()
+
+
+# ---------------------------------------------------------------------------
+# INV-166 : pied de page version + noeud
+# ---------------------------------------------------------------------------
+
+class TestFooter:
+
+    def _cluster(self, route):
+        route.fulfill(json={"local_node": "node2", "local_role": "secondary", "local_location": "izeron",
+                            "quorum": {"total": 3, "healthy": 3, "has_quorum": True}, "members": []})
+
+    def _health(self, version):
+        def handler(route):
+            body = route.fetch().json()
+            body.pop("version", None)
+            if version:
+                body["version"] = version
+            route.fulfill(json=body)
+        return handler
+
+    def test_footer_shows_version_node_and_place(self, page: Page, primary_url):
+        page.route("**/health", self._health("abc1234"))
+        page.route("**/api/cluster", self._cluster)
+        _login(page, primary_url)
+        expect(page.locator("#footer")).to_have_text("Alarme Murgat · serveur abc1234 · nœud node2 (Izeron)", timeout=8000)
+
+    def test_footer_without_version_shows_question_mark(self, page: Page, primary_url):
+        """Backend d'avant /health.version : « ? »."""
+        page.route("**/health", self._health(None))
+        page.route("**/api/cluster", self._cluster)
+        _login(page, primary_url)
+        expect(page.locator("#footer")).to_have_text("Alarme Murgat · serveur ? · nœud node2 (Izeron)", timeout=8000)
+
+    def test_footer_visible_for_a_non_admin_on_every_tab(self, page: Page, primary_url):
+        _login(page, primary_url, "user1", "user123")
+        for tab in page.locator(".tab:visible").all():
+            tab.click()
+            expect(page.locator("#footer")).to_be_visible()
+            expect(page.locator("#footer")).to_contain_text("Alarme Murgat · serveur ")

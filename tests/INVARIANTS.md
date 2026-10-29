@@ -569,8 +569,32 @@ Toute écriture déclenchée depuis le web (POST/PUT/PATCH/DELETE via `api()` : 
 
 ### INV-150 [M] ✅ Web : utilisable sur téléphone (2026-10-22)
 À 375 px de large (téléphone), **aucun onglet** ne fait défiler la page horizontalement, même avec une alarme en cours. Tous les onglets restent atteignables (la barre d'onglets défile sur elle-même), l'en-tête (dont « Déconnexion ») tient dans l'écran, les formulaires passent à la ligne et les tableaux larges défilent à l'intérieur de leur carte. L'affichage sur ordinateur ne change pas.
-- **Pourquoi** : demande du propriétaire du 2026-10-22. Mesuré avant correction : page de 1 039 px de large sur un écran de 375 px (barre des 9 onglets, en-tête, tableaux, formulaires).
-- **Couverture** : Playwright `test_frontend.py::TestMobileLayout`.
+- **Complément du 2026-10-29** (plan validé par le propriétaire) :
+  - **Tablette** : à 768 et 1 024 px non plus, aucun onglet ne fait défiler la page (un contenu trop large défile dans sa carte).
+  - **Sous 700 px**, les tableaux de l'alarme en cours (tableau de bord), des Utilisateurs, des Alarmes, du Log et du Cluster deviennent des **cartes empilées** : une carte par ligne, le nom de la colonne devant chaque valeur. Le bouton « Résoudre » de l'alarme en cours est dans l'écran sans défilement horizontal.
+  - **Sous 700 px**, tout bouton fait au moins **44 px** de haut (« Déconnexion », petits boutons et boutons de la chaîne compris) ; champs et listes en **16 px** (pas de zoom automatique d'iOS). Les graphes sont moins hauts.
+  - Aucun champ n'a une largeur fixe qui dépasse l'écran ; les groupes champ + « Sauvegarder » passent à la ligne. Les deux colonnes de la chaîne d'escalade passent l'une sous l'autre.
+  - Chaque membre de la chaîne a des boutons **▲ / ▼** qui le montent ou le descendent (le glisser-déposer ne marche pas au doigt) ; comme le glisser-déposer (conservé), « Sauvegarder » enregistre l'ordre.
+  - La barre d'onglets montre qu'il reste des onglets à droite (bord estompé).
+- **Pourquoi** : demande du propriétaire du 2026-10-22. Mesuré avant correction : page de 1 039 px de large sur un écran de 375 px (barre des 9 onglets, en-tête, tableaux, formulaires). Le 2026-10-29 : à 768 px, les onglets Alarmes (784 px) et Log (900 px) débordaient ; à 375 px, « Résoudre » était à x = 543 px, au bout d'un tableau à faire défiler.
+- **Couverture** : Playwright `test_frontend.py::TestMobileLayout` (375, 768, 1 024 px ; « Résoudre » dans l'écran), `::TestEscalationDragDrop::test_move_down_button_reorders_chain_for_save` (joués en local, hors CI).
+
+### INV-165 [H] ✅ Web : un non-admin ne voit que le suivi, pas l'administration (2026-10-29)
+Après connexion, le web lit `user.is_admin` dans la réponse de `/api/auth/login`. Pour un utilisateur **non admin** :
+- **Onglets visibles** : Tableau de bord, Escalade (lecture seule : schéma d'escalade en cours, INV-136), Alarmes, Statistiques.
+- **Onglets masqués** : Utilisateurs, Tests, Log, Disponibilité, Cluster.
+- **Actions masquées** : configuration de l'escalade (chaîne, délai, email d'alerte), « Résoudre », « Envoyer une alarme », et tout ce que portent les onglets masqués (« Supprimer », « Réinitialiser », actions de l'onglet Tests).
+- **Aucun GET réservé aux admins** n'est appelé pour lui (`/api/config/system`, `/api/audit/`, `/api/stats/connectivity`), ni surveillé par le WebSocket live (INV-135) : pas de `403` dans la console. Il reste connecté après le chargement initial.
+- **`401` seul déconnecte** (jeton expiré ou invalide). Un `403` (droit manquant) ne déconnecte pas : l'action échoue avec « Réservé aux administrateurs » (snackbar rouge pour une écriture, INV-139).
+- Un **admin** voit tout, comme avant. Si la session précédente avait laissé un onglet admin ouvert, un non-admin revient au tableau de bord.
+- **Masquer n'est pas une sécurité** : chaque route admin refuse elle-même un non-admin (`403`) côté serveur (`/api/alarms/{id}/resolve`, `GET /api/config/system`, etc., PR backend #274 du même plan).
+- **Pourquoi** : plan validé par le propriétaire le 2026-10-29. Les opérateurs d'astreinte doivent pouvoir suivre une alarme depuis le web sans voir ni toucher la configuration.
+- **Couverture** : Playwright `test_frontend.py::TestRoleBasedUI` (joué en local, hors CI).
+
+### INV-166 [L] ✅ Web : pied de page avec la version du serveur et le nœud (2026-10-29)
+Chaque onglet affiche en pied de page `Alarme Murgat · serveur <version> · nœud <local_node> (<Lieu>)` : `version` (sha court) vient de `/health` du nœud qui sert la page, `local_node` et `local_location` de `/api/cluster` (public, lieu au format INV-161). Version absente (backend plus ancien) → `?` ; nœud inconnu → `?` ; lieu inconnu → pas de parenthèses.
+- **Pourquoi** : plan du 2026-10-29. Savoir d'un coup d'œil quelle version tourne et quel nœud répond, sans ouvrir l'onglet Cluster (réservé aux admins, INV-165).
+- **Couverture** : Playwright `test_frontend.py::TestFooter` (joué en local, hors CI).
 
 ### INV-124 [H] ✅ Corps du SMS d'alarme : instruction d'acquittement + lien supervision
 Le corps du SMS d'alarme métier (escalade, `_enqueue_sms_for_user`) doit (a) instruire
@@ -777,6 +801,17 @@ Un utilisateur porte un booléen `is_test` (défaut `false`), cumulable avec `is
 - **Pourquoi** : décision du propriétaire du 2026-10-22. La route était publique : quiconque joignait l'API pouvait se créer un compte, y compris admin (`is_admin` dans le body), puis lire et modifier la chaîne d'escalade.
 - **Couverture** : Integration `test_register_admin_only_inv149.py` (sans jeton, non-admin).
 
+### INV-162 [C] ✅ Seul un admin peut résoudre une alarme (2026-10-29)
+`POST /api/alarms/{id}/resolve` exige un jeton d'admin : jeton d'un non-admin → `403` et l'alarme **reste dans son état** (pas de `resolved`) ; sans jeton → refus (`401` ou `403`). Un admin résout comme avant : audit `alarm_resolved` et push `alarm_resolved` à chaque notifié (INV-147).
+- **Non concerné** : la résolution automatique par la gateway (`/internal/alarms/report-state` à `closed`, INV-120), authentifiée par `X-Gateway-Key`, et l'acquittement (INV-031), toujours ouvert aux notifiés.
+- **Pourquoi** : décision du propriétaire du 2026-10-29 : « résoudre une alarme : admins uniquement ». Tout utilisateur connecté pouvait résoudre n'importe quelle alarme, donc arrêter l'escalade et la sonnerie de tous.
+- **Couverture** : Integration `test_version_permissions_inv162_164.py` : `test_non_admin_cannot_resolve` (user1 notifié → 403, alarme toujours `active` ; RED avant le correctif : 200), `test_admin_resolves`.
+
+### INV-163 [H] ✅ Seul un admin peut lire la configuration système (2026-10-29)
+`GET /api/config/system` (toutes les clés `SystemConfig` : `alert_email`, états modem, réglages d'escalade et de watchdog…) exige un jeton d'admin : sans jeton → refus (`401` ou `403`), jeton d'un non-admin → `403`, aucune valeur renvoyée. L'écriture (`POST /api/config/system`) l'exigeait déjà (INV-077). La chaîne d'escalade publique (`GET /api/config/escalation`) et l'état du modem (`GET /api/system/modem-status`) ne changent pas.
+- **Pourquoi** : décision du propriétaire du 2026-10-29. La route était publique : quiconque joignait l'API lisait l'adresse d'alerte et les réglages internes.
+- **Couverture** : Integration `test_version_permissions_inv162_164.py` : `test_system_config_refused_without_token`, `test_system_config_refused_for_non_admin` (RED avant le correctif : 200 avec les valeurs), `test_system_config_for_admin`.
+
 ---
 
 ## 8. Chaîne d'escalade et config
@@ -936,6 +971,11 @@ Si `last_tick_at < now - 120s` → `/health` renvoie 503 avec `escalation_loop: 
 - **Pourquoi** : monitoring externe doit détecter le blocage.
 - **Fix** : PR0 (a8e1e66). Flag `_simulate_stall` dans `escalation.py` qui bloque la mise à jour de `last_tick_at` pendant le test → plus de race avec le tick concurrent. Endpoint `/test/clear-loop-stall` ajouté pour le teardown propre.
 - **Couverture** : E2E `TestSmsAndHealth::test_health_endpoint_returns_503_if_loop_stalled` (5 runs consécutifs passés).
+
+### INV-164 [M] ✅ /health donne la version déployée (2026-10-29)
+`/health` (réponse `200` comme `503`) renvoie `commit` = sha git complet de l'image et `version` = ses 7 premiers caractères, lus dans la variable d'environnement `GIT_SHA`. Sans `GIT_SHA` (build local, dev, tests) : `version = commit = "dev"`. L'image backend reçoit `GIT_SHA` au build (`ARG`/`ENV` du `backend/Dockerfile`, `build-args` de `cd-build.yml` = sha construit, le même que le tag `sha-<court>`). La version OpenAPI de FastAPI vaut la même `version`.
+- **Pourquoi** : plan du propriétaire du 2026-10-29 : savoir quel commit tourne sur chaque nœud sans `docker inspect`.
+- **Couverture** : Integration `test_version_permissions_inv162_164.py` : `test_health_version_dev_without_git_sha`, `test_health_version_from_git_sha` (RED avant le correctif : champs absents).
 
 ---
 

@@ -275,7 +275,7 @@ class TestSingleAlarm:
             "site": "izeron", "title": "Alarme A", "message": "m", "severity": "critical",
         })
         alarm_id = r.json()["id"]
-        requests.post(f"{API}/alarms/{alarm_id}/resolve", headers=self.headers)
+        requests.post(f"{API}/alarms/{alarm_id}/resolve", headers=_admin_headers())  # INV-162
 
         r = requests.post(f"{API}/alarms/send", headers=self.headers, json={
             "site": "izeron", "title": "Alarme B", "message": "m", "severity": "critical",
