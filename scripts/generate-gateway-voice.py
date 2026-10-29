@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Genere les messages vocaux de la gateway (INV-132/133) -> gateway/voice/*.wav.
+"""Genere les messages vocaux de la gateway (INV-132/133/159) -> gateway/voice/*.wav.
 
 Voix validee par le proprietaire le 2026-10-14 (appels reels sur alarm-1) :
 Piper `fr_FR-upmc-medium`, locutrice `jessica`, debit 1.0, traitement pour la
 ligne telephonique, PCM 16 bits mono 16 kHz (appel VoLTE). Le silence avant le
 message est ajoute par la gateway (LEAD_SILENCE_S), pas ici.
+
+Piper n'est pas deterministe : chaque execution donne une autre prise de chaque message
+(longueur differente). Ne commiter que les fichiers nouveaux ou voulus (git checkout des
+autres) : les prises deja validees au telephone restent celles du depot.
 
 Prerequis (poste de dev, pas les noeuds) :
   python3 -m venv /tmp/piper && /tmp/piper/bin/pip install piper-tts numpy scipy
@@ -21,11 +25,15 @@ import wave
 import numpy as np
 from scipy.signal import butter, lfilter, resample_poly, sosfilt
 
+ALARME = (
+    "Attention. Alarme critique sur {}. Intervention immédiate requise. "
+    "Consultez votre SMS. Appuyez sur 1 pour acquitter. Appuyez sur 2 pour escalader."
+)
 MESSAGES = {
-    "alarme.wav": (
-        "Attention. Alarme critique sur le site Murgat. Intervention immédiate requise. "
-        "Consultez votre SMS. Appuyez sur 1 pour acquitter. Appuyez sur 2 pour escalader."
-    ),
+    "alarme.wav": ALARME.format("le site Murgat"),  # alarme sans site (astreinte)
+    # INV-159 : le message annonce le site de l'alarme
+    "alarme_izeron.wav": ALARME.format("le site d'Izeron"),
+    "alarme_beaufort.wav": ALARME.format("le site de Beaufort"),
     "acquittee.wav": "Alarme acquittée. Merci.",
     "escaladee.wav": "Alarme escaladée au prochain intervenant.",
 }

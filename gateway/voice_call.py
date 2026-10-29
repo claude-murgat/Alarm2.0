@@ -1,4 +1,4 @@
-"""Logique pure de l'appel vocal d'alarme (INV-131 a INV-134).
+"""Logique pure de l'appel vocal d'alarme (INV-131 a INV-134, INV-159).
 
 Aucun import : testable en tier 1 sans pyserial (cf tests/unit/test_gateway_voice_call.py).
 Les entrees sont le texte brut lu sur le port AT du SIM7600 (reponses + URC).
@@ -94,6 +94,19 @@ def pcm_frames(pcm: bytes, sample_rate: int) -> list[bytes]:
 def lead_silence(sample_rate: int) -> bytes:
     """INV-132 : PCM 16 bits nul de LEAD_SILENCE_S secondes."""
     return bytes(int(sample_rate * LEAD_SILENCE_S) * 2)
+
+
+def alarm_voice_file(site: str | None, loaded) -> str:
+    """INV-159 : message qui annonce le site de l'alarme (`alarme_izeron.wav`...). Alarme
+    sans site, site sans message, ou fichier absent de `loaded` (voix d'avant INV-159
+    pendant un deploiement) -> `alarme.wav`."""
+    name = f"alarme_{(site or '').strip().lower()}.wav"
+    return name if site and name in loaded else "alarme.wav"
+
+
+def tts_text(site: str | None, tts_message: str) -> str:
+    """INV-159 : repli TTS du module, le texte commence aussi par le site."""
+    return f"Site {site.strip().capitalize()}. {tts_message}" if site and site.strip() else tts_message
 
 
 def call_deferred_for_sms(to_number: str, pending_sms: list | None) -> bool:
