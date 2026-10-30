@@ -471,6 +471,22 @@
                     <tbody id="resilienceWhatif"></tbody>
                 </table>
             </div>
+            <!-- INV-176..179 : panne controlee (arret reel d'un noeud T min, restauration armee sur la cible) -->
+            <div class="card" id="chaosCard">
+                <h3>Panne contrôlée</h3>
+                <p style="color:#94a3b8;font-size:0.85rem;margin-bottom:10px">Arrête vraiment les conteneurs d'un nœud ou d'un site pendant T minutes, puis les relance (restauration armée sur la cible avant l'arrêt). Refusé pendant une alarme ou un autre test, si un nœud n'est pas sain, et toujours pour deux voteurs etcd (Izeron entier).</p>
+                <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+                    <div class="form-group"><label>Cible</label><select id="chaosTarget"></select></div>
+                    <div class="form-group"><label>Mode</label><select id="chaosMode"><option value="stop">Arrêt des conteneurs</option><option value="netcut" disabled>Coupure réseau (PR suivante)</option></select></div>
+                    <div class="form-group"><label>Minutes (1-10)</label><input type="number" id="chaosMinutes" min="1" max="10" value="2" style="width:80px"></div>
+                    <button class="btn-danger" onclick="chaosStart()">&#x1F4A5; Lancer la panne</button>
+                </div>
+                <div id="chaosError" style="color:#ef4444"></div>
+                <table class="cards" style="margin-top:16px">
+                    <thead><tr><th>Quand</th><th>Cible</th><th>Mode</th><th>Statut</th><th>Leader avant → après</th><th>Alertes</th><th>Restauration</th><th>Actions</th></tr></thead>
+                    <tbody id="chaosHistory"></tbody>
+                </table>
+            </div>
         </div>
 
         <!-- Cluster / Quorum -->
@@ -678,7 +694,7 @@
                 document.getElementById(tab.dataset.tab).classList.add('active');
                 if (tab.dataset.tab === 'audit') loadAuditEvents(1);
                 if (tab.dataset.tab === 'connectivity') loadConnectivity();
-                if (tab.dataset.tab === 'tests') loadResilience();
+                if (tab.dataset.tab === 'tests') { loadResilience(); loadChaosTargets(); loadChaos(); }
             });
         });
 
@@ -1354,6 +1370,70 @@
             } catch (e) { errEl.textContent = 'Erreur : ' + e.message; }
         }
 
+        // INV-176..179 : carte « Panne contrôlée » (onglet Tests)
+        const CHAOS_VOTERS = ['node1', 'node2', 'node3'];  // = logic/chaos.py VOTERS : deux voteurs arretes = quorum etcd perdu
+        async function loadChaosTargets() {
+            const sel = document.getElementById('chaosTarget');
+            try {
+                const members = ((await api('/api/cluster')).members || []).filter(m => m.location).sort((a, b) => a.name.localeCompare(b.name));
+                const sites = [...new Set(members.map(m => m.location))];
+                const opts = members.map(m => `<option value="${escHtml(m.name)}" data-nodes="${escHtml(m.name)}">${escHtml(m.name)} (${place(m.location)})</option>`)
+                    .concat(sites.map(s => {
+                        const nodes = members.filter(m => m.location === s).map(m => m.name);
+                        const quorum = nodes.filter(n => CHAOS_VOTERS.includes(n)).length >= 2;
+                        return `<option value="site:${escHtml(s)}" data-nodes="${escHtml(nodes.join(','))}"${quorum ? ' disabled' : ''}>Site ${place(s)} (${escHtml(nodes.join(', '))})${quorum ? ' — quorum' : ''}</option>`;
+                    }));
+                const cur = sel.value;
+                sel.innerHTML = opts.join('');
+                if ([...sel.options].some(o => o.value === cur && !o.disabled)) sel.value = cur;
+            } catch (e) { document.getElementById('chaosError').textContent = 'Erreur : ' + e.message; }
+        }
+
+        async function chaosStart() {
+            const sel = document.getElementById('chaosTarget'), opt = sel.selectedOptions[0];
+            const mode = document.getElementById('chaosMode').value, minutes = parseInt(document.getElementById('chaosMinutes').value, 10);
+            if (!opt) return;
+            let sentence = `Arrêt réel de ${opt.textContent} pendant ${minutes} min.`;
+            try { sentence = (await api('/api/resilience/whatif?nodes=' + encodeURIComponent(opt.dataset.nodes))).sentence || sentence; } catch (e) { /* texte fixe */ }
+            if (!confirm(`${sentence}\n\nLancer la panne (${mode}, ${minutes} min) sur ${opt.textContent} ?`)) return;
+            log(`Panne contrôlée demandée : ${opt.textContent}, ${mode}, ${minutes} min`, 'info');
+            try {
+                const r = await api('/api/chaos', { method: 'POST', body: JSON.stringify({ nodes: sel.value, mode, minutes }) });
+                log(`Panne #${r.id} en attente du runner (tick 1 min)`, 'success');
+            } catch (e) { log(`Panne refusée : ${e.message}`, 'error'); }
+            loadChaos();
+        }
+
+        async function chaosCancel(id) { await api(`/api/chaos/${id}`, { method: 'DELETE' }); loadChaos(); }
+
+        let chaosSeen = null;  // evenements deja vus ; null au premier chargement (l'historique n'est pas recopie dans le journal)
+        async function loadChaos() {
+            let rows;
+            try { rows = await api('/api/chaos'); } catch (e) { return; }
+            const ev = (r, kind) => r.events.find(e => e.kind === kind);
+            const st = { pending: 'En attente', claimed: 'Prise en charge', running: 'En cours', restored: 'Restauré', failed: 'Échec', cancelled: 'Annulé' };
+            document.getElementById('chaosHistory').innerHTML = rows.map(r => {
+                const started = ev(r, 'started'), restored = ev(r, 'restored'), failed = ev(r, 'failed');
+                const after = restored ? restored.details.leader_after : (r.events.filter(e => e.kind === 'leader_changed').pop() || {}).details?.to;
+                return `<tr>
+                    <td data-label="Quand">${parseUtc(r.created_at).toLocaleString('fr-FR')}</td>
+                    <td data-label="Cible">${escHtml(r.nodes.join(', '))}</td>
+                    <td data-label="Mode">${escHtml(r.mode)}</td>
+                    <td data-label="Statut"><span class="badge ${r.status === 'restored' ? 'online' : (r.status === 'failed' ? 'offline' : 'waiting')}">${st[r.status] || escHtml(r.status)}</span>${failed ? `<br><small style="color:#94a3b8">${escHtml(failed.details.reason || '')}</small>` : ''}</td>
+                    <td data-label="Leader">${escHtml(started?.details.leader_before || '-')} → ${escHtml(after || '-')}</td>
+                    <td data-label="Alertes">${(r.alerts || []).length}</td>
+                    <td data-label="Restauration">${restored && restored.details.restore_seconds != null ? restored.details.restore_seconds + ' s' : '-'}</td>
+                    <td data-label="Actions">${r.status === 'pending' ? `<button class="btn-warning btn-sm" onclick="chaosCancel(${r.id})">Annuler</button>` : ''}</td></tr>`;
+            }).join('') || '<tr><td colspan="8" style="text-align:center;color:#94a3b8">Aucune panne contrôlée</td></tr>';
+            // Journal de test : les nouveaux evenements (test en cours) seulement.
+            const keys = new Set(rows.flatMap(r => r.events.map(e => `${r.id}|${e.ts}|${e.kind}`)));
+            if (chaosSeen) rows.forEach(r => r.events.forEach(e => {
+                if (!chaosSeen.has(`${r.id}|${e.ts}|${e.kind}`))
+                    log(`Panne #${r.id} : ${e.kind} ${JSON.stringify(e.details)}`, e.kind === 'failed' ? 'error' : (e.kind === 'restored' ? 'success' : 'info'));
+            }));
+            chaosSeen = keys;
+        }
+
         async function loadCluster() {
             try {
                 const data = await api('/api/cluster');
@@ -1693,8 +1773,9 @@
             '/api/config/system': [loadAlertEmail],
             '/api/cluster': [loadCluster],
             '/api/system/modem-status': [loadModemSignal],
+            '/api/chaos': [loadChaos],  // INV-179
         };
-        const ADMIN_ONLY_GETS = ['/api/config/system'];  // INV-165 : 403 pour un non-admin
+        const ADMIN_ONLY_GETS = ['/api/config/system', '/api/chaos'];  // INV-165 : 403 pour un non-admin
         let liveWs = null, liveRetry = 0, livePending = new Set(), liveFlush = null;
 
         function connectLive() {

@@ -278,6 +278,9 @@ app.include_router(live_router)
 from .api.resilience import router as resilience_router
 app.include_router(resilience_router)
 
+from .api.chaos import router as chaos_router
+app.include_router(chaos_router)
+
 
 @app.get("/", response_class=HTMLResponse)
 async def root():

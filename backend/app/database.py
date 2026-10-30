@@ -75,6 +75,9 @@ def run_migrations(engine):
         # ── INV-155/156/157 : colonnes site (alarms, sms_queue, call_queue, gateway_states)
         _migrate_site(conn, is_sqlite)
 
+        # ── INV-179 : table chaos_requests (panne controlee)
+        _migrate_chaos_requests(conn, is_sqlite)
+
 
 def _migrate_alarm_notifications(conn, is_sqlite: bool):
     """Crée la table alarm_notifications et migre les données CSV si nécessaire."""
@@ -488,3 +491,33 @@ def _migrate_refresh_tokens(conn, is_sqlite: bool):
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id)"))
         conn.commit()
         logger.info("Migration: table refresh_tokens creee (INV-079)")
+
+
+def _migrate_chaos_requests(conn, is_sqlite: bool):
+    """INV-179 : cree la table chaos_requests (panne controlee). Cf models.ChaosRequest."""
+    if is_sqlite:
+        exists = conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name='chaos_requests'")
+        ).scalar()
+    else:
+        exists = conn.execute(text("SELECT to_regclass('public.chaos_requests')")).scalar()
+    if exists:
+        return
+    pk = "INTEGER PRIMARY KEY AUTOINCREMENT" if is_sqlite else "SERIAL PRIMARY KEY"
+    conn.execute(text(f"""
+        CREATE TABLE chaos_requests (
+            id {pk},
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            requested_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            nodes VARCHAR NOT NULL,
+            mode VARCHAR NOT NULL,
+            minutes INTEGER NOT NULL,
+            status VARCHAR NOT NULL DEFAULT 'pending',
+            claimed_at TIMESTAMP,
+            started_at TIMESTAMP,
+            restored_at TIMESTAMP,
+            events VARCHAR NOT NULL DEFAULT '[]'
+        )
+    """))
+    conn.commit()
+    logger.info("Migration: table chaos_requests creee (INV-179)")
