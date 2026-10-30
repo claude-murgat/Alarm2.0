@@ -152,9 +152,12 @@ DEADLINE=$(( $(date +%s) + T * MINUTE_SECONDS ))
 for n in ${NODES//,/ }; do
   [[ -n "${NODE_IP[$n]:-}" ]] || fail "noeud inconnu du runner : $n"
   if [[ "$MODE" == netcut ]]; then
-    # INV-178 : le helper root arme sur la cible le timer de restauration AVANT la coupure (5 s plus tard).
-    ssh_node "$n" "sudo -n /usr/local/bin/alarm-chaos-net cut $((T * 60))" || fail "alarm-chaos-net cut KO sur $n : rien n'est coupe"
+    # INV-178 : le helper root arme sur la cible le timer de restauration et le prouve actif AVANT la coupure
+    # (5 s plus tard) ; il n'imprime ARMED qu'alors. Noeud note AVANT l'appel : un SSH coupe apres l'armement
+    # laisserait une coupure en route, fail() tente donc `restore` aussi sur lui (filet : le timer de la cible).
     STOPPED+=("$n")
+    armed=$(ssh_node "$n" "sudo -n /usr/local/bin/alarm-chaos-net cut $((T * 60))") || true
+    [[ "$armed" == "ARMED" ]] || fail "alarm-chaos-net cut KO ou SSH interrompu sur $n (restauration tentee, filet : timer de la cible)"
     log "$n : wg0 coupe dans 5 s pendant $T min (restauration par timer sur le noeud)"
     continue
   fi
@@ -177,6 +180,7 @@ done
 # Pendant la panne, toutes les 10 s : leader Patroni (leader_changed) et arret anticipe (annulation admin, alarme).
 POLL=$(( MINUTE_SECONDS < 10 ? MINUTE_SECONDS : 10 ))
 LEADER=$LEADER_BEFORE
+abort=""
 while :; do
   left=$(( DEADLINE - $(date +%s) ))
   (( left > 0 )) || break
@@ -195,8 +199,10 @@ while :; do
   fi
 done
 
-wait_healthy() {  # $1 noeud : /health 200 ET membre Patroni sain (member_ok), en <= HEALTHY_TIMEOUT s
-  local deadline=$(( $(date +%s) + HEALTHY_TIMEOUT ))
+wait_healthy() {  # $1 noeud : /health 200 ET membre Patroni sain (member_ok), en <= HEALTHY_TIMEOUT s apres max(maintenant, T0)
+  local now
+  now=$(date +%s)
+  local deadline=$(( (T0 > now ? T0 : now) + HEALTHY_TIMEOUT ))
   while (( $(date +%s) < deadline )); do
     if curl -fsS --max-time 3 "http://${NODE_IP[$1]}:8000/health" >/dev/null 2>&1 && member_ok "$1"; then
       return 0
@@ -207,15 +213,22 @@ wait_healthy() {  # $1 noeud : /health 200 ET membre Patroni sain (member_ok), e
 }
 
 T0=$(date +%s)
-if [[ "$MODE" == stop ]]; then  # netcut : rien a faire a distance (tunnel coupe), le timer de la cible restaure
+if [[ "$MODE" == stop ]]; then
   for n in "${STOPPED[@]}"; do
     restore_node "$n" || fail "docker start KO sur $n (restauration armee sur le noeud en filet)"
   done
-fi
+elif [[ -n "$abort" ]]; then
+  # netcut, arret anticipe : wg0 remis tout de suite si la cible repond encore ; sinon (cas normal : ce runner
+  # passe par wg0) son timer le remet a l'echeance, et l'attente de sante court depuis l'echeance.
+  for n in "${STOPPED[@]}"; do
+    restore_now "$n" || { log "$n injoignable : wg0 remis par le timer de la cible a l'echeance"; T0=$DEADLINE; }
+  done
+fi  # netcut a l'echeance : rien a faire a distance (tunnel coupe), le timer de la cible restaure
 for n in "${STOPPED[@]}"; do
   wait_healthy "$n" || fail "$n pas sain ${HEALTHY_TIMEOUT} s apres la fin de la panne"
 done
 RESTORE_SECONDS=$(( $(date +%s) - T0 ))
+(( RESTORE_SECONDS > 0 )) || RESTORE_SECONDS=0
 post_event restored "{\"leader_after\":\"$(cluster_leader)\",\"restore_seconds\":$RESTORE_SECONDS}"
 log "Panne controlee #$ID terminee : $NODES restaure(s) en $RESTORE_SECONDS s"
 exit 0

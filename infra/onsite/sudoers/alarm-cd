@@ -13,16 +13,21 @@
 #   non-interactives. Ce fichier comble le gap de maniere chirurgicale.
 #
 # Deploiement : infra/onsite/install.sh (donc alarm-host-sync a chaque commit :stable)
-# pose ce fichier en 440 dans /etc/sudoers.d/alarm-cd APRES `visudo -c -q -f` sur la
-# copie du depot ; si visudo refuse, rien n'est pose et install.sh s'arrete (une
-# sudoers cassee bloque tout `sudo` sur le noeud). La CI (cd-install-smoke.yml) lint
-# aussi ce fichier. Verification non-interactive depuis un poste d'admin :
+# copie ce fichier dans un temporaire root, le lint (`visudo -c -q -f`) et pose CETTE copie
+# en 440 dans /etc/sudoers.d/alarm-cd ; si visudo refuse, rien n'est pose (l'ancienne reste,
+# une sudoers cassee bloquerait tout `sudo` sur le noeud) et install.sh continue le reste.
+# La CI (cd-install-smoke.yml) lint aussi ce fichier.
+# Confiance : la source est le checkout /opt/alarm (owner alarm), comme les scripts root que
+# alarm-host-sync y installe deja (/usr/local/bin/alarm-host-sync, install.sh lui-meme) :
+# ce fichier n'elargit pas ce que `alarm` peut deja faire executer en root.
+# Verification non-interactive depuis un poste d'admin :
 #   ssh alarm@<noeud> "sudo -n systemctl status alarm-cd-pull.timer"
 # doit marcher sans demander de mot de passe.
 #
 # ALARM_CHAOS (INV-177/178, mode netcut) : le runner alarm-chaos.sh (NODE3) coupe le
 # tunnel wg0 d'un noeud via `sudo -n /usr/local/bin/alarm-chaos-net cut <s>` ; le
-# helper (root) arme d'abord le timer de restauration sur le noeud lui-meme.
+# helper (root) valide ses arguments (decimal strict 60..720) et arme d'abord le timer de
+# restauration sur le noeud lui-meme. Pas de motif d'arguments ici : le helper est seul juge.
 #
 # Wildcards (`*`) :
 #   En sudo, `*` matche tout y compris `/` (different du glob shell). On

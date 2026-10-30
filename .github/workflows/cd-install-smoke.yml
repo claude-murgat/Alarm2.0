@@ -402,14 +402,20 @@ jobs:
 
       - name: "Helper netcut (INV-178) : install par install.sh-like, sudoers lint, sudo -n autorise pour alarm"
         # Le vrai install.sh exige un noeud complet ; on rejoue sa sequence pour la sudoers :
-        # visudo -c -f AVANT la pose en 440. Puis `alarm` doit pouvoir lancer le helper sans mot
-        # de passe (alias ALARM_CHAOS) : exit 2 = le helper lui-meme refuse l'argument, pas sudo.
+        # copie root, visudo -c -f sur CETTE copie, pose de la copie en 440. Lint du fichier pose
+        # seul (-f) : `visudo -c` sans -f lint tout /etc/sudoers.d du runner GitHub, dont
+        # /etc/sudoers.d/runner (mode 0644, refuse). Puis `alarm` doit pouvoir lancer le helper sans
+        # mot de passe (alias ALARM_CHAOS) : exit 2 = le helper lui-meme refuse l'argument, pas sudo.
         run: |
           bash -n scripts/alarm-chaos-net.sh
           sudo install -m 755 scripts/alarm-chaos-net.sh /usr/local/bin/alarm-chaos-net
-          sudo visudo -c -q -f infra/onsite/sudoers/alarm-cd
-          sudo install -m 440 infra/onsite/sudoers/alarm-cd /etc/sudoers.d/alarm-cd
-          sudo visudo -c
+          tmp=$(sudo mktemp)
+          sudo cp infra/onsite/sudoers/alarm-cd "$tmp"
+          sudo visudo -c -q -f "$tmp"
+          sudo install -m 440 "$tmp" /etc/sudoers.d/alarm-cd
+          sudo rm -f "$tmp"
+          sudo visudo -c -q -f /etc/sudoers.d/alarm-cd
+          test "$(stat -c '%a %U' /etc/sudoers.d/alarm-cd)" = "440 root"
           set +e
           sudo -u alarm sudo -n /usr/local/bin/alarm-chaos-net cut 30; rc=$?
           set -e
@@ -417,8 +423,9 @@ jobs:
 
       - name: "Helper netcut : vrai systemd-run — restauration armee avant la coupure, unit factice coupee puis remise"
         # Une unit factice joue wg-quick@wg0 (WG= du helper remplace par sed sur la copie installee).
-        # Apres cut 60 : les deux timers existent, la restauration d'abord ; ~8 s plus tard l'unit est
-        # arretee ; ~65 s plus tard elle est de nouveau active et les timers transitoires ont disparu.
+        # Apres cut 60 : ARMED, les deux timers existent a AccuracySec=1s ; ~8 s plus tard l'unit est
+        # arretee (coupure a 5 s +-1) ; ~68 s plus tard elle est de nouveau active (restauration a 60 s +-1)
+        # et les timers transitoires ont disparu. Enfin : unit inactive -> cut refuse (exit 1), rien arme.
         run: |
           sudo tee /etc/systemd/system/smoke-wg.service >/dev/null <<'UNIT'
           [Service]
@@ -428,9 +435,12 @@ jobs:
           UNIT
           sudo systemctl daemon-reload && sudo systemctl start smoke-wg.service
           sudo sed -i 's/^WG=.*/WG=smoke-wg.service/' /usr/local/bin/alarm-chaos-net
-          sudo /usr/local/bin/alarm-chaos-net cut 60
+          test "$(sudo /usr/local/bin/alarm-chaos-net cut 60)" = ARMED
           systemctl list-timers --all --no-pager | tee /tmp/timers.txt
           grep -q alarm-chaos-restore.timer /tmp/timers.txt && grep -q alarm-chaos-cut.timer /tmp/timers.txt
+          for t in alarm-chaos-restore alarm-chaos-cut; do
+            test "$(systemctl show $t.timer -p AccuracyUSec --value)" = 1s || { echo "::error::$t.timer : AccuracySec != 1s"; exit 1; }
+          done
           systemctl is-active smoke-wg.service
           sleep 8
           systemctl is-active smoke-wg.service && { echo "::error::l'unit factice devrait etre coupee"; exit 1; }
@@ -438,6 +448,14 @@ jobs:
           systemctl is-active smoke-wg.service || { echo "::error::l'unit factice n'a pas ete restauree par le timer"; exit 1; }
           systemctl list-timers --all --no-pager | grep -q alarm-chaos- && { echo "::error::timers transitoires non collectes"; exit 1; }
           sudo /usr/local/bin/alarm-chaos-net restore && systemctl is-active smoke-wg.service
+          sudo journalctl -u alarm-chaos-restore --no-pager | grep -q "remis (tentative 1)"
+          sudo systemctl stop smoke-wg.service
+          set +e
+          sudo /usr/local/bin/alarm-chaos-net cut 60; rc=$?
+          set -e
+          test "$rc" -eq 1 || { echo "::error::unit inactive : attendu exit 1, obtenu $rc"; exit 1; }
+          systemctl list-timers --all --no-pager | grep -q alarm-chaos- && { echo "::error::timers armes malgre l'unit inactive"; exit 1; }
+          true
 
   gateway-sync:
     # Issue #183 : deploiement auto du code gateway. Bout en bout sur une vraie

@@ -167,9 +167,13 @@ correspondantes, `journalctl -u alarm-cd-pull*`. Voir
 [`infra/onsite/sudoers/alarm-cd`](../infra/onsite/sudoers/alarm-cd) pour la liste
 exacte.
 
-Déploiement (depuis le 2026-10-30) : `sudo bash infra/onsite/install.sh` pose `/etc/sudoers.d/alarm-cd`
-(mode 440) après `visudo -c -q -f` sur le fichier du dépôt, et s'arrête sans rien poser si visudo
-refuse ; `alarm-host-sync` le relance à chaque commit `:stable`, donc la sudoers suit le dépôt.
+Déploiement (depuis le 2026-10-30) : `sudo bash infra/onsite/install.sh` copie le fichier du dépôt dans
+un temporaire root, le lint (`visudo -c -q -f`) et pose cette copie en `/etc/sudoers.d/alarm-cd` (mode 440) ;
+si visudo refuse, il avertit, ne pose rien (l'ancienne reste) et **continue** le reste de l'installation ;
+`alarm-host-sync` le relance à chaque commit `:stable`, donc la sudoers suit le dépôt. Modèle de confiance :
+la source est le checkout `/opt/alarm` (owner `alarm`), comme les scripts que `alarm-host-sync` y installe
+déjà en root (`/usr/local/bin/alarm-host-sync`, `install.sh` lui-même) — la sudoers n'élargit pas ce que
+`alarm` peut déjà faire exécuter en root.
 La même passe installe le helper root `/usr/local/bin/alarm-chaos-net` (coupure réseau contrôlée,
 INV-177/178, alias `ALARM_CHAOS`).
 ```bash

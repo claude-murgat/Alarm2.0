@@ -47,10 +47,18 @@ inst "$REPO/scripts/alarm-host-sync.sh" /usr/local/bin/alarm-host-sync 755
 
 # 1c. Panne controlee, mode « coupure reseau » (INV-177/178) : helper root + sudoers qui autorise
 # `sudo -n alarm-chaos-net` au user alarm (appel SSH depuis le runner NODE3). Une sudoers cassee
-# bloque tout sudo sur le noeud : visudo d'abord, et on s'arrete sans rien poser s'il refuse.
+# bloque tout sudo sur le noeud : visudo lint une copie root, et c'est elle qui est posee (ce qui est
+# linte est ce qui est pose). visudo refuse -> on saute CETTE etape seulement (l'ancienne reste) :
+# un exit ici bloquerait tout le CD hote du noeud (alarm-host-sync reessaierait en vain).
 inst "$REPO/scripts/alarm-chaos-net.sh" /usr/local/bin/alarm-chaos-net 755
-visudo -c -q -f "$REPO/infra/onsite/sudoers/alarm-cd" || { say "ERREUR : infra/onsite/sudoers/alarm-cd refuse par visudo -c, sudoers NON posee"; exit 1; }
-inst "$REPO/infra/onsite/sudoers/alarm-cd" /etc/sudoers.d/alarm-cd 440
+SUDOERS_TMP=$(mktemp)
+cp "$REPO/infra/onsite/sudoers/alarm-cd" "$SUDOERS_TMP"
+if visudo -c -q -f "$SUDOERS_TMP"; then
+  inst "$SUDOERS_TMP" /etc/sudoers.d/alarm-cd 440
+else
+  say "ATTENTION : infra/onsite/sudoers/alarm-cd refuse par visudo -c : sudoers NON posee (l'ancienne reste), suite de l'installation"
+fi
+rm -f "$SUDOERS_TMP"
 
 # 2. Code gateway -> /opt/alarm-gateway/ + accès au port série (dialout)
 if [ "$AUTO" = 1 ]; then

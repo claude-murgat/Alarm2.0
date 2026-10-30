@@ -1343,6 +1343,7 @@
                 chaosVoters = (d.live.nodes || []).filter(n => n.voter).map(n => n.name);
                 const yn = v => `<span class="badge ${v ? 'online' : 'offline'}">${v ? 'oui' : 'non'}</span>`;
                 const gws = d.live.gateways || [];
+                chaosGateways = gws;
                 document.getElementById('resilienceNodes').innerHTML = (d.live.nodes || []).map(n => {
                     const g = gws.find(g => g.host === n.name);
                     const seen = !g ? '-' : `${escHtml(g.gateway_id)} : ` + (g.last_seen_s == null ? 'jamais vue' : `vu il y a ${Math.round(g.last_seen_s)} s`);
@@ -1373,6 +1374,7 @@
 
         // INV-176..179 : carte « Panne contrôlée » (onglet Tests)
         let chaosVoters = [];  // live.nodes[].voter de /api/resilience (= etcd_voters) : deux voteurs arretes = quorum etcd perdu
+        let chaosGateways = [];  // live.gateways de /api/resilience (gateway_id, host, site) : netcut de l'hote = site aveugle (INV-177)
         async function loadChaosTargets() {
             const sel = document.getElementById('chaosTarget');
             try {
@@ -1396,7 +1398,9 @@
             if (!opt) return;
             let sentence = `Arrêt réel de ${opt.textContent} pendant ${minutes} min.`;
             try { sentence = (await api('/api/resilience/whatif?nodes=' + encodeURIComponent(opt.dataset.nodes))).sentence || sentence; } catch (e) { /* texte fixe */ }
-            if (!confirm(`${sentence}\n\nLancer la panne (${mode}, ${minutes} min) sur ${opt.textContent} ?`)) return;
+            const blind = mode !== 'netcut' ? [] : chaosGateways.filter(g => opt.dataset.nodes.split(',').includes(g.host))
+                .map(g => `ATTENTION : ${g.host} héberge la passerelle ${g.gateway_id} : site ${place(g.site)} aveugle pendant ${minutes} min (ni alarme par contact sec, ni SMS, ni appels).\n\n`);
+            if (!confirm(`${blind.join('')}${sentence}\n\nLancer la panne (${mode}, ${minutes} min) sur ${opt.textContent} ?`)) return;
             log(`Panne contrôlée demandée : ${opt.textContent}, ${mode}, ${minutes} min`, 'info');
             try {
                 const r = await api('/api/chaos', { method: 'POST', body: JSON.stringify({ nodes: sel.value, mode, minutes }) });
