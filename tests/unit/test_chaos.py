@@ -144,25 +144,33 @@ def test_expand_target_nodes_sites_and_unknown():
 NOW = datetime(2026, 10, 30, 12, 0, 0)
 
 
-def stale(status, minutes=5, created=NOW - timedelta(hours=2), claimed=None, started=None):
-    return is_stale(status, minutes, created, claimed, started, NOW)
+def stale(status, minutes=5, created=NOW - timedelta(hours=2), claimed=None, started=None, nodes=1):
+    return is_stale(status, minutes, nodes, created, claimed, started, NOW)
 
 
 def test_pending_expires_30_minutes_after_creation():
     assert not stale("pending", created=NOW - timedelta(minutes=30))
     assert stale("pending", created=NOW - timedelta(minutes=30, seconds=1))
-    assert not stale("pending", minutes=10, created=NOW - timedelta(minutes=29))
+    assert not stale("pending", minutes=10, created=NOW - timedelta(minutes=29), nodes=2)
 
 
-def test_claimed_or_running_expires_minutes_plus_10_after_start_not_creation():
-    # demande creee il y a 2 h, reclamee tard (verrou CD) : son age ne compte plus
-    assert not stale("claimed", claimed=NOW - timedelta(minutes=15))
-    assert stale("claimed", claimed=NOW - timedelta(minutes=15, seconds=1))
-    assert not stale("claimed", minutes=10, claimed=NOW - timedelta(minutes=20))
-    assert stale("claimed", minutes=1, claimed=NOW - timedelta(minutes=11, seconds=1))
+def test_claimed_or_running_expires_minutes_plus_5_per_node_plus_2_after_start_not_creation():
+    # demande creee il y a 2 h, reclamee tard (verrou CD) : son age ne compte plus ; 5 + 5x1 + 2 = 12 min
+    assert not stale("claimed", claimed=NOW - timedelta(minutes=12))
+    assert stale("claimed", claimed=NOW - timedelta(minutes=12, seconds=1))
+    assert not stale("claimed", minutes=10, claimed=NOW - timedelta(minutes=17))
+    assert stale("claimed", minutes=1, claimed=NOW - timedelta(minutes=8, seconds=1))
     # started_at prime sur claimed_at
-    assert not stale("running", claimed=NOW - timedelta(hours=1), started=NOW - timedelta(minutes=15))
-    assert stale("running", claimed=NOW, started=NOW - timedelta(minutes=15, seconds=1))
+    assert not stale("running", claimed=NOW - timedelta(hours=1), started=NOW - timedelta(minutes=12))
+    assert stale("running", claimed=NOW, started=NOW - timedelta(minutes=12, seconds=1))
     # ni claimed_at ni started_at (ne devrait pas arriver) : created_at
-    assert stale("running", created=NOW - timedelta(minutes=15, seconds=1))
-    assert not stale("running", created=NOW - timedelta(minutes=15))
+    assert stale("running", created=NOW - timedelta(minutes=12, seconds=1))
+    assert not stale("running", created=NOW - timedelta(minutes=12))
+
+
+def test_site_gets_5_more_minutes_per_node_runner_waits_for_each_in_turn():
+    # site:beaufort (2 noeuds) en 5 min : 5 + 5x2 + 2 = 17 min (HEALTHY_TIMEOUT 300 s par noeud, l'un apres l'autre)
+    assert not stale("running", started=NOW - timedelta(minutes=17), nodes=2)
+    assert stale("running", started=NOW - timedelta(minutes=17, seconds=1), nodes=2)
+    assert not stale("running", minutes=2, started=NOW - timedelta(minutes=19), nodes=3)
+    assert stale("running", minutes=2, started=NOW - timedelta(minutes=19, seconds=1), nodes=3)

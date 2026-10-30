@@ -310,18 +310,40 @@ def test_pending_never_claimed_expires_after_30_minutes(clean, client, admin_hea
     assert any(d["chaos_id"] == created["id"] and d["reason"] == "timeout" for _, d in _audits("chaos_failed"))
 
 
-def test_claimed_late_runs_its_window_then_expires(clean, client, admin_headers):
-    created = _request(client, admin_headers, minutes=2)
+def test_claimed_late_site_runs_its_window_and_slow_restore_then_expires(clean, client, admin_headers):
+    created = _request(client, admin_headers, nodes="site:beaufort", minutes=2)
     client.get("/internal/chaos/next", headers=GW)
     client.post(f"/internal/chaos/{created['id']}/events", json={"kind": "started", "details": {}}, headers=GW)
-    _age(clean, created["id"], created_at=45, claimed_at=13, started_at=11)  # reclamee tard (verrou CD)
+    # reclamee tard (verrou CD) ; node4 puis node5 lents a revenir (300 s chacun) : 2 + 5x2 + 2 = 14 min
+    _age(clean, created["id"], created_at=45, claimed_at=15, started_at=13)  # > ancienne marge (12)
     r = client.post("/api/chaos", json={"nodes": "node5", "mode": "stop", "minutes": 1}, headers=admin_headers)
     assert r.status_code == 409 and r.json()["detail"] == "un test est déjà en cours"
-    assert _row(client, admin_headers, created["id"])["status"] == "running"  # 2 + 10 min apres started_at
-    _age(clean, created["id"], started_at=13)
+    assert _row(client, admin_headers, created["id"])["status"] == "running"
+    _age(clean, created["id"], started_at=15)
     _request(client, admin_headers, nodes="node5", minutes=1)  # le POST expire l'ancienne, puis accepte
     row = _row(client, admin_headers, created["id"])
     assert row["status"] == "failed" and row["events"][-1]["details"]["reason"] == "timeout"
+
+
+def test_late_runner_event_on_a_finished_request_is_only_appended(clean, client, admin_headers):
+    """Expiree (timeout) puis le runner envoie restored : reste failed, restored_at et audit intacts."""
+    created = _request(client, admin_headers)
+    cid = created["id"]
+    client.get("/internal/chaos/next", headers=GW)
+    client.post(f"/internal/chaos/{cid}/events", json={"kind": "started", "details": {}}, headers=GW)
+    _age(clean, cid, started_at=60)
+    _request(client, admin_headers, nodes="node5", minutes=1)  # expire la demande
+    expired = _row(client, admin_headers, cid)
+    assert expired["status"] == "failed"
+    audits = len(_audits("chaos_restored")), len(_audits("chaos_started"))
+    for kind in ("restored", "started"):
+        r = client.post(f"/internal/chaos/{cid}/events", json={"kind": kind, "details": {"late": True}}, headers=GW)
+        assert r.status_code == 200, r.text
+    row = _row(client, admin_headers, cid)
+    assert row["status"] == "failed" and row["restored_at"] == expired["restored_at"]
+    assert row["started_at"] == expired["started_at"]
+    assert [e["kind"] for e in row["events"]] == ["started", "failed", "restored", "started"]
+    assert (len(_audits("chaos_restored")), len(_audits("chaos_started"))) == audits  # pas d'audit contradictoire
 
 
 def test_history_is_read_only_and_works_on_a_replica(clean, client, admin_headers):

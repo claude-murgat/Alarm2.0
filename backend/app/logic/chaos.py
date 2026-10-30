@@ -7,12 +7,13 @@ catalogue. L'API la joue a la demande (POST /api/chaos) et la rejoue au moment d
 from datetime import timedelta
 
 
-def is_stale(status, minutes, created_at, claimed_at, started_at, now) -> bool:
-    """INV-176 : pending jamais reclamee -> 30 min apres created_at ; claimed/running -> `minutes` + 10 min
-    apres started_at (sinon claimed_at) : un test reclame tard n'expire pas pendant sa fenetre."""
+def is_stale(status, minutes, n_nodes, created_at, claimed_at, started_at, now) -> bool:
+    """INV-176 : pending jamais reclamee -> 30 min apres created_at ; claimed/running -> `minutes` + 5 min par noeud
+    (le runner attend jusqu'a 300 s chaque noeud, l'un apres l'autre) + 2 min apres started_at (sinon claimed_at) :
+    un test reclame tard ou un site lent a revenir n'expire pas avant la fin de sa restauration."""
     if status == "pending":
         return now - created_at > timedelta(minutes=30)
-    return now - (started_at or claimed_at or created_at) > timedelta(minutes=minutes + 10)
+    return now - (started_at or claimed_at or created_at) > timedelta(minutes=minutes + 5 * n_nodes + 2)
 
 
 def expand_target(target: str, locations: dict) -> list:

@@ -106,8 +106,13 @@ ssh_node() {  # $1 noeud, $2 commande distante. ServerAlive : un trou reseau en 
   ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
     -o StrictHostKeyChecking=accept-new "alarm@${NODE_IP[$1]}" "$2"
 }
-restore_node() {  # $1 noeud : relance ses conteneurs et remet la politique de compose
-  ssh_node "$1" "docker start ${CIDS_OF[$1]} && docker update --restart=unless-stopped ${CIDS_OF[$1]} >/dev/null"
+restore_node() {  # $1 noeud : relance ses conteneurs, remet la politique de compose, puis desarme le filet
+  # de CE test (sinon il relancerait le noeud a l'echeance + 60 s, en plein test suivant) ; motif ancre : l'id 7 ne tue pas l'id 70.
+  ssh_node "$1" "docker start ${CIDS_OF[$1]} && docker update --restart=unless-stopped ${CIDS_OF[$1]} >/dev/null && { pkill -f '[a]larm-chaos-$ID\$' || true; }"
+}
+json_str() { printf '%s' "$1" | python3 -c 'import sys, json; print(json.dumps(sys.stdin.read()))'; }
+abort_reason() {  # raison de restaurer tout de suite (annulation admin, alarme survenue), vide sinon
+  api_call "/internal/chaos/${ID}/abort" | py "print(d.get('abort') or '')" 2>/dev/null || true
 }
 
 STOPPED=()
@@ -129,7 +134,7 @@ fail() {
   for n in "${touched[@]}"; do
     restore_now "$n" || log "WARN : restauration immediate de $n KO (restauration armee sur le noeud en filet)"
   done
-  post_event failed "{\"reason\":$(printf '%s' "$1" | python3 -c 'import sys, json; print(json.dumps(sys.stdin.read()))')}"
+  post_event failed "{\"reason\":$(json_str "$1")}"
   exit 1
 }
 
@@ -172,6 +177,9 @@ for n in ${NODES//,/ }; do
   # Nouvelle session : le filet a survecu a la fin de la premiere (systemd-logind KillUserProcesses=yes le tuerait).
   ssh_node "$n" "pgrep -f '[a]larm-chaos-$ID\$' >/dev/null" \
     || fail "restauration armee disparue apres la session SSH sur $n (KillUserProcesses ?) : rien n'est arrete sur ce noeud"
+  # Annulation ou alarme depuis la reclamation (sondes, armement, noeud precedent) : on n'arrete rien de plus.
+  abort=$(abort_reason)
+  [[ -z "$abort" ]] || fail "$abort : rien n'est arrêté sur $n"
   ssh_node "$n" "docker stop $cids" || fail "docker stop KO sur $n"
   STOPPED+=("$n")
   log "$n arrete : $cids"
@@ -191,10 +199,10 @@ while :; do
     post_event leader_changed "{\"from\":\"$LEADER\",\"to\":\"$now_leader\"}"
     LEADER=$now_leader
   fi
-  abort=$(api_call "/internal/chaos/${ID}/abort" | py "print(json.dumps(d['abort']) if d.get('abort') else '')" 2>/dev/null) || true
+  abort=$(abort_reason)
   if [[ -n "$abort" ]]; then
     log "Arret anticipe : $abort"
-    post_event early_restore "{\"reason\":$abort}"
+    post_event early_restore "{\"reason\":$(json_str "$abort")}"
     break
   fi
 done

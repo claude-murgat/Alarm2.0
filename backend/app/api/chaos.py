@@ -76,7 +76,7 @@ def _expire_stale(db: Session):
         return
     now = datetime.utcnow()
     for row in db.query(ChaosRequest).filter(ChaosRequest.status.in_(UNFINISHED)):
-        if is_stale(row.status, row.minutes, row.created_at, row.claimed_at, row.started_at, now):
+        if is_stale(row.status, row.minutes, len(row.nodes.split(",")), row.created_at, row.claimed_at, row.started_at, now):
             _fail(row, "timeout")
     db.commit()
 
@@ -197,6 +197,9 @@ def add_event(chaos_id: int, ev: ChaosEventIn, _: None = Depends(_check_gateway_
     row = _get(db, chaos_id)
     ts = ev.ts.astimezone(timezone.utc).replace(tzinfo=None) if ev.ts and ev.ts.tzinfo else ev.ts
     ts = _append(row, ev.kind, ev.details, ts)
+    if row.status not in UNFINISHED:  # terminee (ex. restored apres l'expiration) : evenement garde, rien d'autre (INV-179)
+        db.commit()
+        return _out(row)
     if ev.kind == "started":
         row.status, row.started_at = "running", ts
     elif ev.kind in ("restored", "failed"):
