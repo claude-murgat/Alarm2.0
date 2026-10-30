@@ -32,8 +32,12 @@ case "$cmd" in
   *setsid*) [[ -f "$H/arm_down" ]] || echo ARMED ;;
   *"docker stop"*) [[ -f "$H/stop_fail_$ip" ]] && exit 1
     [[ -f "$H/abort_on_stop" ]] && cp "$H/abort_on_stop" "$H/abort.json" ;;  # annulation ou alarme apres cet arret
-  *"alarm-chaos-net cut"*) [[ -f "$H/cut_drop_$ip" ]] && exit 255; [[ -f "$H/cut_noarm_$ip" ]] || echo ARMED ;;
-  *"alarm-chaos-net restore"*) [[ -f "$H/restore_down" ]] && exit 255 ;;
+  *"alarm-chaos-net cut"*) [[ -f "$H/cut_drop_$ip" ]] && exit 255; [[ -f "$H/cut_noarm_$ip" ]] && exit 0
+    # /health de la cible muet jusqu'a son timer (S/60 s, MINUTE_SECONDS=1) ; cut_noop : coupure sans effet
+    [[ -f "$H/cut_noop_$ip" || -f "$H/down_until_$ip" ]] || echo $(( $(date +%s) + ${cmd##* } / 60 )) > "$H/down_until_$ip"
+    [[ -f "$H/abort_on_stop" ]] && cp "$H/abort_on_stop" "$H/abort.json"  # annulation ou alarme apres cette coupure
+    echo ARMED ;;
+  *"alarm-chaos-net restore"*) [[ -f "$H/restore_down" ]] && exit 255; rm -f "$H/down_until_$ip" ;;
 esac
 exit 0
 """
@@ -45,14 +49,17 @@ while (( $# )); do
     -d) body=$2; shift ;;
     -H|--max-time) shift ;;
     http*) url=$1 ;;
+    -*f*) fail=1 ;;  # -sf, -fsS : une reponse 503 est alors un echec
   esac
   shift
 done
 echo "$method $url" >> "$H/curl.log"
 case "$url" in
   *":2379/health") grep -qxF "$url" "$H/etcd_down" 2>/dev/null && exit 22; echo '{"health":"true"}' ;;
-  *"10.99.0.4:8000/health") [[ -f "$H/health_at" ]] && (( $(date +%s) < $(cat "$H/health_at") )) && exit 22; cat "$H/health.json" ;;
-  *"/health") cat "$H/health.json" ;;
+  *":8000/health") ip=${url#http://}; ip=${ip%%:*}
+    [[ -f "$H/down_until_$ip" ]] && (( $(date +%s) < $(cat "$H/down_until_$ip") )) && exit 28  # coupe : aucune reponse
+    [[ -f "$H/health_503_$ip" ]] && { [[ -n "${fail:-}" ]] && exit 22; echo '{"status":"degraded"}'; exit 0; }
+    cat "$H/health.json" ;;
   *"/api/cluster") cat "$H/cluster.json" ;;
   *"/internal/chaos/next") cat "$H/next.json" ;;
   *"/abort") cat "$H/abort.json" 2>/dev/null || echo '{"abort": null}' ;;
@@ -262,7 +269,9 @@ def test_netcut_node4_delegates_to_root_helper_no_docker(h):
     (h / "next.json").write_text(json.dumps({**NEXT, "mode": "netcut", "minutes": 3}))
     rc, err = run(h)
     assert rc == 0, err
-    assert ssh_log(h) == ["10.99.0.4 sudo -n /usr/local/bin/alarm-chaos-net cut 180"]
+    # cut, puis, la cible revenue, `restore` : desarme son timer s'il attend encore (INV-178)
+    assert ssh_log(h) == ["10.99.0.4 sudo -n /usr/local/bin/alarm-chaos-net cut 180",
+                          "10.99.0.4 sudo -n /usr/local/bin/alarm-chaos-net restore"]
     for opt in ("BatchMode=yes", "ConnectTimeout=10", "ServerAliveInterval=5", "ServerAliveCountMax=3"):
         assert opt in (h / "ssh_args.log").read_text(), opt
     kinds = [p["kind"] for p in posted(h)]
@@ -275,7 +284,9 @@ def test_netcut_site_cuts_each_node(h):
     rc, err = run(h)
     assert rc == 0, err
     assert ssh_log(h) == ["10.99.0.4 sudo -n /usr/local/bin/alarm-chaos-net cut 60",
-                          "10.99.0.5 sudo -n /usr/local/bin/alarm-chaos-net cut 60"]
+                          "10.99.0.5 sudo -n /usr/local/bin/alarm-chaos-net cut 60",
+                          "10.99.0.4 sudo -n /usr/local/bin/alarm-chaos-net restore",
+                          "10.99.0.5 sudo -n /usr/local/bin/alarm-chaos-net restore"]
     assert [p["kind"] for p in posted(h)] == ["started", "restored"]
 
 
@@ -306,12 +317,14 @@ def test_netcut_cut_not_proven_on_second_node_restores_both_and_fails(h, flag):
 
 def test_netcut_early_restore_reaches_target(h):
     claim(h, mode="netcut", minutes=10)  # fenetre de 10 s (MINUTE_SECONDS=1)
-    (h / "abort.json").write_text(json.dumps({"abort": "alarme en cours"}))
+    (h / "abort_on_stop").write_text(json.dumps({"abort": "alarme en cours"}))  # pendant la fenetre
     t0 = time.monotonic()
     rc, err = run(h)
     assert rc == 0, err
     assert time.monotonic() - t0 < 8, "restauration attendue avant l'echeance"
-    assert ssh_log(h) == ["10.99.0.4 sudo -n /usr/local/bin/alarm-chaos-net cut 600", f"10.99.0.4 {NET_RESTORE}"]
+    # restore tout de suite, puis de nouveau une fois la cible saine (desarmement, sans effet sur wg0 actif)
+    assert ssh_log(h) == ["10.99.0.4 sudo -n /usr/local/bin/alarm-chaos-net cut 600", f"10.99.0.4 {NET_RESTORE}",
+                          f"10.99.0.4 {NET_RESTORE}"]
     assert [p["kind"] for p in posted(h)] == ["started", "early_restore", "restored"]
 
 
@@ -319,13 +332,14 @@ def test_netcut_early_restore_unreachable_waits_for_target_timer_until_deadline(
     # Cible injoignable (le runner passe par wg0) : son timer remet wg0 a l'echeance ; l'attente de sante
     # doit courir jusqu'a l'echeance + HEALTHY_TIMEOUT, pas seulement HEALTHY_TIMEOUT apres l'abandon.
     claim(h, mode="netcut", minutes=10)
-    (h / "abort.json").write_text(json.dumps({"abort": "annulé par l'admin"}))
+    (h / "abort_on_stop").write_text(json.dumps({"abort": "annulé par l'admin"}))
     (h / "restore_down").write_text("")
-    (h / "health_at").write_text(str(int(time.time()) + 5))  # node4 de retour 5 s apres le lancement
+    (h / "down_until_10.99.0.4").write_text(str(int(time.time()) + 5))  # timer de node4 : de retour 5 s apres le lancement
     rc, err = run(h, HEALTHY_TIMEOUT="2")
     assert rc == 0, err
     assert f"10.99.0.4 {NET_RESTORE}" in ssh_log(h)
     assert "timer" in err
+    assert "désarmement" in err  # restore final KO : journalise, le resultat reste restored
     assert [p["kind"] for p in posted(h)] == ["started", "early_restore", "restored"]
     assert posted(h)[2]["details"]["restore_seconds"] >= 0
 
@@ -338,3 +352,30 @@ def test_netcut_node_never_healthy_fails_and_restores(h):
     assert ssh_log(h) == [f"10.99.0.4 {CUT60}", f"10.99.0.4 {NET_RESTORE}"]
     assert [p["kind"] for p in posted(h)] == ["started", "failed"]
     assert "node4 pas sain" in posted(h)[1]["details"]["reason"]
+
+
+@pytest.mark.parametrize("abort_file, cut", [("abort.json", []), ("abort_on_stop", ["node4"])])
+def test_netcut_cancel_or_alarm_before_a_cut_cuts_nothing_more(h, abort_file, cut):
+    """Abort relu juste avant CHAQUE cut (comme avant chaque docker stop) : avant le premier, ou entre node4 et node5."""
+    claim(h, mode="netcut", nodes=["node4", "node5"])
+    (h / abort_file).write_text(json.dumps({"abort": "alarme en cours"}))
+    rc, err = run(h)
+    assert rc == 1, err
+    assert [p["kind"] for p in posted(h)] == ["started", "failed"]
+    victim = "node5" if cut else "node4"
+    assert posted(h)[1]["details"]["reason"] == f"alarme en cours : rien n'est coupé sur {victim}"
+    assert ssh_log(h) == ([f"10.99.0.4 {CUT60}", f"10.99.0.4 {NET_RESTORE}"] if cut else [])  # node5 jamais coupe
+
+
+@pytest.mark.parametrize("answer", ["200", "503"])  # toute reponse HTTP, meme 503, prouve que le tunnel passe
+def test_netcut_cut_without_effect_fails_and_restores(h, answer):
+    claim(h, mode="netcut", minutes=3)
+    (h / "cut_noop_10.99.0.4").write_text("")  # systemctl stop sans effet : /health repond encore
+    if answer == "503":
+        (h / "health_503_10.99.0.4").write_text("")
+    rc, err = run(h, HEALTHY_TIMEOUT="2")
+    assert rc == 1, err
+    assert ssh_log(h) == ["10.99.0.4 sudo -n /usr/local/bin/alarm-chaos-net cut 180", f"10.99.0.4 {NET_RESTORE}"]
+    assert [p["kind"] for p in posted(h)] == ["started", "failed"]
+    reason = posted(h)[1]["details"]["reason"]
+    assert "coupure non effective" in reason and "node4" in reason
