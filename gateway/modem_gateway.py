@@ -33,7 +33,7 @@ from config import (
     DRY_CONTACT_LIVENESS_SECONDS,
 )
 from modem_detect import detect_modem_port, send_at_command
-from modem_health import probe_order  # INV-174
+from modem_health import probe_order, probe_timeout  # INV-174
 from config import PRIMARY_PROBE_TIMEOUT_SECONDS  # INV-174
 from locks import at_lock  # RLock reentrant partage du port AT (cf locks.py)
 from dry_contact import parse_dc_line, raw_to_state, decide_report  # logique pure (cf dry_contact.py)
@@ -77,7 +77,8 @@ def _find_primary_url() -> str | None:
     global _primary_url
     for url in probe_order(_primary_url, ALL_NODE_URLS):
         try:
-            r = requests.get(f"{url}/health", timeout=PRIMARY_PROBE_TIMEOUT_SECONDS)
+            r = requests.get(f"{url}/health", timeout=probe_timeout(
+                url, _primary_url, HTTP_TIMEOUT_SECONDS, PRIMARY_PROBE_TIMEOUT_SECONDS))
             if r.status_code == 200 and r.json().get("role") == "primary":
                 _primary_url = url
                 return url

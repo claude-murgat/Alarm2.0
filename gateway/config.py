@@ -41,8 +41,9 @@ ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", "1800"))
 
 # Timeout HTTP pour les requetes vers les backends
 HTTP_TIMEOUT_SECONDS = int(os.getenv("HTTP_TIMEOUT_SECONDS", "10"))
-# INV-174 : sonde /health de la recherche du primary seulement (un noeud mort coute 3 s, une fois
-# par bascule grace au cache) ; les echanges de donnees gardent HTTP_TIMEOUT_SECONDS.
+# INV-174 : sonde /health des candidats autres que le primary memorise (un noeud mort coute 3 s,
+# une fois par bascule grace au cache) ; le primary memorise et les echanges de donnees gardent
+# HTTP_TIMEOUT_SECONDS.
 PRIMARY_PROBE_TIMEOUT_SECONDS = 3
 
 # ── Contact sec NC local (INV-120 V2) ──────────────────────────────────────

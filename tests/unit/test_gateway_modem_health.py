@@ -172,8 +172,24 @@ class TestProbeOrder:
         assert len(order) == len(set(order)) == len(self.URLS)
 
 
+class TestProbeTimeout:
+    """INV-174 : le primary memorise garde la tolerance des echanges (HTTP_TIMEOUT_SECONDS) : un leader
+    vivant mais lent ne fait pas sauter le poll ; seuls les autres candidats sont sondes a 3 s."""
+
+    CACHED = "http://10.99.0.2:8000"
+
+    def test_cached_primary_keeps_data_timeout(self):
+        assert _mh.probe_timeout(self.CACHED, self.CACHED, 10, 3) == 10
+
+    def test_other_candidate_is_probed_at_3_seconds(self):
+        assert _mh.probe_timeout("http://10.99.0.3:8000", self.CACHED, 10, 3) == 3
+
+    def test_nothing_cached_every_candidate_at_3_seconds(self):
+        assert _mh.probe_timeout(self.CACHED, None, 10, 3) == 3
+
+
 class TestHttpTimeoutDefault:
-    """INV-174 : la sonde /health de la recherche du primary est bornee a 3 s ; les echanges de
+    """INV-174 : la sonde /health des autres candidats est bornee a 3 s ; les echanges de
     donnees et le HealthMonitor gardent HTTP_TIMEOUT_SECONDS (10 s), qui absorbe une pointe de latence."""
 
     @staticmethod

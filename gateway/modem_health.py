@@ -71,3 +71,9 @@ def pcm_reboot_allowed(last_reboot_at: float | None, now: float) -> bool:
 def probe_order(cached: str | None, urls: list[str]) -> list[str]:
     """L'URL memorisee d'abord (si encore configuree), puis les autres dans l'ordre configure."""
     return sorted(urls, key=lambda u: u != cached)
+
+
+def probe_timeout(url: str, cached: str | None, known: float, other: float) -> float:
+    """INV-174 : le primary memorise garde la tolerance des echanges (`known`, HTTP_TIMEOUT_SECONDS) :
+    un leader vivant mais lent ne fait pas sauter le poll ; les autres candidats sont sondes a `other`."""
+    return known if url == cached else other
