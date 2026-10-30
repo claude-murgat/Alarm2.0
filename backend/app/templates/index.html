@@ -1308,8 +1308,8 @@
                 const data = await api('/api/cluster');
                 const q = data.quorum || {};
                 const banner = document.getElementById('quorumBanner');
-                const leader = (data.members || []).some(m => m.role === 'leader' || m.role === 'master');
-                if (!leader) {  // INV-171 : sans leader, rien ne peut être écrit, quorum ou pas
+                // INV-171 : leader vivant vu de ce nœud (les rôles de /cluster peuvent être périmés, INV-170)
+                if (data.cluster_writable === false) {
                     banner.textContent = `AUCUN LEADER (${q.healthy}/${q.total})`;
                     banner.style.background = '#ef444433';
                     banner.style.color = '#ef4444';

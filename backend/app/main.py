@@ -371,6 +371,7 @@ async def cluster_status():
         "local_node": node_name,
         "local_role": local_role,
         "local_location": locations.get(node_name),
+        "cluster_writable": is_leader.is_set() or quorum_monitor.cluster_has_leader,  # INV-171, bandeau web
         "quorum": {
             "total": total_count,
             "healthy": healthy_count,

@@ -72,3 +72,14 @@ def backends_down(healths) -> bool:
     c'est `cluster_writable` qui compte ; absent = backend d'avant, compte inscriptible."""
     return not any(h is not None and h[0] == 200 and h[1].get("cluster_writable") is not False
                    for h in healths)
+
+
+def sms_alert_step(down: bool, last_alert: float, writable_passes: int, now: float,
+                   cooldown: float) -> tuple[bool, float, int]:
+    """INV-171 : (SMS a envoyer, date du dernier SMS, passages inscriptibles consecutifs). SMS si aucun
+    backend ne peut ecrire, hors cooldown (strict). Le cooldown n'est rearme qu'apres 2 passages
+    inscriptibles d'affilee : un backend qui (re)demarre se dit inscriptible jusqu'a son 1er controle."""
+    if down:
+        send = now - last_alert > cooldown
+        return send, now if send else last_alert, 0
+    return False, 0 if writable_passes >= 1 else last_alert, writable_passes + 1

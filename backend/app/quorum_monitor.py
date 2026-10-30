@@ -29,7 +29,7 @@ sans démarrer la background task (tier 2 avec snapshot injecté).
    (logique pure `logic/replica_reinit.py`).
 
 4. INV-170 : même tick, sur TOUS les nœuds (avant le gate leader), `_run_leader_loss_check`
-   alerte quand plus aucun leader n'est vu (logique pure `logic/leader_loss.py`) et tient
+   alerte quand plus aucun leader vivant n'est vu (logique pure `logic/leader_loss.py`) et tient
    `cluster_has_leader`, lu par `/health.cluster_writable` (INV-171).
 """
 import asyncio
@@ -47,7 +47,7 @@ from .database import SessionLocal
 from .email_service import send_alert_email
 from .events import log_event
 from .leader_election import is_leader
-from .logic.leader_loss import LeaderLossState, has_leader, next_state
+from .logic.leader_loss import LeaderLossState, leader_host, next_state, no_leader_cause
 from .logic.quorum_detection import (
     ClusterSnapshot,
     QUORUM_LOSS_THRESHOLD,
@@ -307,23 +307,57 @@ def _run_replica_reinit_check(now: datetime) -> None:
 cluster_has_leader = True
 _leader_loss = LeaderLossState()
 
+# INV-170 : libelle du sujet, explication du corps.
+_CAUSES = {
+    "patroni_injoignable": (
+        "Patroni injoignable depuis ce nœud",
+        "le Patroni local de ce nœud ne répond pas (conteneur arrêté, ou nœud coupé des voteurs etcd). "
+        "Le reste du cluster peut fonctionner normalement : vérifier d'abord ce nœud (conteneur "
+        "Patroni, tunnel WireGuard)."),
+    "aucun_leader": (
+        "Patroni ne liste aucun leader",
+        "Patroni répond mais ne liste aucun leader."),
+    "leader_hors_service": (
+        "leader listé mais hors service",
+        "Patroni liste {host} comme leader, mais son backend ({host}:8000) est injoignable, en erreur "
+        "ou ne se dit pas primary : la clé leader lue dans etcd est probablement périmée (quorum etcd "
+        "perdu, le leader s'est rétrogradé)."),
+}
 
-def _run_leader_loss_check(now: datetime) -> None:
-    """INV-170 : un tick (bloquant, via `asyncio.to_thread`, sur TOUS les noeuds, avant le gate leader).
 
-    Plus aucun leader vu par le Patroni local pendant > 3 min -> un email par episode, depuis chaque
-    noeud qui le constate (sans leader, aucun ne peut se coordonner avec les autres). Etat en memoire :
-    un redemarrage repart de zero. L'audit peut echouer sur un replica (lecture seule) : jamais d'exception.
-    """
-    global cluster_has_leader, _leader_loss
+def _leader_loss_cause() -> tuple[Optional[str], Optional[str]]:
+    """INV-170 : (cause, hôte du leader listé) ; cause None = leader vivant vu de ce nœud."""
+    if is_leader.is_set():
+        return None, None  # primary ici : leader vivant, sans requête (pas de 3e GET /cluster par tick)
     try:
         cluster = _patroni_cluster()
     except Exception as e:
         logger.warning("INV-170 : Patroni injoignable depuis ce noeud (%s)", e)
         cluster = None
-    cluster_has_leader = has_leader(cluster)
-    # Primary ici = il y a un leader, meme si le Patroni local ne repond plus.
-    _leader_loss, email_due = next_state(_leader_loss, cluster_has_leader or is_leader.is_set(), now)
+    host, health = leader_host(cluster), None
+    if host:
+        # shortcut: hôte Patroni + port 8000 = IP WireGuard du nœud en prod ; faux en cluster dev
+        # 3 nœuds (host.docker.internal:8000 = node1), à revoir si on teste un basculement en dev.
+        try:
+            req = urllib.request.Request(f"http://{host}:8000/health", method="GET")
+            health = json.loads(urllib.request.urlopen(req, timeout=3).read().decode("utf-8"))
+        except Exception as e:
+            logger.warning("INV-170 : backend du leader %s injoignable ou en erreur (%s)", host, e)
+    return no_leader_cause(cluster, health), host
+
+
+def _run_leader_loss_check(now: datetime) -> None:
+    """INV-170 : un tick (bloquant, via `asyncio.to_thread`, sur TOUS les noeuds, avant le gate leader).
+
+    Plus aucun leader vivant vu de ce noeud pendant > 3 min -> un email par episode (au plus un par
+    heure), depuis chaque noeud qui le constate (sans leader, aucun ne peut se coordonner avec les
+    autres). Etat en memoire : un redemarrage repart de zero. L'audit peut echouer sur un replica
+    (lecture seule) : jamais d'exception.
+    """
+    global cluster_has_leader, _leader_loss
+    cause, host = _leader_loss_cause()
+    cluster_has_leader = cause is None
+    _leader_loss, email_due = next_state(_leader_loss, cluster_has_leader, now)
     if not email_due:
         return
     node = os.getenv("NODE_NAME", "unknown")
@@ -338,19 +372,20 @@ def _run_leader_loss_check(now: datetime) -> None:
     except Exception:
         logger.exception("INV-170 : SystemConfig illisible, destinataire par défaut")
     since = _leader_loss.since.isoformat()
-    logger.critical("INV-170 : aucun leader dans le cluster depuis %s (vu de %s)", since, node)
-    log_event("cluster_leader_lost", node=node, since=since)
+    where = f"{node} ({location or 'lieu inconnu'})"
+    label, explanation = _CAUSES[cause]
+    logger.critical("INV-170 : aucun leader vivant vu de %s depuis %s (%s)", node, since, cause)
+    log_event("cluster_leader_lost", node=node, since=since, cause=cause)
     send_alert_email(
-        subject=f"[Alarme Murgat] Aucun leader dans le cluster — vu de {node} ({location or 'lieu inconnu'})",
+        subject=f"[Alarme Murgat] Aucun leader vu de {where} — {label}",
         body=(
-            f"Vu de {node} ({location or 'lieu inconnu'}) : aucun membre du cluster Patroni n'est leader "
-            f"depuis {since} (plus de 3 minutes).\n\n"
-            f"Aucune écriture n'est possible : les alarmes ne peuvent plus être créées, escaladées ni "
-            f"acquittées, et les passerelles ne peuvent plus récupérer les SMS ni les appels à passer.\n\n"
-            f"Chaque nœud qui constate la situation envoie son propre email (sans leader, les nœuds ne "
-            f"peuvent pas se coordonner).\n\n"
-            f"Intervention manuelle requise sur Patroni / etcd : patronictl list, vérifier que 2 voteurs "
-            f"etcd sur 3 (node1, node2, node3) sont joignables."
+            f"Vu de {where}, depuis {since} (plus de 3 minutes) : {explanation.format(host=host)}\n\n"
+            f"Si la perte du leader se confirme, aucune écriture n'est possible : les alarmes ne peuvent "
+            f"plus être créées, escaladées ni acquittées, et les passerelles ne peuvent plus récupérer "
+            f"les SMS ni les appels à passer.\n\n"
+            f"Chaque nœud qui constate la situation envoie son propre email (au plus un par heure) : "
+            f"comparer les nœuds et les causes pour situer la panne.\n\n"
+            f"À vérifier : patronictl list, et que 2 voteurs etcd sur 3 (node1, node2, node3) sont joignables."
         ),
         to=alert_email or "direction_technique@charlesmurgat.com",
     )

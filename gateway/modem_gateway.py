@@ -37,7 +37,7 @@ from locks import at_lock  # RLock reentrant partage du port AT (cf locks.py)
 from dry_contact import parse_dc_line, raw_to_state, decide_report  # logique pure (cf dry_contact.py)
 from modem_health import (  # logique pure (cf modem_health.py)
     MAX_AT_FAILURES, MODEM_REBOOT_WAIT_S, at_failures_after, backends_down, call_was_dialed,
-    parse_network, pcm_reboot_allowed, reregister_due, sends_allowed,
+    parse_network, pcm_reboot_allowed, reregister_due, sends_allowed, sms_alert_step,
 )
 from voice_call import (  # logique pure (cf voice_call.py)
     DTMF_WAIT_S, FRAME_S, HANG_UP_COMMANDS, LEAD_SILENCE_S, alarm_voice_file, call_answered,
@@ -593,6 +593,7 @@ class HealthMonitorThread(threading.Thread):
         self.ser = ser
         self.running = True
         self.last_alert_time = 0
+        self.writable_passes = 0  # INV-171 : cooldown SMS rearme apres 2 passages inscriptibles
 
     def run(self):
         logger.info("HealthMonitorThread demarre")
@@ -606,14 +607,12 @@ class HealthMonitorThread(threading.Thread):
                     except Exception:
                         healths.append(None)
 
-                if backends_down(healths):
-                    now = time.time()
-                    if now - self.last_alert_time > ALERT_COOLDOWN_SECONDS:
-                        logger.critical("AUCUN BACKEND NE PEUT ECRIRE (pas de leader ou tous injoignables)")
-                        self._send_alert_sms()
-                        self.last_alert_time = now
-                else:
-                    self.last_alert_time = 0
+                send, self.last_alert_time, self.writable_passes = sms_alert_step(
+                    backends_down(healths), self.last_alert_time, self.writable_passes, time.time(),
+                    ALERT_COOLDOWN_SECONDS)
+                if send:
+                    logger.critical("AUCUN BACKEND NE PEUT ECRIRE (pas de leader ou tous injoignables)")
+                    self._send_alert_sms()
 
             except Exception as e:
                 logger.error(f"HealthMonitor erreur : {e}")
