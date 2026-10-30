@@ -1369,7 +1369,7 @@
                     ${cell('App 4G', w.app_4g_reachable)}${cell('App LAN Izeron', w.app_izeron_lan)}
                     <td data-label="Prévenu par">${escHtml((w.alerted_by || []).join(', ') || 'personne')}</td></tr>
                     <tr><td colspan="${5 + sites.length + gwSites.length}" style="color:#94a3b8;font-size:0.85rem">${escHtml(w.sentence)}</td></tr>`).join('');
-            } catch (e) { errEl.textContent = 'Erreur : ' + e.message; }
+            } catch (e) { errEl.textContent = 'Erreur : ' + e.message; chaosGateways = []; /* liste plus sure : avertissement generique */ }
         }
 
         // INV-176..179 : carte « Panne contrôlée » (onglet Tests)
@@ -1398,8 +1398,9 @@
             if (!opt) return;
             let sentence = `Arrêt réel de ${opt.textContent} pendant ${minutes} min.`;
             try { sentence = (await api('/api/resilience/whatif?nodes=' + encodeURIComponent(opt.dataset.nodes))).sentence || sentence; } catch (e) { /* texte fixe */ }
-            const blind = mode !== 'netcut' ? [] : chaosGateways.filter(g => opt.dataset.nodes.split(',').includes(g.host))
-                .map(g => `ATTENTION : ${g.host} héberge la passerelle ${g.gateway_id} : site ${place(g.site)} aveugle pendant ${minutes} min (ni alarme par contact sec, ni SMS, ni appels).\n\n`);
+            const blind = mode !== 'netcut' ? []
+                : !chaosGateways.length ? ['ATTENTION : passerelles inconnues : couper un nœud passerelle rend son site aveugle (contact sec, SMS, appels).\n\n']
+                : chaosGateways.filter(g => opt.dataset.nodes.split(',').includes(g.host)).map(g => `ATTENTION : ${g.host} héberge la passerelle ${g.gateway_id} : site ${place(g.site)} aveugle pendant ${minutes} min (ni alarme par contact sec, ni SMS, ni appels).\n\n`);
             if (!confirm(`${blind.join('')}${sentence}\n\nLancer la panne (${mode}, ${minutes} min) sur ${opt.textContent} ?`)) return;
             log(`Panne contrôlée demandée : ${opt.textContent}, ${mode}, ${minutes} min`, 'info');
             try {

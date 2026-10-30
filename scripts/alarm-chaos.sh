@@ -160,6 +160,8 @@ for n in ${NODES//,/ }; do
     # INV-178 : le helper root arme sur la cible le timer de restauration et le prouve actif AVANT la coupure
     # (5 s plus tard) ; il n'imprime ARMED qu'alors. Noeud note AVANT l'appel : un SSH coupe apres l'armement
     # laisserait une coupure en route, fail() tente donc `restore` aussi sur lui (filet : le timer de la cible).
+    abort=$(abort_reason)  # annulation ou alarme depuis la reclamation : on ne coupe rien de plus
+    [[ -z "$abort" ]] || fail "$abort : rien n'est coupé sur $n"
     STOPPED+=("$n")
     armed=$(ssh_node "$n" "sudo -n /usr/local/bin/alarm-chaos-net cut $((T * 60))") || true
     [[ "$armed" == "ARMED" ]] || fail "alarm-chaos-net cut KO ou SSH interrompu sur $n (restauration tentee, filet : timer de la cible)"
@@ -184,6 +186,16 @@ for n in ${NODES//,/ }; do
   STOPPED+=("$n")
   log "$n arrete : $cids"
 done
+if [[ "$MODE" == netcut ]]; then
+  # Coupure prouvee, ~20 s apres le dernier cut (MINUTE_SECONDS / 3) : un `systemctl stop` sans effet passerait
+  # sinon pour un « restored » en 0 s. Sans -f : toute reponse HTTP, meme 503, prouve que le tunnel passe encore.
+  sleep $(( MINUTE_SECONDS / 3 ))
+  for n in "${STOPPED[@]}"; do
+    if curl -sS --max-time 3 "http://${NODE_IP[$n]}:8000/health" >/dev/null 2>&1; then
+      fail "coupure non effective sur $n : /health répond encore après la coupure"
+    fi
+  done
+fi
 
 # Pendant la panne, toutes les 10 s : leader Patroni (leader_changed) et arret anticipe (annulation admin, alarme).
 POLL=$(( MINUTE_SECONDS < 10 ? MINUTE_SECONDS : 10 ))
@@ -237,6 +249,11 @@ for n in "${STOPPED[@]}"; do
 done
 RESTORE_SECONDS=$(( $(date +%s) - T0 ))
 (( RESTORE_SECONDS > 0 )) || RESTORE_SECONDS=0
+if [[ "$MODE" == netcut ]]; then  # cible revenue : desarme son timer s'il attend encore (wg0 actif : rien n'est touche)
+  for n in "${STOPPED[@]}"; do
+    restore_now "$n" || log "WARN : désarmement du timer de restauration de $n KO (sans effet sur wg0 remis)"
+  done
+fi
 post_event restored "{\"leader_after\":\"$(cluster_leader)\",\"restore_seconds\":$RESTORE_SECONDS}"
 log "Panne controlee #$ID terminee : $NODES restaure(s) en $RESTORE_SECONDS s"
 exit 0

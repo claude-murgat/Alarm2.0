@@ -5,7 +5,8 @@
 #
 #   alarm-chaos-net cut <S>   coupe wg0 dans 5 s, le remet S secondes (60..720) apres l'appel ;
 #                             imprime ARMED (seule sortie standard) quand tout est arme
-#   alarm-chaos-net restore   remet wg0 tout de suite (et annule une coupure pas encore executee)
+#   alarm-chaos-net restore   remet wg0 tout de suite (et annule une coupure pas encore executee),
+#                             puis desarme le timer de restauration s'il attend encore
 #
 # Garantie INV-178 : la restauration est un timer systemd root DE CETTE MACHINE
 # (alarm-chaos-restore, 10 tentatives a 30 s, journalisees), arme et verifie actif AVANT la
@@ -23,8 +24,11 @@ arm() {  # $1 secondes, $2 unit, puis options/commande ; stdout de systemd-run -
   shift 2
   systemd-run --on-active="$s" --timer-property=AccuracySec=1s --unit="$unit" "$@" >&2
 }
-# Boucle de restauration ($0 = unit wg) : stdout du service transitoire -> journal (journalctl -u alarm-chaos-restore).
-RETRY='i=1; until systemctl start "$0"; do echo "alarm-chaos-restore : $0, tentative $i/10 KO"; [ "$i" -ge 10 ] && { echo "alarm-chaos-restore : ECHEC, $0 non remis apres 10 tentatives"; exit 1; }; i=$((i + 1)); sleep 30; done; echo "alarm-chaos-restore : $0 remis (tentative $i)"'
+# Une tentative ($0 = unit, $1 = interface) : unit deja active -> rien (un `wg-quick down` couperait le tunnel remis) ;
+# sinon `wg-quick down` d'abord : un wg0 residuel (ExecStop en erreur) ferait echouer start (« wg0 already exists »).
+UP='systemctl is-active --quiet "$0" || { wg-quick down "$1" >/dev/null 2>&1 || true; systemctl start "$0"; }'
+# Boucle de restauration : stdout du service transitoire -> journal (journalctl -u alarm-chaos-restore).
+RETRY='i=1; until '"$UP"'; do echo "alarm-chaos-restore : $0, tentative $i/10 KO"; [ "$i" -ge 10 ] && { echo "alarm-chaos-restore : ECHEC, $0 non remis apres 10 tentatives"; exit 1; }; i=$((i + 1)); sleep 30; done; echo "alarm-chaos-restore : $0 remis (tentative $i)"'
 
 case "${1:-}" in
   cut)
@@ -38,7 +42,7 @@ case "${1:-}" in
     systemctl stop alarm-chaos-cut.timer alarm-chaos-restore.timer 2>/dev/null || true
     systemctl reset-failed alarm-chaos-restore.service alarm-chaos-restore.timer alarm-chaos-cut.service 2>/dev/null || true
     # Sans --collect : un echec final de la restauration reste visible (systemctl --failed).
-    arm "$S" alarm-chaos-restore /bin/sh -c "$RETRY" "$WG" \
+    arm "$S" alarm-chaos-restore /bin/sh -c "$RETRY" "$WG" wg0 \
       || { echo "alarm-chaos-net : armement de la restauration KO, rien n'est coupe" >&2; exit 1; }
     systemctl is-active --quiet alarm-chaos-restore.timer \
       || { echo "alarm-chaos-net : timer de restauration inactif, rien n'est coupe" >&2; exit 1; }
@@ -48,7 +52,9 @@ case "${1:-}" in
   restore)
     [[ $# -eq 1 ]] || usage
     systemctl stop alarm-chaos-cut.timer 2>/dev/null || true
-    systemctl start "$WG"
+    /bin/sh -c "$UP" "$WG" wg0
+    # wg0 remis : desarme le filet (sinon il tirerait a l'echeance, en plein test suivant) ; garde arme si wg0 KO (set -e).
+    systemctl stop alarm-chaos-restore.timer 2>/dev/null || true
     ;;
   *) usage ;;
 esac
