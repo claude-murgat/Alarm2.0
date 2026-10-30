@@ -30,7 +30,8 @@ echo "$*" >> "$H/ssh_args.log"
 case "$cmd" in
   *"docker ps"*) echo c1; echo c2 ;;
   *setsid*) [[ -f "$H/arm_down" ]] || echo ARMED ;;
-  *"docker stop"*) [[ -f "$H/stop_fail_$ip" ]] && exit 1 ;;
+  *"docker stop"*) [[ -f "$H/stop_fail_$ip" ]] && exit 1
+    [[ -f "$H/abort_on_stop" ]] && cp "$H/abort_on_stop" "$H/abort.json" ;;  # annulation ou alarme apres cet arret
 esac
 exit 0
 """
@@ -60,7 +61,8 @@ MEMBERS = [{"name": f"node{i}", "role": "leader" if i == 3 else "replica",
             "state": "running" if i == 3 else "streaming"} for i in (1, 2, 3, 4, 5)]
 NEXT = {"id": 7, "nodes": ["node4"], "mode": "stop", "minutes": 1, "status": "claimed",
         "voters": ["node1", "node2", "node3"]}
-RESTORE = "docker start c1 c2 && docker update --restart=unless-stopped c1 c2 >/dev/null"
+# relance, politique de compose remise, puis desarmement du filet de CE test (id 7) seulement
+RESTORE = "docker start c1 c2 && docker update --restart=unless-stopped c1 c2 >/dev/null && { pkill -f '[a]larm-chaos-7$' || true; }"
 
 
 @pytest.fixture
@@ -191,14 +193,53 @@ def test_etcd_voter_unhealthy_stops_nothing(h):
 
 def test_cancel_or_alarm_during_window_restores_early(h):
     claim(h, minutes=10)  # fenetre de 10 s (MINUTE_SECONDS=1)
-    (h / "abort.json").write_text(json.dumps({"abort": "annulé par l'admin"}))
+    (h / "abort_on_stop").write_text(json.dumps({"abort": "annulé par l'admin"}))  # pendant la fenetre
     t0 = time.monotonic()
     rc, err = run(h)
     assert rc == 0, err
     assert time.monotonic() - t0 < 8, "restauration attendue avant l'echeance"
     assert [p["kind"] for p in posted(h)] == ["started", "early_restore", "restored"]
     assert posted(h)[1]["details"] == {"reason": "annulé par l'admin"}
-    assert [l.split(" ", 1)[1] for l in ssh_log(h)][-1] == RESTORE
+    assert [l.split(" ", 1)[1] for l in ssh_log(h)][-1] == RESTORE  # relance puis desarmement du filet
+
+
+@pytest.mark.parametrize("abort_file, stopped", [("abort.json", []), ("abort_on_stop", ["node4"])])
+def test_cancel_or_alarm_before_a_docker_stop_stops_nothing_more(h, abort_file, stopped):
+    """Abort relu juste avant CHAQUE docker stop : avant le premier (rien d'arrete) ou entre node4 et node5."""
+    claim(h, nodes=["node4", "node5"])
+    (h / abort_file).write_text(json.dumps({"abort": "alarme en cours"}))
+    rc, err = run(h)
+    assert rc == 1, err
+    name = {"10.99.0.4": "node4", "10.99.0.5": "node5"}
+    assert [name[l.split(" ", 1)[0]] for l in ssh_log(h) if l.endswith(" docker stop c1 c2")] == stopped
+    assert [p["kind"] for p in posted(h)] == ["started", "failed"]
+    victim = "node5" if stopped else "node4"
+    assert posted(h)[1]["details"]["reason"] == f"alarme en cours : rien n'est arrêté sur {victim}"
+    listed = ["10.99.0.4", "10.99.0.5"] if stopped else ["10.99.0.4"]
+    assert sorted(ssh_log(h)[-len(listed):]) == [f"{ip} {RESTORE}" for ip in listed]  # relances et desarmes
+
+
+def test_disarm_kills_only_this_tests_armed_restore(h):
+    """Le desarmement joue pour de vrai (pkill, faux docker) : le filet de ce test meurt, celui de l'id <id>0 survit."""
+    cid = int(f"7{os.getpid()}")  # propre a ce pytest : jamais le filet d'un autre run en parallele
+    claim(h, id=cid)
+    rc, err = run(h)
+    assert rc == 0, err
+    restore = ssh_log(h)[-1].split(" ", 1)[1]
+    (h / "bin" / "docker").write_text("#!/bin/sh\nexit 0\n")
+    (h / "bin" / "docker").chmod(0o755)
+    # meme forme que le filet arme (plusieurs commandes : sh garde son argv au lieu d'exec sleep)
+    nets = {n: subprocess.Popen(["sh", "-c", "sleep 30; true", n]) for n in (f"alarm-chaos-{cid}", f"alarm-chaos-{cid}0")}
+    mine, other = nets.values()
+    try:
+        time.sleep(0.2)
+        assert subprocess.run(["bash", "-c", restore], env={**os.environ, "PATH": f"{h / 'bin'}:{os.environ['PATH']}"}).returncode == 0
+        mine.wait(timeout=5)  # desarme
+        assert other.poll() is None  # filet d'un autre test intact
+    finally:
+        for proc in nets.values():
+            proc.kill()
+            proc.wait()
 
 
 def test_replica_running_but_not_streaming_is_not_restored(h):
