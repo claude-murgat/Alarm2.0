@@ -59,11 +59,11 @@ android {
         versionName = computedVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // URLs backend dev (10.0.2.2 = alias localhost du PC depuis l'émulateur).
-        // Overridées en `release` ci-dessous pour pointer vers le cluster prod.
-        buildConfigField("String", "PRIMARY_BACKEND_URL", "\"http://10.0.2.2:8000/\"")
-        buildConfigField("String", "FALLBACK_BACKEND_URL", "\"http://10.0.2.2:8001/\"")
-        buildConfigField("String", "FALLBACK_BACKEND_URL_2", "\"http://10.0.2.2:8002/\"")
+        // URLs backend dev (10.0.2.2 = alias localhost du PC depuis l'émulateur),
+        // séparées par des virgules, dans l'ordre d'essai (rotation circulaire,
+        // INV-ANDROID-402). Overridées en `release` ci-dessous pour le cluster prod.
+        buildConfigField("String", "BACKEND_URLS",
+            "\"http://10.0.2.2:8000/,http://10.0.2.2:8001/,http://10.0.2.2:8002/\"")
     }
 
     // Signature release — cf .github/workflows/android-release.yml.
@@ -91,32 +91,23 @@ android {
             isMinifyEnabled = false
             // null si les variables d'env ne sont pas la (build local) -> unsigned.
             signingConfig = signingConfigs.findByName("release")
-            // Cluster prod (cf .env.prod.node{1,2,3} + docs/PROVISIONING_ONSITE.md §22bis).
-            // Ordre cloud-first : NODE3 OVH est le seul backend joignable hors LAN site
-            // (UFW onsite-1/-2 limite l'accès à 172.16.0.0/16). En 4G ou WiFi externe,
-            // les onsite ne répondent pas — donc primary = cloud évite ~6s de timeout
-            // au démarrage. Sur LAN site, le failover circulaire (INV-ANDROID-402)
-            // bascule sur les onsite si le cloud devient injoignable.
-            // IP LAN onsite mises a jour 2026-10-12 : le demenagement de juin a fait
-            // passer les onsite de 172.16.1.120/.121 a 192.168.1.50/.51. Les deux
-            // anciennes adresses ne repondaient plus (port 8000 ferme), donc une
-            // release embarquait 2 replis morts sur 3. Verifie par /health live.
-            buildConfigField("String", "PRIMARY_BACKEND_URL", "\"http://51.210.105.102:8000/\"")
-            buildConfigField("String", "FALLBACK_BACKEND_URL", "\"http://192.168.1.50:8000/\"")
-            buildConfigField("String", "FALLBACK_BACKEND_URL_2", "\"http://192.168.1.51:8000/\"")
-        }
-        // APK du cluster de TEST (alarm-1/alarm-2), installable a cote de l'app de prod :
-        // autre applicationId, nom "Alarme Murgat TEST" (src/clustertest/res). Choix
-        // proprietaire 2026-10-22 : une app separee plutot qu'un selecteur dans l'app de
-        // prod, pour qu'un telephone d'astreinte ne puisse pas rester pointe sur le test.
-        create("clustertest") {
-            initWith(getByName("release"))
-            applicationIdSuffix = ".test"
-            versionNameSuffix = "-test"
-            matchingFallbacks += "release"
-            buildConfigField("String", "PRIMARY_BACKEND_URL", "\"http://172.16.1.121:8000/\"")
-            buildConfigField("String", "FALLBACK_BACKEND_URL", "\"http://172.16.1.120:8000/\"")
-            buildConfigField("String", "FALLBACK_BACKEND_URL_2", "\"http://172.16.1.121:8000/\"")
+            // Cluster prod (cf .env.prod.node{1..5} + docs/PROVISIONING_ONSITE.md §22bis).
+            // Ordre cloud-first : NODE3 OVH est le seul backend joignable hors des LAN
+            // des sites (UFW limite l'accès aux LAN). En 4G ou WiFi externe, les LAN ne
+            // répondent pas — donc cloud en tête évite des timeouts au démarrage. Sur le
+            // LAN d'un site, le failover circulaire (INV-ANDROID-402) bascule sur ses
+            // noeuds si le cloud devient injoignable. Compromis : en 4G avec le cloud
+            // en panne, l'app parcourt les 4 URL LAN mortes avant de réessayer le cloud.
+            // IP LAN Izeron mises a jour 2026-10-12 (demenagement de juin :
+            // 172.16.1.120/.121 -> 192.168.1.50/.51). Beaufort ajoute 2026-10-30
+            // (decision proprietaire) : 172.16.1.120/.121 sont desormais alarm-1/-2,
+            // la PROD de Beaufort (node4/node5) — le cluster de test n'existe plus,
+            // d'ou la suppression du build type `clustertest` le meme jour.
+            buildConfigField("String", "BACKEND_URLS", "\"" + listOf(
+                "http://51.210.105.102:8000/",                              // NODE3 cloud OVH
+                "http://192.168.1.50:8000/", "http://192.168.1.51:8000/",   // onsite-1/-2 Izeron (node1/node2)
+                "http://172.16.1.120:8000/", "http://172.16.1.121:8000/"    // alarm-1/-2 Beaufort (node4/node5)
+            ).joinToString(",") + "\"")
         }
     }
 

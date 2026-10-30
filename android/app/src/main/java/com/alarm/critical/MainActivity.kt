@@ -100,7 +100,7 @@ class MainActivity : AppCompatActivity() {
                         (response?.let { "HTTP ${it.code()}" } ?: "reseau KO ($lastNetworkError)"))
                     if (response == null || !response.isSuccessful) {
                         // L'URL courante ne marche pas — essayer les autres
-                        for (i in 0 until 3) {
+                        for (i in 0 until ApiClient.BACKEND_URLS.size) {
                             ApiClient.switchToNextUrl()
                             response = try {
                                 ApiProvider.service.login(LoginRequest(name, password))
