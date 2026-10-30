@@ -57,3 +57,15 @@ def test_two_gateways_only_the_silent_one_is_alerted():
 
 def test_no_gateway_means_nothing():
     assert decide_silence([], frozenset({"disparue"}), NOW) == ((), NONE)
+
+
+def test_7_days_is_still_alerted():
+    gw = _gw("onsite-2", timedelta(days=7))
+    assert decide_silence([gw], NONE, NOW) == ((gw,), frozenset({"onsite-2"}))
+
+
+def test_older_than_7_days_is_ignored_and_leaves_emailed():
+    """Passerelle retiree (ligne de plus de 7 jours) : ni alerte, ni inscription."""
+    gw = _gw("retiree", timedelta(days=7, seconds=1))
+    assert decide_silence([gw], NONE, NOW) == ((), NONE)
+    assert decide_silence([gw], frozenset({"retiree"}), NOW) == ((), NONE)

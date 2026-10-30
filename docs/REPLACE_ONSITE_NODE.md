@@ -114,7 +114,7 @@ Un nœud non votant n'a **aucun conteneur etcd** : son Patroni utilise les 3 etc
 
 ## Ordre des nœuds dans `/etc/alarm-gateway.env` (passerelle, INV-174)
 
-La passerelle cherche le backend primary dans l'ordre `NODE1_URL … NODE5_URL` et **mémorise** le dernier trouvé : en régime établi, une requête ne coûte qu'un `/health` ; après une bascule, le balayage repart dans l'ordre configuré, à 3 s par nœud mort (`HTTP_TIMEOUT_SECONDS`, défaut 3 depuis INV-174 — si le fichier d'env porte encore `HTTP_TIMEOUT_SECONDS=10`, le passer à 3).
+La passerelle cherche le backend primary dans l'ordre `NODE1_URL … NODE5_URL` et **mémorise** le dernier trouvé : en régime établi, une requête ne coûte qu'un `/health` ; après une bascule, le balayage repart dans l'ordre configuré, à 3 s par nœud mort (sonde `/health` bornée à 3 s dans le code, INV-174). Tant qu'aucun nœud ne répond `primary` (élection, cluster sans quorum), chaque requête refait le balayage complet. `HTTP_TIMEOUT_SECONDS` (10 s) reste celui des échanges de données : ne pas le baisser.
 
 Ordre conseillé (son site d'abord, OVH ensuite, l'autre site en dernier) — **édition manuelle optionnelle**, `install.sh` ne la fait pas :
 

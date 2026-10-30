@@ -87,9 +87,10 @@ _RELAYED_HEADERS = frozenset({
 
 def patroni_cluster_or_none() -> dict | None:
     """INV-173 : cluster vu par le Patroni local (leader en tete du relais), None s'il ne repond
-    pas (ordre configure). Partage avec le relais heartbeat (api/devices.py)."""
+    pas en 1 s (ordre configure) : Patroni est local, et le heartbeat relaye tient dans les 5 s de
+    l'app. Partage avec le relais heartbeat (api/devices.py)."""
     try:
-        return _patroni_cluster()
+        return _patroni_cluster(timeout=1)
     except Exception:
         return None
 

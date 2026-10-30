@@ -26,13 +26,14 @@ MEMBERS = [{"name": "node1", "role": "replica", "state": "streaming", "host": "1
 
 @pytest.fixture
 def patroni(monkeypatch):
-    """`fake["cluster"] = None` : Patroni local injoignable."""
-    fake = {"cluster": {"members": MEMBERS}}
+    """`fake["cluster"] = None` : Patroni local injoignable. `timeouts` : ceux des GET /cluster."""
+    fake = {"cluster": {"members": MEMBERS}, "timeouts": []}
     real = urllib.request.urlopen
 
     def urlopen(req, *a, **kw):
         url = req.full_url if hasattr(req, "full_url") else str(req)
         if url.endswith("/cluster"):
+            fake["timeouts"].append(kw.get("timeout"))
             if fake["cluster"] is None:
                 raise urllib.error.URLError("connection refused")
             return io.BytesIO(json.dumps(fake["cluster"]).encode())
@@ -108,3 +109,5 @@ def test_heartbeat_relay_tries_patroni_leader_first(client, patroni, replica, mo
     assert [u for u, _ in calls] == [f"{LEADER}/api/devices/heartbeat"]
     t = calls[0][1]
     assert isinstance(t, httpx.Timeout) and t.connect == 1.5 and t.read == 3.0
+    # GET /cluster borné à 1 s (budget de 5 s de l'app) ; un tick de fond peut aussi le lire à 3 s.
+    assert 1 in patroni["timeouts"]

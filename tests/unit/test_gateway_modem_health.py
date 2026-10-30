@@ -173,11 +173,20 @@ class TestProbeOrder:
 
 
 class TestHttpTimeoutDefault:
-    """INV-174 : 3 s par noeud (10 s avant : un noeud mort en tete coutait 10 s par requete)."""
+    """INV-174 : la sonde /health de la recherche du primary est bornee a 3 s ; les echanges de
+    donnees et le HealthMonitor gardent HTTP_TIMEOUT_SECONDS (10 s), qui absorbe une pointe de latence."""
 
-    def test_default_is_3_seconds(self, monkeypatch):
-        monkeypatch.delenv("HTTP_TIMEOUT_SECONDS", raising=False)
+    @staticmethod
+    def _config():
         spec = importlib.util.spec_from_file_location("gateway_config", _PATH.parent / "config.py")
         cfg = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cfg)
-        assert cfg.HTTP_TIMEOUT_SECONDS == 3
+        return cfg
+
+    def test_data_timeout_default_is_10_seconds(self, monkeypatch):
+        monkeypatch.delenv("HTTP_TIMEOUT_SECONDS", raising=False)
+        assert self._config().HTTP_TIMEOUT_SECONDS == 10
+
+    def test_primary_probe_is_3_seconds_even_with_env_at_10(self, monkeypatch):
+        monkeypatch.setenv("HTTP_TIMEOUT_SECONDS", "10")  # modele d'install.sh des passerelles posees
+        assert self._config().PRIMARY_PROBE_TIMEOUT_SECONDS == 3

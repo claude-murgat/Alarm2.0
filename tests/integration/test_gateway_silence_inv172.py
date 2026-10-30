@@ -33,25 +33,16 @@ def _clean():
 
 @pytest.fixture
 def check(monkeypatch, client, admin_headers):
-    """Le vrai tick INV-172, état propre, contrôle de fond neutralisé, processus « déjà initialisé »."""
+    """Le vrai tick INV-172, état propre, contrôle de fond neutralisé."""
     from backend.app import quorum_monitor
     monkeypatch.setenv("GATEWAY_KEY", GATEWAY_KEY)
     real = quorum_monitor._run_gateway_silence_check
-    monkeypatch.setattr(quorum_monitor, "_run_gateway_silence_check", lambda db, now: None)
-    monkeypatch.setattr(quorum_monitor, "_silence_initialized", True)
+    monkeypatch.setattr(quorum_monitor, "_run_gateway_silence_check", lambda now: None)
     r = client.post("/api/config/system", json={"key": "alert_email", "value": _ALERT_EMAIL},
                     headers=admin_headers)
     assert r.status_code == 200
     _clean()
-
-    def tick(now):
-        from backend.app.database import SessionLocal
-        db = SessionLocal()
-        try:
-            real(db, now)
-        finally:
-            db.close()
-    yield tick
+    yield real
     _clean()
 
 
@@ -128,14 +119,43 @@ def test_gateway_back_then_silent_again_is_emailed_again(client, check):
         assert "muette depuis 10 min" in mail.call_args.kwargs["subject"]
 
 
-def test_gateway_already_silent_at_first_check_is_registered_without_email(client, check, monkeypatch):
-    from backend.app import quorum_monitor
-    monkeypatch.setattr(quorum_monitor, "_silence_initialized", False)
+def test_gateway_already_silent_at_first_check_is_emailed(client, check):
+    """Pas de suppression au démarrage : une passerelle tombée juste avant un déploiement ou une
+    bascule est signalée au premier contrôle du nouveau leader."""
     t0 = _report(client)
     before = len(_audits())
     with patch("backend.app.quorum_monitor.send_alert_email") as mail:
         check(t0 + timedelta(minutes=30))  # premier contrôle du processus : déjà muette
         check(t0 + timedelta(minutes=31))
-        assert mail.call_count == 0
-    assert _audits()[before:] == []
+        assert mail.call_count == 1
+        assert "muette depuis 30 min" in mail.call_args.kwargs["subject"]
+    assert len(_audits()[before:]) == 1
     assert _persisted() == [GW]
+
+
+def test_background_tick_runs_check_off_event_loop(client, monkeypatch):
+    """La lecture DB et l'email SMTP (timeout 10 s) ne doivent pas geler l'event loop (/health, heartbeats)."""
+    import asyncio
+    from backend.app import quorum_monitor as qm
+    where = []
+
+    def check(*args):
+        try:
+            asyncio.get_running_loop()
+            where.append("event loop")
+        except RuntimeError:
+            where.append("thread")
+    monkeypatch.setattr(qm, "_QUORUM_TICK_SECONDS", 0)
+    monkeypatch.setattr(qm, "_build_snapshot_sync",
+                        lambda now: qm.ClusterSnapshot(has_quorum=True, patroni_reachable=True, timestamp=now))
+    monkeypatch.setattr(qm, "_run_quorum_check", lambda *a, **kw: None)
+    monkeypatch.setattr(qm, "_run_replica_reinit_check", lambda now: None)
+    monkeypatch.setattr(qm, "_run_gateway_silence_check", check)
+
+    async def one_tick():
+        task = asyncio.create_task(qm.quorum_monitor_loop())
+        while not where:
+            await asyncio.sleep(0.01)
+        task.cancel()
+    asyncio.run(asyncio.wait_for(one_tick(), timeout=5))
+    assert where[0] == "thread"

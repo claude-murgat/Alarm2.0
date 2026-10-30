@@ -8,12 +8,16 @@ signalees) dans SystemConfig et envoie un email par passerelle renvoyee dans `al
 from datetime import datetime, timedelta
 
 GATEWAY_SILENCE_THRESHOLD = timedelta(minutes=10)
+# Au-dela, la ligne est celle d'une passerelle renommee ou retiree (ou d'un test) : ignoree.
+GATEWAY_RETIRED_AFTER = timedelta(days=7)
 
 
 def decide_silence(gateways: list[dict], emailed: frozenset, now: datetime) -> tuple[tuple, frozenset]:
     """`gateways` : lignes gateway_states ({gateway_id, site, last_seen}). Renvoie (passerelles a
     signaler ce tick, nouvel ensemble `emailed`) : une passerelle n'est signalee qu'une fois par
-    episode de silence et sort de `emailed` des qu'elle rapporte de nouveau (rearmement)."""
-    silent = [g for g in gateways if now - g["last_seen"] >= GATEWAY_SILENCE_THRESHOLD]
+    episode de silence et sort de `emailed` des qu'elle rapporte de nouveau (rearmement) ou que
+    son silence depasse 7 jours (retiree)."""
+    silent = [g for g in gateways
+              if GATEWAY_SILENCE_THRESHOLD <= now - g["last_seen"] <= GATEWAY_RETIRED_AFTER]
     alerts = tuple(g for g in silent if g["gateway_id"] not in emailed)
     return alerts, frozenset(g["gateway_id"] for g in silent)

@@ -198,11 +198,11 @@ def _run_quorum_check(
     db.commit()
 
 
-def _patroni_cluster() -> dict:
+def _patroni_cluster(timeout: float = 3) -> dict:
     """GET {PATRONI_URL}/cluster du Patroni local (bloquant). Lève si injoignable."""
     patroni_url = os.getenv("PATRONI_URL", "http://patroni:8008")
     req = urllib.request.Request(f"{patroni_url}/cluster", method="GET")
-    resp = urllib.request.urlopen(req, timeout=3)
+    resp = urllib.request.urlopen(req, timeout=timeout)
     return json.loads(resp.read().decode("utf-8"))
 
 
@@ -344,9 +344,9 @@ async def quorum_monitor_loop() -> None:
             db = SessionLocal()
             try:
                 _run_quorum_check(db, snapshot, history[:-1], now=now)
-                _run_gateway_silence_check(db, now)  # INV-172
             finally:
                 db.close()
+            await asyncio.to_thread(_run_gateway_silence_check, now)  # INV-172 : DB + SMTP hors event loop
         except Exception:
             logger.exception("quorum_monitor_loop : erreur dans le tick (continue)")
 
@@ -360,49 +360,48 @@ async def quorum_monitor_loop() -> None:
 
 # INV-172 : passerelle muette (aucun report-state depuis 10 min) -> un email + un audit par episode.
 # Les passerelles deja signalees sont tenues dans SystemConfig (liste JSON de gateway_id), partagee
-# par les leaders successifs. Au premier controle de ce processus, celles deja muettes sont inscrites
-# sans email : gateway_states garde des lignes de passerelles renommees ou de tests.
+# par les leaders successifs : un nouveau leader ne re-signale pas, et une ligne obsolete (< 7 jours,
+# au-dela elle est ignoree) ne coute qu'un email.
 _SILENCE_KEY = "gateway_silence_emailed"
-_silence_initialized = False
 
 
-def _run_gateway_silence_check(db: Session, now: datetime) -> None:
-    """INV-172 : un tick (leader seul), juste apres _run_quorum_check, meme session."""
-    global _silence_initialized
-    gateways = [{"gateway_id": g.gateway_id, "site": g.site, "last_seen": g.last_seen}
-                for g in db.query(GatewayState).all()]
-    row = db.query(SystemConfig).filter(SystemConfig.key == _SILENCE_KEY).first()
-    emailed = frozenset(json.loads(row.value)) if row else frozenset()
-    alerts, silent = decide_silence(gateways, emailed, now)
-    if not _silence_initialized:
-        _silence_initialized = True
-        alerts = ()
-    if silent != emailed:
-        if row is None:
-            row = SystemConfig(key=_SILENCE_KEY, value="[]")
-            db.add(row)
-        row.value = json.dumps(sorted(silent))
-        db.commit()
-    if not alerts:
-        return
-    alert_email = _get_alert_email(db)
-    for g in alerts:
-        minutes = int((now - g["last_seen"]).total_seconds() // 60)
-        site = g["site"] or default_site(db)
-        log_event("gateway_silent", gateway_id=g["gateway_id"], site=site,
-                  last_seen=g["last_seen"].isoformat(), silent_minutes=minutes)
-        logger.error("INV-172 : passerelle %s (%s) muette depuis %s min", g["gateway_id"], site, minutes)
-        _alert(alert_email, (
-            f"[Alarme Murgat] Passerelle {g['gateway_id']} ({site.capitalize()}) muette depuis {minutes} min"
-        ), (
-            f"La passerelle {g['gateway_id']} du site {site.capitalize()} n'a plus envoyé son état depuis "
-            f"{minutes} min (dernier rapport : {g['last_seen'].isoformat()} UTC).\n\n"
-            f"Conséquence : le site {site.capitalize()} ne peut plus déclencher d'alarme par contact sec, "
-            f"ni émettre de SMS ou d'appel (pas de secours entre sites — décision du propriétaire). "
-            f"Ses SMS et appels attendent son retour.\n\n"
-            f"À vérifier sur le nœud passerelle :\n"
-            f"  - systemctl status alarm-sms-gateway (journalctl -u alarm-sms-gateway -n 50)\n"
-            f"  - modem USB présent (lsusb, /dev/ttyUSB*) et alimenté\n"
-            f"  - alimentation et réseau de la machine\n"
-            f"  - tunnel WireGuard (sudo wg show : dernière poignée de main récente)\n\n"
-            f"Un nouvel email partira si elle revient puis se tait de nouveau."))
+def _run_gateway_silence_check(now: datetime) -> None:
+    """INV-172 : un tick (bloquant, via `asyncio.to_thread`, leader seul), juste apres _run_quorum_check."""
+    db = SessionLocal()
+    try:
+        gateways = [{"gateway_id": g.gateway_id, "site": g.site, "last_seen": g.last_seen}
+                    for g in db.query(GatewayState).all()]
+        row = db.query(SystemConfig).filter(SystemConfig.key == _SILENCE_KEY).first()
+        emailed = frozenset(json.loads(row.value)) if row else frozenset()
+        alerts, silent = decide_silence(gateways, emailed, now)
+        if silent != emailed:
+            if row is None:
+                row = SystemConfig(key=_SILENCE_KEY, value="[]")
+                db.add(row)
+            row.value = json.dumps(sorted(silent))
+            db.commit()
+        if not alerts:
+            return
+        alert_email = _get_alert_email(db)
+        for g in alerts:
+            minutes = int((now - g["last_seen"]).total_seconds() // 60)
+            site = g["site"] or default_site(db)
+            log_event("gateway_silent", gateway_id=g["gateway_id"], site=site,
+                      last_seen=g["last_seen"].isoformat(), silent_minutes=minutes)
+            logger.error("INV-172 : passerelle %s (%s) muette depuis %s min", g["gateway_id"], site, minutes)
+            _alert(alert_email, (
+                f"[Alarme Murgat] Passerelle {g['gateway_id']} ({site.capitalize()}) muette depuis {minutes} min"
+            ), (
+                f"La passerelle {g['gateway_id']} du site {site.capitalize()} n'a plus envoyé son état depuis "
+                f"{minutes} min (dernier rapport : {g['last_seen'].isoformat()} UTC).\n\n"
+                f"Conséquence : le site {site.capitalize()} ne peut plus déclencher d'alarme par contact sec, "
+                f"ni émettre de SMS ou d'appel (pas de secours entre sites — décision du propriétaire). "
+                f"Ses SMS et appels attendent son retour.\n\n"
+                f"À vérifier sur le nœud passerelle :\n"
+                f"  - systemctl status alarm-sms-gateway (journalctl -u alarm-sms-gateway -n 50)\n"
+                f"  - modem USB présent (lsusb, /dev/ttyUSB*) et alimenté\n"
+                f"  - alimentation et réseau de la machine\n"
+                f"  - tunnel WireGuard (sudo wg show : dernière poignée de main récente)\n\n"
+                f"Un nouvel email partira si elle revient puis se tait de nouveau."))
+    finally:
+        db.close()
