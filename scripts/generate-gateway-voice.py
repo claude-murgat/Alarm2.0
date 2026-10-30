@@ -25,15 +25,14 @@ import wave
 import numpy as np
 from scipy.signal import butter, lfilter, resample_poly, sosfilt
 
-ALARME = (
-    "Attention. Alarme critique sur {}. Intervention immédiate requise. "
-    "Consultez votre SMS. Appuyez sur 1 pour acquitter. Appuyez sur 2 pour escalader."
-)
+# Message court (demande du proprietaire du 2026-10-30) : le site, puis les touches.
+# Le detail est dans le SMS, qui precede l'appel (INV-134).
+ALARME = "Alarme {}. Appuyez sur 1 pour acquitter, 2 pour escalader."
 MESSAGES = {
-    "alarme.wav": ALARME.format("le site Murgat"),  # alarme sans site (astreinte)
+    "alarme.wav": ALARME.format("Murgat"),  # alarme sans site (astreinte)
     # INV-159 : le message annonce le site de l'alarme
-    "alarme_izeron.wav": ALARME.format("le site d'Izeron"),
-    "alarme_beaufort.wav": ALARME.format("le site de Beaufort"),
+    "alarme_izeron.wav": ALARME.format("Izeron"),
+    "alarme_beaufort.wav": ALARME.format("Beaufort"),
     "acquittee.wav": "Alarme acquittée. Merci.",
     "escaladee.wav": "Alarme escaladée au prochain intervenant.",
 }
