@@ -2,9 +2,17 @@
 
 `check_request` rend la raison du refus (francais, affichee en snackbar) ou None, dans l'ordre du
 catalogue. L'API la joue a la demande (POST /api/chaos) et la rejoue au moment d'agir
-(GET /internal/chaos/next, avec pending=0).
+(GET /internal/chaos/next, avec pending=0). `is_stale` : expiration d'une demande non terminee.
 """
-VOTERS = ("node1", "node2", "node3")  # voteurs etcd : jamais deux a la fois (INV-177)
+from datetime import timedelta
+
+
+def is_stale(status, minutes, created_at, claimed_at, started_at, now) -> bool:
+    """INV-176 : pending jamais reclamee -> 30 min apres created_at ; claimed/running -> `minutes` + 10 min
+    apres started_at (sinon claimed_at) : un test reclame tard n'expire pas pendant sa fenetre."""
+    if status == "pending":
+        return now - created_at > timedelta(minutes=30)
+    return now - (started_at or claimed_at or created_at) > timedelta(minutes=minutes + 10)
 
 
 def expand_target(target: str, locations: dict) -> list:
@@ -17,8 +25,9 @@ def expand_target(target: str, locations: dict) -> list:
     return out
 
 
-def check_request(nodes, mode, minutes, cluster, locations, active_alarms, pending):
-    """`cluster` = JSON de GET {PATRONI_URL}/cluster (None si injoignable) ; `locations` = node_locations."""
+def check_request(nodes, mode, minutes, cluster, locations, voters, active_alarms, pending):
+    """`cluster` = JSON de GET {PATRONI_URL}/cluster (None si injoignable) ; `locations` = node_locations ;
+    `voters` = etcd_voters (INV-177 : jamais deux a la fois)."""
     if not 1 <= minutes <= 10:
         return "durée : entre 1 et 10 minutes"
     if not nodes:
@@ -26,9 +35,9 @@ def check_request(nodes, mode, minutes, cluster, locations, active_alarms, pendi
     for n in nodes:
         if n not in locations:
             return f"nœud inconnu : {n}"
-    voters = [n for n in nodes if n in VOTERS]
-    if len(voters) >= 2:
-        return f"{', '.join(voters)} : quorum etcd perdu — refusé"
+    hit = [n for n in nodes if n in voters]
+    if len(hit) >= 2:
+        return f"{', '.join(hit)} : quorum etcd perdu — refusé"
     if mode == "netcut" and "node3" in nodes:
         return "coupure réseau de node3 refusée : le runner et l'interface web y vivent"
     if active_alarms > 0:
