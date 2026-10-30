@@ -2,11 +2,15 @@
 
 Le tick réel (`_run_gateway_silence_check`) est appelé avec un `now` choisi ; `last_seen` vient d'un vrai
 `POST /internal/alarms/report-state`. La boucle de fond `quorum_monitor_loop` tourne aussi dans le
-TestClient : son appel passe par le nom du module, neutralisé ici pour qu'un tick réel ne consomme pas
-l'alerte attendue.
+TestClient : son appel passe par le nom du module, neutralisé pour toute la session par
+`tests/integration/conftest.py` (fixture `real_gateway_silence_check`, qui fournit le vrai contrôle).
 """
 import json
-from datetime import timedelta
+import os
+import pathlib
+import subprocess
+import sys
+from datetime import datetime, timedelta
 from unittest.mock import patch
 
 import pytest
@@ -32,17 +36,14 @@ def _clean():
 
 
 @pytest.fixture
-def check(monkeypatch, client, admin_headers):
-    """Le vrai tick INV-172, état propre, contrôle de fond neutralisé."""
-    from backend.app import quorum_monitor
+def check(monkeypatch, client, admin_headers, real_gateway_silence_check):
+    """Le vrai tick INV-172, état propre (le contrôle de fond est neutralisé par conftest)."""
     monkeypatch.setenv("GATEWAY_KEY", GATEWAY_KEY)
-    real = quorum_monitor._run_gateway_silence_check
-    monkeypatch.setattr(quorum_monitor, "_run_gateway_silence_check", lambda now: None)
     r = client.post("/api/config/system", json={"key": "alert_email", "value": _ALERT_EMAIL},
                     headers=admin_headers)
     assert r.status_code == 200
     _clean()
-    yield real
+    yield real_gateway_silence_check
     _clean()
 
 
@@ -119,16 +120,37 @@ def test_gateway_back_then_silent_again_is_emailed_again(client, check):
         assert "muette depuis 10 min" in mail.call_args.kwargs["subject"]
 
 
+# Premier contrôle d'un processus neuf (déploiement, bascule de leader) : sous-processus sur la même
+# base, sans état de module hérité des tests précédents ni du tick de fond. Renvoie les sujets envoyés.
+_FRESH_PROCESS_CHECK = """
+import json, sys
+from datetime import datetime
+from unittest.mock import patch
+from backend.app import quorum_monitor
+with patch.object(quorum_monitor, "send_alert_email") as mail:
+    quorum_monitor._run_gateway_silence_check(datetime.fromisoformat(sys.argv[1]))
+print(json.dumps([c.kwargs["subject"] for c in mail.call_args_list]))
+"""
+
+
+def _first_check_in_fresh_process(now: datetime) -> list:
+    r = subprocess.run([sys.executable, "-c", _FRESH_PROCESS_CHECK, now.isoformat()],
+                       cwd=pathlib.Path(__file__).resolve().parents[2], env=os.environ.copy(),
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout.splitlines()[-1])
+
+
 def test_gateway_already_silent_at_first_check_is_emailed(client, check):
     """Pas de suppression au démarrage : une passerelle tombée juste avant un déploiement ou une
     bascule est signalée au premier contrôle du nouveau leader."""
     t0 = _report(client)
     before = len(_audits())
+    assert _first_check_in_fresh_process(t0 + timedelta(minutes=30)) == [
+        f"[Alarme Murgat] Passerelle {GW} (Izeron) muette depuis 30 min"]
     with patch("backend.app.quorum_monitor.send_alert_email") as mail:
-        check(t0 + timedelta(minutes=30))  # premier contrôle du processus : déjà muette
         check(t0 + timedelta(minutes=31))
-        assert mail.call_count == 1
-        assert "muette depuis 30 min" in mail.call_args.kwargs["subject"]
+        assert mail.call_count == 0, "déjà signalée par le leader précédent (clé partagée)"
     assert len(_audits()[before:]) == 1
     assert _persisted() == [GW]
 
