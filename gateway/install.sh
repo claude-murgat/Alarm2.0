@@ -95,8 +95,8 @@ HEALTH_CHECK_INTERVAL_SECONDS=300
 # Cooldown entre deux alertes (évite le spam SMS en cas de panne prolongée)
 ALERT_COOLDOWN_SECONDS=1800
 
-# Timeout HTTP pour les requêtes vers les VPS
-HTTP_TIMEOUT_SECONDS=10
+# Timeout HTTP pour les requêtes vers les backends (INV-174 : 3 s par nœud)
+HTTP_TIMEOUT_SECONDS=3
 
 # Chemin vers le fichier audio Asterisk (sans extension .wav)
 # Enregistrer un message avec : arecord -f cd /opt/alarm-gateway/alarme.wav

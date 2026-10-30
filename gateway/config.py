@@ -39,8 +39,9 @@ HEALTH_CHECK_INTERVAL_SECONDS = int(os.getenv("HEALTH_CHECK_INTERVAL_SECONDS", "
 # Cooldown entre deux alertes health monitor (evite le spam)
 ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", "1800"))
 
-# Timeout HTTP pour les requetes vers les backends
-HTTP_TIMEOUT_SECONDS = int(os.getenv("HTTP_TIMEOUT_SECONDS", "10"))
+# Timeout HTTP pour les requetes vers les backends. INV-174 : 3 s (10 s avant) — un noeud mort
+# ne coute plus qu'un essai de 3 s, une fois, grace au cache du primary (modem_gateway).
+HTTP_TIMEOUT_SECONDS = int(os.getenv("HTTP_TIMEOUT_SECONDS", "3"))
 
 # ── Contact sec NC local (INV-120 V2) ──────────────────────────────────────
 # Déclenchement d'alarme par capteur câblé en NC (Normally Closed) sur la

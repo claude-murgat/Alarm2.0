@@ -146,3 +146,38 @@ class TestPcmRebootAllowed:
     def test_timestamp_in_the_future_does_not_block_forever(self):
         # Horloge recalee en arriere : la trace ne doit pas bloquer l'auto-reparation des heures.
         assert _mh.pcm_reboot_allowed(self.NOW + 3600, self.NOW) is True
+
+
+class TestProbeOrder:
+    """INV-174 : le dernier backend primary connu est sonde en premier ; les autres suivent dans
+    l'ordre configure (NODE1_URL..NODE5_URL), sans doublon."""
+
+    URLS = ["http://10.99.0.3:8000", "http://10.99.0.2:8000", "http://10.99.0.1:8000"]
+
+    def test_cached_second_comes_first_others_keep_their_order(self):
+        assert _mh.probe_order("http://10.99.0.2:8000", self.URLS) == [
+            "http://10.99.0.2:8000", "http://10.99.0.3:8000", "http://10.99.0.1:8000"]
+
+    def test_cached_already_first_is_unchanged(self):
+        assert _mh.probe_order("http://10.99.0.3:8000", self.URLS) == self.URLS
+
+    def test_no_cache_keeps_configured_order(self):
+        assert _mh.probe_order(None, self.URLS) == self.URLS
+
+    def test_cached_url_no_longer_configured_is_ignored(self):
+        assert _mh.probe_order("http://10.99.0.9:8000", self.URLS) == self.URLS
+
+    def test_no_duplicate(self):
+        order = _mh.probe_order("http://10.99.0.1:8000", self.URLS)
+        assert len(order) == len(set(order)) == len(self.URLS)
+
+
+class TestHttpTimeoutDefault:
+    """INV-174 : 3 s par noeud (10 s avant : un noeud mort en tete coutait 10 s par requete)."""
+
+    def test_default_is_3_seconds(self, monkeypatch):
+        monkeypatch.delenv("HTTP_TIMEOUT_SECONDS", raising=False)
+        spec = importlib.util.spec_from_file_location("gateway_config", _PATH.parent / "config.py")
+        cfg = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cfg)
+        assert cfg.HTTP_TIMEOUT_SECONDS == 3

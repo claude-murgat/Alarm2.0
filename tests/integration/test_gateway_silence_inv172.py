@@ -1,0 +1,141 @@
+"""Tier 2 integration : INV-172 — passerelle muette depuis 10 min → un email + un audit par épisode.
+
+Le tick réel (`_run_gateway_silence_check`) est appelé avec un `now` choisi ; `last_seen` vient d'un vrai
+`POST /internal/alarms/report-state`. La boucle de fond `quorum_monitor_loop` tourne aussi dans le
+TestClient : son appel passe par le nom du module, neutralisé ici pour qu'un tick réel ne consomme pas
+l'alerte attendue.
+"""
+import json
+from datetime import timedelta
+from unittest.mock import patch
+
+import pytest
+
+pytestmark = pytest.mark.integration
+
+_ALERT_EMAIL = "direction.technique@charlesmurgat.test"
+GATEWAY_KEY = "test-gateway-key-INV-172"
+GW = "onsite-2"
+KEY = "gateway_silence_emailed"
+
+
+def _clean():
+    from backend.app.database import SessionLocal
+    from backend.app.models import GatewayState, SystemConfig
+    db = SessionLocal()
+    try:
+        db.query(GatewayState).delete()
+        db.query(SystemConfig).filter(SystemConfig.key == KEY).delete()
+        db.commit()
+    finally:
+        db.close()
+
+
+@pytest.fixture
+def check(monkeypatch, client, admin_headers):
+    """Le vrai tick INV-172, état propre, contrôle de fond neutralisé, processus « déjà initialisé »."""
+    from backend.app import quorum_monitor
+    monkeypatch.setenv("GATEWAY_KEY", GATEWAY_KEY)
+    real = quorum_monitor._run_gateway_silence_check
+    monkeypatch.setattr(quorum_monitor, "_run_gateway_silence_check", lambda db, now: None)
+    monkeypatch.setattr(quorum_monitor, "_silence_initialized", True)
+    r = client.post("/api/config/system", json={"key": "alert_email", "value": _ALERT_EMAIL},
+                    headers=admin_headers)
+    assert r.status_code == 200
+    _clean()
+
+    def tick(now):
+        from backend.app.database import SessionLocal
+        db = SessionLocal()
+        try:
+            real(db, now)
+        finally:
+            db.close()
+    yield tick
+    _clean()
+
+
+def _report(client):
+    """report-state de la passerelle (contact au repos) ; renvoie son last_seen."""
+    from backend.app.database import SessionLocal
+    from backend.app.models import GatewayState
+    r = client.post("/internal/alarms/report-state",
+                    json={"gateway_id": GW, "state": "closed", "site": "izeron"},
+                    headers={"X-Gateway-Key": GATEWAY_KEY})
+    assert r.status_code == 200, r.text
+    db = SessionLocal()
+    try:
+        return db.query(GatewayState).filter(GatewayState.gateway_id == GW).one().last_seen
+    finally:
+        db.close()
+
+
+def _audits():
+    from backend.app.database import SessionLocal
+    from backend.app.models import AuditEvent
+    db = SessionLocal()
+    try:
+        rows = db.query(AuditEvent).filter(AuditEvent.event_type == "gateway_silent").all()
+        return [json.loads(r.details) for r in rows]
+    finally:
+        db.close()
+
+
+def _persisted():
+    from backend.app.database import SessionLocal
+    from backend.app.models import SystemConfig
+    db = SessionLocal()
+    try:
+        row = db.query(SystemConfig).filter(SystemConfig.key == KEY).first()
+        return json.loads(row.value) if row else None
+    finally:
+        db.close()
+
+
+def test_silent_gateway_emailed_and_audited_once(client, check):
+    t0 = _report(client)
+    before = len(_audits())
+    with patch("backend.app.quorum_monitor.send_alert_email") as mail:
+        check(t0 + timedelta(minutes=9))
+        assert mail.call_count == 0, "pas encore muette"
+        check(t0 + timedelta(minutes=11))
+        assert mail.call_count == 1
+        kw = mail.call_args.kwargs
+        assert kw["to"] == _ALERT_EMAIL
+        assert kw["subject"] == f"[Alarme Murgat] Passerelle {GW} (Izeron) muette depuis 11 min"
+        assert t0.isoformat() in kw["body"]
+        assert "contact sec" in kw["body"] and "SMS" in kw["body"]
+        assert "alarm-sms-gateway" in kw["body"] and "WireGuard" in kw["body"]
+        check(t0 + timedelta(minutes=12))
+        assert mail.call_count == 1, "un seul email par épisode"
+    audits = _audits()[before:]
+    assert len(audits) == 1
+    assert audits[0]["gateway_id"] == GW and audits[0]["site"] == "izeron"
+    assert audits[0]["silent_minutes"] == 11
+    assert _persisted() == [GW]
+
+
+def test_gateway_back_then_silent_again_is_emailed_again(client, check):
+    t0 = _report(client)
+    with patch("backend.app.quorum_monitor.send_alert_email") as mail:
+        check(t0 + timedelta(minutes=11))
+        assert mail.call_count == 1
+        t1 = _report(client)  # la passerelle reparle
+        check(t1 + timedelta(minutes=1))
+        assert _persisted() == [], "réarmée"
+        check(t1 + timedelta(minutes=10))
+        assert mail.call_count == 2
+        assert "muette depuis 10 min" in mail.call_args.kwargs["subject"]
+
+
+def test_gateway_already_silent_at_first_check_is_registered_without_email(client, check, monkeypatch):
+    from backend.app import quorum_monitor
+    monkeypatch.setattr(quorum_monitor, "_silence_initialized", False)
+    t0 = _report(client)
+    before = len(_audits())
+    with patch("backend.app.quorum_monitor.send_alert_email") as mail:
+        check(t0 + timedelta(minutes=30))  # premier contrôle du processus : déjà muette
+        check(t0 + timedelta(minutes=31))
+        assert mail.call_count == 0
+    assert _audits()[before:] == []
+    assert _persisted() == [GW]
