@@ -64,3 +64,16 @@ def pcm_reboot_allowed(last_reboot_at: float | None, now: float) -> bool:
     """INV-169 : redemarrage permis si aucun dans les 30 dernieres minutes. Une trace
     dans le futur (horloge recalee en arriere) ne bloque pas."""
     return last_reboot_at is None or not 0 <= now - last_reboot_at < PCM_REBOOT_MIN_INTERVAL_S
+
+
+# INV-174 : la recherche du backend primary repartait du 1er noeud de la liste a chaque requete
+# (un noeud mort en tete = un timeout par requete). Le dernier primary connu est sonde d'abord.
+def probe_order(cached: str | None, urls: list[str]) -> list[str]:
+    """L'URL memorisee d'abord (si encore configuree), puis les autres dans l'ordre configure."""
+    return sorted(urls, key=lambda u: u != cached)
+
+
+def probe_timeout(url: str, cached: str | None, known: float, other: float) -> float:
+    """INV-174 : le primary memorise garde la tolerance des echanges (`known`, HTTP_TIMEOUT_SECONDS) :
+    un leader vivant mais lent ne fait pas sauter le poll ; les autres candidats sont sondes a `other`."""
+    return known if url == cached else other

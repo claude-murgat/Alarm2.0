@@ -146,3 +146,63 @@ class TestPcmRebootAllowed:
     def test_timestamp_in_the_future_does_not_block_forever(self):
         # Horloge recalee en arriere : la trace ne doit pas bloquer l'auto-reparation des heures.
         assert _mh.pcm_reboot_allowed(self.NOW + 3600, self.NOW) is True
+
+
+class TestProbeOrder:
+    """INV-174 : le dernier backend primary connu est sonde en premier ; les autres suivent dans
+    l'ordre configure (NODE1_URL..NODE5_URL), sans doublon."""
+
+    URLS = ["http://10.99.0.3:8000", "http://10.99.0.2:8000", "http://10.99.0.1:8000"]
+
+    def test_cached_second_comes_first_others_keep_their_order(self):
+        assert _mh.probe_order("http://10.99.0.2:8000", self.URLS) == [
+            "http://10.99.0.2:8000", "http://10.99.0.3:8000", "http://10.99.0.1:8000"]
+
+    def test_cached_already_first_is_unchanged(self):
+        assert _mh.probe_order("http://10.99.0.3:8000", self.URLS) == self.URLS
+
+    def test_no_cache_keeps_configured_order(self):
+        assert _mh.probe_order(None, self.URLS) == self.URLS
+
+    def test_cached_url_no_longer_configured_is_ignored(self):
+        assert _mh.probe_order("http://10.99.0.9:8000", self.URLS) == self.URLS
+
+    def test_no_duplicate(self):
+        order = _mh.probe_order("http://10.99.0.1:8000", self.URLS)
+        assert len(order) == len(set(order)) == len(self.URLS)
+
+
+class TestProbeTimeout:
+    """INV-174 : le primary memorise garde la tolerance des echanges (HTTP_TIMEOUT_SECONDS) : un leader
+    vivant mais lent ne fait pas sauter le poll ; seuls les autres candidats sont sondes a 3 s."""
+
+    CACHED = "http://10.99.0.2:8000"
+
+    def test_cached_primary_keeps_data_timeout(self):
+        assert _mh.probe_timeout(self.CACHED, self.CACHED, 10, 3) == 10
+
+    def test_other_candidate_is_probed_at_3_seconds(self):
+        assert _mh.probe_timeout("http://10.99.0.3:8000", self.CACHED, 10, 3) == 3
+
+    def test_nothing_cached_every_candidate_at_3_seconds(self):
+        assert _mh.probe_timeout(self.CACHED, None, 10, 3) == 3
+
+
+class TestHttpTimeoutDefault:
+    """INV-174 : la sonde /health des autres candidats est bornee a 3 s ; les echanges de
+    donnees et le HealthMonitor gardent HTTP_TIMEOUT_SECONDS (10 s), qui absorbe une pointe de latence."""
+
+    @staticmethod
+    def _config():
+        spec = importlib.util.spec_from_file_location("gateway_config", _PATH.parent / "config.py")
+        cfg = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cfg)
+        return cfg
+
+    def test_data_timeout_default_is_10_seconds(self, monkeypatch):
+        monkeypatch.delenv("HTTP_TIMEOUT_SECONDS", raising=False)
+        assert self._config().HTTP_TIMEOUT_SECONDS == 10
+
+    def test_primary_probe_is_3_seconds_even_with_env_at_10(self, monkeypatch):
+        monkeypatch.setenv("HTTP_TIMEOUT_SECONDS", "10")  # modele d'install.sh des passerelles posees
+        assert self._config().PRIMARY_PROBE_TIMEOUT_SECONDS == 3

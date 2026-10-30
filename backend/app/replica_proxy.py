@@ -27,6 +27,7 @@ Exclusions (endpoints qui gèrent EUX-MÊMES leur comportement replica) :
 - `/internal/*`            : endpoints node-to-node (gateway SMS/voix, alarms_internal).
   Ils ne commencent pas par `/api/` → déjà hors périmètre, jamais relayés.
 """
+import asyncio
 import logging
 import os
 
@@ -36,6 +37,8 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from .leader_election import is_leader
+from .logic.write_route import leader_first
+from .quorum_monitor import _patroni_cluster
 
 logger = logging.getLogger("replica_proxy")
 
@@ -82,6 +85,16 @@ _RELAYED_HEADERS = frozenset({
 })
 
 
+def patroni_cluster_or_none() -> dict | None:
+    """INV-173 : cluster vu par le Patroni local (leader en tete du relais), None s'il ne repond
+    pas en 1 s (ordre configure) : Patroni est local, et le heartbeat relaye tient dans les 5 s de
+    l'app. Partage avec le relais heartbeat (api/devices.py)."""
+    try:
+        return _patroni_cluster(timeout=1)
+    except Exception:
+        return None
+
+
 def _is_proxyable_write(request: Request) -> bool:
     """True si la requête est une écriture `/api/*` relayable (hors exclusions)."""
     if request.method not in _WRITE_METHODS:
@@ -118,8 +131,10 @@ async def _proxy_write_to_primary(request: Request) -> Response:
     if request.url.query:
         target = f"{target}?{request.url.query}"
 
-    async with httpx.AsyncClient(timeout=5.0) as cli:
-        for peer in _PEER_URLS:
+    # INV-173 : le leader Patroni d'abord, connexion bornee a 1,5 s (un peer mort ne coute plus 5 s).
+    cluster = await asyncio.to_thread(patroni_cluster_or_none)
+    async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=1.5)) as cli:
+        for peer in leader_first(_PEER_URLS, cluster):
             try:
                 r = await cli.request(
                     request.method,

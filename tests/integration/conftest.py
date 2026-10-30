@@ -34,7 +34,19 @@ from fastapi.testclient import TestClient
 
 
 @pytest.fixture(scope="session")
-def client():
+def real_gateway_silence_check():
+    """INV-172 : le tick de fond de quorum_monitor_loop (60 s, is_leader pose en SQLite) ne doit pas
+    signaler pendant un autre test une passerelle laissee par un test avec l'horloge avancee (email,
+    audit). Neutralise pour la session du TestClient ; renvoie le vrai controle (test_gateway_silence_inv172)."""
+    from backend.app import quorum_monitor
+    real = quorum_monitor._run_gateway_silence_check
+    quorum_monitor._run_gateway_silence_check = lambda now: None
+    yield real
+    quorum_monitor._run_gateway_silence_check = real
+
+
+@pytest.fixture(scope="session")
+def client(real_gateway_silence_check):
     """TestClient FastAPI avec lifespan complet (tables crees + users seeded)."""
     # Import differe : garantit que DATABASE_URL est lu apres notre setenv.
     from backend.app.main import app
