@@ -1411,4 +1411,21 @@ class AlarmE2ETest {
             java.util.TimeZone.setDefault(previous)
         }
     }
+
+    // ── 34. INV-ANDROID-402 : BACKEND_URLS vient de BuildConfig, rotation circulaire ──
+
+    @Test
+    fun test34_backendUrlsComeFromBuildConfigAndRotateCircularly() {
+        val urls = com.alarm.critical.api.ApiClient.BACKEND_URLS
+        val expected = com.alarm.critical.BuildConfig.BACKEND_URLS.split(",").map { it.trim() }
+        assertEquals("une URL par entrée de BuildConfig.BACKEND_URLS", expected, urls)
+        assertTrue("au moins 2 URLs pour que le failover ait un sens", urls.size >= 2)
+
+        // Depuis la dernière URL, switchToNextUrl() revient à l'index 0 (pas à 3 % size)
+        com.alarm.critical.api.ApiClient.currentUrlIndex = urls.size - 1
+        assertEquals(urls.last(), com.alarm.critical.api.ApiClient.currentBaseUrl())
+        com.alarm.critical.api.ApiClient.switchToNextUrl()
+        assertEquals("retour à 0 après la dernière URL", 0, com.alarm.critical.api.ApiClient.currentUrlIndex)
+        assertEquals(urls.first(), com.alarm.critical.api.ApiClient.currentBaseUrl())
+    }
 }
