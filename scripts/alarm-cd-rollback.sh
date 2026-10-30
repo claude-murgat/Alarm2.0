@@ -154,8 +154,11 @@ ssh_target "docker tag ${REGISTRY}/${IMAGE}:stable-prev ${REGISTRY}/${IMAGE}:sta
 # --- 3. Restart les containers via compose ---
 # docker compose up -d (sans pull, sans build) re-cree les containers avec
 # l'image actuelle (qui est maintenant :stable-prev re-taggee :stable).
+# INV-180 : charger .env.prod.secrets avant (comme start-prod-node.sh), sinon
+# compose refuse de demarrer ("SECRET_KEY missing", constat NODE3 2026-10-30).
+# Pas start-prod-node.sh ici : sans --pull il rebuild, avec --pull il ecrase le re-tag.
 log "docker compose up -d${UP_SERVICES} (sans pull, sans build)..."
-ssh_target "cd $REMOTE_REPO && docker compose --env-file .env.prod.node${NODE} -p node${NODE} up -d${UP_SERVICES}"
+ssh_target "cd $REMOTE_REPO && set -a && . ./.env.prod.secrets && set +a && docker compose --env-file .env.prod.node${NODE} -p node${NODE} up -d${UP_SERVICES}"
 
 # --- 4. POST event ---
 DETAILS=$(cat <<JSON
