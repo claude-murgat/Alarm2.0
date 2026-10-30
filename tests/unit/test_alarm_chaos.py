@@ -31,6 +31,8 @@ case "$cmd" in
   *"docker ps"*) echo c1; echo c2 ;;
   *setsid*) [[ -f "$H/arm_down" ]] || echo ARMED ;;
   *"docker stop"*) [[ -f "$H/stop_fail_$ip" ]] && exit 1 ;;
+  *"alarm-chaos-net cut"*) [[ -f "$H/cut_drop_$ip" ]] && exit 255; [[ -f "$H/cut_noarm_$ip" ]] || echo ARMED ;;
+  *"alarm-chaos-net restore"*) [[ -f "$H/restore_down" ]] && exit 255 ;;
 esac
 exit 0
 """
@@ -48,6 +50,7 @@ done
 echo "$method $url" >> "$H/curl.log"
 case "$url" in
   *":2379/health") grep -qxF "$url" "$H/etcd_down" 2>/dev/null && exit 22; echo '{"health":"true"}' ;;
+  *"10.99.0.4:8000/health") [[ -f "$H/health_at" ]] && (( $(date +%s) < $(cat "$H/health_at") )) && exit 22; cat "$H/health.json" ;;
   *"/health") cat "$H/health.json" ;;
   *"/api/cluster") cat "$H/cluster.json" ;;
   *"/internal/chaos/next") cat "$H/next.json" ;;
@@ -178,8 +181,9 @@ def test_partial_stop_failure_restarts_every_listed_node_at_once(h):
     assert "docker stop KO sur node5" in posted(h)[1]["details"]["reason"]
 
 
-def test_etcd_voter_unhealthy_stops_nothing(h):
-    claim(h)
+@pytest.mark.parametrize("mode", ["stop", "netcut"])
+def test_etcd_voter_unhealthy_stops_nothing(h, mode):
+    claim(h, mode=mode)
     (h / "etcd_down").write_text("http://10.99.0.3:2379/health\n")  # etcd de node2 tombe, Patroni sain
     rc, err = run(h)
     assert rc == 1, err
@@ -218,6 +222,8 @@ def test_netcut_node4_delegates_to_root_helper_no_docker(h):
     rc, err = run(h)
     assert rc == 0, err
     assert ssh_log(h) == ["10.99.0.4 sudo -n /usr/local/bin/alarm-chaos-net cut 180"]
+    for opt in ("BatchMode=yes", "ConnectTimeout=10", "ServerAliveInterval=5", "ServerAliveCountMax=3"):
+        assert opt in (h / "ssh_args.log").read_text(), opt
     kinds = [p["kind"] for p in posted(h)]
     assert kinds == ["started", "restored"]
     assert posted(h)[1]["details"]["leader_after"] == "node3"
@@ -239,3 +245,55 @@ def test_netcut_node3_refused_by_runner_without_ssh(h):
     assert ssh_log(h) == []
     assert [p["kind"] for p in posted(h)] == ["started", "failed"]
     assert "node3" in posted(h)[1]["details"]["reason"]
+
+
+CUT60 = "sudo -n /usr/local/bin/alarm-chaos-net cut 60"
+NET_RESTORE = "sudo -n /usr/local/bin/alarm-chaos-net restore"
+
+
+@pytest.mark.parametrize("flag", ["cut_drop", "cut_noarm"])  # SSH coupe apres l'armement / sortie sans ARMED
+def test_netcut_cut_not_proven_on_second_node_restores_both_and_fails(h, flag):
+    claim(h, mode="netcut", nodes=["node4", "node5"])
+    (h / f"{flag}_10.99.0.5").write_text("")
+    rc, err = run(h)
+    assert rc == 1, err
+    assert ssh_log(h) == [f"10.99.0.4 {CUT60}", f"10.99.0.5 {CUT60}", f"10.99.0.4 {NET_RESTORE}", f"10.99.0.5 {NET_RESTORE}"]
+    assert [p["kind"] for p in posted(h)] == ["started", "failed"]
+    reason = posted(h)[1]["details"]["reason"]
+    assert "node5" in reason and "SSH interrompu" in reason
+
+
+def test_netcut_early_restore_reaches_target(h):
+    claim(h, mode="netcut", minutes=10)  # fenetre de 10 s (MINUTE_SECONDS=1)
+    (h / "abort.json").write_text(json.dumps({"abort": "alarme en cours"}))
+    t0 = time.monotonic()
+    rc, err = run(h)
+    assert rc == 0, err
+    assert time.monotonic() - t0 < 8, "restauration attendue avant l'echeance"
+    assert ssh_log(h) == ["10.99.0.4 sudo -n /usr/local/bin/alarm-chaos-net cut 600", f"10.99.0.4 {NET_RESTORE}"]
+    assert [p["kind"] for p in posted(h)] == ["started", "early_restore", "restored"]
+
+
+def test_netcut_early_restore_unreachable_waits_for_target_timer_until_deadline(h):
+    # Cible injoignable (le runner passe par wg0) : son timer remet wg0 a l'echeance ; l'attente de sante
+    # doit courir jusqu'a l'echeance + HEALTHY_TIMEOUT, pas seulement HEALTHY_TIMEOUT apres l'abandon.
+    claim(h, mode="netcut", minutes=10)
+    (h / "abort.json").write_text(json.dumps({"abort": "annulé par l'admin"}))
+    (h / "restore_down").write_text("")
+    (h / "health_at").write_text(str(int(time.time()) + 5))  # node4 de retour 5 s apres le lancement
+    rc, err = run(h, HEALTHY_TIMEOUT="2")
+    assert rc == 0, err
+    assert f"10.99.0.4 {NET_RESTORE}" in ssh_log(h)
+    assert "timer" in err
+    assert [p["kind"] for p in posted(h)] == ["started", "early_restore", "restored"]
+    assert posted(h)[2]["details"]["restore_seconds"] >= 0
+
+
+def test_netcut_node_never_healthy_fails_and_restores(h):
+    claim(h, mode="netcut")
+    (h / "cluster.json").write_text(json.dumps({"members": [m for m in MEMBERS if m["name"] != "node4"]}))
+    rc, err = run(h, HEALTHY_TIMEOUT="1")
+    assert rc == 1, err
+    assert ssh_log(h) == [f"10.99.0.4 {CUT60}", f"10.99.0.4 {NET_RESTORE}"]
+    assert [p["kind"] for p in posted(h)] == ["started", "failed"]
+    assert "node4 pas sain" in posted(h)[1]["details"]["reason"]
