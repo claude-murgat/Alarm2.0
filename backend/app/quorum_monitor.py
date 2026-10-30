@@ -37,12 +37,14 @@ import json
 import logging
 import os
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy.orm import Session
 
 from .clock import now as clock_now
+from . import replica_proxy
 from .database import SessionLocal
 from .email_service import send_alert_email
 from .events import log_event
@@ -319,31 +321,33 @@ _CAUSES = {
         "Patroni répond mais ne liste aucun leader."),
     "leader_hors_service": (
         "leader listé mais hors service",
-        "Patroni liste {host} comme leader, mais son backend ({host}:8000) est injoignable, en erreur "
-        "ou ne se dit pas primary : la clé leader lue dans etcd est probablement périmée (quorum etcd "
-        "perdu, le leader s'est rétrogradé)."),
+        "le leader listé par Patroni ({host}) ne répond pas comme primaire : son backend est arrêté ou "
+        "en erreur, ou il a été rétrogradé (clé leader périmée si le quorum etcd est perdu)."),
 }
+
+
+def _peer_is_primary(url: str) -> bool:
+    """INV-170 : ce backend pair répond 200 avec role primary (503, injoignable, illisible : non)."""
+    try:
+        body = urllib.request.urlopen(f"{url}/health", timeout=2).read()
+        return json.loads(body.decode("utf-8"))["role"] == "primary"
+    except Exception:
+        return False
 
 
 def _leader_loss_cause() -> tuple[Optional[str], Optional[str]]:
     """INV-170 : (cause, hôte du leader listé) ; cause None = leader vivant vu de ce nœud."""
     if is_leader.is_set():
         return None, None  # primary ici : leader vivant, sans requête (pas de 3e GET /cluster par tick)
+    peers = replica_proxy._PEER_URLS  # ceux du relai d'écriture : leader vivant = écriture relayée possible
+    with ThreadPoolExecutor(max_workers=max(1, len(peers))) as pool:
+        primary_seen = any(pool.map(_peer_is_primary, peers))
     try:
         cluster = _patroni_cluster()
     except Exception as e:
         logger.warning("INV-170 : Patroni injoignable depuis ce noeud (%s)", e)
         cluster = None
-    host, health = leader_host(cluster), None
-    if host:
-        # shortcut: hôte Patroni + port 8000 = IP WireGuard du nœud en prod ; faux en cluster dev
-        # 3 nœuds (host.docker.internal:8000 = node1), à revoir si on teste un basculement en dev.
-        try:
-            req = urllib.request.Request(f"http://{host}:8000/health", method="GET")
-            health = json.loads(urllib.request.urlopen(req, timeout=3).read().decode("utf-8"))
-        except Exception as e:
-            logger.warning("INV-170 : backend du leader %s injoignable ou en erreur (%s)", host, e)
-    return no_leader_cause(cluster, health), host
+    return no_leader_cause(cluster, primary_seen), leader_host(cluster)
 
 
 def _run_leader_loss_check(now: datetime) -> None:

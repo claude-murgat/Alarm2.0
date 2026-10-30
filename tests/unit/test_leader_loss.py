@@ -1,7 +1,7 @@
 """Unit tests (tier 1) — INV-170 : plus aucun leader vivant vu d'un noeud (backend/app/logic/leader_loss.py).
 
-Logique pure : entrees = reponse GET /cluster du Patroni local (ou None), /health du backend du
-leader liste (ou None), etat, horloge ; sorties = cause, etat suivant, email du.
+Logique pure : entrees = reponse GET /cluster du Patroni local (ou None), un backend pair se dit-il
+primary (True/False), etat, horloge ; sorties = cause, etat suivant, email du.
 Chaque noeud decide seul : sans leader, pas de coordination.
 """
 from datetime import datetime, timedelta, timezone
@@ -41,27 +41,26 @@ class TestLeaderHost:
 
 
 class TestNoLeaderCause:
-    """None = leader vivant (son backend dit primary). Sinon une des trois causes."""
-
-    PRIMARY = {"status": "ok", "role": "primary"}
+    """None = leader vivant (un backend pair se dit primary). Sinon une des trois causes, lue dans /cluster."""
 
     def test_live_leader(self):
-        assert no_leader_cause(_cluster("leader", "replica"), self.PRIMARY) is None
+        assert no_leader_cause(_cluster("leader", "replica"), True) is None
+
+    def test_a_primary_peer_is_enough(self):
+        # Une ecriture relayee d'ici aboutit : leader vivant, meme si le Patroni local se tait ou ne liste personne.
+        assert no_leader_cause(None, True) is None
+        assert no_leader_cause(_cluster("replica", "replica"), True) is None
 
     def test_patroni_unreachable(self):
-        assert no_leader_cause(None, None) == "patroni_injoignable"
+        assert no_leader_cause(None, False) == "patroni_injoignable"
 
     def test_no_leader_listed(self):
-        assert no_leader_cause(_cluster("replica", "replica"), None) == "aucun_leader"
-        assert no_leader_cause({}, self.PRIMARY) == "aucun_leader"
+        assert no_leader_cause(_cluster("replica", "replica"), False) == "aucun_leader"
+        assert no_leader_cause({}, False) == "aucun_leader"
 
-    def test_listed_leader_backend_unreachable(self):
-        # Cas reproduit : quorum etcd perdu, /cluster sert l'ancienne cle /leader.
-        assert no_leader_cause(_cluster("leader", "replica"), None) == "leader_hors_service"
-
-    def test_listed_leader_backend_not_primary(self):
-        assert no_leader_cause(_cluster("leader"), {"role": "secondary"}) == "leader_hors_service"
-        assert no_leader_cause(_cluster("leader"), {}) == "leader_hors_service"
+    def test_listed_leader_but_no_primary_peer(self):
+        # Cas reproduit : quorum etcd perdu, /cluster sert l'ancienne cle /leader ; ou backend du leader arrete.
+        assert no_leader_cause(_cluster("leader", "replica"), False) == "leader_hors_service"
 
 
 def _run(steps):

@@ -1,8 +1,8 @@
 """Tier 2 integration : INV-170 / INV-171 — plus aucun leader vivant, vu d'un replica.
 
-Patroni simule (/cluster) et backend simule du leader liste (node2, http://10.99.0.2:8000/health) ;
+Patroni simule (/cluster) et backends pairs simules (replica_proxy._PEER_URLS : node2, node3) ;
 `is_leader` efface : ce noeud (node1) est un replica. Le cas par defaut est celui reproduit le
-2026-10-30 : quorum etcd perdu, /cluster liste encore node2 `leader` mais son backend dit `secondary`.
+2026-10-30 : quorum etcd perdu, /cluster liste encore node2 `leader` mais aucun pair ne dit `primary`.
 Le controle de la boucle de fond est neutralise pendant chaque test : seuls les ticks du test
 (`patroni["tick"]`, date en 2030) touchent l'etat, aucune course avec un tick reel.
 """
@@ -21,7 +21,9 @@ pytestmark = pytest.mark.integration
 
 _ALERT_EMAIL = "direction.technique@charlesmurgat.test"
 _DEFAULT_EMAIL = "direction_technique@charlesmurgat.com"
-_LEADER_HEALTH = "http://10.99.0.2:8000/health"
+_LEADER = "http://10.99.0.2:8000"  # backend de node2, leader liste
+_EXPLANATION = ("le leader listé par Patroni (10.99.0.2) ne répond pas comme primaire : son backend est arrêté "
+                "ou en erreur, ou il a été rétrogradé (clé leader périmée si le quorum etcd est perdu)")
 T0 = datetime(2030, 1, 1, 12, 0, tzinfo=timezone.utc)
 
 
@@ -52,14 +54,16 @@ def _set_alert_email(value):
 
 @pytest.fixture
 def patroni(monkeypatch, client):
-    """`down` : Patroni local injoignable ; `leader_role` : role annonce par le backend du leader
-    liste (None = injoignable). `tick` : le vrai controle, que la boucle de fond n'appelle plus."""
-    from backend.app import escalation, quorum_monitor
+    """`down` : Patroni local injoignable ; `peers` : role annonce par le /health de chaque backend
+    (None = injoignable). `tick` : le vrai controle, que la boucle de fond n'appelle plus."""
+    from backend.app import escalation, quorum_monitor, replica_proxy
     from backend.app.clock import now as clock_now
     from backend.app.leader_election import is_leader
     from backend.app.logic.leader_loss import LeaderLossState
-    fake = {"cluster": {"members": _members(leader=True)}, "leader_role": "secondary", "down": False,
+    fake = {"cluster": {"members": _members(leader=True)}, "down": False,
+            "peers": {_LEADER: "secondary", "http://10.99.0.3:8000": "secondary"},
             "tick": quorum_monitor._run_leader_loss_check}
+    monkeypatch.setattr(replica_proxy, "_PEER_URLS", list(fake["peers"]))
     monkeypatch.setattr(quorum_monitor, "_run_leader_loss_check", lambda now: None)
     monkeypatch.setattr(quorum_monitor, "_leader_loss", LeaderLossState())
     monkeypatch.setattr(quorum_monitor, "cluster_has_leader", True)
@@ -74,10 +78,11 @@ def patroni(monkeypatch, client):
             if fake["down"]:
                 raise urllib.error.URLError("connection refused")
             return io.BytesIO(json.dumps(fake["cluster"]).encode())
-        if url == _LEADER_HEALTH:
-            if fake["leader_role"] is None:
+        if url.endswith("/health") and url[:-len("/health")] in fake["peers"]:
+            role = fake["peers"][url[:-len("/health")]]
+            if role is None:
                 raise urllib.error.URLError("timed out")
-            return io.BytesIO(json.dumps({"status": "ok", "role": fake["leader_role"]}).encode())
+            return io.BytesIO(json.dumps({"status": "ok", "role": role}).encode())
         return real(req, *a, **kw)
     monkeypatch.setattr(urllib.request, "urlopen", urlopen)
     was_leader = is_leader.is_set()
@@ -103,7 +108,7 @@ def _audits():
 
 
 def test_stale_leader_in_patroni_emails_once_from_this_node(patroni):
-    """Cas reproduit : /cluster liste node2 leader, son backend n'est plus primary."""
+    """Cas reproduit : /cluster liste node2 leader, aucun backend pair n'est plus primary."""
     before = len(_audits())
     with patch("backend.app.quorum_monitor.send_alert_email") as mail:
         _ticks(patroni, 0, 1, 2)
@@ -114,7 +119,7 @@ def test_stale_leader_in_patroni_emails_once_from_this_node(patroni):
     assert mail.call_args.kwargs["subject"] == \
         "[Alarme Murgat] Aucun leader vu de node1 (izeron) — leader listé mais hors service"
     body = mail.call_args.kwargs["body"]
-    assert "Vu de node1" in body and "10.99.0.2" in body and "écriture" in body and "passerelles" in body
+    assert "Vu de node1" in body and _EXPLANATION in body and "écriture" in body and "passerelles" in body
     audits = _audits()[before:]
     assert len(audits) == 1 and audits[0]["node"] == "node1" and audits[0]["cause"] == "leader_hors_service"
 
@@ -122,7 +127,8 @@ def test_stale_leader_in_patroni_emails_once_from_this_node(patroni):
 @pytest.mark.parametrize("setup, cause, label", [
     ({"down": True}, "patroni_injoignable", "Patroni injoignable depuis ce nœud"),
     ({"cluster": {"members": _members(leader=False)}}, "aucun_leader", "Patroni ne liste aucun leader"),
-    ({"leader_role": None}, "leader_hors_service", "leader listé mais hors service"),
+    ({"peers": {_LEADER: None, "http://10.99.0.3:8000": "secondary"}}, "leader_hors_service",
+     "leader listé mais hors service"),
 ])
 def test_each_cause_is_named(patroni, client, setup, cause, label):
     patroni.update(setup)
@@ -133,6 +139,22 @@ def test_each_cause_is_named(patroni, client, setup, cause, label):
     assert mail.call_args.kwargs["subject"] == f"[Alarme Murgat] Aucun leader vu de node1 (izeron) — {label}"
     assert [a["cause"] for a in _audits()[before:]] == [cause]
     assert client.get("/health").json()["cluster_writable"] is False
+    assert client.get("/api/cluster").json()["cluster_writable"] is False  # 503 compris (Patroni injoignable)
+
+
+def test_single_host_dev_cluster_sees_a_leader_on_another_port(patroni, client, monkeypatch):
+    """Cluster dev 3 noeuds sur un seul hote : tous les membres ont l'hote host.docker.internal, dont le
+    port 8000 est ce replica (node1) ; le leader est derriere le port 8002. Ce n'est pas une perte de leader."""
+    from backend.app import replica_proxy
+    host = "http://host.docker.internal"
+    patroni["peers"] = {f"{host}:8000": "secondary", f"{host}:8001": "secondary", f"{host}:8002": "primary"}
+    monkeypatch.setattr(replica_proxy, "_PEER_URLS", [f"{host}:8001", f"{host}:8002"])  # .env.node1
+    for m in patroni["cluster"]["members"]:
+        m["host"] = "host.docker.internal"
+    with patch("backend.app.quorum_monitor.send_alert_email") as mail:
+        _ticks(patroni, 0, 4, 60)
+    assert mail.call_count == 0
+    assert client.get("/health").json()["cluster_writable"] is True
 
 
 def test_health_stays_200_and_says_read_only_until_a_live_leader_is_back(patroni, client):
@@ -143,7 +165,7 @@ def test_health_stays_200_and_says_read_only_until_a_live_leader_is_back(patroni
         assert h.json()["cluster_writable"] is False
         assert client.get("/api/cluster").json()["cluster_writable"] is False
 
-        patroni["leader_role"] = "primary"
+        patroni["peers"][_LEADER] = "primary"
         _ticks(patroni, 1)
         assert client.get("/health").json()["cluster_writable"] is True
         assert client.get("/api/cluster").json()["cluster_writable"] is True
@@ -174,11 +196,13 @@ def test_default_recipient_without_alert_email(patroni):
 
 
 def test_loop_runs_the_check_on_a_replica(patroni, monkeypatch):
-    """Cablage : le controle tourne avant le gate leader de quorum_monitor_loop, donc sur un replica."""
-    from backend.app import quorum_monitor
-    called = threading.Event()
+    """Cablage : le controle tourne avant le gate leader de quorum_monitor_loop, donc sur un replica,
+    a l'heure reelle : `advance-clock` (horloge injectable avancee d'un jour) ne doit rien declencher."""
+    from backend.app import clock, quorum_monitor
+    called, seen = threading.Event(), []
+    monkeypatch.setattr(clock, "_offset", clock._offset + timedelta(days=1))
     monkeypatch.setattr(quorum_monitor, "_QUORUM_TICK_SECONDS", 0)
-    monkeypatch.setattr(quorum_monitor, "_run_leader_loss_check", lambda now: called.set())
+    monkeypatch.setattr(quorum_monitor, "_run_leader_loss_check", lambda now: (seen.append(now), called.set()))
 
     async def first_tick_ran():
         task = asyncio.create_task(quorum_monitor.quorum_monitor_loop())
@@ -191,3 +215,5 @@ def test_loop_runs_the_check_on_a_replica(patroni, monkeypatch):
         finally:
             task.cancel()
     assert asyncio.run(first_tick_ran()), "le controle INV-170 n'a pas tourne sur un replica"
+    assert seen[0].tzinfo is not None and abs(seen[0] - datetime.now(timezone.utc)) < timedelta(seconds=5), \
+        f"horloge reelle attendue, pas clock_now() : {seen[0]}"

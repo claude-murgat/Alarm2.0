@@ -1,8 +1,9 @@
 """Logique pure INV-170 : plus aucun leader vivant vu de ce noeud.
 
-Chaque noeud non primary decide seul : le membre que son Patroni liste comme leader (GET /cluster) doit
-avoir un backend qui se dit `primary` (GET http://<host>:8000/health). Le role de /cluster seul ne suffit
-pas : Patroni le lit dans etcd en serialisable, l'ancienne cle /leader survit a la perte du quorum.
+Chaque noeud non primary decide seul : un leader vivant est vu si un backend pair (ceux du relai
+d'ecriture INV-044) se dit `primary` sur /health, donc si une ecriture relayee d'ici peut aboutir. Le role
+de /cluster seul ne suffit pas : Patroni le lit dans etcd en serialisable, l'ancienne cle /leader survit
+a la perte du quorum ; /cluster (Patroni local) ne sert qu'a nommer la cause.
 Pas de leader vivant pendant plus de 3 min (QUORUM_LOSS_THRESHOLD, INV-085) -> un email par episode,
 au plus un par heure. Fetchs, email et audit : quorum_monitor._run_leader_loss_check.
 """
@@ -20,16 +21,16 @@ def leader_host(cluster: Optional[dict]) -> Optional[str]:
     return next((m.get("host") for m in (cluster or {}).get("members") or [] if m.get("role") == "leader"), None)
 
 
-def no_leader_cause(cluster: Optional[dict], leader_health: Optional[dict]) -> Optional[str]:
-    """None = leader vivant. `cluster` : GET /cluster du Patroni local (None si injoignable) ;
-    `leader_health` : corps de /health du backend du leader liste (None si injoignable ou en erreur)."""
+def no_leader_cause(cluster: Optional[dict], primary_seen: bool) -> Optional[str]:
+    """None = leader vivant : un backend pair repond 200 avec role `primary` (`primary_seen`).
+    Sinon la cause, d'apres `cluster` : GET /cluster du Patroni local (None si injoignable)."""
+    if primary_seen:
+        return None
     if cluster is None:
         return "patroni_injoignable"
     if leader_host(cluster) is None:
         return "aucun_leader"
-    if (leader_health or {}).get("role") != "primary":
-        return "leader_hors_service"
-    return None
+    return "leader_hors_service"
 
 
 @dataclass(frozen=True)  # pragma: no mutate (INV-170 — frozen=False est equivalent : personne ne mute cet etat)
