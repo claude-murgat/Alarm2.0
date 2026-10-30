@@ -1,0 +1,35 @@
+# /etc/systemd/system/alarm-chaos.service
+#
+# Runner de la panne controlee (INV-176..179, docs/CD_DESIGN.md §9ter) : wrapper
+# systemd pour /usr/local/bin/alarm-chaos. Copie de alarm-cd-orchestrate.service.
+#
+# DEPLOIEMENT : uniquement sur NODE3 cloud (le seul noeud qui voit les 5 cibles
+# via le mesh WG), a la main comme l'orchestrateur — PAS pose par install.sh.
+#
+# ACTIVATION : livre **disable** par defaut. L'operateur l'active explicitement :
+#   sudo systemctl enable --now alarm-chaos.timer
+
+[Unit]
+Description=Panne controlee : execute les demandes de l'onglet Tests (INV-176..179)
+Documentation=https://github.com/claude-murgat/Alarm2.0/blob/master/docs/CD_DESIGN.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Meme user que l'orchestrateur : cle SSH vers alarm@10.99.0.X (groupe docker la-bas).
+User=alarm
+Group=alarm
+# GATEWAY_KEY, partagee avec l'orchestrateur CD (fichier root:alarm 640).
+EnvironmentFile=-/etc/alarm/cd.env
+# /var/lib/alarm/cd/ : verrou orchestrate.lock partage avec alarm-cd-orchestrate
+# (pas de deploiement pendant un test, pas de test pendant un deploiement).
+StateDirectory=alarm/cd
+# 10 min de panne max + 5 min d'attente du retour + marge.
+TimeoutStartSec=1500
+ExecStart=/usr/local/bin/alarm-chaos
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

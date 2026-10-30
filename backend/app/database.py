@@ -75,6 +75,9 @@ def run_migrations(engine):
         # ── INV-155/156/157 : colonnes site (alarms, sms_queue, call_queue, gateway_states)
         _migrate_site(conn, is_sqlite)
 
+        # ── INV-179 : table chaos_requests (panne controlee)
+        _migrate_chaos_requests(conn, is_sqlite)
+
 
 def _migrate_alarm_notifications(conn, is_sqlite: bool):
     """Crée la table alarm_notifications et migre les données CSV si nécessaire."""
@@ -488,3 +491,48 @@ def _migrate_refresh_tokens(conn, is_sqlite: bool):
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id)"))
         conn.commit()
         logger.info("Migration: table refresh_tokens creee (INV-079)")
+
+
+def _migrate_chaos_requests(conn, is_sqlite: bool):
+    """INV-176/179 : table chaos_requests (panne controlee, cf models.ChaosRequest), colonne
+    cancel_requested et index unique partiel ux_chaos_one_unfinished (une seule demande non terminee)."""
+    if is_sqlite:
+        exists = conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name='chaos_requests'")
+        ).scalar()
+    else:
+        exists = conn.execute(text("SELECT to_regclass('public.chaos_requests')")).scalar()
+    if not exists:
+        _create_chaos_requests(conn, is_sqlite)
+    elif is_sqlite:
+        cols = [row[1] for row in conn.execute(text("PRAGMA table_info(chaos_requests)")).fetchall()]
+        if "cancel_requested" not in cols:
+            conn.execute(text("ALTER TABLE chaos_requests ADD COLUMN cancel_requested BOOLEAN NOT NULL DEFAULT FALSE"))
+    else:
+        conn.execute(text("ALTER TABLE chaos_requests ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT FALSE"))
+    conn.execute(text(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_chaos_one_unfinished ON chaos_requests ((1)) "
+        "WHERE status IN ('pending', 'claimed', 'running')"
+    ))
+    conn.commit()
+    logger.info("Migration: chaos_requests verifiee (INV-176/179)")
+
+
+def _create_chaos_requests(conn, is_sqlite: bool):
+    pk = "INTEGER PRIMARY KEY AUTOINCREMENT" if is_sqlite else "SERIAL PRIMARY KEY"
+    conn.execute(text(f"""
+        CREATE TABLE chaos_requests (
+            id {pk},
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            requested_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            nodes VARCHAR NOT NULL,
+            mode VARCHAR NOT NULL,
+            minutes INTEGER NOT NULL,
+            status VARCHAR NOT NULL DEFAULT 'pending',
+            claimed_at TIMESTAMP,
+            started_at TIMESTAMP,
+            restored_at TIMESTAMP,
+            cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+            events VARCHAR NOT NULL DEFAULT '[]'
+        )
+    """))

@@ -1081,3 +1081,156 @@ class TestFooter:
             tab.click()
             expect(page.locator("#footer")).to_be_visible()
             expect(page.locator("#footer")).to_contain_text("Version ")
+
+
+# ---------------------------------------------------------------------------
+# Onglet Tests : carte « Résilience » (INV-175)
+# ---------------------------------------------------------------------------
+
+class TestResiliencePanel:
+    """INV-175 — la carte « Résilience » de l'onglet Tests montre l'état réel des nœuds et
+    passerelles puis les scénarios de panne calculés. /api/resilience est simulé (page.route) :
+    le panneau se teste sans cluster. Hors CI : lancé localement (FRONTEND_URL)."""
+
+    FAKE = {
+        "live": {
+            "nodes": [
+                {"name": "node1", "site": "izeron", "voter": True, "reachable": True, "role": "replica", "state": "streaming", "version": "1.0.1"},
+                {"name": "node2", "site": "izeron", "voter": True, "reachable": True, "role": "replica", "state": "streaming", "version": "1.0.1"},
+                {"name": "node3", "site": "ovh", "voter": True, "reachable": True, "role": "leader", "state": "running", "version": "1.0.1"},
+                {"name": "node4", "site": "beaufort", "voter": False, "reachable": False, "role": "replica", "state": "streaming", "version": None},
+                {"name": "node5", "site": "beaufort", "voter": False, "reachable": True, "role": "replica", "state": "streaming", "version": "1.0.1"},
+            ],
+            "gateways": [
+                {"gateway_id": "onsite-2", "host": "node2", "site": "izeron", "registered": True, "last_seen_s": 125.4},
+                {"gateway_id": "alarm-1", "host": "node4", "site": "beaufort", "registered": False, "last_seen_s": None},
+            ],
+            "leader": "node3", "etcd_voters_up": 3,
+        },
+        "whatif": [
+            {"scenario": "ovh_down", "label": "OVH (node3)", "untestable": False, "leader_possible": True,
+             "why": "2/3 voteurs etcd joignables", "writable_from": {"izeron": True, "ovh": False, "beaufort": False},
+             "escalation_running": True, "alarms_created": {"izeron": True, "beaufort": False},
+             "sms_calls": {"izeron": True, "beaufort": False}, "app_4g_reachable": False, "app_izeron_lan": True,
+             "alerted_by": [], "sentence": "Leader : oui (2/3 voteurs etcd joignables). Beaufort : aveugle."},
+            {"scenario": "izeron_both", "label": "Izeron entier (node1 + node2)", "untestable": True, "leader_possible": False,
+             "why": "1/3 voteurs etcd joignables", "writable_from": {"izeron": False, "ovh": False, "beaufort": False},
+             "escalation_running": False, "alarms_created": {"izeron": False, "beaufort": False},
+             "sms_calls": {"izeron": False, "beaufort": False}, "app_4g_reachable": False, "app_izeron_lan": False,
+             "alerted_by": ["email INV-170 (après PR 1)"], "sentence": "Leader : non (1/3 voteurs etcd joignables)."},
+        ],
+    }
+
+    def _open(self, page: Page):
+        page.route("**/api/resilience", lambda route: route.fulfill(json=self.FAKE))
+        with page.expect_request(lambda r: r.url.endswith("/api/resilience")):
+            page.locator(".tab:text('Tests')").click()
+        return page.locator("#resilienceCard")
+
+    def test_loads_when_tests_tab_opens_and_shows_nodes(self, dashboard: Page):
+        card = self._open(dashboard)
+        expect(card).to_contain_text("Résilience")
+        rows = card.locator("#resilienceNodes tr")
+        expect(rows).to_have_count(5)
+        node3 = rows.nth(2)
+        expect(node3).to_contain_text("node3")
+        expect(node3).to_contain_text("OVH")
+        expect(node3).to_contain_text("leader")
+        expect(node3).to_contain_text("1.0.1")
+        expect(node3.locator("td[data-label='Voteur']")).to_contain_text("oui")
+        expect(node3.locator("td[data-label='Joignable']")).to_contain_text("oui")
+        node4 = rows.nth(3)
+        expect(node4.locator("td[data-label='Joignable']")).to_contain_text("non")
+        expect(node4.locator("td[data-label='Voteur']")).not_to_contain_text("oui")
+        expect(node4.locator("td[data-label='Passerelle']")).to_contain_text("alarm-1")
+        expect(node4.locator("td[data-label='Passerelle']")).to_contain_text("jamais vue")
+        expect(rows.nth(1).locator("td[data-label='Passerelle']")).to_contain_text("onsite-2 : vu il y a 125 s")
+
+    def test_whatif_table_cells_and_untestable_row(self, dashboard: Page):
+        card = self._open(dashboard)
+        ovh = card.locator("#resilienceWhatif tr[data-scenario='ovh_down']")
+        expect(ovh).to_contain_text("OVH (node3)")
+        expect(ovh.locator("td.ok")).to_have_count(4)   # leader, écriture Izeron, alarmes Izeron, LAN Izeron
+        expect(ovh.locator("td.ko")).to_have_count(4)   # écriture OVH, écriture Beaufort, alarmes Beaufort, app 4G
+        expect(ovh).to_contain_text("personne")
+        expect(card.locator("#resilienceWhatif")).to_contain_text("Leader : oui (2/3 voteurs etcd joignables). Beaufort : aveugle.")
+        both = card.locator("#resilienceWhatif tr[data-scenario='izeron_both']")
+        expect(both).to_contain_text("non testable : arrêt total")
+        expect(both).to_contain_text("2ᵉ voteur cloud à prévoir")
+        expect(both).to_contain_text("email INV-170 (après PR 1)")
+        expect(both.locator("td.ok")).to_have_count(0)
+        expect(ovh).not_to_contain_text("non testable")
+
+    def test_refresh_button_reloads(self, dashboard: Page):
+        card = self._open(dashboard)
+        with dashboard.expect_request(lambda r: r.url.endswith("/api/resilience")):
+            card.locator("button:has-text('Rafraîchir')").click()
+
+    def test_error_is_shown_not_thrown(self, dashboard: Page):
+        dashboard.route("**/api/resilience", lambda route: route.fulfill(
+            status=503, json={"detail": "Patroni unreachable: down"}))
+        dashboard.locator(".tab:text('Tests')").click()
+        expect(dashboard.locator("#resilienceError")).to_contain_text("Patroni unreachable")
+
+
+# ---------------------------------------------------------------------------
+# Onglet Tests : confirm() de la carte « Panne contrôlée » (INV-177, INV-179)
+# ---------------------------------------------------------------------------
+
+class TestChaosConfirm:
+    """INV-179 — en netcut, le confirm() nomme le site rendu aveugle par la coupure d'un nœud passerelle
+    (live.gateways de /api/resilience) ; liste inconnue (/api/resilience en échec) → avertissement générique,
+    jamais un confirm() muet. /api/resilience, /api/cluster et whatif simulés ; le confirm() est refusé
+    (aucune panne demandée). Hors CI : lancé localement (FRONTEND_URL)."""
+
+    CLUSTER = {"local_node": "node3", "local_role": "primary", "local_location": "ovh",
+               "quorum": {"total": 5, "healthy": 5, "has_quorum": True},
+               "members": [{"name": n["name"], "location": n["site"], "role": n["role"], "state": n["state"]}
+                           for n in TestResiliencePanel.FAKE["live"]["nodes"]]}
+    GENERIC = "passerelles inconnues : couper un nœud passerelle rend son site aveugle (contact sec, SMS, appels)"
+
+    @staticmethod
+    def _resilience(route, ok):
+        if ok:
+            route.fulfill(json=TestResiliencePanel.FAKE)
+        else:
+            route.fulfill(status=503, json={"detail": "Patroni unreachable: down"})
+
+    def _open(self, page: Page, ok=True):
+        page.route("**/api/resilience", lambda route: self._resilience(route, ok))
+        page.route("**/api/resilience/whatif*", lambda route: route.fulfill(json={"sentence": "Leader : oui."}))
+        page.route("**/api/cluster", lambda route: route.fulfill(json=self.CLUSTER))
+        page.locator(".tab:text('Tests')").click()
+        expect(page.locator("#chaosTarget option[value='node4']")).to_have_count(1)
+
+    def _confirm_text(self, page: Page, mode):
+        page.locator("#chaosTarget").select_option("node4")
+        page.locator("#chaosMode").select_option(mode)
+        page.on("dialog", lambda d: d.dismiss())
+        with page.expect_event("dialog") as info:
+            page.locator("#chaosCard button:has-text('Lancer la panne')").click()
+        return info.value.message
+
+    def test_netcut_of_a_gateway_node_names_the_blind_site(self, dashboard: Page):
+        self._open(dashboard)
+        text = self._confirm_text(dashboard, "netcut")
+        assert "alarm-1" in text and "site Beaufort aveugle pendant 2 min" in text, text
+        assert self.GENERIC not in text
+
+    def test_stop_shows_no_blind_warning(self, dashboard: Page):
+        self._open(dashboard)
+        assert "aveugle" not in self._confirm_text(dashboard, "stop")
+
+    def test_netcut_with_resilience_failing_shows_generic_warning(self, dashboard: Page):
+        self._open(dashboard, ok=False)
+        assert self.GENERIC in self._confirm_text(dashboard, "netcut")
+
+    def test_netcut_after_a_failed_refresh_does_not_trust_the_stale_list(self, dashboard: Page):
+        """Liste chargée puis « Rafraîchir » en échec : la liste n'est plus sûre, avertissement générique."""
+        self._open(dashboard)
+        dashboard.unroute("**/api/resilience")
+        dashboard.route("**/api/resilience", lambda route: self._resilience(route, False))
+        dashboard.locator("#resilienceCard button:has-text('Rafraîchir')").click()
+        expect(dashboard.locator("#resilienceError")).to_contain_text("Patroni unreachable")
+        text = self._confirm_text(dashboard, "netcut")
+        assert self.GENERIC in text and "site Beaufort aveugle" not in text, text

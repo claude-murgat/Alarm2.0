@@ -12,6 +12,8 @@ AUDITABLE_EVENTS = {
     "user_created", "user_deleted", "escalation_timeout", "watchdog_offline",
     "escalation_without_call",  # INV-144
     "replica_reinitialized",  # INV-168
+    # INV-179 : panne controlee (leader_changed reste dans chaos_requests.events seulement)
+    "chaos_requested", "chaos_cancelled", "chaos_started", "chaos_early_restore", "chaos_restored", "chaos_failed",
 }
 
 

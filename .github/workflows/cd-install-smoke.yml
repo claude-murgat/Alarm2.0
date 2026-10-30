@@ -6,6 +6,7 @@
 #   - alarm-cd-pull.{service,timer,sh}            : sur les 3 noeuds (V1 PR 3)
 #   - alarm-cd-orchestrate.{service,timer,sh}     : sur NODE3 uniquement (V1.5 PR 9)
 #   - infra/onsite/sudoers/alarm-cd               : NOPASSWD chirurgical
+#   - alarm-chaos.{service,timer,sh} + alarm-chaos-net : panne controlee (INV-176..179)
 #
 # Pourquoi ce workflow existe :
 #   La PR initiale de fix `fix/cd-pull-lock-runtime-dir` corrige un bug ou le
@@ -33,7 +34,11 @@ on:
       - 'scripts/alarm-cd-orchestrate.sh'
       - 'infra/onsite/systemd/alarm-cd-pull.*'
       - 'infra/onsite/systemd/alarm-cd-orchestrate.*'
+      - 'scripts/alarm-chaos.sh'
+      - 'scripts/alarm-chaos-net.sh'
+      - 'infra/onsite/systemd/alarm-chaos.*'
       - 'infra/onsite/sudoers/alarm-cd'
+      - 'infra/onsite/install.sh'
       - 'scripts/alarm-gateway-sync.sh'
       - 'infra/onsite/systemd/alarm-gateway-sync.*'
       - 'gateway/**'
@@ -45,7 +50,11 @@ on:
       - 'scripts/alarm-cd-orchestrate.sh'
       - 'infra/onsite/systemd/alarm-cd-pull.*'
       - 'infra/onsite/systemd/alarm-cd-orchestrate.*'
+      - 'scripts/alarm-chaos.sh'
+      - 'scripts/alarm-chaos-net.sh'
+      - 'infra/onsite/systemd/alarm-chaos.*'
       - 'infra/onsite/sudoers/alarm-cd'
+      - 'infra/onsite/install.sh'
       - 'scripts/alarm-gateway-sync.sh'
       - 'infra/onsite/systemd/alarm-gateway-sync.*'
       - 'gateway/**'
@@ -320,6 +329,133 @@ jobs:
             echo "RuntimeDirectory= / StateDirectory= / EnvironmentFile= presents,"
             echo "timer livre disable par defaut (opt-in V1.5)."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  smoke-install-chaos:
+    # INV-176..179 : runner de panne controlee (NODE3, a la main comme l'orchestrateur).
+    name: alarm-chaos install smoke (panne controlee)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup user alarm (simulant NODE3 cloud)
+        run: |
+          sudo useradd -r -m -s /bin/bash alarm
+          sudo usermod -aG docker alarm
+
+      - name: Install script + units systemd (procedure docs/CD_DESIGN.md §9ter)
+        run: |
+          sudo install -m 755 scripts/alarm-chaos.sh /usr/local/bin/alarm-chaos
+          sudo install -m 644 infra/onsite/systemd/alarm-chaos.service /etc/systemd/system/
+          sudo install -m 644 infra/onsite/systemd/alarm-chaos.timer   /etc/systemd/system/
+          sudo systemctl daemon-reload
+
+      - name: Lint syntaxe unit systemd + bash
+        run: |
+          sudo systemd-analyze verify /etc/systemd/system/alarm-chaos.service /etc/systemd/system/alarm-chaos.timer
+          bash -n scripts/alarm-chaos.sh
+
+      - name: Verif StateDirectory + EnvironmentFile presents
+        # StateDirectory=alarm/cd : verrou orchestrate.lock partage avec l'orchestrateur.
+        run: |
+          for directive in 'StateDirectory=' 'EnvironmentFile=' 'User=alarm'; do
+            sudo systemctl cat alarm-chaos.service | grep -E "^${directive}" || {
+              echo "::error::${directive} absent de l'unit installee"
+              exit 1
+            }
+          done
+
+      - name: Timer livre disable par defaut (opt-in operateur)
+        run: |
+          state=$(sudo systemctl is-enabled alarm-chaos.timer 2>&1 || true)
+          echo "state initial : $state"
+          if [[ "$state" == "enabled" ]]; then
+            echo "::error::alarm-chaos.timer est enable des l'install — devrait etre disable par defaut"
+            exit 1
+          fi
+
+      - name: Lancer le service (sans cd.env -> exit 1 propre « GATEWAY_KEY non definie »)
+        run: |
+          sudo systemctl start alarm-chaos.service || true
+          sudo journalctl -u alarm-chaos.service --no-pager > /tmp/journal-chaos.txt
+          cat /tmp/journal-chaos.txt
+          grep -q "GATEWAY_KEY non definie" /tmp/journal-chaos.txt || {
+            echo "::error::le script n'a pas atteint le controle GATEWAY_KEY"
+            exit 1
+          }
+          if grep -qi "permission denied" /tmp/journal-chaos.txt; then
+            echo "::error::Regression: 'Permission denied' dans le journal alarm-chaos"
+            exit 1
+          fi
+
+      - name: "Verrou partage : avec cd.env, le runner prend STATE_DIR/orchestrate.lock puis sort proprement"
+        # Pas de leader joignable sur le runner CI -> « aucun leader joignable », exit 0.
+        run: |
+          sudo install -d -m 750 -o root -g alarm /etc/alarm
+          echo "GATEWAY_KEY=smoke" | sudo tee /etc/alarm/cd.env >/dev/null
+          sudo chmod 640 /etc/alarm/cd.env && sudo chown root:alarm /etc/alarm/cd.env
+          sudo systemctl start alarm-chaos.service
+          test -f /var/lib/alarm/cd/orchestrate.lock
+          test "$(stat -c '%U' /var/lib/alarm/cd/orchestrate.lock)" = alarm
+          sudo journalctl -u alarm-chaos.service --no-pager | grep -q "aucun leader joignable"
+
+      - name: "Helper netcut (INV-178) : install par install.sh-like, sudoers lint, sudo -n autorise pour alarm"
+        # Le vrai install.sh exige un noeud complet ; on rejoue sa sequence pour la sudoers :
+        # copie root, visudo -c -f sur CETTE copie, pose de la copie en 440. Lint du fichier pose
+        # seul (-f) : `visudo -c` sans -f lint tout /etc/sudoers.d du runner GitHub, dont
+        # /etc/sudoers.d/runner (mode 0644, refuse). Puis `alarm` doit pouvoir lancer le helper sans
+        # mot de passe (alias ALARM_CHAOS) : exit 2 = le helper lui-meme refuse l'argument, pas sudo.
+        run: |
+          bash -n scripts/alarm-chaos-net.sh
+          sudo install -m 755 scripts/alarm-chaos-net.sh /usr/local/bin/alarm-chaos-net
+          tmp=$(sudo mktemp)
+          sudo cp infra/onsite/sudoers/alarm-cd "$tmp"
+          sudo visudo -c -q -f "$tmp"
+          sudo install -m 440 "$tmp" /etc/sudoers.d/alarm-cd
+          sudo rm -f "$tmp"
+          sudo visudo -c -q -f /etc/sudoers.d/alarm-cd
+          test "$(sudo stat -c '%a %U' /etc/sudoers.d/alarm-cd)" = "440 root"  # /etc/sudoers.d : 750 root
+          set +e
+          sudo -u alarm sudo -n /usr/local/bin/alarm-chaos-net cut 30; rc=$?
+          set -e
+          test "$rc" -eq 2 || { echo "::error::attendu exit 2 (secondes invalides), obtenu $rc"; exit 1; }
+
+      - name: "Helper netcut : vrai systemd-run — restauration armee avant la coupure, unit factice coupee puis remise"
+        # Une unit factice joue wg-quick@wg0 (WG= du helper remplace par sed sur la copie installee).
+        # Apres cut 60 : ARMED, les deux timers existent a AccuracySec=1s ; ~8 s plus tard l'unit est
+        # arretee (coupure a 5 s +-1) ; ~68 s plus tard elle est de nouveau active (restauration a 60 s +-1)
+        # et les timers transitoires ont disparu. Enfin : unit inactive -> cut refuse (exit 1), rien arme.
+        run: |
+          sudo tee /etc/systemd/system/smoke-wg.service >/dev/null <<'UNIT'
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/bin/true
+          UNIT
+          sudo systemctl daemon-reload && sudo systemctl start smoke-wg.service
+          sudo sed -i 's/^WG=.*/WG=smoke-wg.service/' /usr/local/bin/alarm-chaos-net
+          test "$(sudo /usr/local/bin/alarm-chaos-net cut 60)" = ARMED
+          systemctl list-timers --all --no-pager | tee /tmp/timers.txt
+          grep -q alarm-chaos-restore.timer /tmp/timers.txt && grep -q alarm-chaos-cut.timer /tmp/timers.txt
+          for t in alarm-chaos-restore alarm-chaos-cut; do
+            test "$(systemctl show $t.timer -p AccuracyUSec --value)" = 1s || { echo "::error::$t.timer : AccuracySec != 1s"; exit 1; }
+          done
+          systemctl is-active smoke-wg.service
+          sleep 8
+          systemctl is-active smoke-wg.service && { echo "::error::l'unit factice devrait etre coupee"; exit 1; }
+          sleep 60
+          systemctl is-active smoke-wg.service || { echo "::error::l'unit factice n'a pas ete restauree par le timer"; exit 1; }
+          systemctl list-timers --all --no-pager | grep -q alarm-chaos- && { echo "::error::timers transitoires non collectes"; exit 1; }
+          sudo /usr/local/bin/alarm-chaos-net restore && systemctl is-active smoke-wg.service
+          sudo journalctl -u alarm-chaos-restore --no-pager | grep -q "remis (tentative 1)"
+          sudo systemctl stop smoke-wg.service
+          set +e
+          sudo /usr/local/bin/alarm-chaos-net cut 60; rc=$?
+          set -e
+          test "$rc" -eq 1 || { echo "::error::unit inactive : attendu exit 1, obtenu $rc"; exit 1; }
+          systemctl list-timers --all --no-pager | grep -q alarm-chaos- && { echo "::error::timers armes malgre l'unit inactive"; exit 1; }
+          true
 
   gateway-sync:
     # Issue #183 : deploiement auto du code gateway. Bout en bout sur une vraie

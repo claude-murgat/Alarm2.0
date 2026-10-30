@@ -12,19 +12,22 @@
 #   `alarm` est dans le groupe sudo SANS NOPASSWD, ce qui bloque les commandes
 #   non-interactives. Ce fichier comble le gap de maniere chirurgicale.
 #
-# Deploiement (premiere fois par noeud, requiert sudo interactif une fois) :
-#   1. Ouvrir DEUX sessions SSH sur le noeud (cf §3.2 de la doc — filet de
-#      securite si la conf sudoers est cassee, sudo refuse de tourner du tout).
-#   2. Dans la session 1 (test) :
-#        sudo install -m 440 -o root -g root \
-#          /opt/alarm/infra/onsite/sudoers/alarm-cd \
-#          /etc/sudoers.d/alarm-cd
-#        sudo visudo -c    # doit afficher "parsed OK"
-#   3. Si visudo -c echoue : `sudo rm /etc/sudoers.d/alarm-cd` IMMEDIATEMENT
-#      depuis la session 2 (admin) avant de fermer la session 1.
-#   4. Tester en non-interactif depuis un poste d'admin :
-#        ssh alarm@<noeud> "sudo -n systemctl status alarm-cd-pull.timer"
-#      doit marcher sans demander de mot de passe.
+# Deploiement : infra/onsite/install.sh (donc alarm-host-sync a chaque commit :stable)
+# copie ce fichier dans un temporaire root, le lint (`visudo -c -q -f`) et pose CETTE copie
+# en 440 dans /etc/sudoers.d/alarm-cd ; si visudo refuse, rien n'est pose (l'ancienne reste,
+# une sudoers cassee bloquerait tout `sudo` sur le noeud) et install.sh continue le reste.
+# La CI (cd-install-smoke.yml) lint aussi ce fichier.
+# Confiance : la source est le checkout /opt/alarm (owner alarm), comme les scripts root que
+# alarm-host-sync y installe deja (/usr/local/bin/alarm-host-sync, install.sh lui-meme) :
+# ce fichier n'elargit pas ce que `alarm` peut deja faire executer en root.
+# Verification non-interactive depuis un poste d'admin :
+#   ssh alarm@<noeud> "sudo -n systemctl status alarm-cd-pull.timer"
+# doit marcher sans demander de mot de passe.
+#
+# ALARM_CHAOS (INV-177/178, mode netcut) : le runner alarm-chaos.sh (NODE3) coupe le
+# tunnel wg0 d'un noeud via `sudo -n /usr/local/bin/alarm-chaos-net cut <s>` ; le
+# helper (root) valide ses arguments (decimal strict 60..720) et arme d'abord le timer de
+# restauration sur le noeud lui-meme. Pas de motif d'arguments ici : le helper est seul juge.
 #
 # Wildcards (`*`) :
 #   En sudo, `*` matche tout y compris `/` (different du glob shell). On
@@ -94,4 +97,6 @@ Cmnd_Alias ALARM_CD_JOURNAL = \
     /usr/bin/journalctl -u alarm-cd-orchestrate.timer, \
     /usr/bin/journalctl -u alarm-cd-orchestrate.timer *
 
-alarm ALL=(root) NOPASSWD: ALARM_CD_INSTALL, ALARM_CD_SYSTEMCTL, ALARM_CD_JOURNAL
+Cmnd_Alias ALARM_CHAOS = /usr/local/bin/alarm-chaos-net
+
+alarm ALL=(root) NOPASSWD: ALARM_CD_INSTALL, ALARM_CD_SYSTEMCTL, ALARM_CD_JOURNAL, ALARM_CHAOS

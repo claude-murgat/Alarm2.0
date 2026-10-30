@@ -275,3 +275,29 @@ class RefreshToken(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     last_used_at = Column(DateTime, nullable=True)
     revoked = Column(Boolean, nullable=False, default=False)
+
+
+class ChaosRequest(Base):
+    """INV-176..179 : panne controlee demandee depuis l'onglet Tests (POST /api/chaos) et
+    executee par scripts/alarm-chaos.sh sur NODE3 (GET /internal/chaos/next, POST .../events).
+
+    status : pending (en attente du runner) -> claimed (reclamee, garde-fous rejoues) -> running
+    (conteneurs arretes) -> restored | failed ; cancelled (DELETE sur une pending). DELETE sur une
+    claimed/running -> cancel_requested (restauration immediate par le runner). `events` : JSON
+    [{kind, ts, details}] (started, leader_changed, early_restore, restored, failed). Expiration :
+    logic/chaos.py is_stale. Index unique partiel ux_chaos_one_unfinished (database.py) : une seule
+    demande pending/claimed/running.
+    """
+    __tablename__ = "chaos_requests"
+    id = Column(Integer, primary_key=True, index=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    requested_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    nodes = Column(String, nullable=False)  # "node4,node5"
+    mode = Column(String, nullable=False)  # stop | netcut
+    minutes = Column(Integer, nullable=False)
+    status = Column(String, nullable=False, default="pending")
+    claimed_at = Column(DateTime, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    restored_at = Column(DateTime, nullable=True)
+    cancel_requested = Column(Boolean, nullable=False, default=False)
+    events = Column(String, nullable=False, default="[]")  # JSON
