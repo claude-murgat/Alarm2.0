@@ -33,6 +33,8 @@ on:
       - 'scripts/alarm-cd-orchestrate.sh'
       - 'infra/onsite/systemd/alarm-cd-pull.*'
       - 'infra/onsite/systemd/alarm-cd-orchestrate.*'
+      - 'scripts/alarm-chaos.sh'
+      - 'infra/onsite/systemd/alarm-chaos.*'
       - 'infra/onsite/sudoers/alarm-cd'
       - 'scripts/alarm-gateway-sync.sh'
       - 'infra/onsite/systemd/alarm-gateway-sync.*'
@@ -45,6 +47,8 @@ on:
       - 'scripts/alarm-cd-orchestrate.sh'
       - 'infra/onsite/systemd/alarm-cd-pull.*'
       - 'infra/onsite/systemd/alarm-cd-orchestrate.*'
+      - 'scripts/alarm-chaos.sh'
+      - 'infra/onsite/systemd/alarm-chaos.*'
       - 'infra/onsite/sudoers/alarm-cd'
       - 'scripts/alarm-gateway-sync.sh'
       - 'infra/onsite/systemd/alarm-gateway-sync.*'
@@ -320,6 +324,76 @@ jobs:
             echo "RuntimeDirectory= / StateDirectory= / EnvironmentFile= presents,"
             echo "timer livre disable par defaut (opt-in V1.5)."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  smoke-install-chaos:
+    # INV-176..179 : runner de panne controlee (NODE3, a la main comme l'orchestrateur).
+    name: alarm-chaos install smoke (panne controlee)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup user alarm (simulant NODE3 cloud)
+        run: |
+          sudo useradd -r -m -s /bin/bash alarm
+          sudo usermod -aG docker alarm
+
+      - name: Install script + units systemd (procedure docs/CD_DESIGN.md §9ter)
+        run: |
+          sudo install -m 755 scripts/alarm-chaos.sh /usr/local/bin/alarm-chaos
+          sudo install -m 644 infra/onsite/systemd/alarm-chaos.service /etc/systemd/system/
+          sudo install -m 644 infra/onsite/systemd/alarm-chaos.timer   /etc/systemd/system/
+          sudo systemctl daemon-reload
+
+      - name: Lint syntaxe unit systemd + bash
+        run: |
+          sudo systemd-analyze verify /etc/systemd/system/alarm-chaos.service /etc/systemd/system/alarm-chaos.timer
+          bash -n scripts/alarm-chaos.sh
+
+      - name: Verif StateDirectory + EnvironmentFile presents
+        # StateDirectory=alarm/cd : verrou orchestrate.lock partage avec l'orchestrateur.
+        run: |
+          for directive in 'StateDirectory=' 'EnvironmentFile=' 'User=alarm'; do
+            sudo systemctl cat alarm-chaos.service | grep -E "^${directive}" || {
+              echo "::error::${directive} absent de l'unit installee"
+              exit 1
+            }
+          done
+
+      - name: Timer livre disable par defaut (opt-in operateur)
+        run: |
+          state=$(sudo systemctl is-enabled alarm-chaos.timer 2>&1 || true)
+          echo "state initial : $state"
+          if [[ "$state" == "enabled" ]]; then
+            echo "::error::alarm-chaos.timer est enable des l'install — devrait etre disable par defaut"
+            exit 1
+          fi
+
+      - name: Lancer le service (sans cd.env -> exit 1 propre « GATEWAY_KEY non definie »)
+        run: |
+          sudo systemctl start alarm-chaos.service || true
+          sudo journalctl -u alarm-chaos.service --no-pager > /tmp/journal-chaos.txt
+          cat /tmp/journal-chaos.txt
+          grep -q "GATEWAY_KEY non definie" /tmp/journal-chaos.txt || {
+            echo "::error::le script n'a pas atteint le controle GATEWAY_KEY"
+            exit 1
+          }
+          if grep -qi "permission denied" /tmp/journal-chaos.txt; then
+            echo "::error::Regression: 'Permission denied' dans le journal alarm-chaos"
+            exit 1
+          fi
+
+      - name: "Verrou partage : avec cd.env, le runner prend STATE_DIR/orchestrate.lock puis sort proprement"
+        # Pas de leader joignable sur le runner CI -> « aucun leader joignable », exit 0.
+        run: |
+          sudo install -d -m 750 -o root -g alarm /etc/alarm
+          echo "GATEWAY_KEY=smoke" | sudo tee /etc/alarm/cd.env >/dev/null
+          sudo chmod 640 /etc/alarm/cd.env && sudo chown root:alarm /etc/alarm/cd.env
+          sudo systemctl start alarm-chaos.service
+          test -f /var/lib/alarm/cd/orchestrate.lock
+          test "$(stat -c '%U' /var/lib/alarm/cd/orchestrate.lock)" = alarm
+          sudo journalctl -u alarm-chaos.service --no-pager | grep -q "aucun leader joignable"
 
   gateway-sync:
     # Issue #183 : deploiement auto du code gateway. Bout en bout sur une vraie

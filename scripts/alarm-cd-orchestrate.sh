@@ -48,9 +48,10 @@ IMAGE="${IMAGE:-alarm-backend}"
 # STATE_DIR / LOCK_FILE surchargeables pour les tests (tests/unit/test_cd_orchestrate.py).
 STATE_DIR="${STATE_DIR:-/var/lib/alarm/cd}"
 STATE_FILE="${STATE_DIR}/orchestrate.state"
-# /run/alarm-cd-orchestrate/ est cree par systemd (RuntimeDirectory= dans le
-# unit) avec owner alarm:alarm. Symetrique a alarm-cd-pull (cf service file).
-LOCK_FILE="${LOCK_FILE:-/run/alarm-cd-orchestrate/lock}"
+# Verrou dans STATE_DIR (cree par systemd StateDirectory=, owner alarm) et non
+# dans /run/ : RuntimeDirectory= disparait a la fin du oneshot, or alarm-chaos.sh
+# (INV-178) prend le meme verrou pour ne jamais tester pendant un deploiement.
+LOCK_FILE="${LOCK_FILE:-${STATE_DIR}/orchestrate.lock}"
 API_BASE_DEFAULT="http://10.99.0.1:8000"
 API_BASE="${API_BASE:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
