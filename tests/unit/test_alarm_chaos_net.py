@@ -142,7 +142,8 @@ def test_restore_cancels_pending_cut_brings_wg0_back_then_disarms_restore_timer(
     c = calls(h)
     assert c[0].startswith("systemctl stop") and "alarm-chaos-cut.timer" in c[0]  # coupure pas encore partie annulee
     up = [] if wg_active else ["wg-quick down wg0", "systemctl start wg-quick@wg0"]  # wg0 residuel retire avant start
-    assert c[1:] == ["systemctl is-active --quiet wg-quick@wg0"] + up + ["systemctl stop alarm-chaos-restore.timer"]
+    check = ["systemctl is-active --quiet wg-quick@wg0"] + up  # avant et apres le delai de 2 s
+    assert c[1:] == check + check + ["systemctl stop alarm-chaos-restore.timer"]
 
 
 def test_restore_failing_keeps_restore_timer_armed(h):
@@ -167,3 +168,26 @@ def test_restore_timer_never_touches_an_active_wg0(h):
     rc, out, log = replay_restore(h, ok_at=1, active=True)
     assert rc == 0, out
     assert log == ["systemctl is-active --quiet wg-quick@wg0"]
+
+
+@pytest.mark.parametrize("start_ok", [True, False])
+def test_restore_racing_a_cut_already_fired_rechecks_wg0_before_disarming(h, start_ok):
+    """Restauration anticipee ~5 s apres l'armement : le timer de coupure vient d'echoir, son `systemctl stop wg0`
+    passe pendant la restauration. Le service de coupure est arrete aussi, et wg0 est reverifie apres un court
+    delai : le filet n'est desarme que sur un wg0 remis (sinon le noeud resterait coupe sans retour automatique)."""
+    sleep = h / "bin" / "sleep"  # le stop deja en file s'execute pendant ce delai
+    sleep.write_text('#!/usr/bin/env bash\necho "sleep $*" >> "$H/calls.log"\ntouch "$H/wg_inactive"\n')
+    sleep.chmod(0o755)
+    if not start_ok:
+        (h / "start_fails").write_text("")
+    rc, _, err = run(h, "restore")
+    c = calls(h)
+    assert "alarm-chaos-cut.service" in c[0] and "alarm-chaos-cut.timer" in c[0], c  # coupure deja partie arretee
+    after = c[c.index(next(x for x in c if x.startswith("sleep "))) + 1:]
+    assert after[:3] == ["systemctl is-active --quiet wg-quick@wg0", "wg-quick down wg0", "systemctl start wg-quick@wg0"], c
+    if start_ok:
+        assert rc == 0, err
+        assert c[-1] == "systemctl stop alarm-chaos-restore.timer", c
+    else:
+        assert rc != 0
+        assert "systemctl stop alarm-chaos-restore.timer" not in c  # filet garde

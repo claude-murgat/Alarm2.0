@@ -51,7 +51,10 @@ case "${1:-}" in
     ;;
   restore)
     [[ $# -eq 1 ]] || usage
-    systemctl stop alarm-chaos-cut.timer 2>/dev/null || true
+    # Coupure deja declenchee (timer echu) : son service aussi, sinon son `stop wg0` passerait apres la remise.
+    systemctl stop alarm-chaos-cut.timer alarm-chaos-cut.service 2>/dev/null || true
+    /bin/sh -c "$UP" "$WG" wg0
+    sleep 2  # un stop wg0 deja en file s'execute ici : wg0 est reverifie avant de desarmer le filet
     /bin/sh -c "$UP" "$WG" wg0
     # wg0 remis : desarme le filet (sinon il tirerait a l'echeance, en plein test suivant) ; garde arme si wg0 KO (set -e).
     systemctl stop alarm-chaos-restore.timer 2>/dev/null || true
