@@ -30,7 +30,7 @@ STALE_AFTER = timedelta(minutes=30)  # runner arrete ou noeud jamais revenu : la
 
 class ChaosIn(BaseModel):
     nodes: str  # "node4,node5" ou "site:beaufort"
-    mode: Literal["stop", "netcut"] = "stop"  # netcut : execute par la PR 5 (le runner actuel le met en echec)
+    mode: Literal["stop", "netcut"] = "stop"  # netcut : coupure du tunnel wg0 du noeud (helper root alarm-chaos-net)
     minutes: int
 
 

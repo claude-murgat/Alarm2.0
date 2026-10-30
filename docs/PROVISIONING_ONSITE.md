@@ -167,15 +167,15 @@ correspondantes, `journalctl -u alarm-cd-pull*`. Voir
 [`infra/onsite/sudoers/alarm-cd`](../infra/onsite/sudoers/alarm-cd) pour la liste
 exacte.
 
-Déploiement (à faire **une fois par nœud onsite**, requiert sudo interactif) :
+Déploiement (depuis le 2026-10-30) : `sudo bash infra/onsite/install.sh` pose `/etc/sudoers.d/alarm-cd`
+(mode 440) après `visudo -c -q -f` sur le fichier du dépôt, et s'arrête sans rien poser si visudo
+refuse ; `alarm-host-sync` le relance à chaque commit `:stable`, donc la sudoers suit le dépôt.
+La même passe installe le helper root `/usr/local/bin/alarm-chaos-net` (coupure réseau contrôlée,
+INV-177/178, alias `ALARM_CHAOS`).
 ```bash
-# Ouvrir d'abord une 2e session SSH en filet de securite (cf §3.2), puis :
-sudo install -m 440 -o root -g root \
-  /opt/alarm/infra/onsite/sudoers/alarm-cd \
-  /etc/sudoers.d/alarm-cd
-sudo visudo -c    # doit afficher "parsed OK"
 # Test non-interactif depuis poste d'admin :
 ssh alarm@<noeud> "sudo -n systemctl status alarm-cd-pull.timer"
+ssh alarm@<noeud> "sudo -n /usr/local/bin/alarm-chaos-net cut 1"   # attendu : usage, exit 2
 ```
 
 > NODE3 cloud OVH a historiquement `(ALL) NOPASSWD: ALL` (heritage du provisioning

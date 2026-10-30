@@ -474,10 +474,10 @@
             <!-- INV-176..179 : panne controlee (arret reel d'un noeud T min, restauration armee sur la cible) -->
             <div class="card" id="chaosCard">
                 <h3>Panne contrôlée</h3>
-                <p style="color:#94a3b8;font-size:0.85rem;margin-bottom:10px">Arrête vraiment les conteneurs d'un nœud ou d'un site pendant T minutes, puis les relance (restauration armée sur la cible avant l'arrêt). Refusé pendant une alarme ou un autre test, si un nœud n'est pas sain, et toujours pour deux voteurs etcd (Izeron entier).</p>
+                <p style="color:#94a3b8;font-size:0.85rem;margin-bottom:10px">Arrête vraiment les conteneurs d'un nœud ou d'un site, ou coupe son tunnel wg0, pendant T minutes, puis restaure (restauration armée sur la cible avant d'agir). Refusé pendant une alarme ou un autre test, si un nœud n'est pas sain, toujours pour deux voteurs etcd (Izeron entier), et pour la coupure réseau de node3 (le runner y vit).</p>
                 <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
                     <div class="form-group"><label>Cible</label><select id="chaosTarget"></select></div>
-                    <div class="form-group"><label>Mode</label><select id="chaosMode"><option value="stop">Arrêt des conteneurs</option><option value="netcut" disabled>Coupure réseau (PR suivante)</option></select></div>
+                    <div class="form-group"><label>Mode</label><select id="chaosMode"><option value="stop">Arrêt des conteneurs</option><option value="netcut">Coupure réseau (wg0)</option></select></div>
                     <div class="form-group"><label>Minutes (1-10)</label><input type="number" id="chaosMinutes" min="1" max="10" value="2" style="width:80px"></div>
                     <button class="btn-danger" onclick="chaosStart()">&#x1F4A5; Lancer la panne</button>
                 </div>

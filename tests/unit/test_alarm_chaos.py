@@ -126,3 +126,33 @@ def test_ssh_failure_reports_failed_and_stops_nothing(h):
     kinds = [p["kind"] for p in posted(h)]
     assert kinds == ["started", "failed"]
     assert "node4" in posted(h)[1]["details"]["reason"]
+
+
+# INV-177/178 (mode netcut) : le runner ne touche pas a docker, il delegue au helper root de la cible
+# (sudo -n alarm-chaos-net cut T*60 : restauration armee sur place), puis attend seulement le retour.
+def test_netcut_node4_delegates_to_root_helper_no_docker(h):
+    (h / "next.json").write_text(json.dumps({**NEXT, "mode": "netcut", "minutes": 3}))
+    rc, err = run(h)
+    assert rc == 0, err
+    assert ssh_log(h) == ["10.99.0.4 sudo -n /usr/local/bin/alarm-chaos-net cut 180"]
+    kinds = [p["kind"] for p in posted(h)]
+    assert kinds == ["started", "restored"]
+    assert posted(h)[1]["details"]["leader_after"] == "node3"
+
+
+def test_netcut_site_cuts_each_node(h):
+    (h / "next.json").write_text(json.dumps({**NEXT, "mode": "netcut", "nodes": ["node4", "node5"], "minutes": 1}))
+    rc, err = run(h)
+    assert rc == 0, err
+    assert ssh_log(h) == ["10.99.0.4 sudo -n /usr/local/bin/alarm-chaos-net cut 60",
+                          "10.99.0.5 sudo -n /usr/local/bin/alarm-chaos-net cut 60"]
+    assert [p["kind"] for p in posted(h)] == ["started", "restored"]
+
+
+def test_netcut_node3_refused_by_runner_without_ssh(h):
+    (h / "next.json").write_text(json.dumps({**NEXT, "mode": "netcut", "nodes": ["node3"]}))
+    rc, _ = run(h)
+    assert rc == 1
+    assert ssh_log(h) == []
+    assert [p["kind"] for p in posted(h)] == ["started", "failed"]
+    assert "node3" in posted(h)[1]["details"]["reason"]

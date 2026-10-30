@@ -6,6 +6,7 @@
 #   - alarm-cd-pull.{service,timer,sh}            : sur les 3 noeuds (V1 PR 3)
 #   - alarm-cd-orchestrate.{service,timer,sh}     : sur NODE3 uniquement (V1.5 PR 9)
 #   - infra/onsite/sudoers/alarm-cd               : NOPASSWD chirurgical
+#   - alarm-chaos.{service,timer,sh} + alarm-chaos-net : panne controlee (INV-176..179)
 #
 # Pourquoi ce workflow existe :
 #   La PR initiale de fix `fix/cd-pull-lock-runtime-dir` corrige un bug ou le
@@ -34,8 +35,10 @@ on:
       - 'infra/onsite/systemd/alarm-cd-pull.*'
       - 'infra/onsite/systemd/alarm-cd-orchestrate.*'
       - 'scripts/alarm-chaos.sh'
+      - 'scripts/alarm-chaos-net.sh'
       - 'infra/onsite/systemd/alarm-chaos.*'
       - 'infra/onsite/sudoers/alarm-cd'
+      - 'infra/onsite/install.sh'
       - 'scripts/alarm-gateway-sync.sh'
       - 'infra/onsite/systemd/alarm-gateway-sync.*'
       - 'gateway/**'
@@ -48,8 +51,10 @@ on:
       - 'infra/onsite/systemd/alarm-cd-pull.*'
       - 'infra/onsite/systemd/alarm-cd-orchestrate.*'
       - 'scripts/alarm-chaos.sh'
+      - 'scripts/alarm-chaos-net.sh'
       - 'infra/onsite/systemd/alarm-chaos.*'
       - 'infra/onsite/sudoers/alarm-cd'
+      - 'infra/onsite/install.sh'
       - 'scripts/alarm-gateway-sync.sh'
       - 'infra/onsite/systemd/alarm-gateway-sync.*'
       - 'gateway/**'
@@ -394,6 +399,45 @@ jobs:
           test -f /var/lib/alarm/cd/orchestrate.lock
           test "$(stat -c '%U' /var/lib/alarm/cd/orchestrate.lock)" = alarm
           sudo journalctl -u alarm-chaos.service --no-pager | grep -q "aucun leader joignable"
+
+      - name: "Helper netcut (INV-178) : install par install.sh-like, sudoers lint, sudo -n autorise pour alarm"
+        # Le vrai install.sh exige un noeud complet ; on rejoue sa sequence pour la sudoers :
+        # visudo -c -f AVANT la pose en 440. Puis `alarm` doit pouvoir lancer le helper sans mot
+        # de passe (alias ALARM_CHAOS) : exit 2 = le helper lui-meme refuse l'argument, pas sudo.
+        run: |
+          bash -n scripts/alarm-chaos-net.sh
+          sudo install -m 755 scripts/alarm-chaos-net.sh /usr/local/bin/alarm-chaos-net
+          sudo visudo -c -q -f infra/onsite/sudoers/alarm-cd
+          sudo install -m 440 infra/onsite/sudoers/alarm-cd /etc/sudoers.d/alarm-cd
+          sudo visudo -c
+          set +e
+          sudo -u alarm sudo -n /usr/local/bin/alarm-chaos-net cut 30; rc=$?
+          set -e
+          test "$rc" -eq 2 || { echo "::error::attendu exit 2 (secondes invalides), obtenu $rc"; exit 1; }
+
+      - name: "Helper netcut : vrai systemd-run — restauration armee avant la coupure, unit factice coupee puis remise"
+        # Une unit factice joue wg-quick@wg0 (WG= du helper remplace par sed sur la copie installee).
+        # Apres cut 60 : les deux timers existent, la restauration d'abord ; ~8 s plus tard l'unit est
+        # arretee ; ~65 s plus tard elle est de nouveau active et les timers transitoires ont disparu.
+        run: |
+          sudo tee /etc/systemd/system/smoke-wg.service >/dev/null <<'UNIT'
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/bin/true
+          UNIT
+          sudo systemctl daemon-reload && sudo systemctl start smoke-wg.service
+          sudo sed -i 's/^WG=.*/WG=smoke-wg.service/' /usr/local/bin/alarm-chaos-net
+          sudo /usr/local/bin/alarm-chaos-net cut 60
+          systemctl list-timers --all --no-pager | tee /tmp/timers.txt
+          grep -q alarm-chaos-restore.timer /tmp/timers.txt && grep -q alarm-chaos-cut.timer /tmp/timers.txt
+          systemctl is-active smoke-wg.service
+          sleep 8
+          systemctl is-active smoke-wg.service && { echo "::error::l'unit factice devrait etre coupee"; exit 1; }
+          sleep 60
+          systemctl is-active smoke-wg.service || { echo "::error::l'unit factice n'a pas ete restauree par le timer"; exit 1; }
+          systemctl list-timers --all --no-pager | grep -q alarm-chaos- && { echo "::error::timers transitoires non collectes"; exit 1; }
+          sudo /usr/local/bin/alarm-chaos-net restore && systemctl is-active smoke-wg.service
 
   gateway-sync:
     # Issue #183 : deploiement auto du code gateway. Bout en bout sur une vraie

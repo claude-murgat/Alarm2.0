@@ -5,6 +5,7 @@
 #   - selection reseau auto              (alarm-modem-rat, CNMP=2 au boot)
 #   - watchdog modem                     (alarm-modem-watchdog, auto-récup + alerte email)
 #   - supervision disque                 (alarm-disk-check.timer, alerte email si fs plein)
+#   - panne controlee « coupure reseau » (alarm-chaos-net + sudoers alarm-cd, INV-177/178)
 #
 # Idempotent — sans danger à re-lancer. À exécuter en root depuis la racine d'un
 # checkout du repo (typiquement /opt/alarm qui est un checkout git) :
@@ -43,6 +44,13 @@ done
 cmp -s "$REPO/scripts/alarm-gateway-sync.sh" /usr/local/bin/alarm-gateway-sync || rm -f /var/lib/alarm/cd/gateway-image-id
 inst "$REPO/scripts/alarm-gateway-sync.sh" /usr/local/bin/alarm-gateway-sync 755
 inst "$REPO/scripts/alarm-host-sync.sh" /usr/local/bin/alarm-host-sync 755
+
+# 1c. Panne controlee, mode « coupure reseau » (INV-177/178) : helper root + sudoers qui autorise
+# `sudo -n alarm-chaos-net` au user alarm (appel SSH depuis le runner NODE3). Une sudoers cassee
+# bloque tout sudo sur le noeud : visudo d'abord, et on s'arrete sans rien poser s'il refuse.
+inst "$REPO/scripts/alarm-chaos-net.sh" /usr/local/bin/alarm-chaos-net 755
+visudo -c -q -f "$REPO/infra/onsite/sudoers/alarm-cd" || { say "ERREUR : infra/onsite/sudoers/alarm-cd refuse par visudo -c, sudoers NON posee"; exit 1; }
+inst "$REPO/infra/onsite/sudoers/alarm-cd" /etc/sudoers.d/alarm-cd 440
 
 # 2. Code gateway -> /opt/alarm-gateway/ + accès au port série (dialout)
 if [ "$AUTO" = 1 ]; then

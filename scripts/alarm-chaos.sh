@@ -1,15 +1,19 @@
 #!/bin/bash
 # alarm-chaos.sh — panne controlee (INV-176..179) : execute les demandes de l'onglet
-# Tests (POST /api/chaos) : arrete les conteneurs d'un noeud pendant T min, puis les
-# relance. Mode « stop » seulement ; « netcut » arrive avec la PR 5 (ici -> failed).
+# Tests (POST /api/chaos) pendant T min, puis restaure :
+#   stop   : arrete les conteneurs du noeud (docker stop), les relance a T ;
+#   netcut : coupe le tunnel wg0 du noeud via le helper root de la cible
+#            (sudo -n alarm-chaos-net cut T*60), qui le remet lui-meme a T.
 #
 # Tourne via alarm-chaos.timer (1 min) sur NODE3 cloud — le seul noeud qui voit
 # les 5 cibles via le mesh WG, comme alarm-cd-orchestrate. Livre desactive et
-# installe a la main (cf docs/CD_DESIGN.md « Panne controlee »).
+# installe a la main (cf docs/CD_DESIGN.md « Panne controlee »). D'ou netcut
+# refuse sur node3 (INV-177) : couper OVH rendrait ce runner aveugle.
 #
-# Garantie INV-178 : la restauration est ARMEE SUR LA CIBLE avant l'arret
-# (setsid nohup sh -c 'sleep T+60 ; docker start ...', detache de la session SSH) :
-# le noeud redemarre meme si ce runner, NODE3 ou le reseau disparaissent.
+# Garantie INV-178 : la restauration est ARMEE SUR LA CIBLE avant d'agir
+# (stop : setsid nohup sh -c 'sleep T+60 ; docker start ...' detache de la session
+# SSH ; netcut : timer systemd root alarm-chaos-restore pose par le helper) :
+# le noeud revient meme si ce runner, NODE3 ou le reseau disparaissent.
 #
 # Verrou partage avec l'orchestrateur CD (${STATE_DIR}/orchestrate.lock) : pas de
 # deploiement pendant un test, pas de test pendant un deploiement. Verrou pris ->
@@ -101,11 +105,18 @@ ssh_node() {  # $1 noeud, $2 commande distante
 
 STOPPED=()
 declare -A CIDS_OF
+restore_now() {  # $1 noeud : relance / reconnecte tout de suite (la restauration armee sur la cible reste en filet)
+  if [[ "$MODE" == netcut ]]; then
+    ssh_node "$1" "sudo -n /usr/local/bin/alarm-chaos-net restore"
+  else
+    ssh_node "$1" "docker start ${CIDS_OF[$1]}"
+  fi
+}
 fail() {
   log "ECHEC : $1"
   local n
-  for n in "${STOPPED[@]}"; do  # relance tout de suite ce qui est deja arrete (la restauration armee reste en filet)
-    ssh_node "$n" "docker start ${CIDS_OF[$n]}" || log "WARN : docker start $n KO (restauration armee sur le noeud dans $((T * MINUTE_SECONDS + 60)) s)"
+  for n in "${STOPPED[@]}"; do
+    restore_now "$n" || log "WARN : restauration immediate de $n KO (restauration armee sur le noeud en filet)"
   done
   post_event failed "{\"reason\":$(printf '%s' "$1" | python3 -c 'import sys, json; print(json.dumps(sys.stdin.read()))')}"
   exit 1
@@ -113,10 +124,19 @@ fail() {
 
 LEADER_BEFORE=$(cluster_leader)
 post_event started "{\"leader_before\":\"$LEADER_BEFORE\"}"
-if [[ "$MODE" != "stop" ]]; then fail "mode $MODE non implemente par ce runner (PR 5)"; fi
+if [[ "$MODE" != "stop" && "$MODE" != "netcut" ]]; then fail "mode $MODE inconnu de ce runner"; fi
+# INV-177 : le backend refuse deja netcut node3 ; ce runner vit sur node3, il refuse aussi.
+if [[ "$MODE" == netcut && ",$NODES," == *,node3,* ]]; then fail "coupure reseau de node3 refusee : ce runner y vit (INV-177)"; fi
 
 for n in ${NODES//,/ }; do
   [[ -n "${NODE_IP[$n]:-}" ]] || fail "noeud inconnu du runner : $n"
+  if [[ "$MODE" == netcut ]]; then
+    # INV-178 : le helper root arme sur la cible le timer de restauration AVANT la coupure (5 s plus tard).
+    ssh_node "$n" "sudo -n /usr/local/bin/alarm-chaos-net cut $((T * 60))" || fail "alarm-chaos-net cut KO sur $n : rien n'est coupe"
+    STOPPED+=("$n")
+    log "$n : wg0 coupe dans 5 s pendant $T min (restauration par timer sur le noeud)"
+    continue
+  fi
   cids=$(ssh_node "$n" "docker ps -q --filter label=com.docker.compose.project=$n" | xargs) || fail "ssh / docker ps KO sur $n"
   [[ -n "$cids" ]] || fail "aucun conteneur en cours sur $n"
   CIDS_OF[$n]=$cids
@@ -155,11 +175,13 @@ wait_healthy() {  # $1 noeud : /health 200 ET membre Patroni running|streaming, 
 }
 
 T0=$(date +%s)
+if [[ "$MODE" == stop ]]; then  # netcut : rien a faire a distance (tunnel coupe), le timer de la cible restaure
+  for n in "${STOPPED[@]}"; do
+    ssh_node "$n" "docker start ${CIDS_OF[$n]}" || fail "docker start KO sur $n (restauration armee sur le noeud en filet)"
+  done
+fi
 for n in "${STOPPED[@]}"; do
-  ssh_node "$n" "docker start ${CIDS_OF[$n]}" || fail "docker start KO sur $n (restauration armee sur le noeud en filet)"
-done
-for n in "${STOPPED[@]}"; do
-  wait_healthy "$n" || fail "$n pas sain ${HEALTHY_TIMEOUT} s apres docker start"
+  wait_healthy "$n" || fail "$n pas sain ${HEALTHY_TIMEOUT} s apres la fin de la panne"
 done
 RESTORE_SECONDS=$(( $(date +%s) - T0 ))
 post_event restored "{\"leader_after\":\"$(cluster_leader)\",\"restore_seconds\":$RESTORE_SECONDS}"
