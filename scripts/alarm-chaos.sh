@@ -7,9 +7,11 @@
 # les 5 cibles via le mesh WG, comme alarm-cd-orchestrate. Livre desactive et
 # installe a la main (cf docs/CD_DESIGN.md « Panne controlee »).
 #
-# Garantie INV-178 : la restauration est ARMEE SUR LA CIBLE avant l'arret
-# (setsid nohup sh -c 'sleep T+60 ; docker start ...', detache de la session SSH) :
+# Garantie INV-178 : avant tout arret, sur la cible, `docker update --restart=always`
+# (un reboot de l'hote relance les conteneurs) et restauration ARMEE (setsid nohup sh -c
+# 'sleep ... ; docker start ...', detachee de la session SSH, prouvee par ARMED puis pgrep) :
 # le noeud redemarre meme si ce runner, NODE3 ou le reseau disparaissent.
+# INV-177 : etcd de chaque voteur sonde juste avant d'agir.
 #
 # Verrou partage avec l'orchestrateur CD (${STATE_DIR}/orchestrate.lock) : pas de
 # deploiement pendant un test, pas de test pendant un deploiement. Verrou pris ->
@@ -65,8 +67,8 @@ cluster_json() {
 cluster_leader() {
   cluster_json | py "print(next((m['name'] for m in d.get('members', []) if m.get('role') == 'leader'), ''))" 2>/dev/null || true
 }
-member_state() {  # $1 = noeud
-  cluster_json | py "print(next((m.get('state', '') for m in d.get('members', []) if m.get('name') == '$1'), ''))" 2>/dev/null || true
+member_ok() {  # $1 = noeud : leader `running`, replica `streaming` (un replica `running` est bloque, INV-168)
+  [[ "$(cluster_json | py "m = next((m for m in d.get('members', []) if m.get('name') == '$1'), {}); print(m.get('state') == ('running' if m.get('role') == 'leader' else 'streaming'))" 2>/dev/null)" == "True" ]]
 }
 
 API_BASE=""
@@ -89,14 +91,18 @@ NEXT=$(api_call /internal/chaos/next) || { log "WARN : aucun leader joignable, G
 if [[ -z "$NEXT" || "$NEXT" == "null" ]]; then
   exit 0  # rien en attente : silencieux (un tick par minute)
 fi
-read -r ID MODE T NODES < <(printf '%s' "$NEXT" | py "print(d['id'], d['mode'], d['minutes'], ','.join(d['nodes']))")
+read -r ID MODE T NODES VOTERS < <(printf '%s' "$NEXT" | py "print(d['id'], d['mode'], d['minutes'], ','.join(d['nodes']), ','.join(d.get('voters', [])))")
 log "Panne controlee #$ID : $MODE $NODES pendant $T min"
 
 post_event() {  # $1 kind, $2 details JSON
   api_call "/internal/chaos/${ID}/events" "{\"kind\":\"$1\",\"details\":$2}" >/dev/null || log "WARN : POST $1 KO"
 }
-ssh_node() {  # $1 noeud, $2 commande distante
-  ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "alarm@${NODE_IP[$1]}" "$2"
+ssh_node() {  # $1 noeud, $2 commande distante. ServerAlive : un trou reseau en pleine commande echoue en ~15 s.
+  ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
+    -o StrictHostKeyChecking=accept-new "alarm@${NODE_IP[$1]}" "$2"
+}
+restore_node() {  # $1 noeud : relance ses conteneurs et remet la politique de compose
+  ssh_node "$1" "docker start ${CIDS_OF[$1]} && docker update --restart=unless-stopped ${CIDS_OF[$1]} >/dev/null"
 }
 
 STOPPED=()
@@ -104,8 +110,10 @@ declare -A CIDS_OF
 fail() {
   log "ECHEC : $1"
   local n
-  for n in "${STOPPED[@]}"; do  # relance tout de suite ce qui est deja arrete (la restauration armee reste en filet)
-    ssh_node "$n" "docker start ${CIDS_OF[$n]}" || log "WARN : docker start $n KO (restauration armee sur le noeud dans $((T * MINUTE_SECONDS + 60)) s)"
+  # Tout noeud liste, meme arrete a moitie ou seulement passe en restart=always (docker start est sans
+  # effet sur un conteneur en marche) ; la restauration armee reste en filet.
+  for n in "${!CIDS_OF[@]}"; do
+    restore_node "$n" || log "WARN : relance $n KO (restauration armee sur le noeud a l'echeance + 60 s)"
   done
   post_event failed "{\"reason\":$(printf '%s' "$1" | python3 -c 'import sys, json; print(json.dumps(sys.stdin.read()))')}"
   exit 1
@@ -115,38 +123,59 @@ LEADER_BEFORE=$(cluster_leader)
 post_event started "{\"leader_before\":\"$LEADER_BEFORE\"}"
 if [[ "$MODE" != "stop" ]]; then fail "mode $MODE non implemente par ce runner (PR 5)"; fi
 
+# INV-177 : etat REEL d'etcd juste avant d'agir (un etcd deja tombe + un voteur arrete = quorum perdu).
+[[ -n "$VOTERS" ]] || fail "voteurs etcd absents de /internal/chaos/next : rien n'est arrete"
+for v in ${VOTERS//,/ }; do
+  [[ -n "${NODE_IP[$v]:-}" ]] || fail "voteur etcd inconnu du runner : $v, rien n'est arrete"
+  curl -sf --max-time 3 "http://${NODE_IP[$v]}:2379/health" >/dev/null \
+    || fail "etcd de $v injoignable ou pas sain : quorum non garanti, rien n'est arrete"
+done
+
+# Echeance absolue : la fenetre finit a DEADLINE quelle que soit la duree des appels ; les filets tirent a DEADLINE + 60 s.
+DEADLINE=$(( $(date +%s) + T * MINUTE_SECONDS ))
 for n in ${NODES//,/ }; do
   [[ -n "${NODE_IP[$n]:-}" ]] || fail "noeud inconnu du runner : $n"
   cids=$(ssh_node "$n" "docker ps -q --filter label=com.docker.compose.project=$n" | xargs) || fail "ssh / docker ps KO sur $n"
   [[ -n "$cids" ]] || fail "aucun conteneur en cours sur $n"
   CIDS_OF[$n]=$cids
-  # INV-178 : armer la restauration SUR LA CIBLE avant d'agir, detachee de la session SSH.
-  ssh_node "$n" "setsid nohup sh -c 'sleep $((T * MINUTE_SECONDS + 60)); docker start $cids' >/dev/null 2>&1 </dev/null &" \
-    || fail "armement de la restauration KO sur $n : rien n'est arrete"
+  # INV-178, avant tout arret : restart=always (Docker relance au demarrage du daemon un conteneur « always »
+  # meme arrete a la main, pas un « unless-stopped ») puis restauration armee SUR LA CIBLE, detachee de la
+  # session SSH ; ARMED n'est imprime que si elle tourne encore 1 s apres son lancement.
+  armed=$(ssh_node "$n" "docker update --restart=always $cids >/dev/null || exit 1; setsid nohup sh -c 'sleep $(( DEADLINE + 60 - $(date +%s) )); docker start $cids; docker update --restart=unless-stopped $cids' alarm-chaos-$ID >/dev/null 2>&1 </dev/null & sleep 1; kill -0 \$! && echo ARMED") || true
+  [[ "$armed" == "ARMED" ]] || fail "armement de la restauration KO sur $n : rien n'est arrete sur ce noeud"
+  # Nouvelle session : le filet a survecu a la fin de la premiere (systemd-logind KillUserProcesses=yes le tuerait).
+  ssh_node "$n" "pgrep -f '[a]larm-chaos-$ID\$' >/dev/null" \
+    || fail "restauration armee disparue apres la session SSH sur $n (KillUserProcesses ?) : rien n'est arrete sur ce noeud"
   ssh_node "$n" "docker stop $cids" || fail "docker stop KO sur $n"
   STOPPED+=("$n")
   log "$n arrete : $cids"
 done
 
-# Pendant la panne : suivi du leader Patroni toutes les 10 s.
+# Pendant la panne, toutes les 10 s : leader Patroni (leader_changed) et arret anticipe (annulation admin, alarme).
 POLL=$(( MINUTE_SECONDS < 10 ? MINUTE_SECONDS : 10 ))
 LEADER=$LEADER_BEFORE
-for (( elapsed = 0; elapsed < T * MINUTE_SECONDS; elapsed += POLL )); do
-  sleep "$POLL"
+while :; do
+  left=$(( DEADLINE - $(date +%s) ))
+  (( left > 0 )) || break
+  sleep $(( left < POLL ? left : POLL ))
   now_leader=$(cluster_leader)
   if [[ -n "$now_leader" && "$now_leader" != "$LEADER" ]]; then
     log "leader Patroni : ${LEADER:-aucun} -> $now_leader"
     post_event leader_changed "{\"from\":\"$LEADER\",\"to\":\"$now_leader\"}"
     LEADER=$now_leader
   fi
+  abort=$(api_call "/internal/chaos/${ID}/abort" | py "print(json.dumps(d['abort']) if d.get('abort') else '')" 2>/dev/null) || true
+  if [[ -n "$abort" ]]; then
+    log "Arret anticipe : $abort"
+    post_event early_restore "{\"reason\":$abort}"
+    break
+  fi
 done
 
-wait_healthy() {  # $1 noeud : /health 200 ET membre Patroni running|streaming, en <= HEALTHY_TIMEOUT s
-  local deadline=$(( $(date +%s) + HEALTHY_TIMEOUT )) state
+wait_healthy() {  # $1 noeud : /health 200 ET membre Patroni sain (member_ok), en <= HEALTHY_TIMEOUT s
+  local deadline=$(( $(date +%s) + HEALTHY_TIMEOUT ))
   while (( $(date +%s) < deadline )); do
-    state=$(member_state "$1")
-    if curl -fsS --max-time 3 "http://${NODE_IP[$1]}:8000/health" >/dev/null 2>&1 \
-       && [[ "$state" == "running" || "$state" == "streaming" ]]; then
+    if curl -fsS --max-time 3 "http://${NODE_IP[$1]}:8000/health" >/dev/null 2>&1 && member_ok "$1"; then
       return 0
     fi
     sleep 5
@@ -156,7 +185,7 @@ wait_healthy() {  # $1 noeud : /health 200 ET membre Patroni running|streaming, 
 
 T0=$(date +%s)
 for n in "${STOPPED[@]}"; do
-  ssh_node "$n" "docker start ${CIDS_OF[$n]}" || fail "docker start KO sur $n (restauration armee sur le noeud en filet)"
+  restore_node "$n" || fail "docker start KO sur $n (restauration armee sur le noeud en filet)"
 done
 for n in "${STOPPED[@]}"; do
   wait_healthy "$n" || fail "$n pas sain ${HEALTHY_TIMEOUT} s apres docker start"

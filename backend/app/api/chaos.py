@@ -3,29 +3,30 @@
 - POST / GET / DELETE /api/chaos : admin (les ecritures web sont relayees au leader par replica_proxy).
 - GET /internal/chaos/next, POST /internal/chaos/{id}/events : runner, cle passerelle, leader seul
   (503 « replica », motif de api/deployments.py ; /internal/* n'est pas relaye, le runner decouvre le leader).
+- GET /internal/chaos/{id}/abort : runner pendant la fenetre (lecture seule) — restaurer tout de suite ?
 """
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_admin
 from ..database import get_db
 from ..events import log_event
 from ..leader_election import is_leader
-from ..logic.chaos import check_request, expand_target
+from ..logic.chaos import check_request, expand_target, is_stale
 from ..models import Alarm, AuditEvent, ChaosRequest, User
 from ..quorum_monitor import _patroni_cluster
-from ..sites import node_locations
+from ..sites import etcd_voters, node_locations
 from .deployments import _check_gateway_key
 
 router = APIRouter(tags=["chaos"])
 UNFINISHED = ("pending", "claimed", "running")
 ALARM_BUSY = ("active", "escalated", "acknowledged")
-STALE_AFTER = timedelta(minutes=30)  # runner arrete ou noeud jamais revenu : la demande est perdue
 
 
 class ChaosIn(BaseModel):
@@ -35,7 +36,7 @@ class ChaosIn(BaseModel):
 
 
 class ChaosEventIn(BaseModel):
-    kind: Literal["started", "leader_changed", "restored", "failed"]
+    kind: Literal["started", "leader_changed", "early_restore", "restored", "failed"]
     details: dict = {}
     ts: Optional[datetime] = None
 
@@ -47,9 +48,12 @@ def _cluster():
         return None
 
 
+def _busy_alarms(db: Session) -> int:
+    return db.query(Alarm).filter(Alarm.status.in_(ALARM_BUSY)).count()
+
+
 def _refusal(db: Session, nodes, mode, minutes, pending):
-    active = db.query(Alarm).filter(Alarm.status.in_(ALARM_BUSY)).count()
-    return check_request(nodes, mode, minutes, _cluster(), node_locations(db), active, pending)
+    return check_request(nodes, mode, minutes, _cluster(), node_locations(db), etcd_voters(db), _busy_alarms(db), pending)
 
 
 def _append(row: ChaosRequest, kind: str, details: dict, ts: Optional[datetime] = None) -> datetime:
@@ -67,9 +71,13 @@ def _fail(row: ChaosRequest, reason: str):
 
 
 def _expire_stale(db: Session):
-    limit = datetime.utcnow() - STALE_AFTER
-    for row in db.query(ChaosRequest).filter(ChaosRequest.status.in_(UNFINISHED), ChaosRequest.created_at < limit):
-        _fail(row, "timeout")
+    """Ecrit : leader seul (le PG d'un replica est en lecture seule), jamais depuis un GET (INV-176)."""
+    if not is_leader.is_set():
+        return
+    now = datetime.utcnow()
+    for row in db.query(ChaosRequest).filter(ChaosRequest.status.in_(UNFINISHED)):
+        if is_stale(row.status, row.minutes, row.created_at, row.claimed_at, row.started_at, now):
+            _fail(row, "timeout")
     db.commit()
 
 
@@ -90,7 +98,7 @@ def _out(row: ChaosRequest, alerts: Optional[list] = None) -> dict:
     out = {"id": row.id, "created_at": iso(row.created_at), "requested_by": row.requested_by,
            "nodes": row.nodes.split(","), "mode": row.mode, "minutes": row.minutes, "status": row.status,
            "claimed_at": iso(row.claimed_at), "started_at": iso(row.started_at), "restored_at": iso(row.restored_at),
-           "events": json.loads(row.events or "[]")}
+           "cancel_requested": bool(row.cancel_requested), "events": json.loads(row.events or "[]")}
     if alerts is not None:
         out["alerts"] = alerts
     return out
@@ -118,7 +126,11 @@ def request_chaos(body: ChaosIn, admin: User = Depends(get_current_admin), db: S
         raise HTTPException(status_code=409, detail=reason)
     row = ChaosRequest(requested_by=admin.id, nodes=",".join(nodes), mode=body.mode, minutes=body.minutes)
     db.add(row)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:  # ux_chaos_one_unfinished : un POST simultane a ecrit le sien d'abord
+        db.rollback()
+        raise HTTPException(status_code=409, detail="un test est déjà en cours")
     db.refresh(row)
     log_event("chaos_requested", chaos_id=row.id, nodes=row.nodes, mode=row.mode, minutes=row.minutes, by_user=admin.id)
     return _out(row)
@@ -126,19 +138,25 @@ def request_chaos(body: ChaosIn, admin: User = Depends(get_current_admin), db: S
 
 @router.get("/api/chaos")
 def history(_admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    _expire_stale(db)
-    rows = db.query(ChaosRequest).order_by(ChaosRequest.id.desc()).limit(10).all()
+    rows =db.query(ChaosRequest).order_by(ChaosRequest.id.desc()).limit(10).all()
     return [_out(r, _alerts(db, r)) for r in rows]
 
 
 @router.delete("/api/chaos/{chaos_id}")
 def cancel(chaos_id: int, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """pending -> cancelled ; claimed/running -> cancel_requested (« Restaurer maintenant », lu par le runner).
+    UPDATE conditionnels : contre un claim simultane, un seul des deux gagne."""
     row = _get(db, chaos_id)
-    if row.status != "pending":
+    q = db.query(ChaosRequest).filter(ChaosRequest.id == chaos_id)
+    if q.filter(ChaosRequest.status == "pending").update({"status": "cancelled"}, synchronize_session=False):
+        was = "pending"
+    elif q.filter(ChaosRequest.status.in_(("claimed", "running"))).update({"cancel_requested": True}, synchronize_session=False):
+        was = None
+    else:
         raise HTTPException(status_code=409, detail=f"test {row.status} : annulation impossible")
-    row.status = "cancelled"
     db.commit()
-    log_event("chaos_cancelled", chaos_id=row.id, nodes=row.nodes, by_user=admin.id)
+    db.refresh(row)
+    log_event("chaos_cancelled", chaos_id=row.id, nodes=row.nodes, status=was or row.status, by_user=admin.id)
     return _out(row)
 
 
@@ -155,9 +173,22 @@ def next_request(_: None = Depends(_check_gateway_key), db: Session = Depends(ge
         _fail(row, reason)
         db.commit()
         return None
-    row.status, row.claimed_at = "claimed", datetime.utcnow()
+    # Conditionnel : une demande annulee pendant le controle n'est jamais reclamee.
+    claimed = (db.query(ChaosRequest).filter(ChaosRequest.id == row.id, ChaosRequest.status == "pending")
+               .update({"status": "claimed", "claimed_at": datetime.utcnow()}, synchronize_session=False))
     db.commit()
-    return _out(row)
+    if not claimed:
+        return None
+    db.refresh(row)
+    return {**_out(row), "voters": etcd_voters(db)}  # sonde etcd du runner (INV-177)
+
+
+@router.get("/internal/chaos/{chaos_id}/abort")
+def abort(chaos_id: int, _: None = Depends(_check_gateway_key), db: Session = Depends(get_db)):
+    """Runner, toutes les 10 s pendant la fenetre : raison de restaurer tout de suite, sinon null."""
+    if _get(db, chaos_id).cancel_requested:
+        return {"abort": "annulé par l'admin"}
+    return {"abort": "alarme en cours" if _busy_alarms(db) else None}
 
 
 @router.post("/internal/chaos/{chaos_id}/events")

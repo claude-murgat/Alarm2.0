@@ -282,9 +282,11 @@ class ChaosRequest(Base):
     executee par scripts/alarm-chaos.sh sur NODE3 (GET /internal/chaos/next, POST .../events).
 
     status : pending (en attente du runner) -> claimed (reclamee, garde-fous rejoues) -> running
-    (conteneurs arretes) -> restored | failed ; cancelled (DELETE sur une pending). `events` :
-    JSON [{kind, ts, details}] (started, leader_changed, restored, failed). Une demande non
-    terminee depuis 30 min passe failed (timeout).
+    (conteneurs arretes) -> restored | failed ; cancelled (DELETE sur une pending). DELETE sur une
+    claimed/running -> cancel_requested (restauration immediate par le runner). `events` : JSON
+    [{kind, ts, details}] (started, leader_changed, early_restore, restored, failed). Expiration :
+    logic/chaos.py is_stale. Index unique partiel ux_chaos_one_unfinished (database.py) : une seule
+    demande pending/claimed/running.
     """
     __tablename__ = "chaos_requests"
     id = Column(Integer, primary_key=True, index=True)
@@ -297,4 +299,5 @@ class ChaosRequest(Base):
     claimed_at = Column(DateTime, nullable=True)
     started_at = Column(DateTime, nullable=True)
     restored_at = Column(DateTime, nullable=True)
+    cancel_requested = Column(Boolean, nullable=False, default=False)
     events = Column(String, nullable=False, default="[]")  # JSON

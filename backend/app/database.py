@@ -494,15 +494,31 @@ def _migrate_refresh_tokens(conn, is_sqlite: bool):
 
 
 def _migrate_chaos_requests(conn, is_sqlite: bool):
-    """INV-179 : cree la table chaos_requests (panne controlee). Cf models.ChaosRequest."""
+    """INV-176/179 : table chaos_requests (panne controlee, cf models.ChaosRequest), colonne
+    cancel_requested et index unique partiel ux_chaos_one_unfinished (une seule demande non terminee)."""
     if is_sqlite:
         exists = conn.execute(
             text("SELECT name FROM sqlite_master WHERE type='table' AND name='chaos_requests'")
         ).scalar()
     else:
         exists = conn.execute(text("SELECT to_regclass('public.chaos_requests')")).scalar()
-    if exists:
-        return
+    if not exists:
+        _create_chaos_requests(conn, is_sqlite)
+    elif is_sqlite:
+        cols = [row[1] for row in conn.execute(text("PRAGMA table_info(chaos_requests)")).fetchall()]
+        if "cancel_requested" not in cols:
+            conn.execute(text("ALTER TABLE chaos_requests ADD COLUMN cancel_requested BOOLEAN NOT NULL DEFAULT FALSE"))
+    else:
+        conn.execute(text("ALTER TABLE chaos_requests ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT FALSE"))
+    conn.execute(text(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_chaos_one_unfinished ON chaos_requests ((1)) "
+        "WHERE status IN ('pending', 'claimed', 'running')"
+    ))
+    conn.commit()
+    logger.info("Migration: chaos_requests verifiee (INV-176/179)")
+
+
+def _create_chaos_requests(conn, is_sqlite: bool):
     pk = "INTEGER PRIMARY KEY AUTOINCREMENT" if is_sqlite else "SERIAL PRIMARY KEY"
     conn.execute(text(f"""
         CREATE TABLE chaos_requests (
@@ -516,8 +532,7 @@ def _migrate_chaos_requests(conn, is_sqlite: bool):
             claimed_at TIMESTAMP,
             started_at TIMESTAMP,
             restored_at TIMESTAMP,
+            cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
             events VARCHAR NOT NULL DEFAULT '[]'
         )
     """))
-    conn.commit()
-    logger.info("Migration: table chaos_requests creee (INV-179)")
