@@ -20,6 +20,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_user
+from .. import quorum_monitor
 from ..clock import now as clock_now
 from ..database import get_db
 from ..logic.modem_signal import modem_signal
@@ -100,17 +101,8 @@ def peer_health():
 
     peers_state = {url: _probe_peer(url) for url in peer_urls}
 
-    # etcd_quorum_seen : lecture best-effort via le module leader_election.
-    # Si on est leader OU si on tourne et qu'on a une DB up, on a quorum.
-    try:
-        from ..leader_election import is_leader
-        # is_leader.is_set() vrai = primary, mais quorum existe meme cote replica.
-        # Pour V1 on simplifie : si le backend tourne et /health est OK, on dit
-        # quorum_seen=true. Le detecteur croisera avec ses propres etcdctl en
-        # cas de doute (cf §7 Cond 1b durcie).
-        quorum = True
-    except Exception:
-        quorum = False
+    # INV-171 : leader vu par le Patroni local (quorum_monitor, tick 60 s) ; plus de true cable.
+    quorum = quorum_monitor.cluster_has_leader
 
     return PeerHealthResponse(
         self_node=self_node,

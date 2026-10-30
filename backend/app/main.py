@@ -24,6 +24,7 @@ from .api.alarms_internal import router as alarms_internal_router
 from .api.audit import router as audit_router
 from .api.connectivity import router as connectivity_router
 from .escalation import escalation_loop
+from . import quorum_monitor
 from .quorum_monitor import quorum_monitor_loop
 from .watchdog import watchdog_loop
 from .leader_election import leader_election_loop, is_leader
@@ -318,6 +319,9 @@ async def health():
         "db": db_ok,
         "escalation_loop": loop_ok,
         "role": role,
+        # INV-171 : leader local ou vu par Patroni. HTTP 200 conserve : un 503 ferait reculer le
+        # canary et peer-health a tort (le probleme est Patroni/etcd, pas l'image deployee).
+        "cluster_writable": is_leader.is_set() or quorum_monitor.cluster_has_leader,
         "test_endpoints_enabled": ENABLE_TEST_ENDPOINTS,
         "secret_key_default": secret_key_default,
         "version": os.getenv("APP_VERSION") or commit[:7],

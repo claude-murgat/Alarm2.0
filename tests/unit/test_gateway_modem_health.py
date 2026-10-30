@@ -146,3 +146,32 @@ class TestPcmRebootAllowed:
     def test_timestamp_in_the_future_does_not_block_forever(self):
         # Horloge recalee en arriere : la trace ne doit pas bloquer l'auto-reparation des heures.
         assert _mh.pcm_reboot_allowed(self.NOW + 3600, self.NOW) is True
+
+
+class TestBackendsDown:
+    """INV-171 : la passerelle alerte quand aucun backend ne peut ecrire. /health repond 200 meme
+    sans leader (un 503 ferait reculer le canary a tort) : c'est cluster_writable qui compte.
+    Entree : par noeud, (code HTTP, corps JSON) ou None si injoignable."""
+
+    OK = (200, {"status": "ok", "role": "secondary", "cluster_writable": True})
+    READ_ONLY = (200, {"status": "ok", "role": "secondary", "cluster_writable": False})
+    DEGRADED = (503, {"status": "degraded", "role": "secondary", "cluster_writable": True})
+    OLD = (200, {"status": "ok", "role": "secondary"})  # backend d'avant INV-171
+
+    def test_one_writable_backend_is_enough(self):
+        assert _mh.backends_down([None, self.READ_ONLY, self.OK]) is False
+
+    def test_all_unreachable(self):
+        assert _mh.backends_down([None, None, None]) is True
+
+    def test_no_backend_configured(self):
+        assert _mh.backends_down([]) is True
+
+    def test_all_read_only_means_no_leader(self):
+        assert _mh.backends_down([self.READ_ONLY, self.READ_ONLY, None]) is True
+
+    def test_503_does_not_count_as_up(self):
+        assert _mh.backends_down([self.DEGRADED, None]) is True
+
+    def test_old_backend_without_the_field_counts_as_writable(self):
+        assert _mh.backends_down([self.OLD]) is False

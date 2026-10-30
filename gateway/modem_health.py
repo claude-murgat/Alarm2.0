@@ -64,3 +64,11 @@ def pcm_reboot_allowed(last_reboot_at: float | None, now: float) -> bool:
     """INV-169 : redemarrage permis si aucun dans les 30 dernieres minutes. Une trace
     dans le futur (horloge recalee en arriere) ne bloque pas."""
     return last_reboot_at is None or not 0 <= now - last_reboot_at < PCM_REBOOT_MIN_INTERVAL_S
+
+
+def backends_down(healths) -> bool:
+    """INV-171 : aucun backend ne peut ecrire. `healths` : par noeud, (code HTTP, corps de /health) ou
+    None si injoignable. /health repond 200 meme sans leader (un 503 ferait reculer le canary) :
+    c'est `cluster_writable` qui compte ; absent = backend d'avant, compte inscriptible."""
+    return not any(h is not None and h[0] == 200 and h[1].get("cluster_writable") is not False
+                   for h in healths)

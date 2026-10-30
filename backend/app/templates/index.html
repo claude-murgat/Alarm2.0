@@ -648,8 +648,11 @@
         async function loadFooter(h) {
             let c = {};
             try { c = await (await fetch(API + '/api/cluster')).json(); } catch (_) {}
-            document.getElementById('footer').textContent = `Version ${h.version || '?'} · nœud ${c.local_node || '?'}`
+            const footer = document.getElementById('footer');
+            footer.textContent = `Version ${h.version || '?'} · nœud ${c.local_node || '?'}`
                 + (c.local_location ? ` (${place(c.local_location)})` : '');
+            // INV-171 : ce nœud ne voit aucun leader -> rien ne peut être écrit
+            if (h.cluster_writable === false) footer.insertAdjacentHTML('beforeend', '<span style="color:#ef4444"> · CLUSTER EN LECTURE SEULE</span>');
         }
         detectPrimary();
 
@@ -1305,7 +1308,12 @@
                 const data = await api('/api/cluster');
                 const q = data.quorum || {};
                 const banner = document.getElementById('quorumBanner');
-                if (q.has_quorum) {
+                const leader = (data.members || []).some(m => m.role === 'leader' || m.role === 'master');
+                if (!leader) {  // INV-171 : sans leader, rien ne peut être écrit, quorum ou pas
+                    banner.textContent = `AUCUN LEADER (${q.healthy}/${q.total})`;
+                    banner.style.background = '#ef444433';
+                    banner.style.color = '#ef4444';
+                } else if (q.has_quorum) {
                     banner.textContent = `Quorum OK (${q.healthy}/${q.total})`;
                     banner.style.background = '#22c55e33';
                     banner.style.color = '#22c55e';

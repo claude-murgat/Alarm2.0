@@ -27,6 +27,10 @@ sans démarrer la background task (tier 2 avec snapshot injecté).
 
 3. INV-168 : même tick, `_run_replica_reinit_check` re-clone un replica Patroni bloqué
    (logique pure `logic/replica_reinit.py`).
+
+4. INV-170 : même tick, sur TOUS les nœuds (avant le gate leader), `_run_leader_loss_check`
+   alerte quand plus aucun leader n'est vu (logique pure `logic/leader_loss.py`) et tient
+   `cluster_has_leader`, lu par `/health.cluster_writable` (INV-171).
 """
 import asyncio
 import json
@@ -43,6 +47,7 @@ from .database import SessionLocal
 from .email_service import send_alert_email
 from .events import log_event
 from .leader_election import is_leader
+from .logic.leader_loss import LeaderLossState, has_leader, next_state
 from .logic.quorum_detection import (
     ClusterSnapshot,
     QUORUM_LOSS_THRESHOLD,
@@ -53,6 +58,7 @@ from .logic.quorum_detection import (
 )
 from .logic.replica_reinit import decide_reinit, reinit_after, reinit_url
 from .models import QuorumStateRow, SystemConfig
+from .sites import node_locations
 
 
 logger = logging.getLogger(__name__)
@@ -296,6 +302,60 @@ def _run_replica_reinit_check(now: datetime) -> None:
         f"Vérifier dans l'onglet Cluster qu'il repasse en « streaming »."))
 
 
+# INV-170 : vu par CE noeud (leader ou non). True tant qu'aucun tick n'a eu lieu : un backend qui
+# demarre ne doit pas se declarer en lecture seule avant d'avoir regarde. Lu par /health (INV-171).
+cluster_has_leader = True
+_leader_loss = LeaderLossState()
+
+
+def _run_leader_loss_check(now: datetime) -> None:
+    """INV-170 : un tick (bloquant, via `asyncio.to_thread`, sur TOUS les noeuds, avant le gate leader).
+
+    Plus aucun leader vu par le Patroni local pendant > 3 min -> un email par episode, depuis chaque
+    noeud qui le constate (sans leader, aucun ne peut se coordonner avec les autres). Etat en memoire :
+    un redemarrage repart de zero. L'audit peut echouer sur un replica (lecture seule) : jamais d'exception.
+    """
+    global cluster_has_leader, _leader_loss
+    try:
+        cluster = _patroni_cluster()
+    except Exception as e:
+        logger.warning("INV-170 : Patroni injoignable depuis ce noeud (%s)", e)
+        cluster = None
+    cluster_has_leader = has_leader(cluster)
+    # Primary ici = il y a un leader, meme si le Patroni local ne repond plus.
+    _leader_loss, email_due = next_state(_leader_loss, cluster_has_leader or is_leader.is_set(), now)
+    if not email_due:
+        return
+    node = os.getenv("NODE_NAME", "unknown")
+    alert_email, location = None, None
+    try:
+        db = SessionLocal()
+        try:
+            alert_email = _get_alert_email(db)
+            location = node_locations(db).get(node)
+        finally:
+            db.close()
+    except Exception:
+        logger.exception("INV-170 : SystemConfig illisible, destinataire par défaut")
+    since = _leader_loss.since.isoformat()
+    logger.critical("INV-170 : aucun leader dans le cluster depuis %s (vu de %s)", since, node)
+    log_event("cluster_leader_lost", node=node, since=since)
+    send_alert_email(
+        subject=f"[Alarme Murgat] Aucun leader dans le cluster — vu de {node} ({location or 'lieu inconnu'})",
+        body=(
+            f"Vu de {node} ({location or 'lieu inconnu'}) : aucun membre du cluster Patroni n'est leader "
+            f"depuis {since} (plus de 3 minutes).\n\n"
+            f"Aucune écriture n'est possible : les alarmes ne peuvent plus être créées, escaladées ni "
+            f"acquittées, et les passerelles ne peuvent plus récupérer les SMS ni les appels à passer.\n\n"
+            f"Chaque nœud qui constate la situation envoie son propre email (sans leader, les nœuds ne "
+            f"peuvent pas se coordonner).\n\n"
+            f"Intervention manuelle requise sur Patroni / etcd : patronictl list, vérifier que 2 voteurs "
+            f"etcd sur 3 (node1, node2, node3) sont joignables."
+        ),
+        to=alert_email or "direction_technique@charlesmurgat.com",
+    )
+
+
 async def quorum_monitor_loop() -> None:
     """Background task INV-085 : tick toutes les `_QUORUM_TICK_SECONDS` secondes.
 
@@ -320,6 +380,12 @@ async def quorum_monitor_loop() -> None:
         except asyncio.CancelledError:
             logger.info("quorum_monitor_loop annulé (shutdown)")
             raise
+
+        # INV-170 : sur tous les noeuds, avant le gate leader. Horloge reelle (cf INV-168).
+        try:
+            await asyncio.to_thread(_run_leader_loss_check, datetime.now(timezone.utc))
+        except Exception:
+            logger.exception("INV-170 : erreur dans le contrôle du leader (continue)")
 
         if not is_leader.is_set():
             # Pas leader → on ne tient même pas d'historique (sera vide
