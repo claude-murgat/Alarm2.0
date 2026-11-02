@@ -6,6 +6,7 @@
 #   - watchdog modem                     (alarm-modem-watchdog, auto-récup + alerte email)
 #   - supervision disque                 (alarm-disk-check.timer, alerte email si fs plein)
 #   - panne controlee « coupure reseau » (alarm-chaos-net + sudoers alarm-cd, INV-177/178)
+#   - DNS de secours                     (resolveur public apres celui du LAN, INV-181)
 #
 # Idempotent — sans danger à re-lancer. À exécuter en root depuis la racine d'un
 # checkout du repo (typiquement /opt/alarm qui est un checkout git) :
@@ -59,6 +60,11 @@ else
   say "ATTENTION : infra/onsite/sudoers/alarm-cd refuse par visudo -c : sudoers NON posee (l'ancienne reste), suite de l'installation"
 fi
 rm -f "$SUDOERS_TMP"
+
+# 1d. DNS de secours (INV-181) : un resolveur public apres celui du LAN. Sans lui, un noeud passe en
+# 4G (box morte) garde le VPN mais perd registre, GitHub et SMTP (alarm-1, 2026-11-02). Un echec
+# ici ne doit pas bloquer le reste de l'installation.
+bash "$REPO/scripts/dns-fallback.sh" || say "ATTENTION : dns-fallback.sh en echec, DNS de secours non pose"
 
 # 2. Code gateway -> /opt/alarm-gateway/ + accès au port série (dialout)
 if [ "$AUTO" = 1 ]; then
