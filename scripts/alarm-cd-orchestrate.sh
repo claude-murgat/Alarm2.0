@@ -20,6 +20,9 @@
 #   - Noeud injoignable (SSH) -> WARN, reporte au prochain passage, la chaine
 #     CONTINUE avec les suivants. Un votant etcd (1, 2, 3) n'est redemarre que
 #     si les 3 votants repondent (quorum) ; sinon seuls 4/5 sont deployes.
+#   - Canary exit 3 (prerequis KO : SSH, registre/DNS injoignable depuis la cible,
+#     rien n'est touche) -> reporte comme un injoignable ; un votant reporte
+#     reporte aussi les votants suivants du passage.
 #   - Etat global /var/lib/alarm/cd/orchestrate.state : <digest>\t<outcome>\t<ts>,
 #     outcome = success (5 noeuds a jour) | partial (noeuds en attente, repris
 #     au tick suivant, SANS cooldown) | failure (un canary a fail).
@@ -231,7 +234,7 @@ for NODE in "${TODO[@]}"; do
     continue
   fi
   if (( NODE <= 3 && ! VOTERS_OK )); then
-    log "WARN : node${NODE} (${NODE_SITE[$NODE]}, votant) reporte au prochain passage : un votant etcd est injoignable"
+    log "WARN : node${NODE} (${NODE_SITE[$NODE]}, votant) reporte au prochain passage : un votant etcd est injoignable ou pas pret"
     PENDING+=("$NODE")
     continue
   fi
@@ -250,6 +253,15 @@ for NODE in "${TODO[@]}"; do
     --soak "$SOAK" \
     --api-base "$API_BASE" \
     --gateway-key "$GATEWAY_KEY" || rc=$?
+  if (( rc == 3 )); then
+    # Prerequis du canary KO (SSH, registre/DNS injoignable depuis la cible), rien n'est touche :
+    # pas une image cassee, on reporte (2026-11-02 : alarm-1 en 4G sans DNS bloquait Izeron 1 h).
+    log "WARN : node${NODE} (${NODE_SITE[$NODE]}) pas pret : reporte au prochain passage"
+    PENDING+=("$NODE")
+    # Un votant pas pret est peut-etre tombe depuis le preflight : aucun autre votant (INV-090).
+    if (( NODE <= 3 )); then VOTERS_OK=0; fi
+    continue
+  fi
   if (( rc != 0 )); then
     log "ERREUR : canary node${NODE} a fail (exit $rc). Halt chaine."
     log "  -> les noeuds restants de ${TODO[*]} (apres node${NODE}) NE sont PAS updates."
