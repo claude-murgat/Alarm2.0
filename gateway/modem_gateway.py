@@ -33,6 +33,8 @@ from config import (
     DRY_CONTACT_LIVENESS_SECONDS,
 )
 from modem_detect import detect_modem_port, send_at_command
+from modem_health import probe_order, probe_timeout  # INV-174
+from config import PRIMARY_PROBE_TIMEOUT_SECONDS  # INV-174
 from locks import at_lock  # RLock reentrant partage du port AT (cf locks.py)
 from dry_contact import parse_dc_line, raw_to_state, decide_report  # logique pure (cf dry_contact.py)
 from modem_health import (  # logique pure (cf modem_health.py)
@@ -64,15 +66,25 @@ pcm_reboot = threading.Event()
 
 # ── Helpers HTTP ─────────────────────────────────────────────────────────────
 
+# INV-174 : dernier primary connu, sonde en premier a l'appel suivant ; le role est toujours
+# reverifie (un ancien leader devenu replica n'est pas reutilise). Pas de verrou : chaque thread
+# cherche en parallele ; deux ecritures concurrentes coutent au pire un balayage de plus.
+_primary_url: str | None = None
+
+
 def _find_primary_url() -> str | None:
-    """Trouve le backend primary parmi les noeuds disponibles."""
-    for url in ALL_NODE_URLS:
+    """Trouve le backend primary parmi les noeuds disponibles, le dernier connu d'abord."""
+    global _primary_url
+    for url in probe_order(_primary_url, ALL_NODE_URLS):
         try:
-            r = requests.get(f"{url}/health", timeout=HTTP_TIMEOUT_SECONDS)
+            r = requests.get(f"{url}/health", timeout=probe_timeout(
+                url, _primary_url, HTTP_TIMEOUT_SECONDS, PRIMARY_PROBE_TIMEOUT_SECONDS))
             if r.status_code == 200 and r.json().get("role") == "primary":
+                _primary_url = url
                 return url
         except Exception:
             continue
+    _primary_url = None
     return None
 
 
