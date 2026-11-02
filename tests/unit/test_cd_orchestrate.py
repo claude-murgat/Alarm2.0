@@ -7,6 +7,7 @@ aucun site, pendant 2 jours (4 versions jamais deployees), plus 1 h de cooldown 
 Le vrai script tourne (copie dans un dossier temporaire, a cote d'un faux `alarm-cd-canary.sh`
 resolu via son SCRIPT_DIR) contre de faux `docker` / `ssh` (PATH) qui journalisent leurs appels.
 """
+import fcntl
 import os
 import pathlib
 import subprocess
@@ -47,7 +48,7 @@ def cd(tmp_path):
     return tmp_path
 
 
-def run(h, down=(), fail=()):
+def run(h, down=(), fail=(), default_lock=False):
     """Un tick du timer. Retourne (exit code, noeuds passes au canary, stderr)."""
     (h / "down").write_text(" ".join(IP[n] for n in down))
     (h / "fail").write_text(" ".join(map(str, fail)))
@@ -55,6 +56,8 @@ def run(h, down=(), fail=()):
     env = {**os.environ, "H": str(h), "PATH": f"{h / 'bin'}:{os.environ['PATH']}",
            "STATE_DIR": str(h / "state"), "LOCK_FILE": str(h / "lock"),
            "API_BASE": "http://test", "GATEWAY_KEY": "k", "SOAK": "0"}
+    if default_lock:  # chemin par defaut du script, celui que prend aussi alarm-chaos.sh
+        del env["LOCK_FILE"]
     p = subprocess.run(["bash", str(h / "cd" / "alarm-cd-orchestrate.sh")], env=env,
                        capture_output=True, text=True, timeout=30)
     return p.returncode, [int(n) for n in (h / "canary.log").read_text().split()], p.stderr
@@ -126,3 +129,14 @@ def test_node_behind_caught_up_even_if_digest_unchanged_since_success(cd):
     rc, deployed, err = run(cd)
     assert (rc, deployed) == (0, [4]), err
     assert outcome(cd) == "success"
+
+
+def test_skips_while_chaos_runner_holds_the_default_lock(cd):
+    """INV-178 : alarm-chaos.sh tient ${STATE_DIR}/orchestrate.lock pendant une panne controlee
+    (test_alarm_chaos.py prouve qu'il prend ce chemin par defaut) : aucun deploiement."""
+    with open(cd / "state" / "orchestrate.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        rc, deployed, err = run(cd, default_lock=True)
+    assert (rc, deployed) == (0, []), err
+    assert "deja pris" in err and "skip ce cycle" in err
+    assert not (cd / "ssh.log").exists()

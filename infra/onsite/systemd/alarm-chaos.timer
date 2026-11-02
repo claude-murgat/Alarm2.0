@@ -1,0 +1,17 @@
+# /etc/systemd/system/alarm-chaos.timer
+#
+# Tick du runner de panne controlee (INV-176..179) : toutes les minutes sur NODE3.
+# Le script est silencieux quand rien n'est en attente, et ne reclame rien si le
+# verrou CD est pris. Livre desactive : `sudo systemctl enable --now alarm-chaos.timer`.
+
+[Unit]
+Description=Timer du runner de panne controlee (INV-176..179)
+Documentation=https://github.com/claude-murgat/Alarm2.0/blob/master/docs/CD_DESIGN.md
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1min
+Unit=alarm-chaos.service
+
+[Install]
+WantedBy=timers.target

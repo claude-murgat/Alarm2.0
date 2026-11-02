@@ -763,6 +763,35 @@ sudo systemctl start alarm-cd-orchestrate.service
 
 ---
 
+## 9ter. Panne contrôlée (INV-176..179, 2026-10-30)
+
+L'onglet Tests (admin) demande l'**arrêt réel** d'un nœud ou d'un site pendant 1 à 10 min (`POST /api/chaos`, table `chaos_requests`). Le runner `scripts/alarm-chaos.sh` (timer `alarm-chaos.timer`, 1 min, **NODE3 uniquement**, livré désactivé) réclame la demande sur le leader (`GET /internal/chaos/next`, clé passerelle), qui **rejoue les garde-fous** : 1..10 min, nœud connu, **jamais deux voteurs etcd** (`etcd_voters` ; Izeron entier refusé), aucune alarme en cours, un seul test à la fois (garanti par un index unique partiel), 5 membres Patroni sains (cf. `tests/INVARIANTS.md` INV-176/177). Juste avant d'agir, le runner sonde `http://<IP WG>:2379/health` de **chaque** voteur etcd : un seul KO → `failed`, rien n'est arrêté.
+
+- **Restauration garantie (INV-178)** : sur la cible, **avant** `docker stop $CIDS` : `docker update --restart=always $CIDS` (un reboot de l'hôte pendant la fenêtre relance les conteneurs ; `unless-stopped` ne relance pas un conteneur arrêté à la main) puis `setsid nohup sh -c 'sleep <échéance+60> ; docker start $CIDS ; docker update --restart=unless-stopped $CIDS'`, prouvé par le marqueur `ARMED` puis par un `pgrep` depuis une nouvelle session SSH. Le nœud redémarre même si le runner, NODE3 ou le réseau disparaissent. À l'échéance, le runner relance lui-même (`docker start` + `unless-stopped`, puis `pkill -f '[a]larm-chaos-<id>$'` désarme la restauration armée de ce seul test) et attend `/health` 200 + membre Patroni `running` (leader) ou `streaming` (replica) (≤ 300 s) → `restored`, sinon `failed`. Tout échec relance aussitôt tous les nœuds déjà touchés.
+- **Arrêt anticipé** : bouton « Restaurer maintenant » (`DELETE /api/chaos/{id}` sur un test en cours) ou alarme survenue pendant la fenêtre : le runner interroge `GET /internal/chaos/{id}/abort` juste avant chaque `docker stop` (raison → `failed`, rien de plus n'est arrêté) puis toutes les 10 s et restaure tout de suite (événement `early_restore`, audité).
+- **Verrou partagé avec le CD** : `/var/lib/alarm/cd/orchestrate.lock` (`flock -n`), pris par `alarm-cd-orchestrate.sh` **et** `alarm-chaos.sh` (remplace `/run/alarm-cd-orchestrate/lock`, qui disparaissait avec le oneshot) : pas de déploiement pendant un test, pas de test pendant un déploiement (le runner ne réclame rien et réessaie au tick suivant).
+- **Résultat (INV-179)** : `GET /api/chaos` = 10 dernières demandes, événements (`started {leader_before}`, `leader_changed`, `restored {leader_after, restore_seconds}`, `failed {reason}`) et `alerts` = `AuditEvent` de la fenêtre (ce que le système a fait pendant la panne). Audit `chaos_requested|cancelled|started|early_restore|restored|failed`.
+- **Mode `netcut`** : accepté par le modèle et l'API (refusé sur node3), exécuté par la PR 5 ; le runner actuel le met en `failed`.
+
+**Prérequis sur les 5 hôtes** : systemd-logind ne doit pas tuer les processus d'une session SSH fermée, sinon la restauration armée disparaît avec la session (le runner le détecte par `pgrep` et refuse le test, qui devient alors impossible). Défaut Debian 12/13 : `KillUserProcesses=no`. À vérifier une fois par hôte (rien, ou `=no`) : `grep -i '^KillUserProcesses' /etc/systemd/logind.conf /etc/systemd/logind.conf.d/*.conf 2>/dev/null`.
+
+**Installation manuelle sur NODE3** (comme l'orchestrateur §9bis, prérequis SSH/cd.env identiques ; **pas** posé par `install.sh`) :
+```bash
+ssh -p 50922 -i ~/.ssh/alarm_node3 alarm@51.210.105.102 '
+  cd /opt/alarm && git pull
+  sudo install -m 755 scripts/alarm-chaos.sh /usr/local/bin/alarm-chaos
+  sudo install -m 755 scripts/alarm-cd-orchestrate.sh /usr/local/bin/alarm-cd-orchestrate   # nouveau verrou partage
+  sudo install -m 644 infra/onsite/systemd/alarm-chaos.service /etc/systemd/system/
+  sudo install -m 644 infra/onsite/systemd/alarm-chaos.timer   /etc/systemd/system/
+  sudo systemctl daemon-reload
+  sudo systemctl start alarm-chaos.service && sudo journalctl -u alarm-chaos -n 10 --no-pager   # rien en attente : silencieux
+  sudo systemctl enable --now alarm-chaos.timer
+'
+```
+Premier test conseillé : `stop node5` 2 min, puis `node4`, puis `node3` (= « OVH arrêté », un seul voteur). Désactivation : `sudo systemctl disable --now alarm-chaos.timer`. Couverture : `tests/unit/test_alarm_chaos.py` (vrai script, faux `ssh`/`curl`), `tests/integration/test_chaos_inv176.py`, job `smoke-install-chaos` de `cd-install-smoke.yml`.
+
+---
+
 ## 10. Métriques de réussite Phase 3
 
 Pour considérer Phase 3 « livrée », tous ces points doivent être verts :
@@ -892,3 +921,4 @@ Dans ce flux, on a remplacé 8 h de service KO + nuit blanche pour l'humain par 
 - **2026-05-22 (vérif live)** — état prod inspecté par SSH avant merge de PR 9. **Constat** : les 3 nœuds tournent `:stable` sha-de1131ac (promu 2026-05-19) depuis 3 jours, `alarm-cd-pull.timer` enabled + active partout, cluster Patroni sain (leader `node1`=onsite-1, replicas sync lag=0). **Pré-requis SSH-from-NODE3 manquants** : (a) `ufw` onsite n'autorise SSH que depuis LAN 172.16.0.0/16 — ajouter règle `from 10.99.0.0/24` ; (b) `/home/alarm/.ssh/` sur NODE3 n'a pas de keypair outbound ; (c) sshd NODE3 écoute `Port 50922` (adaptation cloud), nécessite `~/.ssh/config` pour le self-loop canary `--node 3`. Ces 3 prérequis ajoutés au runbook §9bis. Sans eux, l'orchestrate `Preflight SSH` exit 1 proprement (pas de risque de chaîne incomplète).
 - **2026-10-27** — **5 nœuds** : ajout de node4 (alarm-1, 10.99.0.4) et node5 (alarm-2, 10.99.0.5), **non votants** etcd (Patroni + backend, pas d'etcd local). Ordre canary §4 `(3 5 4 2 1)`. `alarm-cd-canary.sh`, `alarm-cd-rollback.sh` et `start-prod-node.sh` acceptent les nœuds 1 à 5. Pour 4/5, ils lancent `up --no-deps patroni backend`. Le preflight SSH de l'orchestrateur couvre les 5 IP : n'installer cette version sur NODE3 qu'une fois node4/5 en service.
 - **2026-10-29** — **Déploiement indépendant par site** (§4, INV-167) après l'incident node4/5 hors ligne 2 jours (préflight `exit 1` → aucun déploiement, 4 versions bloquées). État par nœud `node<N>.digest`, nœud injoignable reporté sans bloquer les autres ni déclencher de cooldown (outcome `partial`), votants redémarrés seulement si les 3 répondent. Remplace la consigne du 2026-10-27 ci-dessus.
+- **2026-10-30** — **Panne contrôlée** (§9ter, INV-176..179) : `scripts/alarm-chaos.sh` + `alarm-chaos.{service,timer}` sur NODE3 (manuel, désactivé), API `/api/chaos` + `/internal/chaos/*`, carte « Panne contrôlée » dans l'onglet Tests. Verrou de l'orchestrateur déplacé de `/run/alarm-cd-orchestrate/lock` vers `/var/lib/alarm/cd/orchestrate.lock` pour être partagé avec le runner.
