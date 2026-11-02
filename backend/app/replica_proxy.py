@@ -38,7 +38,7 @@ from starlette.responses import JSONResponse, Response
 
 from .leader_election import is_leader
 from .logic.write_route import leader_first
-from .quorum_monitor import _patroni_cluster
+from . import quorum_monitor  # module, pas la fonction : quorum_monitor importe aussi replica_proxy (cycle)
 
 logger = logging.getLogger("replica_proxy")
 
@@ -90,7 +90,7 @@ def patroni_cluster_or_none() -> dict | None:
     pas en 1 s (ordre configure) : Patroni est local, et le heartbeat relaye tient dans les 5 s de
     l'app. Partage avec le relais heartbeat (api/devices.py)."""
     try:
-        return _patroni_cluster(timeout=1)
+        return quorum_monitor._patroni_cluster(timeout=1)
     except Exception:
         return None
 
