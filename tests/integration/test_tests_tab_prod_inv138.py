@@ -104,3 +104,25 @@ def test_heartbeat_pause_ends_by_itself_after_5_min(client, admin):
     assert client.post("/api/devices/heartbeat", headers=admin).status_code == 503
     client.post("/api/test/advance-clock", params={"seconds": 2 * 60, "peer": "false"})
     assert client.post("/api/devices/heartbeat", headers=admin).status_code == 200
+
+
+# INV-138 (amende 2026-10-30) : les deux actions sont persistees dans audit_events.
+def _audit(client, admin, event_type):
+    r = client.get("/api/audit/", headers=admin, params={"event_type": event_type})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_go_offline_is_audited(client, admin):
+    assert client.post("/api/devices/me/go-offline", headers=admin).status_code == 200
+    events = _audit(client, admin, "test_go_offline")
+    assert len(events) >= 1
+    assert events[0]["user_id"] == _user(client, admin, "admin")["id"]
+
+
+def test_heartbeat_pause_is_audited(client, admin):
+    assert client.post("/api/devices/me/heartbeat-pause", headers=admin).json()["paused"] is True
+    events = _audit(client, admin, "test_heartbeat_pause")
+    assert len(events) >= 1
+    assert events[0]["user_id"] == _user(client, admin, "admin")["id"]
+    assert events[0]["details"]["paused"] is True

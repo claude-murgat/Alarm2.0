@@ -15,6 +15,8 @@ from datetime import timedelta
 from ..auth import get_current_user, get_current_admin, security, SECRET_KEY, ALGORITHM
 from ..events import log_event
 from ..leader_election import is_leader
+from ..logic.write_route import leader_first
+from ..replica_proxy import patroni_cluster_or_none
 
 router = APIRouter(prefix="/api/devices", tags=["devices"])
 
@@ -42,12 +44,13 @@ def _proxy_heartbeat_to_primary(token: str):
     si plusieurs nœuds avaient le flag par erreur.
     """
     import httpx
-    for peer in _PEER_URLS:
+    # INV-173 : le leader Patroni d'abord, connexion bornee a 1,5 s (un peer mort ne coute plus 3 s).
+    for peer in leader_first(_PEER_URLS, patroni_cluster_or_none()):
         try:
             r = httpx.post(
                 f"{peer}/api/devices/heartbeat",
                 headers={"Authorization": f"Bearer {token}", "X-Heartbeat-Proxied": "1"},
-                timeout=3.0,
+                timeout=httpx.Timeout(3.0, connect=1.5),
             )
             if r.status_code == 200:
                 return r.json()
