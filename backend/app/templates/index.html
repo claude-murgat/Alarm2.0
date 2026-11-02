@@ -474,10 +474,10 @@
             <!-- INV-176..179 : panne controlee (arret reel d'un noeud T min, restauration armee sur la cible) -->
             <div class="card" id="chaosCard">
                 <h3>Panne contrôlée</h3>
-                <p style="color:#94a3b8;font-size:0.85rem;margin-bottom:10px">Arrête vraiment les conteneurs d'un nœud ou d'un site pendant T minutes, puis les relance (restauration armée sur la cible avant l'arrêt). Refusé pendant une alarme ou un autre test, si un nœud n'est pas sain, et toujours pour deux voteurs etcd (Izeron entier).</p>
+                <p style="color:#94a3b8;font-size:0.85rem;margin-bottom:10px">Arrête vraiment les conteneurs d'un nœud ou d'un site, ou coupe son tunnel wg0, pendant T minutes, puis restaure (restauration armée sur la cible avant d'agir). Refusé pendant une alarme ou un autre test, si un nœud n'est pas sain, toujours pour deux voteurs etcd (Izeron entier), et pour la coupure réseau de node3 (le runner y vit).</p>
                 <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
                     <div class="form-group"><label>Cible</label><select id="chaosTarget"></select></div>
-                    <div class="form-group"><label>Mode</label><select id="chaosMode"><option value="stop">Arrêt des conteneurs</option><option value="netcut" disabled>Coupure réseau (PR suivante)</option></select></div>
+                    <div class="form-group"><label>Mode</label><select id="chaosMode"><option value="stop">Arrêt des conteneurs</option><option value="netcut">Coupure réseau (wg0)</option></select></div>
                     <div class="form-group"><label>Minutes (1-10)</label><input type="number" id="chaosMinutes" min="1" max="10" value="2" style="width:80px"></div>
                     <button class="btn-danger" onclick="chaosStart()">&#x1F4A5; Lancer la panne</button>
                 </div>
@@ -1346,6 +1346,7 @@
                 chaosVoters = (d.live.nodes || []).filter(n => n.voter).map(n => n.name);
                 const yn = v => `<span class="badge ${v ? 'online' : 'offline'}">${v ? 'oui' : 'non'}</span>`;
                 const gws = d.live.gateways || [];
+                chaosGateways = gws;
                 document.getElementById('resilienceNodes').innerHTML = (d.live.nodes || []).map(n => {
                     const g = gws.find(g => g.host === n.name);
                     const seen = !g ? '-' : `${escHtml(g.gateway_id)} : ` + (g.last_seen_s == null ? 'jamais vue' : `vu il y a ${Math.round(g.last_seen_s)} s`);
@@ -1371,11 +1372,12 @@
                     ${cell('App 4G', w.app_4g_reachable)}${cell('App LAN Izeron', w.app_izeron_lan)}
                     <td data-label="Prévenu par">${escHtml((w.alerted_by || []).join(', ') || 'personne')}</td></tr>
                     <tr><td colspan="${5 + sites.length + gwSites.length}" style="color:#94a3b8;font-size:0.85rem">${escHtml(w.sentence)}</td></tr>`).join('');
-            } catch (e) { errEl.textContent = 'Erreur : ' + e.message; }
+            } catch (e) { errEl.textContent = 'Erreur : ' + e.message; chaosGateways = []; /* liste plus sure : avertissement generique */ }
         }
 
         // INV-176..179 : carte « Panne contrôlée » (onglet Tests)
         let chaosVoters = [];  // live.nodes[].voter de /api/resilience (= etcd_voters) : deux voteurs arretes = quorum etcd perdu
+        let chaosGateways = [];  // live.gateways de /api/resilience (gateway_id, host, site) : netcut de l'hote = site aveugle (INV-177)
         async function loadChaosTargets() {
             const sel = document.getElementById('chaosTarget');
             try {
@@ -1399,7 +1401,10 @@
             if (!opt) return;
             let sentence = `Arrêt réel de ${opt.textContent} pendant ${minutes} min.`;
             try { sentence = (await api('/api/resilience/whatif?nodes=' + encodeURIComponent(opt.dataset.nodes))).sentence || sentence; } catch (e) { /* texte fixe */ }
-            if (!confirm(`${sentence}\n\nLancer la panne (${mode}, ${minutes} min) sur ${opt.textContent} ?`)) return;
+            const blind = mode !== 'netcut' ? []
+                : !chaosGateways.length ? ['ATTENTION : passerelles inconnues : couper un nœud passerelle rend son site aveugle (contact sec, SMS, appels).\n\n']
+                : chaosGateways.filter(g => opt.dataset.nodes.split(',').includes(g.host)).map(g => `ATTENTION : ${g.host} héberge la passerelle ${g.gateway_id} : site ${place(g.site)} aveugle pendant ${minutes} min (ni alarme par contact sec, ni SMS, ni appels).\n\n`);
+            if (!confirm(`${blind.join('')}${sentence}\n\nLancer la panne (${mode}, ${minutes} min) sur ${opt.textContent} ?`)) return;
             log(`Panne contrôlée demandée : ${opt.textContent}, ${mode}, ${minutes} min`, 'info');
             try {
                 const r = await api('/api/chaos', { method: 'POST', body: JSON.stringify({ nodes: sel.value, mode, minutes }) });

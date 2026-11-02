@@ -1171,3 +1171,66 @@ class TestResiliencePanel:
             status=503, json={"detail": "Patroni unreachable: down"}))
         dashboard.locator(".tab:text('Tests')").click()
         expect(dashboard.locator("#resilienceError")).to_contain_text("Patroni unreachable")
+
+
+# ---------------------------------------------------------------------------
+# Onglet Tests : confirm() de la carte « Panne contrôlée » (INV-177, INV-179)
+# ---------------------------------------------------------------------------
+
+class TestChaosConfirm:
+    """INV-179 — en netcut, le confirm() nomme le site rendu aveugle par la coupure d'un nœud passerelle
+    (live.gateways de /api/resilience) ; liste inconnue (/api/resilience en échec) → avertissement générique,
+    jamais un confirm() muet. /api/resilience, /api/cluster et whatif simulés ; le confirm() est refusé
+    (aucune panne demandée). Hors CI : lancé localement (FRONTEND_URL)."""
+
+    CLUSTER = {"local_node": "node3", "local_role": "primary", "local_location": "ovh",
+               "quorum": {"total": 5, "healthy": 5, "has_quorum": True},
+               "members": [{"name": n["name"], "location": n["site"], "role": n["role"], "state": n["state"]}
+                           for n in TestResiliencePanel.FAKE["live"]["nodes"]]}
+    GENERIC = "passerelles inconnues : couper un nœud passerelle rend son site aveugle (contact sec, SMS, appels)"
+
+    @staticmethod
+    def _resilience(route, ok):
+        if ok:
+            route.fulfill(json=TestResiliencePanel.FAKE)
+        else:
+            route.fulfill(status=503, json={"detail": "Patroni unreachable: down"})
+
+    def _open(self, page: Page, ok=True):
+        page.route("**/api/resilience", lambda route: self._resilience(route, ok))
+        page.route("**/api/resilience/whatif*", lambda route: route.fulfill(json={"sentence": "Leader : oui."}))
+        page.route("**/api/cluster", lambda route: route.fulfill(json=self.CLUSTER))
+        page.locator(".tab:text('Tests')").click()
+        expect(page.locator("#chaosTarget option[value='node4']")).to_have_count(1)
+
+    def _confirm_text(self, page: Page, mode):
+        page.locator("#chaosTarget").select_option("node4")
+        page.locator("#chaosMode").select_option(mode)
+        page.on("dialog", lambda d: d.dismiss())
+        with page.expect_event("dialog") as info:
+            page.locator("#chaosCard button:has-text('Lancer la panne')").click()
+        return info.value.message
+
+    def test_netcut_of_a_gateway_node_names_the_blind_site(self, dashboard: Page):
+        self._open(dashboard)
+        text = self._confirm_text(dashboard, "netcut")
+        assert "alarm-1" in text and "site Beaufort aveugle pendant 2 min" in text, text
+        assert self.GENERIC not in text
+
+    def test_stop_shows_no_blind_warning(self, dashboard: Page):
+        self._open(dashboard)
+        assert "aveugle" not in self._confirm_text(dashboard, "stop")
+
+    def test_netcut_with_resilience_failing_shows_generic_warning(self, dashboard: Page):
+        self._open(dashboard, ok=False)
+        assert self.GENERIC in self._confirm_text(dashboard, "netcut")
+
+    def test_netcut_after_a_failed_refresh_does_not_trust_the_stale_list(self, dashboard: Page):
+        """Liste chargée puis « Rafraîchir » en échec : la liste n'est plus sûre, avertissement générique."""
+        self._open(dashboard)
+        dashboard.unroute("**/api/resilience")
+        dashboard.route("**/api/resilience", lambda route: self._resilience(route, False))
+        dashboard.locator("#resilienceCard button:has-text('Rafraîchir')").click()
+        expect(dashboard.locator("#resilienceError")).to_contain_text("Patroni unreachable")
+        text = self._confirm_text(dashboard, "netcut")
+        assert self.GENERIC in text and "site Beaufort aveugle" not in text, text

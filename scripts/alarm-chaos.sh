@@ -1,16 +1,21 @@
 #!/bin/bash
 # alarm-chaos.sh — panne controlee (INV-176..179) : execute les demandes de l'onglet
-# Tests (POST /api/chaos) : arrete les conteneurs d'un noeud pendant T min, puis les
-# relance. Mode « stop » seulement ; « netcut » arrive avec la PR 5 (ici -> failed).
+# Tests (POST /api/chaos) pendant T min, puis restaure :
+#   stop   : arrete les conteneurs du noeud (docker stop), les relance a T ;
+#   netcut : coupe le tunnel wg0 du noeud via le helper root de la cible
+#            (sudo -n alarm-chaos-net cut T*60), qui le remet lui-meme a T.
 #
 # Tourne via alarm-chaos.timer (1 min) sur NODE3 cloud — le seul noeud qui voit
 # les 5 cibles via le mesh WG, comme alarm-cd-orchestrate. Livre desactive et
-# installe a la main (cf docs/CD_DESIGN.md « Panne controlee »).
+# installe a la main (cf docs/CD_DESIGN.md « Panne controlee »). D'ou netcut
+# refuse sur node3 (INV-177) : couper OVH rendrait ce runner aveugle.
 #
-# Garantie INV-178 : avant tout arret, sur la cible, `docker update --restart=always`
-# (un reboot de l'hote relance les conteneurs) et restauration ARMEE (setsid nohup sh -c
-# 'sleep ... ; docker start ...', detachee de la session SSH, prouvee par ARMED puis pgrep) :
-# le noeud redemarre meme si ce runner, NODE3 ou le reseau disparaissent.
+# Garantie INV-178 : la restauration est ARMEE SUR LA CIBLE avant d'agir.
+#   stop   : `docker update --restart=always` (un reboot de l'hote relance les conteneurs) et
+#            setsid nohup sh -c 'sleep ... ; docker start ...', detachee de la session SSH,
+#            prouvee par ARMED puis pgrep ;
+#   netcut : timer systemd root alarm-chaos-restore pose par le helper.
+# Le noeud revient meme si ce runner, NODE3 ou le reseau disparaissent.
 # INV-177 : etcd de chaque voteur sonde juste avant d'agir.
 #
 # Verrou partage avec l'orchestrateur CD (${STATE_DIR}/orchestrate.lock) : pas de
@@ -112,13 +117,22 @@ abort_reason() {  # raison de restaurer tout de suite (annulation admin, alarme 
 
 STOPPED=()
 declare -A CIDS_OF
+restore_now() {  # $1 noeud : relance / reconnecte tout de suite (la restauration armee sur la cible reste en filet)
+  if [[ "$MODE" == netcut ]]; then
+    ssh_node "$1" "sudo -n /usr/local/bin/alarm-chaos-net restore"
+  else
+    restore_node "$1"
+  fi
+}
 fail() {
   log "ECHEC : $1"
   local n
-  # Tout noeud liste, meme arrete a moitie ou seulement passe en restart=always (docker start est sans
-  # effet sur un conteneur en marche) ; la restauration armee reste en filet.
-  for n in "${!CIDS_OF[@]}"; do
-    restore_node "$n" || log "WARN : relance $n KO (restauration armee sur le noeud a l'echeance + 60 s)"
+  # stop : tout noeud liste, meme arrete a moitie ou seulement passe en restart=always (docker start est
+  # sans effet sur un conteneur en marche) ; netcut : les noeuds coupes. La restauration armee reste en filet.
+  local touched=("${!CIDS_OF[@]}")
+  [[ "$MODE" == netcut ]] && touched=("${STOPPED[@]}")
+  for n in "${touched[@]}"; do
+    restore_now "$n" || log "WARN : restauration immediate de $n KO (restauration armee sur le noeud en filet)"
   done
   post_event failed "{\"reason\":$(json_str "$1")}"
   exit 1
@@ -126,7 +140,9 @@ fail() {
 
 LEADER_BEFORE=$(cluster_leader)
 post_event started "{\"leader_before\":\"$LEADER_BEFORE\"}"
-if [[ "$MODE" != "stop" ]]; then fail "mode $MODE non implemente par ce runner (PR 5)"; fi
+if [[ "$MODE" != "stop" && "$MODE" != "netcut" ]]; then fail "mode $MODE inconnu de ce runner"; fi
+# INV-177 : le backend refuse deja netcut node3 ; ce runner vit sur node3, il refuse aussi.
+if [[ "$MODE" == netcut && ",$NODES," == *,node3,* ]]; then fail "coupure reseau de node3 refusee : ce runner y vit (INV-177)"; fi
 
 # INV-177 : etat REEL d'etcd juste avant d'agir (un etcd deja tombe + un voteur arrete = quorum perdu).
 [[ -n "$VOTERS" ]] || fail "voteurs etcd absents de /internal/chaos/next : rien n'est arrete"
@@ -140,6 +156,18 @@ done
 DEADLINE=$(( $(date +%s) + T * MINUTE_SECONDS ))
 for n in ${NODES//,/ }; do
   [[ -n "${NODE_IP[$n]:-}" ]] || fail "noeud inconnu du runner : $n"
+  if [[ "$MODE" == netcut ]]; then
+    # INV-178 : le helper root arme sur la cible le timer de restauration et le prouve actif AVANT la coupure
+    # (5 s plus tard) ; il n'imprime ARMED qu'alors. Noeud note AVANT l'appel : un SSH coupe apres l'armement
+    # laisserait une coupure en route, fail() tente donc `restore` aussi sur lui (filet : le timer de la cible).
+    abort=$(abort_reason)  # annulation ou alarme depuis la reclamation : on ne coupe rien de plus
+    [[ -z "$abort" ]] || fail "$abort : rien n'est coupé sur $n"
+    STOPPED+=("$n")
+    armed=$(ssh_node "$n" "sudo -n /usr/local/bin/alarm-chaos-net cut $((T * 60))") || true
+    [[ "$armed" == "ARMED" ]] || fail "alarm-chaos-net cut KO ou SSH interrompu sur $n (restauration tentee, filet : timer de la cible)"
+    log "$n : wg0 coupe dans 5 s pendant $T min (restauration par timer sur le noeud)"
+    continue
+  fi
   cids=$(ssh_node "$n" "docker ps -q --filter label=com.docker.compose.project=$n" | xargs) || fail "ssh / docker ps KO sur $n"
   [[ -n "$cids" ]] || fail "aucun conteneur en cours sur $n"
   CIDS_OF[$n]=$cids
@@ -158,10 +186,21 @@ for n in ${NODES//,/ }; do
   STOPPED+=("$n")
   log "$n arrete : $cids"
 done
+if [[ "$MODE" == netcut ]]; then
+  # Coupure prouvee, ~20 s apres le dernier cut (MINUTE_SECONDS / 3) : un `systemctl stop` sans effet passerait
+  # sinon pour un « restored » en 0 s. Sans -f : toute reponse HTTP, meme 503, prouve que le tunnel passe encore.
+  sleep $(( MINUTE_SECONDS / 3 ))
+  for n in "${STOPPED[@]}"; do
+    if curl -sS --max-time 3 "http://${NODE_IP[$n]}:8000/health" >/dev/null 2>&1; then
+      fail "coupure non effective sur $n : /health répond encore après la coupure"
+    fi
+  done
+fi
 
 # Pendant la panne, toutes les 10 s : leader Patroni (leader_changed) et arret anticipe (annulation admin, alarme).
 POLL=$(( MINUTE_SECONDS < 10 ? MINUTE_SECONDS : 10 ))
 LEADER=$LEADER_BEFORE
+abort=""
 while :; do
   left=$(( DEADLINE - $(date +%s) ))
   (( left > 0 )) || break
@@ -180,8 +219,10 @@ while :; do
   fi
 done
 
-wait_healthy() {  # $1 noeud : /health 200 ET membre Patroni sain (member_ok), en <= HEALTHY_TIMEOUT s
-  local deadline=$(( $(date +%s) + HEALTHY_TIMEOUT ))
+wait_healthy() {  # $1 noeud : /health 200 ET membre Patroni sain (member_ok), en <= HEALTHY_TIMEOUT s apres max(maintenant, T0)
+  local now
+  now=$(date +%s)
+  local deadline=$(( (T0 > now ? T0 : now) + HEALTHY_TIMEOUT ))
   while (( $(date +%s) < deadline )); do
     if curl -fsS --max-time 3 "http://${NODE_IP[$1]}:8000/health" >/dev/null 2>&1 && member_ok "$1"; then
       return 0
@@ -192,13 +233,27 @@ wait_healthy() {  # $1 noeud : /health 200 ET membre Patroni sain (member_ok), e
 }
 
 T0=$(date +%s)
+if [[ "$MODE" == stop ]]; then
+  for n in "${STOPPED[@]}"; do
+    restore_node "$n" || fail "docker start KO sur $n (restauration armee sur le noeud en filet)"
+  done
+elif [[ -n "$abort" ]]; then
+  # netcut, arret anticipe : wg0 remis tout de suite si la cible repond encore ; sinon (cas normal : ce runner
+  # passe par wg0) son timer le remet a l'echeance, et l'attente de sante court depuis l'echeance.
+  for n in "${STOPPED[@]}"; do
+    restore_now "$n" || { log "$n injoignable : wg0 remis par le timer de la cible a l'echeance"; T0=$DEADLINE; }
+  done
+fi  # netcut a l'echeance : rien a faire a distance (tunnel coupe), le timer de la cible restaure
 for n in "${STOPPED[@]}"; do
-  restore_node "$n" || fail "docker start KO sur $n (restauration armee sur le noeud en filet)"
-done
-for n in "${STOPPED[@]}"; do
-  wait_healthy "$n" || fail "$n pas sain ${HEALTHY_TIMEOUT} s apres docker start"
+  wait_healthy "$n" || fail "$n pas sain ${HEALTHY_TIMEOUT} s apres la fin de la panne"
 done
 RESTORE_SECONDS=$(( $(date +%s) - T0 ))
+(( RESTORE_SECONDS > 0 )) || RESTORE_SECONDS=0
+if [[ "$MODE" == netcut ]]; then  # cible revenue : desarme son timer s'il attend encore (wg0 actif : rien n'est touche)
+  for n in "${STOPPED[@]}"; do
+    restore_now "$n" || log "WARN : désarmement du timer de restauration de $n KO (sans effet sur wg0 remis)"
+  done
+fi
 post_event restored "{\"leader_after\":\"$(cluster_leader)\",\"restore_seconds\":$RESTORE_SECONDS}"
 log "Panne controlee #$ID terminee : $NODES restaure(s) en $RESTORE_SECONDS s"
 exit 0
