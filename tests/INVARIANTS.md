@@ -1106,6 +1106,16 @@ Chaque backend **qui n'est pas primary** vérifie à chaque tick de `quorum_moni
 - **Pourquoi pas `start-prod-node.sh`** : sans `--pull` il reconstruit l'image localement (`up --build`), avec `--pull` il retire `:stable` depuis GHCR et écrase le re-tag local — dans les deux cas l'image relancée ne serait pas l'image rétablie.
 - **Couverture** : Unit `tests/unit/test_cd_rollback.py` (vrai script ; faux `ssh` qui exécute la commande distante dans un dépôt factice contenant `.env.prod.secrets`, faux `docker` / `curl`) : node3 et node4 → le `up -d` reçoit la `SECRET_KEY` du fichier, services inchangés (`--no-deps patroni backend` pour node4), ni `pull` ni `--build`. RED sur le script d'origine (`SECRET_KEY` vide).
 
+### INV-181 [H] ✅ Nœud sur site : le DNS survit à la perte du réseau local (2026-11-02)
+Chaque nœud sur site garde au moins un **résolveur DNS public** (`1.1.1.1` ou `9.9.9.9`) dans `/etc/resolv.conf`, **après** celui du réseau local, qui reste prioritaire (FAILOVER_4G §2.6).
+- `infra/onsite/install.sh` (donc `alarm-host-sync` à chaque commit `:stable`) lance `scripts/dns-fallback.sh` : s'il n'y a aucun résolveur public, il ajoute `1.1.1.1` puis `9.9.9.9` à la suite, dans la limite de **3** résolveurs (glibc ignore les suivants). Déjà un public, ou déjà 3 résolveurs : rien ne change.
+- `/etc/resolv.conf` **lien symbolique** (géré par systemd-resolved, NetworkManager…) : laissé tel quel, avec un avertissement.
+- `/etc/dhcp/dhclient.conf` présent : `append domain-name-servers 1.1.1.1, 9.9.9.9;` ajouté une fois, sinon un renouvellement DHCP effacerait le secours.
+- Coût quand la box est morte : chaque résolution attend le délai du premier résolveur (5 s par défaut) avant le public.
+- **Pourquoi** : le 2026-11-02, alarm-1 (node4, Beaufort) a perdu son réseau local et est passé sur sa 4G de secours. Le VPN marchait, mais son seul résolveur était la box morte (`172.16.0.1`) : plus de registre d'images, plus de GitHub, donc plus de déploiement, et plus de serveur SMTP pour les emails d'alerte. onsite-1 et onsite-2 avaient déjà un résolveur public, posé à la main.
+- **Limite** : un nœud déjà sans DNS ne reçoit pas ce correctif par `alarm-host-sync`, qui a besoin de GitHub. Il le reçoit au retour de son réseau local, ou par une application à la main.
+- **Couverture** : Unit `tests/unit/test_dns_fallback.py` (vrai script sur des fichiers temporaires) : box seule → `1.1.1.1` et `9.9.9.9` ajoutés après elle ; public déjà présent → inchangé ; lien → inchangé ; 3 résolveurs → inchangé ; deux passages → identique ; `dhclient.conf` complété une fois, jamais créé.
+
 ---
 
 ## 10. Observabilité et audit

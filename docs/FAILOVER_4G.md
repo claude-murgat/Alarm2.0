@@ -183,6 +183,10 @@ la fibre : `UseDNS=no` (networkd) ou, en ifupdown, ne pas laisser dhclient écra
 pour cette interface (`supersede domain-name-servers` dans un hook dédié `$IF`). La résolution doit
 rester primaire via le lien fixe ; la 4G ne fournit le DNS que si elle devient l'unique route.
 
+**Secours public (INV-181, 2026-11-02)** : rien ne bascule le DNS quand la box tombe. `install.sh` ajoute donc
+`1.1.1.1` et `9.9.9.9` **après** le résolveur du LAN (`scripts/dns-fallback.sh`, et `append domain-name-servers`
+dans `dhclient.conf`). Sans eux, alarm-1 passé en 4G le 2026-11-02 gardait le VPN mais ne résolvait plus rien.
+
 ---
 
 ## 2bis. Activation QMI (matériel réel onsite-2)
