@@ -12,17 +12,15 @@ import java.util.concurrent.TimeUnit
 object ApiClient {
     private val TAG = "ApiClient"
 
-    // Liste des URLs backend : 3 noeuds HA (rotation circulaire sur failover)
-    // Configurees au build-time via BuildConfig (voir build.gradle.kts)
-    private val BACKEND_URLS = listOf(
-        BuildConfig.PRIMARY_BACKEND_URL,
-        BuildConfig.FALLBACK_BACKEND_URL,
-        BuildConfig.FALLBACK_BACKEND_URL_2
-    )
+    // Liste des URLs backend dans l'ordre d'essai (rotation circulaire sur failover,
+    // INV-ANDROID-402). Configuree au build-time via BuildConfig.BACKEND_URLS
+    // (chaine separee par des virgules, voir build.gradle.kts). `internal` : lue
+    // par les tests Espresso.
+    internal val BACKEND_URLS: List<String> =
+        BuildConfig.BACKEND_URLS.split(",").map { it.trim() }.filter { it.isNotEmpty() }
 
-    // Index de l'URL courante (0 = primary, 1 = fallback, 2 = fallback_2).
-    // Rotation circulaire sur switchToNextUrl() : 0 -> 1 -> 2 -> 0 -> ...
-    // Cf docs/architecture_option_B_3vps_patroni.md (3 sites distincts).
+    // Index de l'URL courante (0 = premiere URL de la liste : le cloud en release).
+    // Rotation circulaire sur switchToNextUrl() : 0 -> 1 -> ... -> size-1 -> 0 -> ...
     @Volatile
     var currentUrlIndex: Int = 0
 

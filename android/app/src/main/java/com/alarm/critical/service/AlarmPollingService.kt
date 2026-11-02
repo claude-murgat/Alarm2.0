@@ -261,7 +261,7 @@ class AlarmPollingService : Service() {
 
         // L'URL courante ne marche pas — essayer les autres
         Log.w(TAG, "URL courante n'est pas le primary, recherche...")
-        for (i in 0 until 3) {
+        for (i in 0 until ApiClient.BACKEND_URLS.size) {
             ApiClient.switchToNextUrl()
             try {
                 val response = ApiProvider.service.heartbeat("Bearer $token")
