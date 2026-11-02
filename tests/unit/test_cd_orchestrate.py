@@ -31,6 +31,7 @@ case " $(cat "$H/down" 2>/dev/null) " in *" $ip "*) exit 255 ;; esac
 CANARY = r"""#!/usr/bin/env bash
 echo "$2" >> "$H/canary.log"
 case " $(cat "$H/fail" 2>/dev/null) " in *" $2 "*) exit 2 ;; esac
+case " $(cat "$H/unready" 2>/dev/null) " in *" $2 "*) exit 3 ;; esac  # prerequis KO, rien touche
 """
 
 
@@ -48,10 +49,11 @@ def cd(tmp_path):
     return tmp_path
 
 
-def run(h, down=(), fail=(), default_lock=False):
+def run(h, down=(), fail=(), default_lock=False, unready=()):
     """Un tick du timer. Retourne (exit code, noeuds passes au canary, stderr)."""
     (h / "down").write_text(" ".join(IP[n] for n in down))
     (h / "fail").write_text(" ".join(map(str, fail)))
+    (h / "unready").write_text(" ".join(map(str, unready)))
     (h / "canary.log").write_text("")
     env = {**os.environ, "H": str(h), "PATH": f"{h / 'bin'}:{os.environ['PATH']}",
            "STATE_DIR": str(h / "state"), "LOCK_FILE": str(h / "lock"),
@@ -140,3 +142,31 @@ def test_skips_while_chaos_runner_holds_the_default_lock(cd):
     assert (rc, deployed) == (0, []), err
     assert "deja pris" in err and "skip ce cycle" in err
     assert not (cd / "ssh.log").exists()
+
+
+def test_unready_beaufort_node_is_deferred_without_halting_izeron(cd):
+    """2026-11-02 : alarm-1 sur sa 4G de secours, DNS mort, registre illisible -> canary exit 3."""
+    rc, deployed, err = run(cd, unready=(4,))
+    assert rc == 0, err
+    assert deployed == [3, 5, 4, 2, 1]  # 4 tente, reporte ; 2 et 1 deployes quand meme
+    assert outcome(cd) == "partial"
+    assert at_digest(cd) == [1, 2, 3, 5]
+    assert "node4 (Beaufort) pas pret : reporte au prochain passage" in err
+
+    rc, deployed, err = run(cd)  # pas de cooldown : node4 repris au tick suivant
+    assert (rc, deployed) == (0, [4]), err
+    assert outcome(cd) == "success"
+
+
+def test_unready_voter_defers_the_following_voters(cd):
+    """Un votant pas pret est peut-etre tombe : redemarrer un autre votant perdrait le quorum."""
+    rc, deployed, err = run(cd, unready=(3,))
+    assert rc == 0, err
+    assert deployed == [3, 5, 4]  # 2 et 1 (votants) reportes sans etre touches
+    assert outcome(cd) == "partial"
+    assert at_digest(cd) == [4, 5]
+    assert "node2 (Izeron, votant) reporte" in err
+
+    rc, deployed, err = run(cd)
+    assert (rc, deployed) == (0, [3, 2, 1]), err
+    assert outcome(cd) == "success"

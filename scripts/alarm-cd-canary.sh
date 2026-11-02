@@ -9,6 +9,7 @@
 #   5. Si soak vert -> POST kind=canary_promoted, exit 0.
 #   6. Si soak rouge -> POST kind=rollback (PR 6 enrichit avec l'action),
 #      halt canary, exit 2.
+#   Prerequis KO (SSH, digest distant illisible), rien n'est touche -> exit 3 (reporte par l'orchestrateur).
 #
 # Designe pour tourner sur NODE3 cloud OVH (le seul qui voit les 5 noeuds via WG).
 # L'humain enchaine les 5 commandes manuellement V1 (ordre de alarm-cd-orchestrate.sh) :
@@ -143,7 +144,7 @@ fi
 log "Verification pre-requis..."
 if ! ssh_target "true" 2>/dev/null; then
   log "ERREUR : SSH vers ${SSH_USER}@${WG_IP} echoue (cle manquante ? noeud down ?)"
-  exit 1
+  exit 3
 fi
 
 # Image presente en cache local sur la cible (= timer pull a deja tourne) ?
@@ -157,7 +158,7 @@ REMOTE_DIGEST_BACKEND=$(ssh_target \
 
 if [[ -z "$REMOTE_DIGEST_BACKEND" ]]; then
   log "ERREUR : impossible de lire le digest distant alarm-backend:${TAG}"
-  exit 1
+  exit 3
 fi
 
 if [[ "$LOCAL_DIGEST_BACKEND" == "$REMOTE_DIGEST_BACKEND" ]]; then
