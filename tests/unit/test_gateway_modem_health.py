@@ -146,3 +146,70 @@ class TestPcmRebootAllowed:
     def test_timestamp_in_the_future_does_not_block_forever(self):
         # Horloge recalee en arriere : la trace ne doit pas bloquer l'auto-reparation des heures.
         assert _mh.pcm_reboot_allowed(self.NOW + 3600, self.NOW) is True
+
+
+class TestBackendsDown:
+    """INV-171 : la passerelle alerte quand aucun backend ne peut ecrire. /health repond 200 meme
+    sans leader (un 503 ferait reculer le canary a tort) : c'est cluster_writable qui compte.
+    Entree : par noeud, (code HTTP, corps JSON) ou None si injoignable."""
+
+    OK = (200, {"status": "ok", "role": "secondary", "cluster_writable": True})
+    READ_ONLY = (200, {"status": "ok", "role": "secondary", "cluster_writable": False})
+    DEGRADED = (503, {"status": "degraded", "role": "secondary", "cluster_writable": True})
+    OLD = (200, {"status": "ok", "role": "secondary"})  # backend d'avant INV-171
+
+    def test_one_writable_backend_is_enough(self):
+        assert _mh.backends_down([None, self.READ_ONLY, self.OK]) is False
+
+    def test_all_unreachable(self):
+        assert _mh.backends_down([None, None, None]) is True
+
+    def test_no_backend_configured(self):
+        assert _mh.backends_down([]) is True
+
+    def test_all_read_only_means_no_leader(self):
+        assert _mh.backends_down([self.READ_ONLY, self.READ_ONLY, None]) is True
+
+    def test_503_does_not_count_as_up(self):
+        assert _mh.backends_down([self.DEGRADED, None]) is True
+
+    def test_old_backend_without_the_field_counts_as_writable(self):
+        assert _mh.backends_down([self.OLD]) is False
+
+
+class TestSmsAlertStep:
+    """INV-171 : (SMS a envoyer, date du dernier SMS, passages inscriptibles consecutifs).
+    Le cooldown n'est rearme qu'apres 2 passages inscriptibles d'affilee : un backend qui
+    (re)demarre se dit inscriptible jusqu'a son 1er controle (60 s) ; un passage isole ne doit pas
+    relancer un SMS a chaque redeploiement."""
+
+    COOLDOWN = 1800
+
+    def _sent(self, passes):
+        """passes : (instant, aucun backend inscriptible). Renvoie les instants des SMS."""
+        last, streak, sent = 0, 0, []
+        for now, down in passes:
+            send, last, streak = _mh.sms_alert_step(down, last, streak, now, self.COOLDOWN)
+            if send:
+                sent.append(now)
+        return sent
+
+    def test_all_down_sends_sms(self):
+        assert self._sent([(10_000, True)]) == [10_000]
+
+    def test_never_down_never_sends(self):
+        assert self._sent([(10_000, False), (10_300, False)]) == []
+
+    def test_cooldown_is_strict(self):
+        assert self._sent([(10_000, True), (11_800, True), (11_801, True)]) == [10_000, 11_801]
+
+    def test_one_writable_pass_does_not_rearm_the_cooldown(self):
+        # Backend redemarre pendant l'episode : inscriptible par defaut le temps de son 1er controle.
+        assert self._sent([(10_000, True), (10_300, False), (10_600, True)]) == [10_000]
+
+    def test_two_writable_passes_rearm_the_cooldown(self):
+        assert self._sent([(10_000, True), (10_300, False), (10_600, False), (10_900, True)]) == [10_000, 10_900]
+
+    def test_a_down_pass_restarts_the_streak(self):
+        passes = [(10_000, True), (10_300, False), (10_600, True), (10_900, False), (11_200, True)]
+        assert self._sent(passes) == [10_000]

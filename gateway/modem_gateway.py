@@ -36,8 +36,8 @@ from modem_detect import detect_modem_port, send_at_command
 from locks import at_lock  # RLock reentrant partage du port AT (cf locks.py)
 from dry_contact import parse_dc_line, raw_to_state, decide_report  # logique pure (cf dry_contact.py)
 from modem_health import (  # logique pure (cf modem_health.py)
-    MAX_AT_FAILURES, MODEM_REBOOT_WAIT_S, at_failures_after, call_was_dialed, parse_network,
-    pcm_reboot_allowed, reregister_due, sends_allowed,
+    MAX_AT_FAILURES, MODEM_REBOOT_WAIT_S, at_failures_after, backends_down, call_was_dialed,
+    parse_network, pcm_reboot_allowed, reregister_due, sends_allowed, sms_alert_step,
 )
 from voice_call import (  # logique pure (cf voice_call.py)
     DTMF_WAIT_S, FRAME_S, HANG_UP_COMMANDS, LEAD_SILENCE_S, alarm_voice_file, call_answered,
@@ -586,36 +586,33 @@ class SmsReceiverThread(threading.Thread):
 # ── Health Monitor Thread ────────────────────────────────────────────────────
 
 class HealthMonitorThread(threading.Thread):
-    """Surveille les 3 noeuds backend et alerte par SMS si tous sont KO."""
+    """Surveille les noeuds backend et alerte par SMS si aucun ne peut ecrire (INV-171)."""
 
     def __init__(self, ser: serial.Serial):
         super().__init__(daemon=True, name="HealthMonitor")
         self.ser = ser
         self.running = True
         self.last_alert_time = 0
+        self.writable_passes = 0  # INV-171 : cooldown SMS rearme apres 2 passages inscriptibles
 
     def run(self):
         logger.info("HealthMonitorThread demarre")
         while self.running:
             try:
-                all_down = True
+                healths = []  # INV-171 : (code, corps) par noeud, None si injoignable
                 for url in ALL_NODE_URLS:
                     try:
                         r = requests.get(f"{url}/health", timeout=HTTP_TIMEOUT_SECONDS)
-                        if r.status_code == 200:
-                            all_down = False
-                            break
+                        healths.append((r.status_code, r.json()))
                     except Exception:
-                        continue
+                        healths.append(None)
 
-                if all_down:
-                    now = time.time()
-                    if now - self.last_alert_time > ALERT_COOLDOWN_SECONDS:
-                        logger.critical("TOUS LES BACKENDS SONT INJOIGNABLES")
-                        self._send_alert_sms()
-                        self.last_alert_time = now
-                else:
-                    self.last_alert_time = 0
+                send, self.last_alert_time, self.writable_passes = sms_alert_step(
+                    backends_down(healths), self.last_alert_time, self.writable_passes, time.time(),
+                    ALERT_COOLDOWN_SECONDS)
+                if send:
+                    logger.critical("AUCUN BACKEND NE PEUT ECRIRE (pas de leader ou tous injoignables)")
+                    self._send_alert_sms()
 
             except Exception as e:
                 logger.error(f"HealthMonitor erreur : {e}")
@@ -627,7 +624,8 @@ class HealthMonitorThread(threading.Thread):
             logger.warning("Pas de destinataires d'alerte configures (ALERT_RECIPIENTS)")
             return
 
-        message = "ALERTE ALARME MURGAT: Tous les backends sont injoignables. Intervention requise."
+        message = ("ALERTE ALARME MURGAT: Aucun backend ne peut ecrire (pas de leader ou tous "
+                   "injoignables). Intervention requise.")
         for recipient in ALERT_RECIPIENTS:
             try:
                 with at_lock:

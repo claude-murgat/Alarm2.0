@@ -64,3 +64,22 @@ def pcm_reboot_allowed(last_reboot_at: float | None, now: float) -> bool:
     """INV-169 : redemarrage permis si aucun dans les 30 dernieres minutes. Une trace
     dans le futur (horloge recalee en arriere) ne bloque pas."""
     return last_reboot_at is None or not 0 <= now - last_reboot_at < PCM_REBOOT_MIN_INTERVAL_S
+
+
+def backends_down(healths) -> bool:
+    """INV-171 : aucun backend ne peut ecrire. `healths` : par noeud, (code HTTP, corps de /health) ou
+    None si injoignable. /health repond 200 meme sans leader (un 503 ferait reculer le canary) :
+    c'est `cluster_writable` qui compte ; absent = backend d'avant, compte inscriptible."""
+    return not any(h is not None and h[0] == 200 and h[1].get("cluster_writable") is not False
+                   for h in healths)
+
+
+def sms_alert_step(down: bool, last_alert: float, writable_passes: int, now: float,
+                   cooldown: float) -> tuple[bool, float, int]:
+    """INV-171 : (SMS a envoyer, date du dernier SMS, passages inscriptibles consecutifs). SMS si aucun
+    backend ne peut ecrire, hors cooldown (strict). Le cooldown n'est rearme qu'apres 2 passages
+    inscriptibles d'affilee : un backend qui (re)demarre se dit inscriptible jusqu'a son 1er controle."""
+    if down:
+        send = now - last_alert > cooldown
+        return send, now if send else last_alert, 0
+    return False, 0 if writable_passes >= 1 else last_alert, writable_passes + 1
