@@ -33,8 +33,8 @@ case "$cmd" in
   *"docker stop"*) [[ -f "$H/stop_fail_$ip" ]] && exit 1
     [[ -f "$H/abort_on_stop" ]] && cp "$H/abort_on_stop" "$H/abort.json" ;;  # annulation ou alarme apres cet arret
   *"alarm-chaos-net cut"*) [[ -f "$H/cut_drop_$ip" ]] && exit 255; [[ -f "$H/cut_noarm_$ip" ]] && exit 0
-    # /health de la cible muet jusqu'a son timer (S/60 s, MINUTE_SECONDS=1) ; cut_noop : coupure sans effet
-    [[ -f "$H/cut_noop_$ip" || -f "$H/down_until_$ip" ]] || echo $(( $(date +%s) + ${cmd##* } / 60 )) > "$H/down_until_$ip"
+    # /health de la cible muet jusqu'a son timer (S/60 s, MINUTE_SECONDS=1) ; cut_noop : coupure sans effet ; +3 s de temps reel : les ssh d un site se suivent avant la sonde (CI lente)
+    [[ -f "$H/cut_noop_$ip" || -f "$H/down_until_$ip" ]] || echo $(( $(date +%s) + ${cmd##* } / 60 + 3 )) > "$H/down_until_$ip"
     [[ -f "$H/abort_on_stop" ]] && cp "$H/abort_on_stop" "$H/abort.json"  # annulation ou alarme apres cette coupure
     echo ARMED ;;
   *"alarm-chaos-net restore"*) [[ -f "$H/restore_down" ]] && exit 255; rm -f "$H/down_until_$ip" ;;
