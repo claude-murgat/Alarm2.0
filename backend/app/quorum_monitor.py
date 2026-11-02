@@ -27,22 +27,29 @@ sans démarrer la background task (tier 2 avec snapshot injecté).
 
 3. INV-168 : même tick, `_run_replica_reinit_check` re-clone un replica Patroni bloqué
    (logique pure `logic/replica_reinit.py`).
+
+4. INV-170 : même tick, sur TOUS les nœuds (avant le gate leader), `_run_leader_loss_check`
+   alerte quand plus aucun leader vivant n'est vu (logique pure `logic/leader_loss.py`) et tient
+   `cluster_has_leader`, lu par `/health.cluster_writable` (INV-171).
 """
 import asyncio
 import json
 import logging
 import os
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy.orm import Session
 
 from .clock import now as clock_now
+from . import replica_proxy
 from .database import SessionLocal
 from .email_service import send_alert_email
 from .events import log_event
 from .leader_election import is_leader
+from .logic.leader_loss import LeaderLossState, leader_host, next_state, no_leader_cause
 from .logic.quorum_detection import (
     ClusterSnapshot,
     QUORUM_LOSS_THRESHOLD,
@@ -53,6 +60,10 @@ from .logic.quorum_detection import (
 )
 from .logic.replica_reinit import decide_reinit, reinit_after, reinit_url
 from .models import QuorumStateRow, SystemConfig
+from .logic.gateway_silence import decide_silence  # INV-172
+from .models import GatewayState  # INV-172
+from .sites import default_site  # INV-172
+from .sites import node_locations
 
 
 logger = logging.getLogger(__name__)
@@ -195,11 +206,11 @@ def _run_quorum_check(
     db.commit()
 
 
-def _patroni_cluster() -> dict:
+def _patroni_cluster(timeout: float = 3) -> dict:
     """GET {PATRONI_URL}/cluster du Patroni local (bloquant). Lève si injoignable."""
     patroni_url = os.getenv("PATRONI_URL", "http://patroni:8008")
     req = urllib.request.Request(f"{patroni_url}/cluster", method="GET")
-    resp = urllib.request.urlopen(req, timeout=3)
+    resp = urllib.request.urlopen(req, timeout=timeout)
     return json.loads(resp.read().decode("utf-8"))
 
 
@@ -296,6 +307,97 @@ def _run_replica_reinit_check(now: datetime) -> None:
         f"Vérifier dans l'onglet Cluster qu'il repasse en « streaming »."))
 
 
+# INV-170 : vu par CE noeud (leader ou non). True tant qu'aucun tick n'a eu lieu : un backend qui
+# demarre ne doit pas se declarer en lecture seule avant d'avoir regarde. Lu par /health (INV-171).
+cluster_has_leader = True
+_leader_loss = LeaderLossState()
+
+# INV-170 : libelle du sujet, explication du corps.
+_CAUSES = {
+    "patroni_injoignable": (
+        "Patroni injoignable depuis ce nœud",
+        "le Patroni local de ce nœud ne répond pas (conteneur arrêté, ou nœud coupé des voteurs etcd). "
+        "Le reste du cluster peut fonctionner normalement : vérifier d'abord ce nœud (conteneur "
+        "Patroni, tunnel WireGuard)."),
+    "aucun_leader": (
+        "Patroni ne liste aucun leader",
+        "Patroni répond mais ne liste aucun leader."),
+    "leader_hors_service": (
+        "leader listé mais hors service",
+        "le leader listé par Patroni ({host}) ne répond pas comme primaire : son backend est arrêté ou "
+        "en erreur, ou il a été rétrogradé (clé leader périmée si le quorum etcd est perdu)."),
+}
+
+
+def _peer_is_primary(url: str) -> bool:
+    """INV-170 : ce backend pair répond 200 avec role primary (503, injoignable, illisible : non)."""
+    try:
+        body = urllib.request.urlopen(f"{url}/health", timeout=2).read()
+        return json.loads(body.decode("utf-8"))["role"] == "primary"
+    except Exception:
+        return False
+
+
+def _leader_loss_cause() -> tuple[Optional[str], Optional[str]]:
+    """INV-170 : (cause, hôte du leader listé) ; cause None = leader vivant vu de ce nœud."""
+    if is_leader.is_set():
+        return None, None  # primary ici : leader vivant, sans requête (pas de 3e GET /cluster par tick)
+    peers = replica_proxy._PEER_URLS  # ceux du relai d'écriture : leader vivant = écriture relayée possible
+    with ThreadPoolExecutor(max_workers=max(1, len(peers))) as pool:
+        primary_seen = any(pool.map(_peer_is_primary, peers))
+    try:
+        cluster = _patroni_cluster()
+    except Exception as e:
+        logger.warning("INV-170 : Patroni injoignable depuis ce noeud (%s)", e)
+        cluster = None
+    return no_leader_cause(cluster, primary_seen), leader_host(cluster)
+
+
+def _run_leader_loss_check(now: datetime) -> None:
+    """INV-170 : un tick (bloquant, via `asyncio.to_thread`, sur TOUS les noeuds, avant le gate leader).
+
+    Plus aucun leader vivant vu de ce noeud pendant > 3 min -> un email par episode (au plus un par
+    heure), depuis chaque noeud qui le constate (sans leader, aucun ne peut se coordonner avec les
+    autres). Etat en memoire : un redemarrage repart de zero. L'audit peut echouer sur un replica
+    (lecture seule) : jamais d'exception.
+    """
+    global cluster_has_leader, _leader_loss
+    cause, host = _leader_loss_cause()
+    cluster_has_leader = cause is None
+    _leader_loss, email_due = next_state(_leader_loss, cluster_has_leader, now)
+    if not email_due:
+        return
+    node = os.getenv("NODE_NAME", "unknown")
+    alert_email, location = None, None
+    try:
+        db = SessionLocal()
+        try:
+            alert_email = _get_alert_email(db)
+            location = node_locations(db).get(node)
+        finally:
+            db.close()
+    except Exception:
+        logger.exception("INV-170 : SystemConfig illisible, destinataire par défaut")
+    since = _leader_loss.since.isoformat()
+    where = f"{node} ({location or 'lieu inconnu'})"
+    label, explanation = _CAUSES[cause]
+    logger.critical("INV-170 : aucun leader vivant vu de %s depuis %s (%s)", node, since, cause)
+    log_event("cluster_leader_lost", node=node, since=since, cause=cause)
+    send_alert_email(
+        subject=f"[Alarme Murgat] Aucun leader vu de {where} — {label}",
+        body=(
+            f"Vu de {where}, depuis {since} (plus de 3 minutes) : {explanation.format(host=host)}\n\n"
+            f"Si la perte du leader se confirme, aucune écriture n'est possible : les alarmes ne peuvent "
+            f"plus être créées, escaladées ni acquittées, et les passerelles ne peuvent plus récupérer "
+            f"les SMS ni les appels à passer.\n\n"
+            f"Chaque nœud qui constate la situation envoie son propre email (au plus un par heure) : "
+            f"comparer les nœuds et les causes pour situer la panne.\n\n"
+            f"À vérifier : patronictl list, et que 2 voteurs etcd sur 3 (node1, node2, node3) sont joignables."
+        ),
+        to=alert_email or "direction_technique@charlesmurgat.com",
+    )
+
+
 async def quorum_monitor_loop() -> None:
     """Background task INV-085 : tick toutes les `_QUORUM_TICK_SECONDS` secondes.
 
@@ -321,6 +423,12 @@ async def quorum_monitor_loop() -> None:
             logger.info("quorum_monitor_loop annulé (shutdown)")
             raise
 
+        # INV-170 : sur tous les noeuds, avant le gate leader. Horloge reelle (cf INV-168).
+        try:
+            await asyncio.to_thread(_run_leader_loss_check, datetime.now(timezone.utc))
+        except Exception:
+            logger.exception("INV-170 : erreur dans le contrôle du leader (continue)")
+
         if not is_leader.is_set():
             # Pas leader → on ne tient même pas d'historique (sera vide
             # quand on deviendra leader, warming up de 3 min). Acceptable.
@@ -343,6 +451,7 @@ async def quorum_monitor_loop() -> None:
                 _run_quorum_check(db, snapshot, history[:-1], now=now)
             finally:
                 db.close()
+            await asyncio.to_thread(_run_gateway_silence_check, now)  # INV-172 : DB + SMTP hors event loop
         except Exception:
             logger.exception("quorum_monitor_loop : erreur dans le tick (continue)")
 
@@ -352,3 +461,52 @@ async def quorum_monitor_loop() -> None:
             await asyncio.to_thread(_run_replica_reinit_check, datetime.now(timezone.utc))
         except Exception:
             logger.exception("INV-168 : erreur dans le contrôle des replicas (continue)")
+
+
+# INV-172 : passerelle muette (aucun report-state depuis 10 min) -> un email + un audit par episode.
+# Les passerelles deja signalees sont tenues dans SystemConfig (liste JSON de gateway_id), partagee
+# par les leaders successifs : un nouveau leader ne re-signale pas, et une ligne obsolete (< 7 jours,
+# au-dela elle est ignoree) ne coute qu'un email.
+_SILENCE_KEY = "gateway_silence_emailed"
+
+
+def _run_gateway_silence_check(now: datetime) -> None:
+    """INV-172 : un tick (bloquant, via `asyncio.to_thread`, leader seul), juste apres _run_quorum_check."""
+    db = SessionLocal()
+    try:
+        gateways = [{"gateway_id": g.gateway_id, "site": g.site, "last_seen": g.last_seen}
+                    for g in db.query(GatewayState).all()]
+        row = db.query(SystemConfig).filter(SystemConfig.key == _SILENCE_KEY).first()
+        emailed = frozenset(json.loads(row.value)) if row else frozenset()
+        alerts, silent = decide_silence(gateways, emailed, now)
+        if silent != emailed:
+            if row is None:
+                row = SystemConfig(key=_SILENCE_KEY, value="[]")
+                db.add(row)
+            row.value = json.dumps(sorted(silent))
+            db.commit()
+        if not alerts:
+            return
+        alert_email = _get_alert_email(db)
+        for g in alerts:
+            minutes = int((now - g["last_seen"]).total_seconds() // 60)
+            site = g["site"] or default_site(db)
+            log_event("gateway_silent", gateway_id=g["gateway_id"], site=site,
+                      last_seen=g["last_seen"].isoformat(), silent_minutes=minutes)
+            logger.error("INV-172 : passerelle %s (%s) muette depuis %s min", g["gateway_id"], site, minutes)
+            _alert(alert_email, (
+                f"[Alarme Murgat] Passerelle {g['gateway_id']} ({site.capitalize()}) muette depuis {minutes} min"
+            ), (
+                f"La passerelle {g['gateway_id']} du site {site.capitalize()} n'a plus envoyé son état depuis "
+                f"{minutes} min (dernier rapport : {g['last_seen'].isoformat()} UTC).\n\n"
+                f"Conséquence : le site {site.capitalize()} ne peut plus déclencher d'alarme par contact sec, "
+                f"ni émettre de SMS ou d'appel (pas de secours entre sites — décision du propriétaire). "
+                f"Ses SMS et appels attendent son retour.\n\n"
+                f"À vérifier sur le nœud passerelle :\n"
+                f"  - systemctl status alarm-sms-gateway (journalctl -u alarm-sms-gateway -n 50)\n"
+                f"  - modem USB présent (lsusb, /dev/ttyUSB*) et alimenté\n"
+                f"  - alimentation et réseau de la machine\n"
+                f"  - tunnel WireGuard (sudo wg show : dernière poignée de main récente)\n\n"
+                f"Un nouvel email partira si elle revient puis se tait de nouveau."))
+    finally:
+        db.close()
