@@ -303,7 +303,7 @@ Avant le `up -d` de la nouvelle image, le script canary :
 
 En cas de rollback :
 1. `docker tag <last-stable-digest> ghcr.io/.../alarm-backend:stable` (re-pointe le tag local)
-2. `docker compose --env-file .env.prod.nodeX up -d` (relance avec l'ancienne image)
+2. Charge `.env.prod.secrets` (`set -a ; . ./.env.prod.secrets ; set +a`, comme `start-prod-node.sh` — INV-180, constat NODE3 2026-10-30 : sans lui compose refuse « SECRET_KEY missing »), puis `docker compose --env-file .env.prod.nodeX up -d` (relance avec l'ancienne image)
 3. Logger `kind=rollback` dans `deployment_events` (cf §6) avec les 5 dernières lignes de log de la nouvelle image en `details_json`
 4. Email à `direction_technique@charlesmurgat.com`
 5. **Halte du canary** : les nœuds restants ne sont pas updatés, pour ne pas répliquer le bug

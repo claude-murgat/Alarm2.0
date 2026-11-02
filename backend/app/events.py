@@ -14,6 +14,9 @@ AUDITABLE_EVENTS = {
     "replica_reinitialized",  # INV-168
     # INV-179 : panne controlee (leader_changed reste dans chaos_requests.events seulement)
     "chaos_requested", "chaos_cancelled", "chaos_started", "chaos_early_restore", "chaos_restored", "chaos_failed",
+    "gateway_silent",  # INV-172
+    "cluster_leader_lost",  # INV-170
+    "test_go_offline", "test_heartbeat_pause",  # INV-138 (onglet Tests en prod)
 }
 
 
