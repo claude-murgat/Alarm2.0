@@ -24,6 +24,7 @@ from .api.alarms_internal import router as alarms_internal_router
 from .api.audit import router as audit_router
 from .api.connectivity import router as connectivity_router
 from .escalation import escalation_loop
+from . import quorum_monitor
 from .quorum_monitor import quorum_monitor_loop
 from .watchdog import watchdog_loop
 from .leader_election import leader_election_loop, is_leader
@@ -275,6 +276,12 @@ app.include_router(system_router)
 from .api.live import router as live_router
 app.include_router(live_router)
 
+from .api.resilience import router as resilience_router
+app.include_router(resilience_router)
+
+from .api.chaos import router as chaos_router
+app.include_router(chaos_router)
+
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
@@ -318,6 +325,9 @@ async def health():
         "db": db_ok,
         "escalation_loop": loop_ok,
         "role": role,
+        # INV-171 : leader local ou backend pair primary (INV-170). HTTP 200 conserve : un 503 ferait reculer le
+        # canary et peer-health a tort (le probleme est Patroni/etcd, pas l'image deployee).
+        "cluster_writable": is_leader.is_set() or quorum_monitor.cluster_has_leader,
         "test_endpoints_enabled": ENABLE_TEST_ENDPOINTS,
         "secret_key_default": secret_key_default,
         "version": os.getenv("APP_VERSION") or commit[:7],
@@ -347,7 +357,8 @@ async def cluster_status():
     except Exception as e:
         return JSONResponse(
             status_code=503,
-            content={"error": f"Patroni unreachable: {e}", "local_node": node_name, "local_role": local_role}
+            content={"error": f"Patroni unreachable: {e}", "local_node": node_name, "local_role": local_role,
+                     "cluster_writable": is_leader.is_set() or quorum_monitor.cluster_has_leader}  # INV-171
         )
 
     members = cluster.get("members", [])
@@ -367,6 +378,7 @@ async def cluster_status():
         "local_node": node_name,
         "local_role": local_role,
         "local_location": locations.get(node_name),
+        "cluster_writable": is_leader.is_set() or quorum_monitor.cluster_has_leader,  # INV-171, bandeau web
         "quorum": {
             "total": total_count,
             "healthy": healthy_count,

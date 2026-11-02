@@ -37,6 +37,28 @@ def requested_sites(db: Session, site: str | None) -> list[str]:
 DEFAULT_NODE_LOCATIONS = "node1:izeron,node2:izeron,node3:ovh,node4:beaufort,node5:beaufort"
 
 
+def _pairs(db: Session, key: str, default: str) -> dict[str, str]:
+    pairs = (p.split(":", 1) for p in _split(_config(db, key, default)))
+    return {a.strip(): b.strip() for a, b in (p for p in pairs if len(p) == 2)}
+
+
 def node_locations(db: Session) -> dict[str, str]:
-    pairs = (p.split(":", 1) for p in _split(_config(db, "node_locations", DEFAULT_NODE_LOCATIONS)))
-    return {name.strip(): loc.strip() for name, loc in (p for p in pairs if len(p) == 2)}
+    return _pairs(db, "node_locations", DEFAULT_NODE_LOCATIONS)
+
+
+# INV-175 : topologie du panneau resilience. Memes defauts sur une base deja en service.
+DEFAULT_ETCD_VOTERS = "node1,node2,node3"
+DEFAULT_RELAY_NODES = "node3"  # seul noeud qui relie les sites entre eux
+DEFAULT_GATEWAY_HOSTS = "onsite-2:node2,alarm-1:node4"  # passerelle:noeud qui l'heberge
+
+
+def etcd_voters(db: Session) -> list[str]:
+    return _split(_config(db, "etcd_voters", DEFAULT_ETCD_VOTERS))
+
+
+def relay_nodes(db: Session) -> list[str]:
+    return _split(_config(db, "relay_nodes", DEFAULT_RELAY_NODES))
+
+
+def gateway_hosts(db: Session) -> dict[str, str]:
+    return _pairs(db, "gateway_hosts", DEFAULT_GATEWAY_HOSTS)
