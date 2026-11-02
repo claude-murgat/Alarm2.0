@@ -13,6 +13,7 @@ AUDITABLE_EVENTS = {
     "escalation_without_call",  # INV-144
     "replica_reinitialized",  # INV-168
     "cluster_leader_lost",  # INV-170
+    "test_go_offline", "test_heartbeat_pause",  # INV-138 (onglet Tests en prod)
 }
 
 
