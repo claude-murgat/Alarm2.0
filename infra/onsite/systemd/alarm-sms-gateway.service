@@ -1,0 +1,27 @@
+# /etc/systemd/system/alarm-sms-gateway.service — pose par infra/onsite/install.sh sur CHAQUE machine
+# sur site (INV-182) : modem et Arduino branchables sur n'importe laquelle. Sans modem, la passerelle
+# l'attend sans sortir et lit le contact sec (INV-183).
+[Unit]
+Description=Alarm 2.0 — SMS Gateway (poll VPS + send via USB GSM key)
+After=network-online.target
+Wants=network-online.target
+# Jamais "failed" : la passerelle sort volontairement si le modem est muet (INV-126), systemd doit
+# toujours la relancer (relances comptees par alarm-modem-watchdog, INV-146).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=alarm-gateway
+WorkingDirectory=/opt/alarm-gateway
+EnvironmentFile=/etc/alarm-gateway.env
+ExecStart=python3 /opt/alarm-gateway/modem_gateway.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=alarm-sms-gateway
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

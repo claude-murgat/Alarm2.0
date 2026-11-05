@@ -4,8 +4,10 @@
 set -uo pipefail
 WDM="${WDM:-/dev/cdc-wdm0}"; APN="${APN:-orange}"; METRIC="${METRIC:-300}"; CHECK="${CHECK:-30}"
 log(){ echo "$(date '+%F %T') [4g-standby] $*"; }
-for i in $(seq 1 30); do [ -e "$WDM" ] && break; sleep 2; done
-[ -e "$WDM" ] || { log "modem $WDM absent apres 60s — abandon (systemd relancera)"; exit 1; }
+# INV-182 : sans modem (machine qui n'en a pas, ou pas encore), on l'attend sans sortir ni
+# toucher aux routes : plus de relance systemd toutes les 70 s. Une ligne de journal.
+[ -e "$WDM" ] || log "modem $WDM absent : en attente (aucune route 4G sans modem)"
+until [ -e "$WDM" ]; do sleep 10; done
 IF=""
 for c in /sys/class/net/ww*; do [ -e "$c/device/driver" ] || continue; case "$(readlink -f "$c/device/driver")" in *qmi_wwan*) IF="$(basename "$c")"; break;; esac; done
 [ -n "$IF" ] || { log "interface qmi_wwan introuvable"; exit 1; }
@@ -30,6 +32,9 @@ teardown(){
 }
 trap teardown TERM INT
 bring_up(){
+  # Modem debranche en marche : sortie, systemd relance et le nouveau processus l'attend (son
+  # interface peut changer de nom sur un autre port USB). Une relance par disparition.
+  [ -e "$WDM" ] || { log "modem $WDM disparu : sortie, relance systemd puis attente de son retour"; exit 1; }
   qmicli -d "$WDM" -p --wds-stop-network=disable >/dev/null 2>&1 || true
   ip link set "$IF" down 2>/dev/null
   echo Y > "/sys/class/net/$IF/qmi/raw_ip" 2>/dev/null || true

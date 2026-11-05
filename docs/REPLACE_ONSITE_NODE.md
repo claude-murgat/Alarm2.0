@@ -25,13 +25,13 @@ Pour remplacer un voteur, on garde le **même `NODE_NAME` et la même IP WireGua
 
 ## 0. Avant le jour J (nouvelle machine prête, hors cluster)
 - Provisionnement de base fait : `docs/PROVISIONING_ONSITE.md` §2-§12, Docker §14, `/opt/alarm` cloné, `infra/onsite/install.sh` lancé.
-- Pour le nœud passerelle : utilisateur `alarm-gateway` créé, unité `alarm-sms-gateway`, udev, voix, modem testé (SMS + appel).
+- Passerelle : posée et démarrée par `install.sh` sur **chaque** machine (INV-182) ; poser `GATEWAY_KEY` et `GATEWAY_SITE` dans `/etc/alarm-gateway.env` (`docs/PROVISIONING_ONSITE.md` §21). Si la machine porte le modem : modem testé (SMS + appel).
 - Timers CD installés : `alarm-cd-pull` (`infra/onsite/systemd/alarm-cd-pull.*`, **non installé par `install.sh`**), `alarm-host-sync`, `alarm-gateway-sync`.
 - Images `:stable` déjà en cache (`alarm-cd-pull` a tourné une fois).
 - Clé WireGuard prod générée (`wg genkey`), mais `wg0` prod **pas encore monté** : l'IP 10.99.0.X est encore portée par l'ancien nœud.
 - Secrets copiés depuis l'ancien nœud, mode 600, propriétaire `alarm` :
   - `/opt/alarm/.env.prod.secrets` (même `SECRET_KEY` sur les 3 nœuds) ;
-  - `/etc/alarm-gateway.env` (`GATEWAY_KEY`), sur le nœud passerelle seulement.
+  - `/etc/alarm-gateway.env` : `GATEWAY_KEY` (copié) et `GATEWAY_SITE` (site de la **nouvelle** machine), sur chaque machine.
 - Clé SSH de l'orchestrateur NODE3 ajoutée dans `~alarm/.ssh/authorized_keys`, avec la règle ufw `allow from 10.99.0.0/24 to any port 22 proto tcp` (`docs/CD_DESIGN.md` §9bis).
 - Vérifier sur le web prod que les 3 nœuds sont sains et qu'**aucune alarme n'est active**.
 
@@ -63,7 +63,7 @@ ETCD_INITIAL_CLUSTER_STATE=existing ./scripts/start-prod-node.sh --pull N
 ```
 - etcd rejoint le cluster (`existing`). La variable ne sert qu'au premier démarrage : une fois `/etcd-data` initialisé, la valeur par défaut `new` est sans effet.
 - Patroni trouve un leader dans etcd et, son volume étant vide, **se clone en replica** depuis lui (basebackup). Rien à faire.
-- Nœud passerelle : `sudo systemctl enable --now alarm-sms-gateway alarm-modem-rat alarm-modem-watchdog alarm-4g-standby`.
+- Passerelle et pile modem : déjà actives (`install.sh`, INV-182). Brancher le modem et l'Arduino suffit (section suivante).
 
 ## 4. Vérifier
 ```bash
@@ -84,6 +84,9 @@ curl -s http://10.99.0.X:8000/health                                  # role rep
 ## Ordre conseillé
 1. **node1 (onsite-1) en premier** : pas de modem, risque le plus faible.
 2. Après 24 h stables, **node2 (onsite-2)**, qui déplace aussi la passerelle SMS/appels.
+
+## Le matériel (modem, Arduino) peut changer de machine
+Depuis le 2026-11-05 (INV-182, INV-183, INV-184), chaque machine sur site a la passerelle et la pile modem, actives même sans matériel : le modem SIM7600 et l'Arduino du contact sec se débranchent d'une machine et se rebranchent sur une autre **sans aucune commande**. La passerelle de la machine d'arrivée trouve le modem en 15 s au plus (puis son démarrage) et l'Arduino en 5 s, et les rattache à **son** `GATEWAY_SITE` (le site suit la machine, pas le matériel : vérifier `GATEWAY_KEY` et `GATEWAY_SITE` de la machine d'arrivée). **Un seul modem par site à la fois** : deux modems sur un même site enverraient chaque SMS et chaque appel deux fois. Effets attendus sur la machine de départ, une fois chacun : le watchdog tente **une** récupération USB et envoie **un** email « Modem SIM7600 DOWN » (normal, il attend ensuite sans rien toucher ; un reboot ou `sudo rm /run/alarm-modem-seen` lui fait oublier ce modem) ; si l'Arduino est parti, l'email « Passerelle <machine> muette » au bout de 10 min (INV-172 ; la ligne est oubliée après 7 jours). L'indicateur de signal de l'ancienne machine reste « inconnu » dans le web et l'app (INV-158) tant que sa ligne `modem_status:<machine>` existe : la supprimer de `system_config` sur le leader si elle gêne.
 
 ---
 

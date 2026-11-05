@@ -22,6 +22,7 @@ import wave
 
 import requests
 import serial
+from serial.tools import list_ports
 
 from config import (
     ALL_NODE_URLS, GATEWAY_ID, GATEWAY_KEY, GATEWAY_SITE, MODEM_AT_PORT, MODEM_BAUD_RATE,
@@ -32,8 +33,9 @@ from config import (
     DRY_CONTACT_SOURCE, DRY_CONTACT_HOST_PORT, DRY_CONTACT_HOST_BAUD,
     DRY_CONTACT_LIVENESS_SECONDS,
 )
-from modem_detect import detect_modem_port, send_at_command
+from modem_detect import KNOWN_VIDS, detect_modem_port, send_at_command
 from modem_health import probe_order, probe_timeout  # INV-174
+from modem_health import MODEM_RESCAN_SECONDS, MUTE_SCANS_BEFORE_EXIT, modem_search_step  # INV-183
 from config import PRIMARY_PROBE_TIMEOUT_SECONDS  # INV-174
 from locks import at_lock  # RLock reentrant partage du port AT (cf locks.py)
 from dry_contact import parse_dc_line, raw_to_state, decide_report  # logique pure (cf dry_contact.py)
@@ -797,6 +799,8 @@ class HostDryContactMonitorThread(threading.Thread):
     le dernier état connu, **tant qu'il est frais** (< `liveness_seconds`). Si le
     µC se tait (débranché/HS) au-delà, on cesse de reporter → le backend voit le
     silence (INV-122) au lieu d'un état périmé. Reconnexion auto si le port tombe.
+    INV-183 : Arduino absent ou débranché -> un seul avertissement par absence, nouvelle
+    recherche toutes les 5 s, reprise seule au rebranchement.
     """
 
     def __init__(
@@ -817,6 +821,7 @@ class HostDryContactMonitorThread(threading.Thread):
         self.liveness = max(2.0, liveness_seconds)
         self.running = True
         self._last_logged_state: str | None = None
+        self._absent_logged = False  # INV-183 : un avertissement par absence du µC
 
     def _resolve_port(self) -> str | None:
         """Port explicite, sinon auto-détect (by-id Arduino puis ttyACM*)."""
@@ -840,25 +845,25 @@ class HostDryContactMonitorThread(threading.Thread):
         )
         while self.running:
             port = self._resolve_port()
-            if not port:
-                logger.warning(
-                    "HostDryContact : aucun port µC USB trouve (Arduino debranche ?). Retry 5s."
-                )
-                time.sleep(5.0)
-                continue
             try:
+                if not port:
+                    raise OSError("aucun port µC USB trouve (Arduino debranche ?)")
                 self._serve(port)
             except Exception as e:
-                logger.error(f"HostDryContact : erreur sur {port} : {e}. Reouverture dans 3s.")
-                time.sleep(3.0)
+                if not self._absent_logged:
+                    logger.warning(f"HostDryContact : {e} — nouvelle recherche toutes les 5 s, "
+                                   f"sans autre message jusqu'au retour du µC")
+                    self._absent_logged = True
+                time.sleep(5.0)
 
     def _serve(self, port: str):
         latest_raw: int | None = None
         latest_ts = 0.0
         last_post = 0.0
         silent_warned = False
-        logger.info(f"HostDryContact : ouverture {port} @{self.baud}")
         with serial.Serial(port, self.baud, timeout=1.0) as ser:
+            logger.info(f"HostDryContact : {port} ouvert @{self.baud}")
+            self._absent_logged = False
             while self.running:
                 raw_line = ser.readline().decode(errors="replace")
                 v = parse_dc_line(raw_line)
@@ -901,6 +906,25 @@ class HostDryContactMonitorThread(threading.Thread):
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+def _wait_for_modem(manual_port: str | None):
+    """INV-183 : cherche le modem toutes les MODEM_RESCAN_SECONDS sans jamais sortir s'il est absent.
+    (port, ser) quand il repond ; (None, None) s'il est sur l'USB mais muet trop longtemps."""
+    mute_scans, waiting = 0, False
+    while True:
+        # Sans port SIMCom, pas de detect_modem_port : pas de balayage ni de logs toutes les 15 s.
+        on_usb = any(p.vid in KNOWN_VIDS for p in list_ports.comports())
+        port, ser = detect_modem_port(manual_port=manual_port) if on_usb else (None, None)
+        action, mute_scans = modem_search_step(on_usb, ser is not None, mute_scans)
+        if action != "attendre":
+            return port, ser
+        if not waiting:
+            waiting = True
+            logger.warning(f"En attente du modem (absent ou pas encore pret) : nouvelle recherche toutes les "
+                           f"{MODEM_RESCAN_SECONDS} s ; ni SMS ni appel par cette passerelle d'ici la (INV-183)")
+            logger.info("Gateway operationnelle — en attente du modem, contact sec actif")
+        time.sleep(MODEM_RESCAN_SECONDS)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Gateway modem SIM7600E-H — Alarm 2.0"
@@ -910,12 +934,32 @@ def main():
 
     logger.info("=== Gateway Modem SIM7600E-H demarree ===")
 
-    # Detecter le modem
+    # INV-120 V2 — poll level-based contact sec NC (opt-in via DRY_CONTACT_ENABLED). INV-183 : la
+    # source hote (Arduino) demarre avant et sans le modem ; la source modem demarre avec lui.
+    if not DRY_CONTACT_ENABLED:
+        logger.info("Contact sec desactive (DRY_CONTACT_ENABLED=false)")
+    elif DRY_CONTACT_SOURCE == "host":
+        HostDryContactMonitorThread(
+            port=DRY_CONTACT_HOST_PORT,
+            baud=DRY_CONTACT_HOST_BAUD,
+            gateway_id=GATEWAY_ID,
+            normal_value=DRY_CONTACT_NORMAL_VALUE,
+            poll_seconds=DRY_CONTACT_POLL_SECONDS,
+            liveness_seconds=DRY_CONTACT_LIVENESS_SECONDS,
+        ).start()
+        logger.info(
+            f"Contact sec active (source=host) : gateway_id={GATEWAY_ID}, "
+            f"port={DRY_CONTACT_HOST_PORT or 'auto'}, poll={DRY_CONTACT_POLL_SECONDS:.1f}s, "
+            f"normal_value={DRY_CONTACT_NORMAL_VALUE}"
+        )
+
+    # Detecter le modem (INV-183 : absent -> attente, jamais de sortie)
     manual_port = args.port or MODEM_AT_PORT or None
-    port, ser = detect_modem_port(manual_port=manual_port)
+    port, ser = _wait_for_modem(manual_port)
 
     if not ser:
-        logger.critical("Modem non detecte. Abandon.")
+        logger.critical(f"Modem present sur l'USB mais muet a {MUTE_SCANS_BEFORE_EXIT} recherches : "
+                        f"sortie pour relance systemd (INV-126, INV-146)")
         return 1
 
     logger.info(f"Modem connecte sur {port}")
@@ -926,8 +970,7 @@ def main():
         send_at_command(ser, "AT+CNMI=2,1,0,0,0", timeout=3)  # Notifications SMS
 
     # INV-132 : port audio USB (interface 4) pour injecter la voix dans l'appel
-    from serial.tools import list_ports as lp
-    audio_port = next((p.device for p in lp.comports() if is_audio_port(p.vid, p.location)), None)
+    audio_port = next((p.device for p in list_ports.comports() if is_audio_port(p.vid, p.location)), None)
     if audio_port:
         logger.info(f"Port audio detecte : {audio_port} (voix injectee dans l'appel)")
     else:
@@ -954,41 +997,21 @@ def main():
         HealthMonitorThread(ser),
     ]
 
-    # INV-120 V2 — poll level-based contact sec NC (opt-in via DRY_CONTACT_ENABLED)
-    if DRY_CONTACT_ENABLED:
-        if DRY_CONTACT_SOURCE == "host":
-            threads.append(
-                HostDryContactMonitorThread(
-                    port=DRY_CONTACT_HOST_PORT,
-                    baud=DRY_CONTACT_HOST_BAUD,
-                    gateway_id=GATEWAY_ID,
-                    normal_value=DRY_CONTACT_NORMAL_VALUE,
-                    poll_seconds=DRY_CONTACT_POLL_SECONDS,
-                    liveness_seconds=DRY_CONTACT_LIVENESS_SECONDS,
-                )
+    if DRY_CONTACT_ENABLED and DRY_CONTACT_SOURCE != "host":
+        threads.append(
+            DryContactMonitorThread(
+                ser=ser,
+                gateway_id=GATEWAY_ID,
+                gpio_pin=DRY_CONTACT_GPIO_PIN,
+                normal_value=DRY_CONTACT_NORMAL_VALUE,
+                poll_seconds=DRY_CONTACT_POLL_SECONDS,
             )
-            logger.info(
-                f"Contact sec active (source=host) : gateway_id={GATEWAY_ID}, "
-                f"port={DRY_CONTACT_HOST_PORT or 'auto'}, poll={DRY_CONTACT_POLL_SECONDS:.1f}s, "
-                f"normal_value={DRY_CONTACT_NORMAL_VALUE}"
-            )
-        else:
-            threads.append(
-                DryContactMonitorThread(
-                    ser=ser,
-                    gateway_id=GATEWAY_ID,
-                    gpio_pin=DRY_CONTACT_GPIO_PIN,
-                    normal_value=DRY_CONTACT_NORMAL_VALUE,
-                    poll_seconds=DRY_CONTACT_POLL_SECONDS,
-                )
-            )
-            logger.info(
-                f"Contact sec active (source=modem) : gateway_id={GATEWAY_ID}, "
-                f"GPIO pin{DRY_CONTACT_GPIO_PIN}, poll={DRY_CONTACT_POLL_SECONDS:.1f}s, "
-                f"normal_value={DRY_CONTACT_NORMAL_VALUE}"
-            )
-    else:
-        logger.info("Contact sec desactive (DRY_CONTACT_ENABLED=false)")
+        )
+        logger.info(
+            f"Contact sec active (source=modem) : gateway_id={GATEWAY_ID}, "
+            f"GPIO pin{DRY_CONTACT_GPIO_PIN}, poll={DRY_CONTACT_POLL_SECONDS:.1f}s, "
+            f"normal_value={DRY_CONTACT_NORMAL_VALUE}"
+        )
 
     for t in threads:
         t.start()

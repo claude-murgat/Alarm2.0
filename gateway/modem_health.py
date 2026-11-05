@@ -11,6 +11,25 @@ traiter une reponse vide comme un succes.
 MAX_AT_FAILURES = 2
 
 
+# INV-183 : modem absent -> nouvelle recherche toutes les 15 s, sans sortir. Present mais muet sur
+# 2 recherches de suite -> sortie (INV-126) : la 1re peut tomber pendant le demarrage du modem.
+MODEM_RESCAN_SECONDS = 15
+MUTE_SCANS_BEFORE_EXIT = 2
+
+
+def modem_search_step(on_usb: bool, answered: bool, mute_scans: int) -> tuple[str, int]:
+    """INV-183 : (action, recherches muettes consecutives) apres une recherche du modem.
+    `on_usb` : un port serie SIMCom est enumere ; `answered` : l'un d'eux repond OK a AT.
+    'utiliser' | 'attendre' (absent, ou muet moins de MUTE_SCANS_BEFORE_EXIT fois) | 'sortir'
+    (muet MUTE_SCANS_BEFORE_EXIT fois de suite : relance systemd, comptee par le watchdog INV-146)."""
+    if answered:
+        return "utiliser", 0
+    if not on_usb:
+        return "attendre", 0
+    mute_scans += 1
+    return ("sortir" if mute_scans >= MUTE_SCANS_BEFORE_EXIT else "attendre"), mute_scans
+
+
 def call_was_dialed(atd_response: str) -> bool:
     """Le SIM7600 repond OK a `ATD<numero>;`. Toute autre reponse, y compris
     vide, signifie que l'appel n'est jamais parti."""

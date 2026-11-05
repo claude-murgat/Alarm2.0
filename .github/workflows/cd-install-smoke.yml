@@ -7,6 +7,8 @@
 #   - alarm-cd-orchestrate.{service,timer,sh}     : sur NODE3 uniquement (V1.5 PR 9)
 #   - infra/onsite/sudoers/alarm-cd               : NOPASSWD chirurgical
 #   - alarm-chaos.{service,timer,sh} + alarm-chaos-net : panne controlee (INV-176..179)
+#   - infra/onsite/install.sh complet + vraie passerelle sur une machine sans modem ni
+#     Arduino (INV-182/183/184)
 #
 # Pourquoi ce workflow existe :
 #   La PR initiale de fix `fix/cd-pull-lock-runtime-dir` corrige un bug ou le
@@ -41,6 +43,9 @@ on:
       - 'infra/onsite/install.sh'
       - 'scripts/alarm-gateway-sync.sh'
       - 'infra/onsite/systemd/alarm-gateway-sync.*'
+      - 'infra/onsite/systemd/alarm-sms-gateway.service'
+      - 'scripts/4g-standby.sh'
+      - 'scripts/modem-watchdog.py'
       - 'gateway/**'
       - '.github/workflows/cd-install-smoke.yml'
   push:
@@ -57,6 +62,9 @@ on:
       - 'infra/onsite/install.sh'
       - 'scripts/alarm-gateway-sync.sh'
       - 'infra/onsite/systemd/alarm-gateway-sync.*'
+      - 'infra/onsite/systemd/alarm-sms-gateway.service'
+      - 'scripts/4g-standby.sh'
+      - 'scripts/modem-watchdog.py'
       - 'gateway/**'
       - '.github/workflows/cd-install-smoke.yml'
 
@@ -525,3 +533,66 @@ jobs:
           test "$(sudo cat /var/lib/alarm/cd/gateway-image-id)" = "$(docker image inspect "$IMG" -f '{{.Id}}')"
           systemctl is-active alarm-sms-gateway.service
           sudo journalctl -u alarm-gateway-sync --no-pager | tail -5 || true
+
+  onsite-install:
+    # INV-182/183/184 : le vrai infra/onsite/install.sh sur une machine sans modem ni Arduino (le
+    # runner), comme onsite-1 ou alarm-3 : utilisateur, unit, .env, puis la vraie passerelle et la
+    # pile modem actives sans echec ni relance. Ce que fera alarm-host-sync sur chaque machine.
+    name: install.sh + passerelle sur une machine sans modem (INV-182)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lint unit passerelle
+        run: sudo systemd-analyze verify infra/onsite/systemd/alarm-sms-gateway.service
+
+      - name: Drop-in d'avant (pose par l'ancien install.sh)
+        run: |
+          sudo install -d /etc/systemd/system/alarm-sms-gateway.service.d
+          printf '[Service]\nExecStart=\nExecStart=python3 /opt/alarm-gateway/modem_gateway.py\n' \
+            | sudo tee /etc/systemd/system/alarm-sms-gateway.service.d/override.conf >/dev/null
+
+      - name: 1er passage (bootstrap a la main)
+        run: |
+          sudo bash infra/onsite/install.sh | tee /tmp/install1.log
+          grep -q "ATTENTION: GATEWAY_KEY manquant" /tmp/install1.log
+          grep -q "ATTENTION: GATEWAY_SITE manquant" /tmp/install1.log
+          id -nG alarm-gateway | grep -qw dialout
+          sudo cmp infra/onsite/systemd/alarm-sms-gateway.service /etc/systemd/system/alarm-sms-gateway.service
+          test ! -e /etc/systemd/system/alarm-sms-gateway.service.d
+          sudo cmp gateway/modem_gateway.py /opt/alarm-gateway/modem_gateway.py
+          test "$(sudo stat -c '%a %U %G' /etc/alarm-gateway.env)" = "640 root alarm-gateway"
+          sudo grep -qx DRY_CONTACT_SOURCE=host /etc/alarm-gateway.env
+          sudo grep -qx DRY_CONTACT_NORMAL_VALUE=0 /etc/alarm-gateway.env
+          if sudo grep -q '^GATEWAY_KEY' /etc/alarm-gateway.env; then echo "::error::GATEWAY_KEY ecrit"; exit 1; fi
+          systemctl is-enabled alarm-modem-rat alarm-sms-gateway
+
+      - name: Sans modem ni Arduino - tout tourne, rien ne relance (INV-182/183/184)
+        run: |
+          sleep 60
+          for u in alarm-sms-gateway alarm-4g-standby alarm-modem-watchdog alarm-wan-failover; do
+            systemctl is-active "$u" || { sudo journalctl -u "$u" --no-pager | tail -30; exit 1; }
+            n=$(systemctl show "$u" -p NRestarts --value)
+            test "$n" = 0 || { echo "::error::$u relance $n fois"; sudo journalctl -u "$u" --no-pager | tail -30; exit 1; }
+          done
+          sudo journalctl -u alarm-sms-gateway --no-pager > /tmp/gw.log; tail -20 /tmp/gw.log
+          grep -q "Gateway operationnelle" /tmp/gw.log
+          test "$(grep -c "En attente du modem" /tmp/gw.log)" = 1
+          test "$(grep -c "HostDryContact : aucun port" /tmp/gw.log)" = 1  # 12 recherches, 1 message
+          if grep -q "Traceback\|Abandon" /tmp/gw.log; then echo "::error::sortie ou exception"; exit 1; fi
+          sudo journalctl -u alarm-modem-watchdog --no-pager | grep -q "aucun modem vu"
+          sudo journalctl -u alarm-4g-standby --no-pager | grep -q "en attente"
+
+      - name: 2e passage --auto (alarm-host-sync) - valeurs posees a la main gardees, passerelle non relancee
+        run: |
+          PID=$(systemctl show alarm-sms-gateway -p ExecMainPID --value)
+          echo GATEWAY_SITE=izeron | sudo tee -a /etc/alarm-gateway.env >/dev/null
+          sudo sed -i 's/^DRY_CONTACT_NORMAL_VALUE=0$/DRY_CONTACT_NORMAL_VALUE=1/' /etc/alarm-gateway.env
+          sudo bash infra/onsite/install.sh --auto | tee /tmp/install2.log
+          test "$PID" = "$(systemctl show alarm-sms-gateway -p ExecMainPID --value)"
+          if grep -q "GATEWAY_SITE manquant" /tmp/install2.log; then exit 1; fi
+          sudo grep -qx GATEWAY_SITE=izeron /etc/alarm-gateway.env
+          sudo grep -qx DRY_CONTACT_NORMAL_VALUE=1 /etc/alarm-gateway.env
+          test "$(sudo grep -c '^NODE1_URL=' /etc/alarm-gateway.env)" = 1
