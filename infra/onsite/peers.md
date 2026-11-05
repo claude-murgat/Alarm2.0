@@ -12,12 +12,14 @@ restent sur leurs machines respectives uniquement (`/etc/wireguard/privatekey` m
 | `10.99.0.3` | NODE2 onsite-2 (2ème baie) | onsite-2.alarm.local | `192.168.1.51:51820` |
 | `10.99.0.4` | node4 alarm-1 (site beaufort, gateway) — **non votant etcd** | alarm-1 | derrière NAT `92.103.41.246`, relayé par NODE3 |
 | `10.99.0.5` | node5 alarm-2 (site beaufort) — **non votant etcd** | alarm-2 | derrière NAT `92.103.41.246`, relayé par NODE3 |
+| `10.99.0.6` | node6 alarm-3 (futur nœud d'Izeron, affiché site izeron) — **non votant etcd** | alarm-3 | à Beaufort jusqu'au déménagement (derrière NAT `92.103.41.246`), relayé par NODE3 |
+| `10.99.0.7` | node7 alarm-4 (futur nœud d'Izeron, affiché site izeron) — **non votant etcd** | alarm-4 | à Beaufort jusqu'au déménagement (derrière NAT `92.103.41.246`), relayé par NODE3 |
 
 > **Relais NODE3 (nœuds 4/5, 2026-10-27)** : le site beaufort ne joint pas directement le
 > LAN des onsite. Tout le trafic inter-sites passe par NODE3 en étoile : NODE3 route
 > `wg0 → wg0` (`net.ipv4.ip_forward=1` + forward iptables autorisé sur `wg0`), et chaque
 > spoke déclare le peer NODE3 avec `AllowedIPs = 10.99.0.0/24` (au lieu de `10.99.0.1/32`).
-> Seul NODE3 déclare les peers `10.99.0.4/32` et `10.99.0.5/32` (pas d'`Endpoint =`,
+> Seul NODE3 déclare les peers `10.99.0.4/32` à `10.99.0.7/32` (pas d'`Endpoint =`,
 > apprentissage par `PersistentKeepalive` depuis le site NAT'd). Un peer plus spécifique
 > (`/32`, ex. lien LAN direct onsite-1 ↔ onsite-2) reste prioritaire sur le `/24` du relais.
 
@@ -47,6 +49,8 @@ restent sur leurs machines respectives uniquement (`/etc/wireguard/privatekey` m
 | `10.99.0.1` (NODE3) | `GDN64aY60tBSWKN4qA6GBd/JhistmDP2oF1qN0Xj9gw=` | 2026-05-02 |
 | `10.99.0.2` (onsite-1) | `iO0HHo7Lbuvqs4rV6C456dSm8d+T3ef96CHA9m32CHE=` | 2026-05-06 |
 | `10.99.0.3` (onsite-2) | `IdbW+fqdOhFPSIO6XRp5oego+U/shypsOllOjYHQhi8=` | 2026-05-01 |
+| `10.99.0.6` (alarm-3) | _clé à générer au provisioning_ | — |
+| `10.99.0.7` (alarm-4) | _clé à générer au provisioning_ | — |
 
 ## Mesh handshakes vérifiés (mesh 3-way complet)
 

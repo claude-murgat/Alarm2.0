@@ -2,7 +2,7 @@
 Tier 2 integration : INV-176/177/179 — panne controlee : POST/GET/DELETE /api/chaos (admin),
 GET /internal/chaos/next et POST /internal/chaos/{id}/events (cle passerelle, leader seul).
 
-Patroni est simule par `urlopen` (motif de test_cluster_location_inv161.py) : 5 membres sains,
+Patroni est simule par `urlopen` (motif de test_cluster_location_inv161.py) : 7 membres sains,
 leader node3. La base SQLite est partagee avec les autres tests : les alarmes actives laissees
 par eux sont mises de cote (resolved) le temps du test, puis restaurees.
 """
@@ -20,7 +20,7 @@ pytestmark = pytest.mark.integration
 GATEWAY_KEY = os.environ.setdefault("GATEWAY_KEY", "test-gateway-key-cd")
 GW = {"X-Gateway-Key": GATEWAY_KEY}
 MEMBERS = [{"name": f"node{i}", "role": "leader" if i == 3 else "replica",
-            "state": "running" if i == 3 else "streaming", "host": f"10.99.0.{i}"} for i in (1, 2, 3, 4, 5)]
+            "state": "running" if i == 3 else "streaming", "host": f"10.99.0.{i}"} for i in range(1, 8)]
 UNFINISHED = ("pending", "claimed", "running")
 ALARM_BUSY = ("active", "escalated", "acknowledged")
 
@@ -114,6 +114,21 @@ def test_whole_izeron_refused_quorum(clean, client, admin_headers):
     assert client.get("/api/chaos", headers=admin_headers).json() == []
 
 
+def test_node6_alone_accepted_and_izeron_with_node6_node7_still_refused(clean, client, admin_headers):
+    """2026-11-05 : node6/node7 (alarm-3/alarm-4) etiquetes Izeron, non votants."""
+    r = client.post("/api/chaos", json={"nodes": "site:izeron", "mode": "stop", "minutes": 2}, headers=admin_headers)
+    assert r.status_code == 409 and r.json()["detail"] == "node1, node2 : quorum etcd perdu — refusé"
+    created = _request(client, admin_headers, nodes="node6")
+    assert created["nodes"] == ["node6"] and created["status"] == "pending"
+
+
+def test_node6_missing_from_patroni_refused(clean, client, admin_headers, monkeypatch):
+    """node6/node7 pas encore installes : le cluster n'est pas complet, aucun test (INV-176)."""
+    monkeypatch.setitem(globals(), "MEMBERS", [m for m in MEMBERS if m["name"] != "node6"])
+    r = client.post("/api/chaos", json={"nodes": "node4", "mode": "stop", "minutes": 2}, headers=admin_headers)
+    assert r.status_code == 409 and r.json()["detail"] == "membre absent du cluster Patroni : node6"
+
+
 def test_active_alarm_refused(clean, client, admin_headers):
     with active_alarm():
         r = client.post("/api/chaos", json={"nodes": "node4", "mode": "stop", "minutes": 2}, headers=admin_headers)
@@ -166,7 +181,8 @@ def test_voters_read_from_etcd_voters_config(clean, client, admin_headers):
         r = client.post("/api/chaos", json={"nodes": "site:beaufort", "mode": "stop", "minutes": 2}, headers=admin_headers)
         assert r.status_code == 409, r.text
         assert r.json()["detail"] == "node4, node5 : quorum etcd perdu — refusé"
-        _request(client, admin_headers, nodes="site:izeron")  # node1 seul voteur d'Izeron ici
+        created = _request(client, admin_headers, nodes="site:izeron")  # node1 seul voteur d'Izeron ici
+        assert created["nodes"] == ["node1", "node2", "node6", "node7"]  # alarm-3/4 etiquetes Izeron (INV-161)
     finally:
         clean.query(SystemConfig).filter(SystemConfig.key == "etcd_voters").delete()
         clean.commit()

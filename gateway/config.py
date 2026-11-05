@@ -6,14 +6,16 @@ Creer /etc/alarm-gateway.env avec ces variables pour la production.
 import os
 import socket
 
-# URLs des noeuds backend (cluster Patroni). NODE4/NODE5 (non votants) optionnels :
+# URLs des noeuds backend (cluster Patroni). NODE4 a NODE7 (non votants) optionnels :
 # vides par defaut, ignores dans ALL_NODE_URLS (dev/CI inchanges).
 NODE1_URL = os.getenv("NODE1_URL", "http://localhost:8000")
 NODE2_URL = os.getenv("NODE2_URL", "http://localhost:8001")
 NODE3_URL = os.getenv("NODE3_URL", "http://localhost:8002")
 NODE4_URL = os.getenv("NODE4_URL", "")
 NODE5_URL = os.getenv("NODE5_URL", "")
-ALL_NODE_URLS = [u for u in (NODE1_URL, NODE2_URL, NODE3_URL, NODE4_URL, NODE5_URL) if u]
+NODE6_URL = os.getenv("NODE6_URL", "")
+NODE7_URL = os.getenv("NODE7_URL", "")
+ALL_NODE_URLS = [u for u in (NODE1_URL, NODE2_URL, NODE3_URL, NODE4_URL, NODE5_URL, NODE6_URL, NODE7_URL) if u]
 
 # Legacy aliases (pour sms_gateway_legacy.py)
 VPS1_URL = NODE1_URL

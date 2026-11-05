@@ -121,14 +121,17 @@ if [ -f "$ENV" ]; then
   add_env(){ grep -q "^$1=" "$ENV" || { echo "$1=$2" >> "$ENV"; say "env += $1"; }; }
   add_env DRY_CONTACT_ENABLED true
   add_env GATEWAY_ID "$(hostname -s)"
-  # 5 backends à interroger (le gateway trouve le leader via /health). IPs Wireguard
+  # 7 backends à interroger (le gateway trouve le leader via /health). IPs Wireguard
   # du mesh : 10.99.0.1=node3(cloud) 10.99.0.2=node1 10.99.0.3=node2,
-  # 10.99.0.4=node4(alarm-1) 10.99.0.5=node5(alarm-2) (non votants etcd).
+  # 10.99.0.4=node4(alarm-1) 10.99.0.5=node5(alarm-2) 10.99.0.6=node6(alarm-3)
+  # 10.99.0.7=node7(alarm-4) (non votants etcd).
   add_env NODE1_URL http://10.99.0.1:8000
   add_env NODE2_URL http://10.99.0.2:8000
   add_env NODE3_URL http://10.99.0.3:8000
   add_env NODE4_URL http://10.99.0.4:8000
   add_env NODE5_URL http://10.99.0.5:8000
+  add_env NODE6_URL http://10.99.0.6:8000
+  add_env NODE7_URL http://10.99.0.7:8000
   grep -q "^GATEWAY_KEY=" "$ENV" || say "ATTENTION: GATEWAY_KEY manquant dans $ENV (doit matcher le backend)"
 else
   say "ATTENTION: $ENV absent — la gateway ne démarrera pas"

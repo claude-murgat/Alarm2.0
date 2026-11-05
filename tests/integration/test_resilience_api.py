@@ -1,9 +1,10 @@
 """
-Tier 2 integration : INV-175 — GET /api/resilience (admin) : etat reel des 5 noeuds et des
+Tier 2 integration : INV-175 — GET /api/resilience (admin) : etat reel des 7 noeuds et des
 passerelles + scenarios de panne calcules ; GET /api/resilience/whatif pour un scenario libre.
 
 Patroni et les /health des autres noeuds sont simules par `urlopen` (motif de
-test_cluster_location_inv161.py) : 10.99.0.4 (node4) ne repond pas.
+test_cluster_location_inv161.py) : 10.99.0.4 (node4) ne repond pas. 7 noeuds depuis le 2026-11-05 :
+node6/node7 (alarm-3/alarm-4) etiquetes Izeron, non votants.
 """
 import io
 import json
@@ -16,7 +17,7 @@ import pytest
 pytestmark = pytest.mark.integration
 
 MEMBERS = [{"name": f"node{i}", "role": "leader" if i == 3 else "replica",
-            "state": "running" if i == 3 else "streaming", "host": f"10.99.0.{i}"} for i in (1, 2, 3, 4, 5)]
+            "state": "running" if i == 3 else "streaming", "host": f"10.99.0.{i}"} for i in range(1, 8)]
 
 
 @pytest.fixture
@@ -77,17 +78,25 @@ def test_live_nodes_and_gateways(client, admin_headers, fake_cluster, stale_gate
     assert r.status_code == 200, r.text
     live = r.json()["live"]
     nodes = {n["name"]: n for n in live["nodes"]}
-    assert list(nodes) == ["node1", "node2", "node3", "node4", "node5"]
+    assert list(nodes) == [f"node{i}" for i in range(1, 8)]
     assert nodes["node3"] == {"name": "node3", "site": "ovh", "voter": True, "reachable": True,
-                              "role": "leader", "state": "running", "version": "v-3"}
+                              "role": "leader", "state": "running", "version": "v-3",
+                              "machine": "OVH", "retiring": False}
     assert nodes["node4"] == {"name": "node4", "site": "beaufort", "voter": False, "reachable": False,
-                              "role": "replica", "state": "streaming", "version": None}
+                              "role": "replica", "state": "streaming", "version": None,
+                              "machine": "alarm-1", "retiring": False}
+    assert nodes["node6"] == {"name": "node6", "site": "izeron", "voter": False, "reachable": True,
+                              "role": "replica", "state": "streaming", "version": "v-6",
+                              "machine": "alarm-3", "retiring": False}
+    assert (nodes["node7"]["machine"], nodes["node7"]["site"]) == ("alarm-4", "izeron")
+    assert [n for n in nodes if nodes[n]["retiring"]] == ["node1", "node2"]
+    assert nodes["node1"]["machine"] == "onsite-1"
     assert nodes["node1"]["voter"] and nodes["node1"]["reachable"] and nodes["node1"]["version"] == "v-1"
     assert live["leader"] == "node3"
     assert live["etcd_voters_up"] == 3
     # Une sonde /health par membre Patroni
     assert sorted(u for u in fake_cluster if u.endswith("/health")) == [
-        f"http://10.99.0.{i}:8000/health" for i in (1, 2, 3, 4, 5)]
+        f"http://10.99.0.{i}:8000/health" for i in range(1, 8)]
     gws = {g["gateway_id"]: g for g in live["gateways"]}
     assert set(gws) == {"onsite-2", "alarm-1"}
     assert gws["onsite-2"]["site"] == "izeron" and gws["onsite-2"]["host"] == "node2"
@@ -102,7 +111,12 @@ def test_whatif_default_scenarios(client, admin_headers, fake_cluster):
     both = whatif["izeron_both"]
     assert both["untestable"] is True and both["leader_possible"] is False
     assert both["alerted_by"] == ["email INV-170 (après PR 1)"]
-    assert both["label"] == "Izeron entier (node1 + node2)"
+    assert both["label"] == "Izeron entier (node1 + node2 + node6 + node7)"
+    assert whatif["izeron_one_node"]["label"] == "Un nœud à Izeron (node1)"
+    beaufort = whatif["beaufort_both"]  # inchange avec 7 noeuds
+    assert beaufort["label"] == "Beaufort entier (node4 + node5)" and beaufort["untestable"] is False
+    assert beaufort["alarms_created"] == {"izeron": True, "beaufort": False}
+    assert beaufort["alerted_by"] == ["email INV-144"]
     ovh = whatif["ovh_down"]
     assert ovh["untestable"] is False and ovh["leader_possible"] is True
     assert ovh["writable_from"] == {"izeron": True, "ovh": False, "beaufort": False}

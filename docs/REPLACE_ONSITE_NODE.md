@@ -3,16 +3,25 @@
 Remplacer onsite-1 ou onsite-2 par une nouvelle machine **sans interrompre le service**.
 On remplace **un nœud à la fois** : etcd et Patroni gardent 2 membres sur 3 et les alarmes continuent.
 
-Cible prévue (choix du propriétaire, 2026-10-22) :
+Cible (décision du propriétaire du 2026-11-05 ; remplace le plan du 2026-10-22 où alarm-1/alarm-2 devaient remplacer onsite-1/onsite-2) :
 
-| Nouvelle machine | Remplace | `NODE_NAME` | IP WireGuard prod | Rôle |
-|---|---|---|---|---|
-| alarm-2 (172.16.1.121) | onsite-1 | node1 | 10.99.0.2 | backend + etcd + Patroni |
-| alarm-1 (172.16.1.120) | onsite-2 | node2 | 10.99.0.3 | idem + passerelle SMS/appels (nouveau SIM7600) |
+| Machine | IP LAN | `NODE_NAME` | IP WireGuard | Site affiché (`node_locations`) | Rôle |
+|---|---|---|---|---|---|
+| onsite-1 | 192.168.1.50 | node1 | 10.99.0.2 | Izeron | voteur etcd + Patroni + backend — **bientôt obsolète**, gardé jusqu'au déménagement |
+| onsite-2 | 192.168.1.51 | node2 | 10.99.0.3 | Izeron | idem + passerelle Izeron — **bientôt obsolète**, gardé jusqu'au déménagement |
+| OVH | 51.210.105.102 | node3 | 10.99.0.1 | OVH | voteur etcd + relais WireGuard |
+| alarm-1 | 172.16.1.118 | node4 | 10.99.0.4 | Beaufort | non votant + passerelle Beaufort ; **reste à Beaufort** |
+| alarm-2 | 172.16.1.119 | node5 | 10.99.0.5 | Beaufort | non votant ; **reste à Beaufort** |
+| alarm-3 | 172.16.1.120 | node6 | 10.99.0.6 | Izeron | **futur nœud d'Izeron**, entre d'abord comme non votant |
+| alarm-4 | 172.16.1.121 | node7 | 10.99.0.7 | Izeron | **futur nœud d'Izeron**, entre d'abord comme non votant |
 
-> **2026-10-27** : alarm-1 et alarm-2 entrent d'abord en prod comme nœuds **non votants** node4 / node5 (cf [dernière section](#ajouter-un-nœud-non-votant-patroni--backend-sans-etcd)).
+- alarm-3 et alarm-4 rejoignent le cluster comme **non votants** node6 / node7 ([dernière section](#ajouter-un-nœud-non-votant-patroni--backend-sans-etcd)). Ils sont affichés « Izeron » dès maintenant, alors qu'ils sont **physiquement à Beaufort jusqu'au déménagement** : le panneau Résilience et la panne contrôlée (`site:izeron`) les comptent à Izeron (limite assumée, INV-161).
+- onsite-1 / onsite-2 restent voteurs etcd et en service jusqu'au déménagement ; l'interface les marque « bientôt obsolète » (`retiring_nodes`, INV-161). Le moment et la manière dont alarm-3/alarm-4 prendront leur place de voteur ne sont pas encore décidés : les §0-§5 ci-dessous décrivent le remplacement d'un voteur à `NODE_NAME` et IP WireGuard constants.
+- Affichage (web, onglets Cluster et Tests) : `machine · nœud` (« alarm-3 · node6 ») d'après les clés SystemConfig `node_machines` et `retiring_nodes` (INV-161) ; un changement de machine ou de site se fait par ces clés, sans redéploiement.
 
-On garde le **même `NODE_NAME` et la même IP WireGuard** que le nœud remplacé. Ainsi `.env.prod.nodeN`, `ETCD_INITIAL_CLUSTER`, l'orchestrateur CD (`alarm-cd-orchestrate`, `NODES_ORDER=(3 5 4 2 1)`) et les URLs de l'app ne changent pas. Seuls changent la clé WireGuard, les clés SSH et l'IP LAN.
+> **2026-10-27** : alarm-1 et alarm-2 sont entrés en prod comme nœuds **non votants** node4 / node5.
+
+Pour remplacer un voteur, on garde le **même `NODE_NAME` et la même IP WireGuard** que le nœud remplacé. Ainsi `.env.prod.nodeN`, `ETCD_INITIAL_CLUSTER`, l'orchestrateur CD (`alarm-cd-orchestrate`, `NODES_ORDER=(3 7 6 5 4 2 1)`) et les URLs de l'app ne changent pas. Seuls changent la clé WireGuard, les clés SSH et l'IP LAN (et `node_machines`, pour l'affichage).
 
 ## 0. Avant le jour J (nouvelle machine prête, hors cluster)
 - Provisionnement de base fait : `docs/PROVISIONING_ONSITE.md` §2-§12, Docker §14, `/opt/alarm` cloné, `infra/onsite/install.sh` lancé.
@@ -73,31 +82,35 @@ curl -s http://10.99.0.X:8000/health                                  # role rep
 4. **Vider son volume etcd** : son ancien ID de membre a été retiré. Démarrer avec `ETCD_INITIAL_CLUSTER_STATE=existing ./scripts/start-prod-node.sh --pull N`. Son volume Patroni est conservé et rattrape le leader.
 
 ## Ordre conseillé
-1. **node1 (onsite-1 → alarm-2) en premier** : pas de modem, risque le plus faible.
-2. Après 24 h stables, **node2 (onsite-2 → alarm-1)**, qui déplace aussi la passerelle SMS/appels.
+1. **node1 (onsite-1) en premier** : pas de modem, risque le plus faible.
+2. Après 24 h stables, **node2 (onsite-2)**, qui déplace aussi la passerelle SMS/appels.
 
 ---
 
 ## Ajouter un nœud non votant (Patroni + backend, sans etcd)
 
-Décision du propriétaire (2026-10-27) :
+Décisions du propriétaire (node4/node5 le 2026-10-27, node6/node7 le 2026-11-05) :
 
-| Machine | `NODE_NAME` | IP WireGuard | Rôle |
-|---|---|---|---|
-| alarm-1 | node4 | 10.99.0.4 | Patroni + backend + passerelle du site **beaufort** |
-| alarm-2 | node5 | 10.99.0.5 | Patroni + backend |
+| Machine | `NODE_NAME` | IP WireGuard | Site affiché | Rôle |
+|---|---|---|---|---|
+| alarm-1 | node4 | 10.99.0.4 | Beaufort | Patroni + backend + passerelle du site **beaufort** |
+| alarm-2 | node5 | 10.99.0.5 | Beaufort | Patroni + backend |
+| alarm-3 | node6 | 10.99.0.6 | Izeron (physiquement à Beaufort jusqu'au déménagement) | Patroni + backend |
+| alarm-4 | node7 | 10.99.0.7 | Izeron (physiquement à Beaufort jusqu'au déménagement) | Patroni + backend |
 
-Un nœud non votant n'a **aucun conteneur etcd** : son Patroni utilise les 3 etcd votants (10.99.0.1/.2/.3) via WireGuard, relayés par NODE3 (`infra/onsite/peers.md`). Le quorum etcd reste 2 sur 3 : perdre le site beaufort ne le touche pas, et `ETCD_INITIAL_CLUSTER` ne change pas. `.env.prod.node4/5` existent déjà dans le repo.
+Un nœud non votant n'a **aucun conteneur etcd** : son Patroni utilise les 3 etcd votants (10.99.0.1/.2/.3) via WireGuard, relayés par NODE3 (`infra/onsite/peers.md`). Le quorum etcd reste 2 sur 3 : perdre le site beaufort ne le touche pas, et `ETCD_INITIAL_CLUSTER` ne change pas. `.env.prod.node4` à `.env.prod.node7` existent dans le repo ; les `PEER_TEST_URLS` des 7 nœuds listent déjà 10.99.0.6 et 10.99.0.7.
 
-1. **Avant** : comme le §0 ci-dessus (provisionnement, timers CD, `.env.prod.secrets`, clé SSH de l'orchestrateur). `wg0` monté avec 10.99.0.X, puis vérifier que les votants répondent à travers le relais : `curl -s http://10.99.0.1:2379/health` (idem `.2`, `.3`).
-2. **Capacité de réplication, une seule fois avant le 1er ajout** : 4 replicas + un clonage dépassent `max_wal_senders=5`. `patroni/patroni.yml` (10) ne sert qu'au bootstrap. Sur le cluster en service, sans alarme active :
+**Avant l'arrivée de node6/node7** (le dépôt les annonce déjà) : chaque passage du CD les trouve injoignables et les reporte (`partial`, sans cooldown, les 5 autres sont déployés, INV-167) ; la panne contrôlée refuse toute demande (« membre absent du cluster Patroni : node6 », INV-176) — pour tester avant leur arrivée, enregistrer `node_locations` sans eux (SystemConfig).
+
+1. **Avant** : comme le §0 ci-dessus (provisionnement, timers CD, `.env.prod.secrets`, clé SSH de l'orchestrateur). WireGuard : générer la clé de la machine, déclarer son peer `10.99.0.X/32` **sur NODE3 seulement** (relais, `infra/onsite/peers.md`), noter la clé publique dans `peers.md`. `wg0` monté avec 10.99.0.X, puis vérifier que les votants répondent à travers le relais : `curl -s http://10.99.0.1:2379/health` (idem `.2`, `.3`).
+2. **Capacité de réplication, une seule fois avant le 1er ajout** : 4 replicas + un clonage dépassent `max_wal_senders=5`. `patroni/patroni.yml` (10) ne sert qu'au bootstrap. À 7 nœuds (6 replicas + un clonage = 7), 10 suffit encore : avant node6/node7, vérifier seulement `$P show-config` (`max_wal_senders: 10`, `max_replication_slots: 10`). Sur le cluster en service, sans alarme active :
    ```bash
    P="docker exec node3-patroni-1 patronictl -c /etc/patroni/patroni.yml"
    $P edit-config --pg max_wal_senders=10 --pg max_replication_slots=10 --force
    $P list                                # « Pending restart » sur chaque membre
    $P restart alarm-cluster <replica> --force   # chaque replica d'abord, le leader en dernier
    ```
-3. **Démarrer** : `cd /opt/alarm && ./scripts/start-prod-node.sh --pull N` (N = 4 ou 5). Le script ne lance que `patroni` et `backend` (`--no-deps`). Ni `ETCD_INITIAL_CLUSTER_STATE`, ni `etcdctl member add` : le nœud n'est pas membre etcd. Patroni se clone en replica depuis le leader.
+3. **Démarrer** : `cd /opt/alarm && ./scripts/start-prod-node.sh --pull N` (N = 4 à 7). Le script ne lance que `patroni` et `backend` (`--no-deps`). Ni `ETCD_INITIAL_CLUSTER_STATE`, ni `etcdctl member add` : le nœud n'est pas membre etcd. Patroni se clone en replica depuis le leader.
 4. **Vérifier** :
    ```bash
    docker compose --env-file .env.prod.nodeN -p nodeN ps   # patroni + backend, PAS d'etcd
@@ -105,8 +118,9 @@ Un nœud non votant n'a **aucun conteneur etcd** : son Patroni utilise les 3 etc
    $P list                                                  # nodeN « replica », lag ~0
    curl -s http://10.99.0.X:8000/health                     # role replica
    ```
-5. **Passerelle (alarm-1)** : comme un nœud passerelle du §0, avec `GATEWAY_SITE=beaufort` dans `/etc/alarm-gateway.env`. `install.sh` y ajoute `NODE4_URL` / `NODE5_URL` s'ils manquent.
-6. **CD** : l'orchestrateur suit `NODES_ORDER=(3 5 4 2 1)`. Depuis le 2026-10-29 (INV-167), un node4 ou node5 qui ne répond pas est **reporté au prochain passage** sans bloquer les autres nœuds ; il reçoit la version courante dès qu'il revient (`docs/CD_DESIGN.md` §4, « Déploiement indépendant par site »).
+5. **Passerelle (alarm-1)** : comme un nœud passerelle du §0, avec `GATEWAY_SITE=beaufort` dans `/etc/alarm-gateway.env`. `install.sh` y ajoute `NODE4_URL` à `NODE7_URL` s'ils manquent (sur toutes les passerelles, au prochain `alarm-host-sync`).
+6. **CD** : l'orchestrateur suit `NODES_ORDER=(3 7 6 5 4 2 1)`. Depuis le 2026-10-29 (INV-167), un non votant (node4 à node7) qui ne répond pas est **reporté au prochain passage** sans bloquer les autres nœuds ; il reçoit la version courante dès qu'il revient (`docs/CD_DESIGN.md` §4, « Déploiement indépendant par site »). Les scripts CD et le runner de panne contrôlée de NODE3 sont **installés à la main** (`docs/CD_DESIGN.md` §9bis, §9ter) : les réinstaller depuis `/opt/alarm` après le merge qui ajoute un nœud.
+7. **Affichage** : machine et site viennent de `node_machines` / `node_locations` (SystemConfig, INV-161). Défauts déjà prévus pour node4 à node7 ; une clé enregistrée en base remplace son défaut entier : la compléter si elle existe.
 
 **Retrait** : `docker compose --env-file .env.prod.nodeN -p nodeN down` sur le nœud. Aucun geste etcd. Patroni oublie le membre au bout du TTL.
 
@@ -114,13 +128,13 @@ Un nœud non votant n'a **aucun conteneur etcd** : son Patroni utilise les 3 etc
 
 ## Ordre des nœuds dans `/etc/alarm-gateway.env` (passerelle, INV-174)
 
-La passerelle cherche le backend primary dans l'ordre `NODE1_URL … NODE5_URL` et **mémorise** le dernier trouvé : en régime établi, une requête ne coûte qu'un `/health` ; après une bascule, l'ancien primary coûte `HTTP_TIMEOUT_SECONDS` (10 s, sa sonde garde la tolérance des échanges) puis le balayage repart dans l'ordre configuré, à 3 s par autre nœud mort (constante du code, INV-174). Tant qu'aucun nœud ne répond `primary` (élection, cluster sans quorum), chaque requête refait le balayage complet à 3 s par nœud. `HTTP_TIMEOUT_SECONDS` (10 s) reste celui des échanges de données et de la sonde du primary mémorisé : ne pas le baisser.
+La passerelle cherche le backend primary dans l'ordre `NODE1_URL … NODE7_URL` et **mémorise** le dernier trouvé : en régime établi, une requête ne coûte qu'un `/health` ; après une bascule, l'ancien primary coûte `HTTP_TIMEOUT_SECONDS` (10 s, sa sonde garde la tolérance des échanges) puis le balayage repart dans l'ordre configuré, à 3 s par autre nœud mort (constante du code, INV-174). Tant qu'aucun nœud ne répond `primary` (élection, cluster sans quorum), chaque requête refait le balayage complet à 3 s par nœud. `HTTP_TIMEOUT_SECONDS` (10 s) reste celui des échanges de données et de la sonde du primary mémorisé : ne pas le baisser.
 
 Ordre conseillé (son site d'abord, OVH ensuite, l'autre site en dernier) — **édition manuelle optionnelle**, `install.sh` ne la fait pas :
 
-| Passerelle | `NODE1_URL` | `NODE2_URL` | `NODE3_URL` | `NODE4_URL` | `NODE5_URL` |
-|---|---|---|---|---|---|
-| Izeron (onsite-2) | `http://10.99.0.3:8000` | `http://10.99.0.2:8000` | `http://10.99.0.1:8000` | `http://10.99.0.4:8000` | `http://10.99.0.5:8000` |
-| Beaufort (alarm-1) | `http://10.99.0.4:8000` | `http://10.99.0.5:8000` | `http://10.99.0.1:8000` | `http://10.99.0.2:8000` | `http://10.99.0.3:8000` |
+| Passerelle | `NODE1_URL` | `NODE2_URL` | `NODE3_URL` | `NODE4_URL` | `NODE5_URL` | `NODE6_URL` | `NODE7_URL` |
+|---|---|---|---|---|---|---|---|
+| Izeron (onsite-2) | `http://10.99.0.3:8000` | `http://10.99.0.2:8000` | `http://10.99.0.1:8000` | `http://10.99.0.4:8000` | `http://10.99.0.5:8000` | `http://10.99.0.6:8000` | `http://10.99.0.7:8000` |
+| Beaufort (alarm-1) | `http://10.99.0.4:8000` | `http://10.99.0.5:8000` | `http://10.99.0.1:8000` | `http://10.99.0.2:8000` | `http://10.99.0.3:8000` | `http://10.99.0.6:8000` | `http://10.99.0.7:8000` |
 
 Les noms `NODEx_URL` ne désignent pas un nœud : seule la position compte. Après édition : `sudo systemctl restart alarm-sms-gateway`.

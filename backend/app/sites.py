@@ -33,8 +33,11 @@ def requested_sites(db: Session, site: str | None) -> list[str]:
     return _split(site or "") or [default_site(db)]
 
 
-# INV-161 : lieu de chaque noeud du cluster (onglet Cluster). nom:lieu separes par des virgules.
-DEFAULT_NODE_LOCATIONS = "node1:izeron,node2:izeron,node3:ovh,node4:beaufort,node5:beaufort"
+# INV-161 : lieu, machine et noeuds « bientot obsoletes » du cluster (onglet Cluster). nom:valeur separes
+# par des virgules. node6/node7 (alarm-3/4) : futurs noeuds d'Izeron, physiquement a Beaufort jusqu'au demenagement.
+DEFAULT_NODE_LOCATIONS = "node1:izeron,node2:izeron,node3:ovh,node4:beaufort,node5:beaufort,node6:izeron,node7:izeron"
+DEFAULT_NODE_MACHINES = "node1:onsite-1,node2:onsite-2,node3:OVH,node4:alarm-1,node5:alarm-2,node6:alarm-3,node7:alarm-4"
+DEFAULT_RETIRING_NODES = "node1,node2"
 
 
 def _pairs(db: Session, key: str, default: str) -> dict[str, str]:
@@ -44,6 +47,14 @@ def _pairs(db: Session, key: str, default: str) -> dict[str, str]:
 
 def node_locations(db: Session) -> dict[str, str]:
     return _pairs(db, "node_locations", DEFAULT_NODE_LOCATIONS)
+
+
+def node_machines(db: Session) -> dict[str, str]:
+    return _pairs(db, "node_machines", DEFAULT_NODE_MACHINES)
+
+
+def retiring_nodes(db: Session) -> list[str]:
+    return _split(_config(db, "retiring_nodes", DEFAULT_RETIRING_NODES))
 
 
 # INV-175 : topologie du panneau resilience. Memes defauts sur une base deja en service.

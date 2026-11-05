@@ -761,6 +761,49 @@ class TestCluster:
         assert rows.count() >= 1, f"Attendu au moins 1 membre, got {rows.count()}"
 
 
+class TestClusterTab:
+    """INV-161 (2026-11-05) — onglet Cluster : « machine · nœud », lieu, badge « bientôt obsolète ».
+    /api/cluster simulé (page.route) : se teste sans cluster. Hors CI : lancé localement (FRONTEND_URL)."""
+
+    CLUSTER = {"local_node": "node6", "local_machine": "alarm-3", "local_role": "secondary", "local_location": "izeron",
+               "cluster_writable": True, "quorum": {"total": 4, "healthy": 4, "has_quorum": True},
+               "members": [
+                   {"name": "node1", "machine": "onsite-1", "retiring": True, "location": "izeron", "role": "replica", "state": "streaming"},
+                   {"name": "node6", "machine": "alarm-3", "retiring": False, "location": "izeron", "role": "replica", "state": "streaming"},
+                   {"name": "node9", "machine": "node9", "retiring": False, "location": None, "role": "leader", "state": "running"},
+                   {"name": "node8", "machine": "<b>pc</b>", "retiring": False, "location": "beaufort", "role": "replica", "state": "streaming"},
+               ]}
+
+    def _open(self, page: Page):
+        page.route("**/api/cluster", lambda route: route.fulfill(json=self.CLUSTER))
+        page.locator(".tab:text('Cluster')").click()
+        page.evaluate("loadCluster()")  # charge une fois au login (loadAll), puis sur changement en direct
+        rows = page.locator("#clusterMembers tr")
+        expect(rows).to_have_count(4)
+        return rows
+
+    def test_members_show_machine_site_and_retiring_badge(self, dashboard: Page):
+        rows = self._open(dashboard)
+        node1 = rows.nth(0).locator("td[data-label='Nœud']")
+        expect(node1).to_contain_text("onsite-1 · node1")
+        expect(node1.locator(".badge.retiring")).to_have_text("bientôt obsolète")
+        expect(rows.nth(0).locator("td[data-label='Lieu']")).to_have_text("Izeron")
+        node6 = rows.nth(1).locator("td[data-label='Nœud']")
+        expect(node6).to_have_text("alarm-3 · node6")
+        expect(node6.locator(".badge")).to_have_count(0)
+        expect(rows.nth(2).locator("td[data-label='Nœud']")).to_have_text("node9")  # machine inconnue : le nom seul
+        expect(rows.nth(2).locator("td[data-label='Lieu']")).to_have_text("-")
+
+    def test_local_node_shows_machine_and_site(self, dashboard: Page):
+        self._open(dashboard)
+        expect(dashboard.locator("#clusterLocalNode")).to_have_text("alarm-3 · node6 (Izeron)")
+
+    def test_machine_name_is_escaped(self, dashboard: Page):
+        cell = self._open(dashboard).nth(3).locator("td[data-label='Nœud']")
+        expect(cell).to_have_text("<b>pc</b> · node8")
+        expect(cell.locator("b")).to_have_count(0)
+
+
 # ---------------------------------------------------------------------------
 # Onglet Disponibilite operateurs (INV-056)
 # ---------------------------------------------------------------------------
@@ -1095,11 +1138,12 @@ class TestResiliencePanel:
     FAKE = {
         "live": {
             "nodes": [
-                {"name": "node1", "site": "izeron", "voter": True, "reachable": True, "role": "replica", "state": "streaming", "version": "1.0.1"},
-                {"name": "node2", "site": "izeron", "voter": True, "reachable": True, "role": "replica", "state": "streaming", "version": "1.0.1"},
-                {"name": "node3", "site": "ovh", "voter": True, "reachable": True, "role": "leader", "state": "running", "version": "1.0.1"},
-                {"name": "node4", "site": "beaufort", "voter": False, "reachable": False, "role": "replica", "state": "streaming", "version": None},
-                {"name": "node5", "site": "beaufort", "voter": False, "reachable": True, "role": "replica", "state": "streaming", "version": "1.0.1"},
+                {"name": "node1", "site": "izeron", "voter": True, "reachable": True, "role": "replica", "state": "streaming", "version": "1.0.1", "machine": "onsite-1", "retiring": True},
+                {"name": "node2", "site": "izeron", "voter": True, "reachable": True, "role": "replica", "state": "streaming", "version": "1.0.1", "machine": "onsite-2", "retiring": True},
+                {"name": "node3", "site": "ovh", "voter": True, "reachable": True, "role": "leader", "state": "running", "version": "1.0.1", "machine": "OVH", "retiring": False},
+                {"name": "node4", "site": "beaufort", "voter": False, "reachable": False, "role": "replica", "state": "streaming", "version": None, "machine": "alarm-1", "retiring": False},
+                {"name": "node5", "site": "beaufort", "voter": False, "reachable": True, "role": "replica", "state": "streaming", "version": "1.0.1", "machine": "alarm-2", "retiring": False},
+                {"name": "node6", "site": "izeron", "voter": False, "reachable": True, "role": "replica", "state": "streaming", "version": "1.0.1", "machine": "alarm-3", "retiring": False},
             ],
             "gateways": [
                 {"gateway_id": "onsite-2", "host": "node2", "site": "izeron", "registered": True, "last_seen_s": 125.4},
@@ -1131,9 +1175,9 @@ class TestResiliencePanel:
         card = self._open(dashboard)
         expect(card).to_contain_text("Résilience")
         rows = card.locator("#resilienceNodes tr")
-        expect(rows).to_have_count(5)
+        expect(rows).to_have_count(6)
         node3 = rows.nth(2)
-        expect(node3).to_contain_text("node3")
+        expect(node3.locator("td[data-label='Nœud']")).to_have_text("OVH · node3")
         expect(node3).to_contain_text("OVH")
         expect(node3).to_contain_text("leader")
         expect(node3).to_contain_text("1.0.1")
@@ -1145,6 +1189,14 @@ class TestResiliencePanel:
         expect(node4.locator("td[data-label='Passerelle']")).to_contain_text("alarm-1")
         expect(node4.locator("td[data-label='Passerelle']")).to_contain_text("jamais vue")
         expect(rows.nth(1).locator("td[data-label='Passerelle']")).to_contain_text("onsite-2 : vu il y a 125 s")
+        # INV-161 (2026-11-05) : machine · nœud, badge « bientôt obsolète » pour onsite-1/onsite-2
+        node1 = rows.nth(0).locator("td[data-label='Nœud']")
+        expect(node1).to_contain_text("onsite-1 · node1")
+        expect(node1.locator(".badge.retiring")).to_have_text("bientôt obsolète")
+        node6 = rows.nth(5).locator("td[data-label='Nœud']")
+        expect(node6).to_have_text("alarm-3 · node6")
+        expect(node6.locator(".badge")).to_have_count(0)
+        expect(rows.nth(5).locator("td[data-label='Lieu']")).to_have_text("Izeron")
 
     def test_whatif_table_cells_and_untestable_row(self, dashboard: Page):
         card = self._open(dashboard)
@@ -1185,7 +1237,8 @@ class TestChaosConfirm:
 
     CLUSTER = {"local_node": "node3", "local_role": "primary", "local_location": "ovh",
                "quorum": {"total": 5, "healthy": 5, "has_quorum": True},
-               "members": [{"name": n["name"], "location": n["site"], "role": n["role"], "state": n["state"]}
+               "members": [{"name": n["name"], "location": n["site"], "role": n["role"], "state": n["state"],
+                            "machine": n["machine"], "retiring": n["retiring"]}
                            for n in TestResiliencePanel.FAKE["live"]["nodes"]]}
     GENERIC = "passerelles inconnues : couper un nœud passerelle rend son site aveugle (contact sec, SMS, appels)"
 
@@ -1210,6 +1263,18 @@ class TestChaosConfirm:
         with page.expect_event("dialog") as info:
             page.locator("#chaosCard button:has-text('Lancer la panne')").click()
         return info.value.message
+
+    def test_target_options_show_machine_site_and_retiring(self, dashboard: Page):
+        """INV-161/179 (2026-11-05) : « alarm-3 · node6 (Izeron) », « — bientôt obsolète » pour onsite-1/2 ;
+        Izeron (node1, node2, node6) garde deux voteurs : option désactivée « quorum »."""
+        self._open(dashboard)
+        sel = dashboard.locator("#chaosTarget")
+        expect(sel.locator("option[value='node4']")).to_have_text("alarm-1 · node4 (Beaufort)")
+        expect(sel.locator("option[value='node6']")).to_have_text("alarm-3 · node6 (Izeron)")
+        expect(sel.locator("option[value='node1']")).to_have_text("onsite-1 · node1 (Izeron) — bientôt obsolète")
+        izeron = sel.locator("option[value='site:izeron']")
+        expect(izeron).to_have_text("Site Izeron (node1, node2, node6) — quorum")
+        expect(izeron).to_be_disabled()
 
     def test_netcut_of_a_gateway_node_names_the_blind_site(self, dashboard: Page):
         self._open(dashboard)
