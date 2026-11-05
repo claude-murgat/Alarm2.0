@@ -263,7 +263,7 @@ class DashboardActivity : AppCompatActivity() {
         versionText.text = "Version ${BuildConfig.VERSION_NAME} · nœud ?"
         lifecycleScope.launch {
             val cluster = try { ApiProvider.service.getCluster().body() } catch (e: Exception) { null }
-            versionText.text = "Version ${BuildConfig.VERSION_NAME} · nœud ${cluster?.local_node ?: "?"}" +
+            versionText.text = "Version ${BuildConfig.VERSION_NAME} · nœud ${cluster?.local_node?.let { nodeLabel(it, cluster.local_machine) } ?: "?"}" +
                 (cluster?.local_location?.takeIf { it.isNotBlank() }?.let { " (${place(it)})" } ?: "")
         }
     }

@@ -113,10 +113,16 @@ data class PhoneUpdate(val phone_number: String)
 /** POST /api/config/escalation/bulk : la chaine complete, dans l'ordre. */
 data class EscalationBulkRequest(val user_ids: List<Int>)
 
-/** GET /api/cluster (INV-161). */
-data class ClusterResponse(val local_node: String?, val local_location: String?, val members: List<ClusterMember>?)
+/** GET /api/cluster (INV-161). `machine`, `retiring`, `local_machine` : absents d'un backend d'avant le 2026-11-05. */
+data class ClusterResponse(
+    val local_node: String?, val local_location: String?, val members: List<ClusterMember>?,
+    val local_machine: String? = null,
+)
 
-data class ClusterMember(val name: String, val role: String?, val state: String?, val location: String?)
+data class ClusterMember(
+    val name: String, val role: String?, val state: String?, val location: String?,
+    val machine: String? = null, val retiring: Boolean? = null,
+)
 
 /** GET /api/stats/kpi. */
 data class KpiResponse(
