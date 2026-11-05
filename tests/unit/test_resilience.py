@@ -5,6 +5,9 @@ ou plusieurs noeuds tombent. Topologie de prod : node1/node2 Izeron (voteurs), n
 (voteur, relais entre sites, facade publique de l'app), node4/node5 Beaufort ; passerelles
 onsite-2 (sur node2) et alarm-1 (sur node4).
 
+Aujourd'hui (2026-11-05) : 7 noeuds, voteurs node1, node2, node3, onsite-1/2 (node1/node2) « Legacy » :
+TODAY ci-dessous, avec le scenario « Legacy debranche » (sans leader : ce que corrige le jour du demenagement).
+
 Rien n'appelle la logique a l'import du module : un mutant qui plante ferait echouer la
 collecte (pytest sort en 2) et mutmut le compterait comme survivant.
 """
@@ -13,7 +16,7 @@ import dataclasses
 import pytest
 
 from backend.app.logic.resilience import (
-    Gateway, Node, Scenario, Topology, connected, default_scenarios, evaluate)
+    Gateway, Node, Scenario, Topology, connected, default_scenarios, evaluate, group_of)
 
 pytestmark = pytest.mark.unit
 
@@ -206,3 +209,39 @@ def test_outcome_is_plain_data():
     o = evaluate(PROD, scen("ovh_down"))
     d = dataclasses.asdict(o)
     assert d["writable_from"]["beaufort"] is False and d["alerted_by"] == ()
+
+
+# Aujourd'hui : node6/node7 (alarm-3/4) etiquetes Izeron, non votants ; onsite-1/2 « Legacy ».
+TODAY = dataclasses.replace(PROD, nodes=NODES + (Node("node6", "izeron"), Node("node7", "izeron")),
+                            retiring=frozenset({"node2", "node1"}))
+LEGACY = "Legacy débranché (node1 + node2) : ce que corrige le jour du déménagement"
+
+
+def test_default_scenarios_add_legacy_unplugged_when_nodes_are_retiring():
+    scenarios = scen(topo=TODAY)
+    assert list(scenarios) == ["izeron_one_node", "beaufort_one_node", "izeron_both", "ovh_down",
+                               "beaufort_both", "legacy_unplugged", "gateway_izeron", "gateway_beaufort"]
+    assert scenarios["legacy_unplugged"].down_nodes == {"node1", "node2"}
+    assert scenarios["legacy_unplugged"].label == LEGACY  # noeuds dans l'ordre de la topologie
+    assert scenarios["legacy_unplugged"].down_gateways == frozenset()
+    assert [k for k, s in scenarios.items() if s.untestable] == ["izeron_both", "legacy_unplugged"]
+
+
+def test_legacy_unplugged_today_no_leader():
+    """onsite-1/2 debranches avec les 3 voteurs d'aujourd'hui : node3 seul voteur -> aucun leader. C'est ce
+    que corrige le jour du demenagement (node6/node7 voteurs, node1/node2 retires d'etcd)."""
+    o = evaluate(TODAY, scen("legacy_unplugged", TODAY))
+    assert o.leader_possible is False and o.escalation_running is False
+    assert o.why == "1/3 voteurs etcd joignables"
+    assert o.writable_from == {"izeron": False, "ovh": False, "beaufort": False}
+    assert o.alerted_by == (INV170,)
+
+
+@pytest.mark.parametrize("site, retiring, group", [
+    ("izeron", True, "Legacy (Izeron)"), ("izeron", False, "Izeron"), ("beaufort", False, "Beaufort"),
+    ("ovh", False, "OVH"), ("beaufort", True, "Legacy (Izeron)"), (None, True, "Legacy (Izeron)"),
+    (None, False, "Lieu inconnu"), ("", False, "Lieu inconnu")])
+def test_group_of(site, retiring, group):
+    """INV-161 (2026-11-05) : libelles EXACTS partages avec l'app Android (PR #297) : « Legacy (Izeron) »
+    pour tout noeud retiring (regle du proprietaire, sans tenir compte du lieu), sinon le lieu."""
+    assert group_of(site, retiring) == group

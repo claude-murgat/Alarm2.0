@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from ..auth import get_current_admin
 from ..clock import now as clock_now
 from ..database import get_db
-from ..logic.resilience import Gateway, Node, Scenario, Topology, default_scenarios, evaluate
+from ..logic.resilience import Gateway, Node, Scenario, Topology, default_scenarios, evaluate, group_of
 from ..models import GatewayState, SystemConfig, User
 from ..quorum_monitor import _patroni_cluster
 from ..sites import (_split, default_site, etcd_voters, gateway_hosts, node_locations, node_machines,
@@ -34,7 +34,7 @@ def _topology(db: Session) -> Topology:
         nodes=tuple(Node(name, site) for name, site in locations.items()),
         voters=frozenset(etcd_voters(db)), relay=frozenset(relay_nodes(db)),
         gateways=tuple(Gateway(g, locations.get(h, "?"), h) for g, h in gateway_hosts(db).items()),
-        default_site=default_site(db))
+        default_site=default_site(db), retiring=frozenset(retiring_nodes(db)))
 
 
 def _health(host):
@@ -71,14 +71,15 @@ def resilience(_admin: User = Depends(get_current_admin), db: Session = Depends(
         raise HTTPException(status_code=503, detail=f"Patroni unreachable: {e}")
     topo = _topology(db)
     by_name = {m.get("name"): m for m in members}
-    machines, retiring = node_machines(db), retiring_nodes(db)  # INV-161 : « alarm-3 · node6 », « bientot obsolete »
+    machines = node_machines(db)  # INV-161 : « alarm-3 · node6 », « bientot obsolete », groupe d'affichage
     with ThreadPoolExecutor(5) as pool:
         healths = dict(zip(by_name, pool.map(lambda m: _health(m["host"]) if m.get("host") else None, by_name.values())))
     nodes = [{"name": n.name, "site": n.site, "voter": n.name in topo.voters,
               "reachable": healths.get(n.name) is not None,
               "role": by_name.get(n.name, {}).get("role"), "state": by_name.get(n.name, {}).get("state"),
               "version": (healths.get(n.name) or {}).get("version"),
-              "machine": machines.get(n.name, n.name), "retiring": n.name in retiring} for n in topo.nodes]
+              "machine": machines.get(n.name, n.name), "retiring": n.name in topo.retiring,
+              "group": group_of(n.site, n.name in topo.retiring)} for n in topo.nodes]
     return {
         "live": {"nodes": nodes, "gateways": _gateways_live(db, topo, clock_now()),
                  "leader": next((m.get("name") for m in members if m.get("role") == "leader"), None),
