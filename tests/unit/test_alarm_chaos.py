@@ -68,7 +68,7 @@ case "$url" in
 esac
 """
 MEMBERS = [{"name": f"node{i}", "role": "leader" if i == 3 else "replica",
-            "state": "running" if i == 3 else "streaming"} for i in (1, 2, 3, 4, 5)]
+            "state": "running" if i == 3 else "streaming"} for i in range(1, 8)]  # 7 noeuds depuis le 2026-11-05
 NEXT = {"id": 7, "nodes": ["node4"], "mode": "stop", "minutes": 1, "status": "claimed",
         "voters": ["node1", "node2", "node3"]}
 # relance, politique de compose remise, puis desarmement du filet de CE test (id 7) seulement
@@ -143,6 +143,17 @@ def test_stop_node4_probes_etcd_pins_restart_proves_arming_then_stops_and_restor
     assert posted(h)[1]["details"]["leader_after"] == "node3"
     assert isinstance(posted(h)[1]["details"]["restore_seconds"], int)
     assert "POST http://10.99.0.1:8000/internal/chaos/7/events" in (h / "curl.log").read_text()
+
+
+def test_stop_node6_targets_its_wireguard_ip(h):
+    """2026-11-05 : node6 = alarm-3 (10.99.0.6), non votant ; avant, « noeud inconnu du runner »."""
+    claim(h, nodes=["node6"])
+    rc, err = run(h)
+    assert rc == 0, err
+    log = ssh_log(h)
+    assert log and all(l.startswith("10.99.0.6 ") for l in log), log
+    assert "docker stop c1 c2" in [l.split(" ", 1)[1] for l in log]
+    assert [p["kind"] for p in posted(h)] == ["started", "restored"]
 
 
 def test_lock_held_by_cd_no_claim(h):

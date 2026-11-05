@@ -34,9 +34,9 @@ def h(tmp_path):
     return tmp_path
 
 
-def run(h):
+def run(h, node=4):
     env = {**os.environ, "H": str(h), "PATH": f"{h / 'bin'}:{os.environ['PATH']}"}
-    p = subprocess.run(["bash", str(SCRIPT), "--node", "4", "--soak", "0", "--api-base", "http://test",
+    p = subprocess.run(["bash", str(SCRIPT), "--node", str(node), "--soak", "0", "--api-base", "http://test",
                         "--gateway-key", "k"], env=env, capture_output=True, text=True, timeout=30)
     log = (h / "ssh.log").read_text().splitlines() if (h / "ssh.log").exists() else []
     return p.returncode, log, p.stderr
@@ -50,3 +50,12 @@ def test_unready_target_exits_3_without_touching_the_node(h, flag, msg):
     assert rc == 3, err
     assert msg in err
     assert not any("start-prod-node" in c or "compose" in c or " tag " in c for c in log), log
+
+
+@pytest.mark.parametrize("node", [6, 7])
+def test_node6_node7_target_their_wireguard_ip(h, node):
+    """2026-11-05 : alarm-3/alarm-4 (node6/node7) acceptes, cible 10.99.0.6 / 10.99.0.7 (INV-167)."""
+    (h / "ssh_down").write_text("")
+    rc, _, err = run(h, node)
+    assert rc == 3, err
+    assert f"SSH vers alarm@10.99.0.{node} echoue" in err

@@ -206,6 +206,18 @@ class TestHttpTimeoutDefault:
     def test_primary_probe_is_3_seconds_even_with_env_at_10(self, monkeypatch):
         monkeypatch.setenv("HTTP_TIMEOUT_SECONDS", "10")  # modele d'install.sh des passerelles posees
         assert self._config().PRIMARY_PROBE_TIMEOUT_SECONDS == 3
+
+
+class TestAllNodeUrls:
+    """INV-174 (2026-11-05) : node6/node7 (alarm-3/alarm-4) sondes apres les 5 autres ; une URL vide est ignoree."""
+
+    def test_node6_node7_appended_and_empty_ignored(self, monkeypatch):
+        for i in range(1, 8):
+            monkeypatch.setenv(f"NODE{i}_URL", f"http://10.99.0.{i}:8000")
+        assert TestHttpTimeoutDefault._config().ALL_NODE_URLS == [f"http://10.99.0.{i}:8000" for i in range(1, 8)]
+        monkeypatch.setenv("NODE6_URL", "")
+        monkeypatch.delenv("NODE7_URL")
+        assert TestHttpTimeoutDefault._config().ALL_NODE_URLS == [f"http://10.99.0.{i}:8000" for i in range(1, 6)]
 class TestBackendsDown:
     """INV-171 : la passerelle alerte quand aucun backend ne peut ecrire. /health repond 200 meme
     sans leader (un 503 ferait reculer le canary a tort) : c'est cluster_writable qui compte.

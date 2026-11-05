@@ -28,7 +28,7 @@ from . import quorum_monitor
 from .quorum_monitor import quorum_monitor_loop
 from .watchdog import watchdog_loop
 from .leader_election import leader_election_loop, is_leader
-from .sites import node_locations
+from .sites import node_locations, node_machines, retiring_nodes
 from .replica_proxy import ReplicaWriteProxyMiddleware
 from .database import DATABASE_URL
 
@@ -365,17 +365,20 @@ async def cluster_status():
     healthy_count = sum(1 for m in members if m.get("state") in ("running", "streaming"))
     total_count = len(members)
 
-    # INV-161 : lieu de chaque noeud (Izeron, Beaufort, OVH)
+    # INV-161 : lieu (Izeron, Beaufort, OVH), machine (repli : nom Patroni) et « bientot obsolete »
     db = SessionLocal()
     try:
-        locations = node_locations(db)
+        locations, machines, retiring = node_locations(db), node_machines(db), retiring_nodes(db)
     finally:
         db.close()
     for m in members:
         m["location"] = locations.get(m.get("name"))
+        m["machine"] = machines.get(m.get("name"), m.get("name"))
+        m["retiring"] = m.get("name") in retiring
 
     return {
         "local_node": node_name,
+        "local_machine": machines.get(node_name, node_name),
         "local_role": local_role,
         "local_location": locations.get(node_name),
         "cluster_writable": is_leader.is_set() or quorum_monitor.cluster_has_leader,  # INV-171, bandeau web

@@ -39,6 +39,7 @@
         .badge.online { background: #22c55e33; color: #22c55e; }
         .badge.offline { background: #ef444433; color: #ef4444; }
         .badge.waiting { background: #f59e0b33; color: #f59e0b; }
+        .badge.retiring { background: #f59e0b33; color: #f59e0b; }
         .badge.critical { background: #ef444433; color: #ef4444; }
         .badge.high { background: #f59e0b33; color: #f59e0b; }
         .badge.medium { background: #3b82f633; color: #3b82f6; }
@@ -565,7 +566,7 @@
             <div class="card">
                 <h3>Membres du cluster</h3>
                 <table class="cards">
-                    <thead><tr><th>Nom</th><th>Lieu</th><th>Role</th><th>Etat</th><th>Host</th><th>Port</th><th>Timeline</th><th>Lag</th></tr></thead>
+                    <thead><tr><th>Nœud</th><th>Lieu</th><th>Role</th><th>Etat</th><th>Host</th><th>Port</th><th>Timeline</th><th>Lag</th></tr></thead>
                     <tbody id="clusterMembers"></tbody>
                 </table>
             </div>
@@ -899,6 +900,9 @@
         const siteTitle = a => a.site ? `${siteName(a.site)} · ${a.title}` : a.title;
         // INV-161 : lieu d'un noeud (izeron/beaufort/ovh)
         const place = l => l ? ({ ovh: 'OVH' }[l] || l.charAt(0).toUpperCase() + l.slice(1)) : '-';
+        // INV-161 : « alarm-3 · node6 » (le nom seul si la machine est inconnue) ; badge des machines a remplacer
+        const nodeLabel = (machine, name) => machine && machine !== name ? `${machine} · ${name}` : (name || '-');
+        const retiringBadge = r => r ? ' <span class="badge retiring">bientôt obsolète</span>' : '';
 
         async function loadSites() {
             const sel = document.getElementById('alarmSite');
@@ -1351,7 +1355,7 @@
                     const g = gws.find(g => g.host === n.name);
                     const seen = !g ? '-' : `${escHtml(g.gateway_id)} : ` + (g.last_seen_s == null ? 'jamais vue' : `vu il y a ${Math.round(g.last_seen_s)} s`);
                     return `<tr>
-                        <td data-label="Nœud"><strong>${escHtml(n.name)}</strong></td>
+                        <td data-label="Nœud"><strong>${escHtml(nodeLabel(n.machine, n.name))}</strong>${retiringBadge(n.retiring)}</td>
                         <td data-label="Lieu">${place(n.site)}</td>
                         <td data-label="Rôle">${escHtml(n.role || '-')}</td>
                         <td data-label="Voteur">${n.voter ? 'oui' : '-'}</td>
@@ -1383,7 +1387,7 @@
             try {
                 const members = ((await api('/api/cluster')).members || []).filter(m => m.location).sort((a, b) => a.name.localeCompare(b.name));
                 const sites = [...new Set(members.map(m => m.location))];
-                const opts = members.map(m => `<option value="${escHtml(m.name)}" data-nodes="${escHtml(m.name)}">${escHtml(m.name)} (${place(m.location)})</option>`)
+                const opts = members.map(m => `<option value="${escHtml(m.name)}" data-nodes="${escHtml(m.name)}">${escHtml(nodeLabel(m.machine, m.name))} (${place(m.location)})${m.retiring ? ' — bientôt obsolète' : ''}</option>`)
                     .concat(sites.map(s => {
                         const nodes = members.filter(m => m.location === s).map(m => m.name);
                         const quorum = nodes.filter(n => chaosVoters.includes(n)).length >= 2;
@@ -1471,7 +1475,7 @@
                 document.getElementById('clusterTotal').textContent = q.total || '-';
                 document.getElementById('clusterHealthy').textContent = q.healthy || '-';
                 document.getElementById('clusterLocalNode').textContent =
-                    (data.local_node || '-') + (data.local_location ? ` (${place(data.local_location)})` : '');
+                    nodeLabel(data.local_machine, data.local_node) + (data.local_location ? ` (${place(data.local_location)})` : '');
                 document.getElementById('clusterLocalRole').textContent = data.local_role || '-';
 
                 const tbody = document.getElementById('clusterMembers');
@@ -1481,7 +1485,7 @@
                     const color = isLeader ? '#22c55e' : isDown ? '#ef4444' : '#94a3b8';
                     const lag = m.lag != null ? m.lag : '-';
                     return `<tr style="color:${color}">
-                        <td data-label="Nom"><strong>${m.name || '-'}</strong></td>
+                        <td data-label="Nœud"><strong>${escHtml(nodeLabel(m.machine, m.name))}</strong>${retiringBadge(m.retiring)}</td>
                         <td data-label="Lieu">${place(m.location)}</td>
                         <td data-label="Role"><span class="badge" style="background:${isLeader ? '#22c55e33' : '#33415533'};color:${color}">${m.role || '-'}</span></td>
                         <td data-label="Etat">${m.state || '-'}</td>
