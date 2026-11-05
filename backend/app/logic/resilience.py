@@ -1,9 +1,10 @@
 """Logique pure : panneau resilience (INV-175) — ce que le systeme fait encore quand des noeuds
 ou des passerelles tombent.
 
-Topologie de prod : node1/node2 Izeron, node3 OVH, node4/node5 Beaufort ; voteurs etcd
-node1-3 ; node3 seul relais entre les sites et facade publique de l'app ; passerelles onsite-2
-(sur node2) et alarm-1 (sur node4). Tout vient de SystemConfig (sites.py), rien n'est fige ici.
+Topologie de prod : node1/node2 Izeron (« Legacy », bientot retires), node3 OVH, node4/node5
+Beaufort, node6/node7 Izeron ; voteurs etcd node1, node2, node3, node6, node7 (2026-11-05) ; node3
+seul relais entre les sites et facade publique de l'app ; passerelles onsite-2 (sur node2) et
+alarm-1 (sur node4). Tout vient de SystemConfig (sites.py), rien n'est fige ici.
 `alerted_by` encode les alertes d'aujourd'hui : sans leader, aucun email ne part (INV-085 est
 leader-gated) ; INV-170 (PR 1) ajoutera l'email « aucun leader » depuis chaque noeud.
 """
@@ -31,6 +32,7 @@ class Topology:
     gateways: tuple
     public_nodes: frozenset = frozenset({"node3"})
     default_site: str = "izeron"
+    retiring: frozenset = frozenset()  # retiring_nodes (INV-161) : scenario « Legacy debranche »
 
 
 @dataclass(frozen=True)  # pragma: no mutate (frozen=False equivalent : rien ne mute ces valeurs)
@@ -58,6 +60,14 @@ class Outcome:
 
 def _place(site: str) -> str:
     return {"ovh": "OVH"}.get(site, site.capitalize())
+
+
+def group_of(site, retiring: bool) -> str:
+    """INV-161 : groupe d'affichage (web et app Android, libelles exacts du contrat) : machine bientot
+    obsolete -> « Legacy (Izeron) » quel que soit son lieu (regle du proprietaire), sinon son lieu."""
+    if retiring:
+        return "Legacy (Izeron)"
+    return _place(site) if site else "Lieu inconnu"
 
 
 def connected(topo: Topology, a: str, b: str, up: set) -> bool:
@@ -110,8 +120,9 @@ def evaluate(topo: Topology, scenario: Scenario) -> Outcome:
 
 
 def default_scenarios(topo: Topology) -> list:
-    """Un noeud par site multi-noeuds (celui sans passerelle), chaque site entier, chaque
-    passerelle. `untestable` = aucun leader possible (arret total, refuse par le proprietaire)."""
+    """Un noeud par site multi-noeuds (celui sans passerelle), chaque site entier, les noeuds
+    « Legacy » debranches (controle du demenagement), chaque passerelle. `untestable` = aucun
+    leader possible (arret total, refuse par le proprietaire)."""
     by_site: dict = {}
     for n in topo.nodes:
         by_site.setdefault(n.site, []).append(n.name)
@@ -126,6 +137,10 @@ def default_scenarios(topo: Topology) -> list:
             out.append(Scenario(f"{s}_both", f"{_place(s)} entier ({' + '.join(names)})", frozenset(names)))
         else:
             out.append(Scenario(f"{s}_down", f"{_place(s)} ({names[0]})", frozenset(names)))
+    legacy = [n.name for n in topo.nodes if n.name in topo.retiring]
+    if legacy:
+        out.append(Scenario("legacy_unplugged", f"Legacy débranché ({' + '.join(legacy)}) : contrôle du jour du déménagement",
+                            frozenset(legacy)))
     for g in topo.gateways:
         out.append(Scenario(f"gateway_{g.site}", f"Passerelle {_place(g.site)} ({g.gateway_id})",
                             frozenset(), frozenset({g.gateway_id})))

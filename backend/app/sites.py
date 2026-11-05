@@ -58,7 +58,9 @@ def retiring_nodes(db: Session) -> list[str]:
 
 
 # INV-175 : topologie du panneau resilience. Memes defauts sur une base deja en service.
-DEFAULT_ETCD_VOTERS = "node1,node2,node3"
+# INV-090 (2026-11-05) : 5 voteurs pendant la transition (node6/node7 = alarm-3/4) ; node1/node2 sortiront
+# au demenagement (docs/REPLACE_ONSITE_NODE.md).
+DEFAULT_ETCD_VOTERS = "node1,node2,node3,node6,node7"
 DEFAULT_RELAY_NODES = "node3"  # seul noeud qui relie les sites entre eux
 DEFAULT_GATEWAY_HOSTS = "onsite-2:node2,alarm-1:node4"  # passerelle:noeud qui l'heberge
 

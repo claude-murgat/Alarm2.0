@@ -395,7 +395,8 @@ def _run_leader_loss_check(now: datetime) -> None:
             f"les SMS ni les appels à passer.\n\n"
             f"Chaque nœud qui constate la situation envoie son propre email (au plus un par heure) : "
             f"comparer les nœuds et les causes pour situer la panne.\n\n"
-            f"À vérifier : patronictl list, et que 2 voteurs etcd sur 3 (node1, node2, node3) sont joignables."
+            f"À vérifier : patronictl list, et qu'une majorité des voteurs etcd est joignable "
+            f"(etcdctl endpoint health --cluster ; liste dans SystemConfig etcd_voters)."
         ),
         to=alert_email or "direction_technique@charlesmurgat.com",
     )

@@ -5,6 +5,9 @@ ou plusieurs noeuds tombent. Topologie de prod : node1/node2 Izeron (voteurs), n
 (voteur, relais entre sites, facade publique de l'app), node4/node5 Beaufort ; passerelles
 onsite-2 (sur node2) et alarm-1 (sur node4).
 
+Transition du 2026-11-05 (INV-090) : 7 noeuds, voteurs node1, node2, node3, node6, node7, onsite-1/2
+(node1/node2) « Legacy » : TRANSITION ci-dessous, avec le scenario « Legacy debranche ».
+
 Rien n'appelle la logique a l'import du module : un mutant qui plante ferait echouer la
 collecte (pytest sort en 2) et mutmut le compterait comme survivant.
 """
@@ -13,7 +16,7 @@ import dataclasses
 import pytest
 
 from backend.app.logic.resilience import (
-    Gateway, Node, Scenario, Topology, connected, default_scenarios, evaluate)
+    Gateway, Node, Scenario, Topology, connected, default_scenarios, evaluate, group_of)
 
 pytestmark = pytest.mark.unit
 
@@ -206,3 +209,59 @@ def test_outcome_is_plain_data():
     o = evaluate(PROD, scen("ovh_down"))
     d = dataclasses.asdict(o)
     assert d["writable_from"]["beaufort"] is False and d["alerted_by"] == ()
+
+
+# Transition du 2026-11-05 : node6/node7 (alarm-3/4) etiquetes Izeron, voteurs ; onsite-1/2 « Legacy ».
+TRANSITION = dataclasses.replace(
+    PROD, nodes=NODES + (Node("node6", "izeron"), Node("node7", "izeron")),
+    voters=frozenset({"node1", "node2", "node3", "node6", "node7"}), retiring=frozenset({"node2", "node1"}))
+LEGACY = "Legacy débranché (node1 + node2) : contrôle du jour du déménagement"
+
+
+def test_transition_default_scenarios_add_legacy_unplugged():
+    scenarios = scen(topo=TRANSITION)
+    assert list(scenarios) == ["izeron_one_node", "beaufort_one_node", "izeron_both", "ovh_down",
+                               "beaufort_both", "legacy_unplugged", "gateway_izeron", "gateway_beaufort"]
+    assert scenarios["legacy_unplugged"].down_nodes == {"node1", "node2"}
+    assert scenarios["legacy_unplugged"].label == LEGACY  # noeuds dans l'ordre de la topologie
+    assert scenarios["legacy_unplugged"].down_gateways == frozenset()
+    assert scenarios["izeron_both"].label == "Izeron entier (node1 + node2 + node6 + node7)"
+    assert [k for k, s in scenarios.items() if s.untestable] == ["izeron_both"]
+
+
+def test_transition_truth_table_with_5_voters():
+    one, ovh, both, beaufort = (evaluate(TRANSITION, scen(k, TRANSITION))
+                                for k in ("izeron_one_node", "ovh_down", "izeron_both", "beaufort_both"))
+    assert one.leader_possible and one.why == "4/5 voteurs etcd joignables" and one.alerted_by == ()
+    # OVH : 4/5 voteurs « a Izeron » (node6/node7 y sont etiquetes, cf. limite d'INV-090), Beaufort aveugle
+    assert ovh.leader_possible and ovh.why == "4/5 voteurs etcd joignables"
+    assert ovh.writable_from == {"izeron": True, "ovh": False, "beaufort": False}
+    assert ovh.app_4g_reachable is False and ovh.alerted_by == ()
+    assert both.leader_possible is False and both.why == "1/5 voteurs etcd joignables"
+    assert both.alerted_by == (INV170,)
+    assert beaufort.leader_possible and beaufort.why == "5/5 voteurs etcd joignables"
+    assert beaufort.alarms_created == {"izeron": True, "beaufort": False}
+
+
+def test_legacy_unplugged_keeps_a_leader_but_izeron_gateway_must_move():
+    """Contrôle du déménagement : node3, node6, node7 = 3/5 voteurs -> leader ; la passerelle d'Izeron
+    est encore sur onsite-2 (gateway_hosts) : alarmes et SMS d'Izeron perdus tant qu'elle n'a pas bougé."""
+    o = evaluate(TRANSITION, scen("legacy_unplugged", TRANSITION))
+    assert o.leader_possible and o.escalation_running
+    assert o.why == "3/5 voteurs etcd joignables"
+    assert o.writable_from == {"izeron": True, "ovh": True, "beaufort": True}
+    assert o.alarms_created == o.sms_calls == {"izeron": False, "beaufort": True}
+    assert o.app_4g_reachable and o.app_izeron_lan
+    assert o.alerted_by == ("email INV-144",)
+    moved = dataclasses.replace(TRANSITION, gateways=(Gateway("alarm-3", "izeron", "node6"), GATEWAYS[1]))
+    assert evaluate(moved, scen("legacy_unplugged", moved)).alerted_by == ()
+
+
+@pytest.mark.parametrize("site, retiring, group", [
+    ("izeron", True, "Legacy (Izeron)"), ("izeron", False, "Izeron"), ("beaufort", False, "Beaufort"),
+    ("ovh", False, "OVH"), ("beaufort", True, "Legacy (Izeron)"), (None, True, "Legacy (Izeron)"),
+    (None, False, "Lieu inconnu"), ("", False, "Lieu inconnu")])
+def test_group_of(site, retiring, group):
+    """INV-161 (2026-11-05) : libelles EXACTS partages avec l'app Android (PR #297) : « Legacy (Izeron) »
+    pour tout noeud retiring (regle du proprietaire, sans tenir compte du lieu), sinon le lieu."""
+    assert group_of(site, retiring) == group

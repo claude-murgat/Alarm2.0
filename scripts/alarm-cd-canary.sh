@@ -14,13 +14,14 @@
 # Designe pour tourner sur NODE3 cloud OVH (le seul qui voit les 7 noeuds via WG).
 # L'humain enchaine les 7 commandes manuellement V1 (ordre de alarm-cd-orchestrate.sh) :
 #   ./scripts/alarm-cd-canary.sh --node 3   # NODE3 d'abord
-#   ./scripts/alarm-cd-canary.sh --node 7   # alarm-4 (non votant, futur Izeron)
-#   ./scripts/alarm-cd-canary.sh --node 6   # alarm-3 (non votant, futur Izeron)
 #   ./scripts/alarm-cd-canary.sh --node 5   # alarm-2 (non votant)
 #   ./scripts/alarm-cd-canary.sh --node 4   # alarm-1 (non votant)
+#   ./scripts/alarm-cd-canary.sh --node 7   # alarm-4 (voteur, futur Izeron)
+#   ./scripts/alarm-cd-canary.sh --node 6   # alarm-3 (voteur, futur Izeron)
 #   ./scripts/alarm-cd-canary.sh --node 2   # onsite-2 ensuite
 #   ./scripts/alarm-cd-canary.sh --node 1   # onsite-1 en dernier (le plus critique)
-# Noeuds 4 a 7 : start-prod-node.sh ne relance que Patroni + backend (pas d'etcd local).
+# Noeuds 4 et 5 : start-prod-node.sh ne relance que Patroni + backend (pas d'etcd local) ;
+# voteurs 1, 2, 3, 6, 7 : etcd + Patroni + backend (INV-090).
 #
 # V1.5 (cf doc) : promotion auto entre etapes apres 5 deploiements clean.
 #
@@ -86,8 +87,8 @@ fi
 #   node3 -> NODE3 cloud -> 10.99.0.1
 #   node4 -> alarm-1 -> 10.99.0.4 (non votant)
 #   node5 -> alarm-2 -> 10.99.0.5 (non votant)
-#   node6 -> alarm-3 -> 10.99.0.6 (non votant, futur Izeron)
-#   node7 -> alarm-4 -> 10.99.0.7 (non votant, futur Izeron)
+#   node6 -> alarm-3 -> 10.99.0.6 (voteur, futur Izeron)
+#   node7 -> alarm-4 -> 10.99.0.7 (voteur, futur Izeron)
 case "$NODE" in
   1) WG_IP="10.99.0.2"; NODE_NAME="node1" ;;
   2) WG_IP="10.99.0.3"; NODE_NAME="node2" ;;

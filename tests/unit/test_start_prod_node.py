@@ -1,8 +1,9 @@
 """INV-167 (amende 2026-11-05) : `start-prod-node.sh` accepte les 7 noeuds de prod ; les non votants
-(node4 a node7) ne lancent que Patroni + backend, jamais de conteneur etcd.
+(node4, node5) ne lancent que Patroni + backend, jamais de conteneur etcd. INV-090 (2026-11-05) :
+node6/node7 = alarm-3/alarm-4 (futurs noeuds d'Izeron) sont voteurs etcd comme node1 a node3, et les
+7 `.env.prod.nodeN` listent les 5 voteurs.
 
-node6/node7 = alarm-3/alarm-4 (futurs noeuds d'Izeron). Un etcd lance par erreur sur un non votant
-tenterait de demarrer un membre inconnu du cluster etcd. Le vrai script tourne depuis un dossier qui
+Un etcd lance par erreur sur un non votant tenterait de demarrer un membre inconnu du cluster etcd. Le vrai script tourne depuis un dossier qui
 tient lieu de /opt/alarm (vrais `.env.prod.nodeN` du depot), contre de faux `ip` / `docker` (PATH).
 """
 import os
@@ -58,7 +59,7 @@ def run(h, node):
 def test_each_prod_node_starts_non_voters_without_etcd(h, node):
     rc, calls, out = run(h, node)
     assert rc == 0, out
-    services = " --no-deps patroni backend" if node >= 4 else ""
+    services = " --no-deps patroni backend" if node in (4, 5) else ""  # voteurs : etcd compris
     assert calls == [f"compose --env-file .env.prod.node{node} -p node{node} pull{services.replace(' --no-deps', '')}",
                      f"compose --env-file .env.prod.node{node} -p node{node} up -d{services}"], calls
 
@@ -79,3 +80,17 @@ def test_existing_nodes_peer_with_node6_and_node7_last(node):
     peers = next(l for l in env if l.startswith("PEER_TEST_URLS=")).split("=", 1)[1].split(",")
     assert peers[-2:] == ["http://10.99.0.6:8000", "http://10.99.0.7:8000"]
     assert len(peers) == 6 and len(set(peers)) == 6
+
+
+ETCD_HOSTS = "10.99.0.1:2379,10.99.0.2:2379,10.99.0.3:2379,10.99.0.6:2379,10.99.0.7:2379"
+ETCD_INITIAL_CLUSTER = ("node1=http://10.99.0.2:2380,node2=http://10.99.0.3:2380,node3=http://10.99.0.1:2380,"
+                        "node6=http://10.99.0.6:2380,node7=http://10.99.0.7:2380")
+
+
+@pytest.mark.parametrize("node", range(1, 8))
+def test_every_prod_env_lists_the_5_etcd_voters(node):
+    """INV-090 (2026-11-05) : 5 voteurs node1, node2, node3, node6, node7 (Patroni de chaque noeud ;
+    ETCD_INITIAL_CLUSTER ne sert qu'au premier demarrage d'un voteur)."""
+    env = (REPO / f".env.prod.node{node}").read_text().splitlines()
+    assert f"ETCD_HOSTS={ETCD_HOSTS}" in env
+    assert f"ETCD_INITIAL_CLUSTER={ETCD_INITIAL_CLUSTER}" in env

@@ -4,7 +4,7 @@ passerelles + scenarios de panne calcules ; GET /api/resilience/whatif pour un s
 
 Patroni et les /health des autres noeuds sont simules par `urlopen` (motif de
 test_cluster_location_inv161.py) : 10.99.0.4 (node4) ne repond pas. 7 noeuds depuis le 2026-11-05 :
-node6/node7 (alarm-3/alarm-4) etiquetes Izeron, non votants.
+node6/node7 (alarm-3/alarm-4) etiquetes Izeron, voteurs etcd (5 voteurs, INV-090).
 """
 import io
 import json
@@ -81,19 +81,20 @@ def test_live_nodes_and_gateways(client, admin_headers, fake_cluster, stale_gate
     assert list(nodes) == [f"node{i}" for i in range(1, 8)]
     assert nodes["node3"] == {"name": "node3", "site": "ovh", "voter": True, "reachable": True,
                               "role": "leader", "state": "running", "version": "v-3",
-                              "machine": "OVH", "retiring": False}
+                              "machine": "OVH", "retiring": False, "group": "OVH"}
     assert nodes["node4"] == {"name": "node4", "site": "beaufort", "voter": False, "reachable": False,
                               "role": "replica", "state": "streaming", "version": None,
-                              "machine": "alarm-1", "retiring": False}
-    assert nodes["node6"] == {"name": "node6", "site": "izeron", "voter": False, "reachable": True,
+                              "machine": "alarm-1", "retiring": False, "group": "Beaufort"}
+    assert nodes["node6"] == {"name": "node6", "site": "izeron", "voter": True, "reachable": True,
                               "role": "replica", "state": "streaming", "version": "v-6",
-                              "machine": "alarm-3", "retiring": False}
+                              "machine": "alarm-3", "retiring": False, "group": "Izeron"}
     assert (nodes["node7"]["machine"], nodes["node7"]["site"]) == ("alarm-4", "izeron")
     assert [n for n in nodes if nodes[n]["retiring"]] == ["node1", "node2"]
-    assert nodes["node1"]["machine"] == "onsite-1"
+    assert (nodes["node1"]["machine"], nodes["node1"]["group"]) == ("onsite-1", "Legacy (Izeron)")
+    assert [n for n in nodes if nodes[n]["voter"]] == ["node1", "node2", "node3", "node6", "node7"]
     assert nodes["node1"]["voter"] and nodes["node1"]["reachable"] and nodes["node1"]["version"] == "v-1"
     assert live["leader"] == "node3"
-    assert live["etcd_voters_up"] == 3
+    assert live["etcd_voters_up"] == 5  # node4 injoignable n'est pas voteur
     # Une sonde /health par membre Patroni
     assert sorted(u for u in fake_cluster if u.endswith("/health")) == [
         f"http://10.99.0.{i}:8000/health" for i in range(1, 8)]
@@ -107,9 +108,11 @@ def test_live_nodes_and_gateways(client, admin_headers, fake_cluster, stale_gate
 
 def test_whatif_default_scenarios(client, admin_headers, fake_cluster):
     whatif = {w["scenario"]: w for w in client.get("/api/resilience", headers=admin_headers).json()["whatif"]}
-    assert {"izeron_one_node", "ovh_down", "izeron_both", "beaufort_both", "gateway_izeron"} <= set(whatif)
+    assert {"izeron_one_node", "ovh_down", "izeron_both", "beaufort_both", "legacy_unplugged",
+            "gateway_izeron"} <= set(whatif)
     both = whatif["izeron_both"]
     assert both["untestable"] is True and both["leader_possible"] is False
+    assert both["why"] == "1/5 voteurs etcd joignables"  # node3 seul voteur restant
     assert both["alerted_by"] == ["email INV-170 (après PR 1)"]
     assert both["label"] == "Izeron entier (node1 + node2 + node6 + node7)"
     assert whatif["izeron_one_node"]["label"] == "Un nœud à Izeron (node1)"
@@ -119,6 +122,7 @@ def test_whatif_default_scenarios(client, admin_headers, fake_cluster):
     assert beaufort["alerted_by"] == ["email INV-144"]
     ovh = whatif["ovh_down"]
     assert ovh["untestable"] is False and ovh["leader_possible"] is True
+    assert ovh["why"] == "4/5 voteurs etcd joignables"
     assert ovh["writable_from"] == {"izeron": True, "ovh": False, "beaufort": False}
     assert ovh["sms_calls"] == {"izeron": True, "beaufort": False}
     assert ovh["app_4g_reachable"] is False
@@ -145,3 +149,15 @@ def test_patroni_unreachable_503(client, admin_headers, patroni_down):
     r = client.get("/api/resilience", headers=admin_headers)
     assert r.status_code == 503
     assert "Patroni" in r.text
+
+
+def test_legacy_unplugged_is_the_move_day_check(client, admin_headers, fake_cluster):
+    """INV-175 (2026-11-05) : onsite-1/2 (retiring_nodes) debranches -> node3, node6, node7 = 3/5 voteurs,
+    leader possible ; la passerelle d'Izeron est encore sur onsite-2 (gateway_hosts par defaut)."""
+    whatif = {w["scenario"]: w for w in client.get("/api/resilience", headers=admin_headers).json()["whatif"]}
+    legacy = whatif["legacy_unplugged"]
+    assert legacy["label"] == "Legacy débranché (node1 + node2) : contrôle du jour du déménagement"
+    assert legacy["untestable"] is False and legacy["leader_possible"] is True
+    assert legacy["why"] == "3/5 voteurs etcd joignables"
+    assert legacy["writable_from"] == {"izeron": True, "ovh": True, "beaufort": True}
+    assert legacy["alarms_created"] == {"izeron": False, "beaufort": True}

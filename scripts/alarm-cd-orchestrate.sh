@@ -1,5 +1,5 @@
 #!/bin/bash
-# alarm-cd-orchestrate.sh — chaine canary 3 -> 7 -> 6 -> 5 -> 4 -> 2 -> 1 automatique (V1.5).
+# alarm-cd-orchestrate.sh — chaine canary 3 -> 5 -> 4 -> 7 -> 6 -> 2 -> 1 automatique (V1.5).
 #
 # Cf docs/CD_DESIGN.md §4 (ordre canary) et §8 (plan PR 9 — "promotion canary
 # auto apres soak vert"). Wraps alarm-cd-canary.sh pour les 7 noeuds en sequence,
@@ -18,8 +18,8 @@
 #     courant de :stable (cache local NODE3) est saute.
 #   - Les 7 noeuds au digest courant -> no-op silencieux (95 % des ticks).
 #   - Noeud injoignable (SSH) -> WARN, reporte au prochain passage, la chaine
-#     CONTINUE avec les suivants. Un votant etcd (1, 2, 3) n'est redemarre que
-#     si les 3 votants repondent (quorum) ; sinon seuls 4 a 7 sont deployes.
+#     CONTINUE avec les suivants. Un voteur etcd (VOTERS = 1 2 3 6 7) n'est redemarre
+#     que si TOUS les voteurs repondent (quorum) ; sinon seuls 4 et 5 sont deployes.
 #   - Canary exit 3 (prerequis KO : SSH, registre/DNS injoignable depuis la cible,
 #     rien n'est touche) -> reporte comme un injoignable ; un votant reporte
 #     reporte aussi les votants suivants du passage.
@@ -65,15 +65,19 @@ COOLDOWN_AFTER_FAIL=3600
 # Soak entre etapes (override possible via env). 120 s depuis le 2026-10-20 (choix proprietaire :
 # ~10 min de deploiement au lieu de ~35) ; toujours un noeud a la fois, rollback auto conserve.
 SOAK="${SOAK:-120}"
-# Ordre canary fige (INV-167) : NODE3 (cloud, le moins critique) -> les non votants
-# etcd du plus recent au plus ancien, node7 alarm-4, node6 alarm-3, node5 alarm-2,
-# node4 alarm-1 (un echec n'entame pas le quorum) -> onsite-2 (Celeron, maillon
-# faible) -> onsite-1 (i5, le plus puissant et souvent primary). node1 reste le
-# dernier (son canary_promoted = fin de chaine, cf backend/app/api/deployments.py).
+# Ordre canary fige (INV-167, 2026-11-05), du moins critique au plus critique : NODE3
+# (cloud) -> les non votants node5 alarm-2, node4 alarm-1 (passerelle Beaufort ; un echec
+# n'entame pas le quorum) -> les nouveaux voteurs node7 alarm-4, node6 alarm-3 -> les
+# voteurs Legacy onsite-2 (Celeron, maillon faible), onsite-1 (i5, souvent primary). node1
+# reste le dernier (son canary_promoted = fin de chaine, cf backend/app/api/deployments.py).
 # Cf §4 doc — justification de l'ordre.
-NODES_ORDER=(3 7 6 5 4 2 1)
+NODES_ORDER=(3 5 4 7 6 2 1)
+# Voteurs etcd (INV-090, 2026-11-05 : 5 pendant la transition ; node1/node2 en sortent au
+# demenagement, docs/REPLACE_ONSITE_NODE.md). Non votants : 4 et 5.
+VOTERS=(1 2 3 6 7)
+is_voter() { [[ " ${VOTERS[*]} " == *" $1 "* ]]; }
 # IP WG (cf alarm-cd-canary.sh) et site (logs seulement, node6/7 = futurs noeuds
-# d'Izeron, INV-161). Votants etcd = 1, 2, 3 ; non votants = 4 a 7.
+# d'Izeron, INV-161).
 NODE_IP=([1]=10.99.0.2 [2]=10.99.0.3 [3]=10.99.0.1 [4]=10.99.0.4 [5]=10.99.0.5 [6]=10.99.0.6 [7]=10.99.0.7)
 NODE_SITE=([1]=Izeron [2]=Izeron [3]=OVH [4]=Beaufort [5]=Beaufort [6]=Izeron [7]=Izeron)
 
@@ -184,15 +188,17 @@ if [[ -z "${GATEWAY_KEY:-}" ]]; then
 fi
 export GATEWAY_KEY
 
-# Preflight SSH : les noeuds a deployer, plus les 3 votants des que l'un d'eux
+# Preflight SSH : les noeuds a deployer, plus TOUS les voteurs des que l'un d'eux
 # est a deployer. Un noeud injoignable n'arrete plus la chaine : jusqu'au
 # 2026-10-29, node4/5 hors ligne 2 jours -> exit 1 a chaque tour, aucune des 4
 # versions promues n'a ete deployee, sur aucun site.
 DOWN=" "
 VOTER_TODO=0
-if is_todo 1 || is_todo 2 || is_todo 3; then VOTER_TODO=1; fi
+for NODE in "${VOTERS[@]}"; do
+  if is_todo "$NODE"; then VOTER_TODO=1; fi
+done
 for NODE in "${NODES_ORDER[@]}"; do
-  if ! is_todo "$NODE" && ! (( VOTER_TODO && NODE <= 3 )); then
+  if ! is_todo "$NODE" && ! { (( VOTER_TODO )) && is_voter "$NODE"; }; then
     continue
   fi
   if ! ssh -o BatchMode=yes -o ConnectTimeout=10 \
@@ -201,10 +207,10 @@ for NODE in "${NODES_ORDER[@]}"; do
     DOWN+="$NODE "
   fi
 done
-# Quorum etcd (INV-090) : redemarrer un votant pendant qu'un autre est absent
-# ne laisserait qu'un etcd sur 3 -> quorum perdu. Les 3 votants ou aucun.
+# Quorum etcd (INV-090) : redemarrer un voteur pendant qu'un autre est absent peut
+# perdre le quorum (et ne laisse aucune marge). Tous les voteurs ou aucun.
 VOTERS_OK=1
-for NODE in 1 2 3; do
+for NODE in "${VOTERS[@]}"; do
   if [[ "$DOWN" == *" $NODE "* ]]; then VOTERS_OK=0; fi
 done
 if [[ "$DOWN" == " " ]]; then
@@ -213,7 +219,7 @@ else
   log "Preflight SSH : injoignables :${DOWN% }"
 fi
 if (( VOTER_TODO && ! VOTERS_OK )); then
-  log "WARN : votant etcd injoignable : aucun votant (1, 2, 3) redemarre ce passage (quorum etcd), seuls les non votants 4 a 7 sont deployes"
+  log "WARN : votant etcd injoignable : aucun votant (${VOTERS[*]}) redemarre ce passage (quorum etcd), seuls les non votants sont deployes"
 fi
 
 # Resolution du chemin de alarm-cd-canary.sh : meme dossier que ce script.
@@ -235,7 +241,7 @@ for NODE in "${TODO[@]}"; do
     PENDING+=("$NODE")
     continue
   fi
-  if (( NODE <= 3 && ! VOTERS_OK )); then
+  if is_voter "$NODE" && (( ! VOTERS_OK )); then
     log "WARN : node${NODE} (${NODE_SITE[$NODE]}, votant) reporte au prochain passage : un votant etcd est injoignable ou pas pret"
     PENDING+=("$NODE")
     continue
@@ -261,7 +267,7 @@ for NODE in "${TODO[@]}"; do
     log "WARN : node${NODE} (${NODE_SITE[$NODE]}) pas pret : reporte au prochain passage"
     PENDING+=("$NODE")
     # Un votant pas pret est peut-etre tombe depuis le preflight : aucun autre votant (INV-090).
-    if (( NODE <= 3 )); then VOTERS_OK=0; fi
+    if is_voter "$NODE"; then VOTERS_OK=0; fi
     continue
   fi
   if (( rc != 0 )); then

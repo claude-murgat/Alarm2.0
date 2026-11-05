@@ -115,7 +115,19 @@ def test_machines_and_retiring_follow_system_config(client, patroni_cluster, mon
         assert machine["node6"] == "alarm-3-izeron" and machine["node1"] == "vieux-pc"
         assert machine["node4"] == "node4"  # absent de la cle enregistree -> nom Patroni
         assert retiring["node4"] is True and retiring["node1"] is False and retiring["node2"] is False
+        group = _by_name(data, "group")  # le groupe suit retiring_nodes ; retiring -> toujours « Legacy (Izeron) »
+        assert (group["node4"], group["node1"]) == ("Legacy (Izeron)", "Izeron")
         assert data["local_machine"] == "vieux-pc"
     finally:
         _set("node_machines", None)
         _set("retiring_nodes", None)
+
+
+def test_default_groups(client, patroni_cluster, no_stored_keys, monkeypatch):
+    """2026-11-05 : groupe d'affichage, libelles EXACTS du contrat avec l'app Android (PR #297) :
+    « Izeron », « Beaufort », « OVH », « Legacy (Izeron) » ; lieu inconnu -> « Lieu inconnu »."""
+    monkeypatch.setenv("NODE_NAME", "node3")
+    data = client.get("/api/cluster").json()
+    assert _by_name(data, "group") == {"node1": "Legacy (Izeron)", "node2": "Legacy (Izeron)", "node3": "OVH",
+                                       "node4": "Beaufort", "node5": "Beaufort", "node6": "Izeron",
+                                       "node7": "Izeron", "node9": "Lieu inconnu"}

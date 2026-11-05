@@ -40,6 +40,9 @@
         .badge.offline { background: #ef444433; color: #ef4444; }
         .badge.waiting { background: #f59e0b33; color: #f59e0b; }
         .badge.retiring { background: #f59e0b33; color: #f59e0b; }
+        /* INV-161 : en-tete de groupe (Izeron, Beaufort, OVH, Legacy (Izeron) separe en dernier) */
+        tr.group-row td { font-weight: 600; color: #94a3b8; background: #33415533; }
+        tr.group-row.legacy td { color: #f59e0b; border-top: 2px solid #f59e0b; }
         .badge.critical { background: #ef444433; color: #ef4444; }
         .badge.high { background: #f59e0b33; color: #f59e0b; }
         .badge.medium { background: #3b82f633; color: #3b82f6; }
@@ -196,6 +199,7 @@
             table.cards thead { display: none; }
             table.cards tr { border: 1px solid #334155; border-radius: 6px; padding: 4px 10px; margin-bottom: 8px; }
             table.cards td { border: none; padding: 5px 0; max-width: none !important; overflow-wrap: anywhere; }
+            table.cards tr.group-row { border: none; padding: 8px 0 0; margin-bottom: 4px; }
             table.cards td[data-label]::before { content: attr(data-label); display: inline-block; min-width: 8em; margin-right: 8px;
                 color: #94a3b8; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; }
         }
@@ -475,7 +479,7 @@
             <!-- INV-176..179 : panne controlee (arret reel d'un noeud T min, restauration armee sur la cible) -->
             <div class="card" id="chaosCard">
                 <h3>Panne contrôlée</h3>
-                <p style="color:#94a3b8;font-size:0.85rem;margin-bottom:10px">Arrête vraiment les conteneurs d'un nœud ou d'un site, ou coupe son tunnel wg0, pendant T minutes, puis restaure (restauration armée sur la cible avant d'agir). Refusé pendant une alarme ou un autre test, si un nœud n'est pas sain, toujours pour deux voteurs etcd (Izeron entier), et pour la coupure réseau de node3 (le runner y vit).</p>
+                <p style="color:#94a3b8;font-size:0.85rem;margin-bottom:10px">Arrête vraiment les conteneurs d'un nœud ou d'un site, ou coupe son tunnel wg0, pendant T minutes, puis restaure (restauration armée sur la cible avant d'agir). Refusé pendant une alarme ou un autre test, si un nœud n'est pas sain, toujours pour deux voteurs etcd (Izeron entier, node6 + node7, Legacy), et pour la coupure réseau de node3 (le runner y vit).</p>
                 <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
                     <div class="form-group"><label>Cible</label><select id="chaosTarget"></select></div>
                     <div class="form-group"><label>Mode</label><select id="chaosMode"><option value="stop">Arrêt des conteneurs</option><option value="netcut">Coupure réseau (wg0)</option></select></div>
@@ -903,6 +907,16 @@
         // INV-161 : « alarm-3 · node6 » (le nom seul si la machine est inconnue) ; badge des machines a remplacer
         const nodeLabel = (machine, name) => machine && machine !== name ? `${machine} · ${name}` : (name || '-');
         const retiringBadge = r => r ? ' <span class="badge retiring">bientôt obsolète</span>' : '';
+        // INV-161 : groupes d'affichage (`group` de l'API, memes libelles et ordre que l'app Android) :
+        // Izeron, Beaufort, OVH, autres, « Legacy (Izeron) » en dernier ; noeuds tries par nom -> [[groupe, [noeuds]], ...]
+        const LEGACY_GROUP = 'Legacy (Izeron)';
+        const groupRank = g => g === LEGACY_GROUP ? 9 : (['Izeron', 'Beaufort', 'OVH'].indexOf(g) + 1 || 4);
+        const byGroup = list => {
+            const groups = {};
+            [...list].sort((a, b) => a.name.localeCompare(b.name)).forEach(n => (groups[n.group || '-'] = groups[n.group || '-'] || []).push(n));
+            return Object.entries(groups).sort(([a], [b]) => groupRank(a) - groupRank(b) || a.localeCompare(b));
+        };
+        const groupRow = (g, cols) => `<tr class="group-row${g === LEGACY_GROUP ? ' legacy' : ''}"><td colspan="${cols}">${escHtml(g)}</td></tr>`;
 
         async function loadSites() {
             const sel = document.getElementById('alarmSite');
@@ -1351,10 +1365,10 @@
                 const yn = v => `<span class="badge ${v ? 'online' : 'offline'}">${v ? 'oui' : 'non'}</span>`;
                 const gws = d.live.gateways || [];
                 chaosGateways = gws;
-                document.getElementById('resilienceNodes').innerHTML = (d.live.nodes || []).map(n => {
+                document.getElementById('resilienceNodes').innerHTML = byGroup(d.live.nodes || []).map(([grp, ns]) => groupRow(grp, 7) + ns.map(n => {
                     const g = gws.find(g => g.host === n.name);
                     const seen = !g ? '-' : `${escHtml(g.gateway_id)} : ` + (g.last_seen_s == null ? 'jamais vue' : `vu il y a ${Math.round(g.last_seen_s)} s`);
-                    return `<tr>
+                    return `<tr data-node="${escHtml(n.name)}">
                         <td data-label="Nœud"><strong>${escHtml(nodeLabel(n.machine, n.name))}</strong>${retiringBadge(n.retiring)}</td>
                         <td data-label="Lieu">${place(n.site)}</td>
                         <td data-label="Rôle">${escHtml(n.role || '-')}</td>
@@ -1362,7 +1376,7 @@
                         <td data-label="Joignable">${yn(n.reachable)}</td>
                         <td data-label="Version">${escHtml(n.version || '-')}</td>
                         <td data-label="Passerelle">${seen}</td></tr>`;
-                }).join('');
+                }).join('')).join('');
                 const w0 = d.whatif[0] || {}, sites = Object.keys(w0.writable_from || {}), gwSites = Object.keys(w0.alarms_created || {});
                 document.getElementById('resilienceWhatifHead').innerHTML = '<tr><th>Scénario</th><th>Leader</th>'
                     + sites.map(s => `<th>Écriture ${place(s)}</th>`).join('') + gwSites.map(s => `<th>Alarmes/SMS ${place(s)}</th>`).join('')
@@ -1387,12 +1401,12 @@
             try {
                 const members = ((await api('/api/cluster')).members || []).filter(m => m.location).sort((a, b) => a.name.localeCompare(b.name));
                 const sites = [...new Set(members.map(m => m.location))];
-                const opts = members.map(m => `<option value="${escHtml(m.name)}" data-nodes="${escHtml(m.name)}">${escHtml(nodeLabel(m.machine, m.name))} (${place(m.location)})${m.retiring ? ' — bientôt obsolète' : ''}</option>`)
-                    .concat(sites.map(s => {
+                const opts = byGroup(members).map(([g, ms]) => `<optgroup label="${escHtml(g)}">` + ms.map(m => `<option value="${escHtml(m.name)}" data-nodes="${escHtml(m.name)}">${escHtml(nodeLabel(m.machine, m.name))} (${place(m.location)})${m.retiring ? ' — bientôt obsolète' : ''}</option>`).join('') + '</optgroup>')
+                    .concat('<optgroup label="Sites entiers">' + sites.map(s => {
                         const nodes = members.filter(m => m.location === s).map(m => m.name);
                         const quorum = nodes.filter(n => chaosVoters.includes(n)).length >= 2;
                         return `<option value="site:${escHtml(s)}" data-nodes="${escHtml(nodes.join(','))}"${quorum ? ' disabled' : ''}>Site ${place(s)} (${escHtml(nodes.join(', '))})${quorum ? ' — quorum' : ''}</option>`;
-                    }));
+                    }).join('') + '</optgroup>');
                 const cur = sel.value;
                 sel.innerHTML = opts.join('');
                 if ([...sel.options].some(o => o.value === cur && !o.disabled)) sel.value = cur;
@@ -1479,12 +1493,12 @@
                 document.getElementById('clusterLocalRole').textContent = data.local_role || '-';
 
                 const tbody = document.getElementById('clusterMembers');
-                tbody.innerHTML = (data.members || []).map(m => {
+                tbody.innerHTML = byGroup(data.members || []).map(([g, ms]) => groupRow(g, 8) + ms.map(m => {
                     const isLeader = m.role === 'leader';
                     const isDown = m.state === 'stopped' || m.state === 'unknown';
                     const color = isLeader ? '#22c55e' : isDown ? '#ef4444' : '#94a3b8';
                     const lag = m.lag != null ? m.lag : '-';
-                    return `<tr style="color:${color}">
+                    return `<tr data-node="${escHtml(m.name)}" style="color:${color}">
                         <td data-label="Nœud"><strong>${escHtml(nodeLabel(m.machine, m.name))}</strong>${retiringBadge(m.retiring)}</td>
                         <td data-label="Lieu">${place(m.location)}</td>
                         <td data-label="Role"><span class="badge" style="background:${isLeader ? '#22c55e33' : '#33415533'};color:${color}">${m.role || '-'}</span></td>
@@ -1494,7 +1508,7 @@
                         <td data-label="Timeline">${m.timeline || '-'}</td>
                         <td data-label="Lag">${lag}</td>
                     </tr>`;
-                }).join('');
+                }).join('')).join('');
             } catch (e) {
                 document.getElementById('quorumBanner').textContent = 'Erreur: ' + e.message;
                 document.getElementById('quorumBanner').style.background = '#ef444433';

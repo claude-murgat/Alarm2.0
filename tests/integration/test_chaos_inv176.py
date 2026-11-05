@@ -110,14 +110,17 @@ def test_non_admin_forbidden(clean, client, user1_headers):
 def test_whole_izeron_refused_quorum(clean, client, admin_headers):
     r = client.post("/api/chaos", json={"nodes": "site:izeron", "mode": "stop", "minutes": 2}, headers=admin_headers)
     assert r.status_code == 409, r.text
-    assert r.json()["detail"] == "node1, node2 : quorum etcd perdu — refusé"
+    assert r.json()["detail"] == "node1, node2, node6, node7 : quorum etcd perdu — refusé"
     assert client.get("/api/chaos", headers=admin_headers).json() == []
 
 
-def test_node6_alone_accepted_and_izeron_with_node6_node7_still_refused(clean, client, admin_headers):
-    """2026-11-05 : node6/node7 (alarm-3/alarm-4) etiquetes Izeron, non votants."""
-    r = client.post("/api/chaos", json={"nodes": "site:izeron", "mode": "stop", "minutes": 2}, headers=admin_headers)
-    assert r.status_code == 409 and r.json()["detail"] == "node1, node2 : quorum etcd perdu — refusé"
+def test_node6_alone_accepted_and_two_voters_still_refused(clean, client, admin_headers):
+    """2026-11-05 : node6/node7 (alarm-3/alarm-4) etiquetes Izeron, voteurs (etcd_voters par defaut) :
+    jamais deux voteurs (INV-177, regle gardee avec 5 voteurs), un seul permis."""
+    for nodes, hit in (("node6,node7", "node6, node7"), ("node1,node2", "node1, node2"),
+                       ("site:izeron", "node1, node2, node6, node7")):
+        r = client.post("/api/chaos", json={"nodes": nodes, "mode": "stop", "minutes": 2}, headers=admin_headers)
+        assert r.status_code == 409 and r.json()["detail"] == f"{hit} : quorum etcd perdu — refusé", nodes
     created = _request(client, admin_headers, nodes="node6")
     assert created["nodes"] == ["node6"] and created["status"] == "pending"
 
@@ -154,7 +157,7 @@ def test_request_then_claim_once(clean, client, admin_headers):
     claimed = r.json()
     assert claimed["id"] == created["id"] and claimed["status"] == "claimed" and claimed["claimed_at"]
     assert claimed["nodes"] == ["node4", "node5"] and claimed["mode"] == "stop"
-    assert claimed["voters"] == ["node1", "node2", "node3"]  # etcd_voters, pour la sonde etcd du runner
+    assert claimed["voters"] == ["node1", "node2", "node3", "node6", "node7"]  # etcd_voters, sonde etcd du runner
     assert client.get("/internal/chaos/next", headers=GW).json() is None
     assert _row(client, admin_headers, created["id"])["status"] == "claimed"
 
