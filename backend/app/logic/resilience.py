@@ -1,10 +1,10 @@
 """Logique pure : panneau resilience (INV-175) — ce que le systeme fait encore quand des noeuds
 ou des passerelles tombent.
 
-Topologie de prod : node1/node2 Izeron (« Legacy », bientot retires), node3 OVH, node4/node5
-Beaufort, node6/node7 Izeron ; voteurs etcd node1-3 (node3, node6, node7 apres le demenagement) ;
-node3 seul relais entre les sites et facade publique de l'app ; passerelles onsite-2 (sur node2) et
-alarm-1 (sur node4). Tout vient de SystemConfig (sites.py), rien n'est fige ici.
+Topologie de prod (jour du demenagement) : node3 OVH, node4/node5 Beaufort, node6/node7 Izeron ;
+voteurs etcd node3, node6, node7 ; node3 seul relais entre les sites et facade publique de l'app ;
+passerelles alarm-3 (sur node6) et alarm-1 (sur node4). Tout vient de SystemConfig (sites.py), rien
+n'est fige ici.
 `alerted_by` encode les alertes d'aujourd'hui : sans leader, aucun email ne part (INV-085 est
 leader-gated) ; INV-170 (PR 1) ajoutera l'email « aucun leader » depuis chaque noeud.
 """

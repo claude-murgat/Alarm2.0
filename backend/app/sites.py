@@ -34,10 +34,10 @@ def requested_sites(db: Session, site: str | None) -> list[str]:
 
 
 # INV-161 : lieu, machine et noeuds « bientot obsoletes » du cluster (onglet Cluster). nom:valeur separes
-# par des virgules. node6/node7 (alarm-3/4) : futurs noeuds d'Izeron, physiquement a Beaufort jusqu'au demenagement.
-DEFAULT_NODE_LOCATIONS = "node1:izeron,node2:izeron,node3:ovh,node4:beaufort,node5:beaufort,node6:izeron,node7:izeron"
-DEFAULT_NODE_MACHINES = "node1:onsite-1,node2:onsite-2,node3:OVH,node4:alarm-1,node5:alarm-2,node6:alarm-3,node7:alarm-4"
-DEFAULT_RETIRING_NODES = "node1,node2"
+# par des virgules. Jour du demenagement (INV-090) : onsite-1/2 (node1/node2) retires, alarm-3/4 a Izeron.
+DEFAULT_NODE_LOCATIONS = "node3:ovh,node4:beaufort,node5:beaufort,node6:izeron,node7:izeron"
+DEFAULT_NODE_MACHINES = "node3:OVH,node4:alarm-1,node5:alarm-2,node6:alarm-3,node7:alarm-4"
+DEFAULT_RETIRING_NODES = ""
 
 
 def _pairs(db: Session, key: str, default: str) -> dict[str, str]:
@@ -58,9 +58,10 @@ def retiring_nodes(db: Session) -> list[str]:
 
 
 # INV-175 : topologie du panneau resilience. Memes defauts sur une base deja en service.
-DEFAULT_ETCD_VOTERS = "node1,node2,node3"
+DEFAULT_ETCD_VOTERS = "node3,node6,node7"  # INV-090, jour du demenagement
 DEFAULT_RELAY_NODES = "node3"  # seul noeud qui relie les sites entre eux
-DEFAULT_GATEWAY_HOSTS = "onsite-2:node2,alarm-1:node4"  # passerelle:noeud qui l'heberge
+# passerelle:noeud qui l'heberge ; Izeron sur alarm-3 (node6) le jour J, alarm-4 -> « alarm-4:node7 »
+DEFAULT_GATEWAY_HOSTS = "alarm-3:node6,alarm-1:node4"
 
 
 def etcd_voters(db: Session) -> list[str]:

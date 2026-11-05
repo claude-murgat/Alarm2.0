@@ -1,7 +1,7 @@
 """Tier 2 integration : INV-170 / INV-171 — plus aucun leader vivant, vu d'un replica.
 
 Patroni simule (/cluster) et backends pairs simules (replica_proxy._PEER_URLS : node2, node3) ;
-`is_leader` efface : ce noeud (node1) est un replica. Le cas par defaut est celui reproduit le
+`is_leader` efface : ce noeud (node6, Izeron ; node1 avant le demenagement) est un replica. Le cas par defaut est celui reproduit le
 2026-10-30 : quorum etcd perdu, /cluster liste encore node2 `leader` mais aucun pair ne dit `primary`.
 Le controle de la boucle de fond est neutralise pendant chaque test : seuls les ticks du test
 (`patroni["tick"]`, date en 2030) touchent l'etat, aucune course avec un tick reel.
@@ -68,7 +68,7 @@ def patroni(monkeypatch, client):
     monkeypatch.setattr(quorum_monitor, "_leader_loss", LeaderLossState())
     monkeypatch.setattr(quorum_monitor, "cluster_has_leader", True)
     monkeypatch.setattr(escalation, "last_tick_at", clock_now())  # /health : boucle vue vivante
-    monkeypatch.setenv("NODE_NAME", "node1")
+    monkeypatch.setenv("NODE_NAME", "node6")
     _set_alert_email(_ALERT_EMAIL)
     real = urllib.request.urlopen
 
@@ -117,11 +117,11 @@ def test_stale_leader_in_patroni_emails_once_from_this_node(patroni):
     assert mail.call_count == 1, "un email par episode, depuis ce noeud"
     assert mail.call_args.kwargs["to"] == _ALERT_EMAIL
     assert mail.call_args.kwargs["subject"] == \
-        "[Alarme Murgat] Aucun leader vu de node1 (izeron) — leader listé mais hors service"
+        "[Alarme Murgat] Aucun leader vu de node6 (izeron) — leader listé mais hors service"
     body = mail.call_args.kwargs["body"]
-    assert "Vu de node1" in body and _EXPLANATION in body and "écriture" in body and "passerelles" in body
+    assert "Vu de node6" in body and _EXPLANATION in body and "écriture" in body and "passerelles" in body
     audits = _audits()[before:]
-    assert len(audits) == 1 and audits[0]["node"] == "node1" and audits[0]["cause"] == "leader_hors_service"
+    assert len(audits) == 1 and audits[0]["node"] == "node6" and audits[0]["cause"] == "leader_hors_service"
 
 
 @pytest.mark.parametrize("setup, cause, label", [
@@ -136,7 +136,7 @@ def test_each_cause_is_named(patroni, client, setup, cause, label):
     with patch("backend.app.quorum_monitor.send_alert_email") as mail:
         _ticks(patroni, 0, 4)
     assert mail.call_count == 1
-    assert mail.call_args.kwargs["subject"] == f"[Alarme Murgat] Aucun leader vu de node1 (izeron) — {label}"
+    assert mail.call_args.kwargs["subject"] == f"[Alarme Murgat] Aucun leader vu de node6 (izeron) — {label}"
     assert [a["cause"] for a in _audits()[before:]] == [cause]
     assert client.get("/health").json()["cluster_writable"] is False
     assert client.get("/api/cluster").json()["cluster_writable"] is False  # 503 compris (Patroni injoignable)

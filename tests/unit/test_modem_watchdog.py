@@ -140,3 +140,11 @@ class TestMainLoop:
         body = st["bodies"][0]
         assert "n'en depend pas" not in body
         assert "controleur USB" in body and "Arduino" in body and "contact sec de cette machine" in body
+
+
+def test_smtp_settings_come_from_an_env_file_that_still_exists():
+    """Jour du demenagement (INV-090) : .env.prod.node1/2 supprimes. Le watchdog lit SMTP_* dans un
+    .env.prod du depot present sur toutes les machines, sinon ses emails partent « SMTP incomplet »."""
+    src = _PATH.read_text()
+    env = src.split("load_env('/opt/alarm/", 1)[1].split("'", 1)[0]
+    assert "SMTP_HOST=" in (_PATH.parents[1] / env).read_text()
