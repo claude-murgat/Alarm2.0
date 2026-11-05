@@ -70,6 +70,9 @@ data class FcmTokenDeleteRequest(val device_id: String)
 
 data class HeartbeatResponse(val status: String, val timestamp: String)
 
+/** GET /health (INV-164) : `version` = release du serveur, ex. "1.8.0" (INV-ANDROID-705). */
+data class HealthResponse(val version: String?)
+
 /** INV-ANDROID-606 : une entree de GET /api/config/escalation (public). */
 data class EscalationEntry(val position: Int, val user_id: Int)
 

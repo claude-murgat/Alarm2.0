@@ -162,6 +162,10 @@ jobs:
           fi
           OUT="alarme-murgat-${GITHUB_REF_NAME}-${VER}.apk"
           cp "$APK" "$OUT"
+          # INV-ANDROID-705 : l'app verifie cette empreinte avant d'installer la mise a jour.
+          # Format sha256sum, « <hex>  <nom> » : `sha256sum -c` marche aussi a la main.
+          sha256sum "$OUT" > "$OUT.sha256"
+          cat "$OUT.sha256"
           {
             echo "apk=$OUT"
             echo "version=$VER"
@@ -187,6 +191,8 @@ jobs:
             printf '   (Parametres > Applications > Acces special > Installer des applications inconnues).\n'
             printf '3. Installer. Une mise a jour s installe par-dessus la precedente sans\n'
             printf '   desinstaller, tant que les releases sont signees avec la meme cle.\n\n'
+            printf 'Ensuite l app se met a jour elle-meme (bandeau du tableau de bord, INV-ANDROID-705).\n'
+            printf 'Empreinte SHA-256 : `%s.sha256`, que l app verifie avant d installer.\n\n' "$APK"
             printf '### Backends joints par cette version\n\n'
             printf 'Dans l ordre d essai, avec failover circulaire (INV-ANDROID-402) :\n\n'
             printf '1. `51.210.105.102:8000` — noeud cloud OVH, le seul joignable hors des LAN des sites\n'
@@ -205,14 +211,14 @@ jobs:
             # Filtre dans jq et pas grep : un grep sans resultat sort en 1 et
             # ferait echouer le step (bash -eo pipefail).
             gh release view "$GITHUB_REF_NAME" --json assets \
-              --jq ".assets[].name | select(endswith(\".apk\") and . != \"$APK\")" \
+              --jq ".assets[].name | select((endswith(\".apk\") or endswith(\".apk.sha256\")) and . != \"$APK\" and . != \"$APK.sha256\")" \
               | while read -r OLD; do gh release delete-asset "$GITHUB_REF_NAME" "$OLD" --yes; done
-            gh release upload "$GITHUB_REF_NAME" "$APK" --clobber
+            gh release upload "$GITHUB_REF_NAME" "$APK" "$APK.sha256" --clobber
             # Les notes (version, commit, versionCode) doivent decrire l APK
             # attache, pas celui de la premiere publication (issue #199).
             gh release edit "$GITHUB_REF_NAME" --notes-file release-notes.md
           else
-            gh release create "$GITHUB_REF_NAME" "$APK" \
+            gh release create "$GITHUB_REF_NAME" "$APK" "$APK.sha256" \
               --title "Alarme Murgat $GITHUB_REF_NAME" \
               --notes-file release-notes.md
           fi

@@ -14,6 +14,8 @@
     <!-- READ_PHONE_STATE = runtime permission Android 6+ ; sans elle, le
          NetworkAvailabilityMonitor fait fail open (cellularInService=true) -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <!-- INV-ANDROID-705 : mise a jour integree (PackageInstaller) -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:allowBackup="true"
@@ -80,6 +82,11 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <!-- INV-ANDROID-705 : statut de l'installation de la mise a jour -->
+        <receiver
+            android:name=".update.UpdateStatusReceiver"
+            android:exported="false" />
 
         <service
             android:name=".service.AlarmPollingService"
