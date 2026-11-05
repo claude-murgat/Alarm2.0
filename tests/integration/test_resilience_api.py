@@ -81,16 +81,17 @@ def test_live_nodes_and_gateways(client, admin_headers, fake_cluster, stale_gate
     assert list(nodes) == [f"node{i}" for i in range(1, 8)]
     assert nodes["node3"] == {"name": "node3", "site": "ovh", "voter": True, "reachable": True,
                               "role": "leader", "state": "running", "version": "v-3",
-                              "machine": "OVH", "retiring": False}
+                              "machine": "OVH", "retiring": False, "group": "OVH"}
     assert nodes["node4"] == {"name": "node4", "site": "beaufort", "voter": False, "reachable": False,
                               "role": "replica", "state": "streaming", "version": None,
-                              "machine": "alarm-1", "retiring": False}
+                              "machine": "alarm-1", "retiring": False, "group": "Beaufort"}
     assert nodes["node6"] == {"name": "node6", "site": "izeron", "voter": False, "reachable": True,
                               "role": "replica", "state": "streaming", "version": "v-6",
-                              "machine": "alarm-3", "retiring": False}
+                              "machine": "alarm-3", "retiring": False, "group": "Izeron"}
     assert (nodes["node7"]["machine"], nodes["node7"]["site"]) == ("alarm-4", "izeron")
     assert [n for n in nodes if nodes[n]["retiring"]] == ["node1", "node2"]
-    assert nodes["node1"]["machine"] == "onsite-1"
+    assert (nodes["node1"]["machine"], nodes["node1"]["group"]) == ("onsite-1", "Legacy (Izeron)")
+    assert [n for n in nodes if nodes[n]["voter"]] == ["node1", "node2", "node3"]
     assert nodes["node1"]["voter"] and nodes["node1"]["reachable"] and nodes["node1"]["version"] == "v-1"
     assert live["leader"] == "node3"
     assert live["etcd_voters_up"] == 3
@@ -107,9 +108,11 @@ def test_live_nodes_and_gateways(client, admin_headers, fake_cluster, stale_gate
 
 def test_whatif_default_scenarios(client, admin_headers, fake_cluster):
     whatif = {w["scenario"]: w for w in client.get("/api/resilience", headers=admin_headers).json()["whatif"]}
-    assert {"izeron_one_node", "ovh_down", "izeron_both", "beaufort_both", "gateway_izeron"} <= set(whatif)
+    assert {"izeron_one_node", "ovh_down", "izeron_both", "beaufort_both", "legacy_unplugged",
+            "gateway_izeron"} <= set(whatif)
     both = whatif["izeron_both"]
     assert both["untestable"] is True and both["leader_possible"] is False
+    assert both["why"] == "1/3 voteurs etcd joignables"  # node3 seul voteur restant
     assert both["alerted_by"] == ["email INV-170 (après PR 1)"]
     assert both["label"] == "Izeron entier (node1 + node2 + node6 + node7)"
     assert whatif["izeron_one_node"]["label"] == "Un nœud à Izeron (node1)"
@@ -119,6 +122,7 @@ def test_whatif_default_scenarios(client, admin_headers, fake_cluster):
     assert beaufort["alerted_by"] == ["email INV-144"]
     ovh = whatif["ovh_down"]
     assert ovh["untestable"] is False and ovh["leader_possible"] is True
+    assert ovh["why"] == "2/3 voteurs etcd joignables"
     assert ovh["writable_from"] == {"izeron": True, "ovh": False, "beaufort": False}
     assert ovh["sms_calls"] == {"izeron": True, "beaufort": False}
     assert ovh["app_4g_reachable"] is False
@@ -145,3 +149,13 @@ def test_patroni_unreachable_503(client, admin_headers, patroni_down):
     r = client.get("/api/resilience", headers=admin_headers)
     assert r.status_code == 503
     assert "Patroni" in r.text
+
+
+def test_legacy_unplugged_today_has_no_leader(client, admin_headers, fake_cluster):
+    """INV-175 (2026-11-05) : onsite-1/2 (retiring_nodes) debranches avec les 3 voteurs d'aujourd'hui ->
+    node3 seul voteur, aucun leader, non testable : ce que corrige le jour du demenagement."""
+    whatif = {w["scenario"]: w for w in client.get("/api/resilience", headers=admin_headers).json()["whatif"]}
+    legacy = whatif["legacy_unplugged"]
+    assert legacy["label"] == "Legacy débranché (node1 + node2) : ce que corrige le jour du déménagement"
+    assert legacy["untestable"] is True and legacy["leader_possible"] is False
+    assert legacy["why"] == "1/3 voteurs etcd joignables"
