@@ -22,10 +22,11 @@ pour la procédure complète et les explications.
 | `systemd/alarm-cd-pull.timer` | `/etc/systemd/system/alarm-cd-pull.timer` | Timer 5 min pour le pull (CD V1) |
 | `systemd/alarm-4g-standby.service` | `/etc/systemd/system/alarm-4g-standby.service` | Secours internet 4G en standby chaud (QMI, métrique 300) |
 | `systemd/alarm-modem-rat.service` | `/etc/systemd/system/alarm-modem-rat.service` | Remet `CNMP=2` (sélection réseau automatique) au boot — `CNMP=54` bloquait l'inscription (2026-10-21) |
-| `systemd/alarm-modem-watchdog.service` | `/etc/systemd/system/alarm-modem-watchdog.service` | Watchdog modem : auto-récup d'un drop USB (PCI rescan) + alerte email |
+| `systemd/alarm-modem-watchdog.service` | `/etc/systemd/system/alarm-modem-watchdog.service` | Watchdog modem : auto-récup d'un drop USB (PCI rescan, une fois par épisode, seulement pour un modem déjà vu — INV-184) + alerte email |
+| `systemd/alarm-sms-gateway.service` | `/etc/systemd/system/alarm-sms-gateway.service` | Passerelle `modem_gateway.py` (SMS, appels, contact sec) sur chaque machine ; attend le modem sans sortir (INV-182/183) |
 | `systemd/alarm-disk-check.service` | `/etc/systemd/system/alarm-disk-check.service` | Sonde remplissage disque (`/` + `/var/lib/docker`) → alerte email si seuil dépassé (oneshot, lancé par le timer) |
 | `systemd/alarm-disk-check.timer` | `/etc/systemd/system/alarm-disk-check.timer` | Timer 15 min de la sonde disque (garde-fou anti-saturation, cf incident WAL 2026-06-22) |
-| `install.sh` | *(exécutable)* | **Installe toute la stack modem + la supervision disque** : units ci-dessus + scripts `/opt/alarm/{4g-standby.sh,modem-set-rat.py,modem-watchdog.py,disk-check.sh,send-alert-email.py}` (sources dans `scripts/`) + code gateway `→ /opt/alarm-gateway/` + groupe `dialout` + drop-in `modem_gateway.py` |
+| `install.sh` | *(exécutable)* | **Installe toute la stack modem + la supervision disque** : units ci-dessus + scripts `/opt/alarm/{4g-standby.sh,modem-set-rat.py,modem-watchdog.py,disk-check.sh,send-alert-email.py}` (sources dans `scripts/`) + user `alarm-gateway` (groupe `dialout`) + code gateway `→ /opt/alarm-gateway/` + `/etc/alarm-gateway.env` (valeurs non secrètes) |
 
 ## Stack modem on-site (gateway SMS/voix + secours 4G + watchdog)
 
@@ -39,12 +40,15 @@ déploie d'un coup, de façon idempotente, depuis un checkout du repo sur le nœ
 sudo bash infra/onsite/install.sh
 ```
 
-Le script copie les units + scripts, déploie le code gateway (`modem_gateway.py`, le superset
-contact+voix+SMS — **pas** le legacy `sms_gateway.py`), ajoute `alarm-gateway` au groupe
-`dialout` (sinon `Permission denied` sur `/dev/ttyUSB*`), pose le drop-in systemd, et enable
-les services. Runbook complet : [`docs/FAILOVER_4G.md`](../../docs/FAILOVER_4G.md).
-Prérequis secrets (non posés par le script) : `GATEWAY_KEY` dans `/etc/alarm-gateway.env`,
-`SMTP_*` dans `/opt/alarm/.env.prod.{node<N>,secrets}` (alertes email du watchdog).
+Le script tourne sur **chaque** machine sur site (INV-182 : modem et Arduino branchables sur
+n'importe laquelle) : il crée le user `alarm-gateway` (groupe `dialout`, sinon `Permission denied`
+sur `/dev/ttyUSB*`), copie les units + scripts, déploie le code gateway (`modem_gateway.py`, le
+superset contact+voix+SMS — **pas** le legacy `sms_gateway.py`), crée `/etc/alarm-gateway.env`, puis
+active et démarre la passerelle et la pile modem (sans modem : elles attendent, sans échec).
+Runbook complet : [`docs/FAILOVER_4G.md`](../../docs/FAILOVER_4G.md).
+À poser à la main (non posés par le script) : `GATEWAY_KEY` (secret) et `GATEWAY_SITE` (site de la
+machine) dans `/etc/alarm-gateway.env`, `SMTP_*` dans `/opt/alarm/.env.prod.{node<N>,secrets}`
+(alertes email du watchdog).
 
 ## Supervision disque (garde-fou anti-saturation)
 

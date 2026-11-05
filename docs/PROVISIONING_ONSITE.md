@@ -621,25 +621,63 @@ de la nouvelle machine. Spécifiquement :
 
 Tout le reste (fichiers `infra/onsite/*`) est strictement réutilisable sans modification.
 
-### Stack modem (gateway SMS/voix/contact + secours 4G + watchdog)
+### Stack modem (gateway SMS/voix/contact + secours 4G + watchdog) — sur chaque machine
 
-Une fois le nœud de base provisionné et le user `alarm-gateway` créé, déployer toute la
-stack modem en une commande idempotente depuis un checkout du repo sur la machine :
+Depuis le 2026-11-05 (INV-182), la passerelle et la pile modem sont installées et actives sur
+**chaque** machine sur site (onsite-1, onsite-2, alarm-1 à alarm-4) : le modem SIM7600 et l'Arduino
+du contact sec se branchent sur **n'importe laquelle**, à chaud, sans autre geste. Sans modem ni
+Arduino, tout attend sans erreur ni relance en boucle (INV-183, INV-184).
+
+Une commande idempotente depuis un checkout du repo sur la machine (ensuite `alarm-host-sync` la
+rejoue seule à chaque commit promu) :
 
 ```bash
 sudo bash infra/onsite/install.sh
 ```
 
-Elle copie les units + scripts (`/opt/alarm/`), déploie le code gateway (`modem_gateway.py`)
-vers `/opt/alarm-gateway/`, ajoute `alarm-gateway` au groupe `dialout`, pose le drop-in
-systemd, et enable les services. Ensuite : poser les secrets `GATEWAY_KEY`
-(`/etc/alarm-gateway.env`, doit matcher le backend) et `SMTP_*`
-(`/opt/alarm/.env.prod.{node<N>,secrets}`, pour les alertes email du watchdog), puis
-`sudo systemctl restart alarm-sms-gateway`. Valider avec `sudo APN=orange bash
+Elle crée l'utilisateur `alarm-gateway` (groupe `dialout`), installe les units (dont
+`alarm-sms-gateway.service`, versionnée dans `infra/onsite/systemd/`) et les scripts (`/opt/alarm/`),
+le code gateway (`/opt/alarm-gateway/`), les paquets manquants (`python3-serial`, `python3-requests`,
+`libqmi-utils`), crée `/etc/alarm-gateway.env` (`root:alarm-gateway`, 640) avec les valeurs non
+secrètes (contact sec par Arduino, `GATEWAY_ID`, `NODE1_URL` … `NODE7_URL`), puis active et démarre
+la passerelle et la pile modem. Elle ne modifie jamais une valeur déjà présente.
+
+**Seules deux valeurs à poser à la main**, une fois par machine (`install.sh` signale celles qui
+manquent), dans `/etc/alarm-gateway.env`, puis `sudo systemctl restart alarm-sms-gateway` :
+
+| Variable | Valeur |
+|---|---|
+| `GATEWAY_KEY` | secret, identique à celui du backend (Bitwarden) — jamais écrit par `install.sh` |
+| `GATEWAY_SITE` | site de **cette machine** : `beaufort` (alarm-1, alarm-2) ou `izeron` (alarm-3, alarm-4, onsite-1, onsite-2) |
+
+Le modem et l'Arduino prennent le site de la machine où ils sont branchés (pas de lien matériel →
+site). Pour les emails du watchdog : `SMTP_*` dans `/opt/alarm/.env.prod.{node<N>,secrets}`.
+Prérequis : ModemManager masqué (§2.3). Sur la machine qui porte le modem : `sudo APN=orange bash
 scripts/smoketest-4g.sh`. Runbook complet : [`FAILOVER_4G.md`](FAILOVER_4G.md).
 
-> ⚠️ À ce jour seul **onsite-2** a une SIM7600 physique — la stack modem ne tourne que là.
-> La redondance 2 gateways (design INV-120 V2, OR fail-to-alarm) attend une 2e carte sur onsite-1.
+> ⚠️ **Un seul modem par site à la fois** : deux passerelles avec modem sur le même site liraient
+> la même file et enverraient chaque SMS et chaque appel deux fois (pas d'arbitrage, INV-182). Les
+> passerelles sans modem ne lisent pas cette file. Plusieurs Arduino sur un même site, en revanche,
+> sont prévus (agrégation OR, INV-122).
+
+**Alertes** : un site dont aucun modem n'a donné de nouvelles depuis 10 min reçoit l'email
+`[Alarme Murgat] Site <Site> sans modem depuis N min` (INV-185, envoyé par le leader, une fois par
+épisode). Une clé `GATEWAY_KEY` absente ou par défaut donne une ligne ERROR au démarrage de la
+passerelle (`journalctl -u alarm-sms-gateway`), puis au plus un message 401 par 10 min.
+
+**Limites connues (revue PR #296)** :
+- `MODEM_XHCI` (adresse PCI du contrôleur USB, défaut `0000:00:14.0`) est celle d'onsite-2. Sur une
+  machine dont le contrôleur est ailleurs (`readlink -f /sys/bus/usb/devices/usb1` donne le
+  chemin PCI), la récupération du watchdog n'agit pas et il relance un `rescan` PCI à chacun de ses
+  démarrages (sans effet). Le régler par un drop-in :
+  `sudo systemctl edit alarm-modem-watchdog` → `[Service]` `Environment=MODEM_XHCI=0000:00:xx.x`.
+- `CNMP=2` n'est réappliqué qu'au boot (`alarm-modem-rat`) : après avoir branché un modem à chaud,
+  `sudo systemctl restart alarm-modem-rat`.
+- Le lien udev `/dev/sim7600_at` (`MODEM_AT_PORT`) est essayé sans filtre de fabricant ; s'il ne
+  pointe plus sur le SIM7600 après un déplacement, le retirer de `/etc/alarm-gateway.env`
+  (la détection automatique suffit).
+- ModemManager est masqué par `install.sh` sur chaque machine (§2.3).
+- Si `alarm-host-sync` tourne aussi sur NODE3 (OVH), la passerelle y est installée, inactive.
 
 ---
 
@@ -988,6 +1026,10 @@ chown alarm:alarm .env.prod.secrets
 ---
 
 ## 23. Historique des changements
+
+- **2026-11-05** : passerelle et pile modem sur **chaque** machine sur site (INV-182/183/184) ;
+  modem et Arduino branchables n'importe où ; seuls `GATEWAY_KEY` et `GATEWAY_SITE` à poser à la
+  main (§21 « Stack modem »).
 
 - **2026-05-01** : création initiale + provisioning machine onsite-2 à 172.16.1.120
   - Phase 1 OS/réseau/Docker complète

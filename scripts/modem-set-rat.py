@@ -8,6 +8,8 @@ def log(m): print(f"[modem-rat] {m}", flush=True)
 for _ in range(20):
     if glob.glob('/dev/ttyUSB*'): break
     time.sleep(2)
+else:  # INV-182 : machine sans modem -> rien a faire, pas d'unit en echec a chaque boot
+    log('aucun modem (pas de /dev/ttyUSB*) : rien a faire'); sys.exit(0)
 def held(p):
     try: return subprocess.run(['fuser', p], capture_output=True).returncode == 0
     except Exception: return False

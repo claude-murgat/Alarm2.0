@@ -52,6 +52,18 @@
   seul, route métrique 300) + `alarm-modem-rat.service` (`scripts/modem-set-rat.py`, remet `CNMP=2` — sélection auto — au
   boot, avant la gateway). Survit aux reboots (services enabled). Coexiste avec la gateway SMS/voix
   (`modem_gateway.py`, port AT) car le data passe en QMI (`cdc-wdm0`) — interfaces séparées.
+- **Modem branchable sur n'importe quelle machine sur site (INV-182, 2026-11-05)** : la pile tourne
+  sur chaque machine. Sans modem, `alarm-4g-standby` attend `/dev/cdc-wdm0` (une ligne de journal)
+  sans sortir ni toucher aux routes, puis monte le lien dès qu'un modem est branché ; modem débranché
+  en marche → une sortie, systemd relance, nouvelle attente (l'interface `ww*` change de nom avec le
+  port USB : elle est relue au redémarrage). `alarm-modem-rat` sans `/dev/ttyUSB*` termine en succès
+  (il ne tourne qu'au boot : sur un modem branché à chaud, `CNMP=2` n'est réappliqué qu'au prochain
+  boot ou par `sudo systemctl restart alarm-modem-rat`). `alarm-wan-failover` ne fait rien sans
+  route 4G.
+  Watchdog (INV-184) : il n'agit que sur un modem **déjà vu** sur la machine depuis son démarrage
+  (`/run/alarm-modem-seen`) ; modem disparu → **une seule** récupération PCI et un email par
+  épisode, puis attente de son retour (avant : nouvelle récupération toutes les ~10 min, sans fin,
+  qui réinitialisait aussi l'Arduino du contact sec).
 - **Correctif vs design existant** : l'esquisse `ARCHITECTURE_SMS_VOIX.md` utilise `nmcli`
   (NetworkManager) et `AT+NETOPEN`. Or les nœuds n'embarquent pas NetworkManager, et `NETOPEN`
   active la **pile TCP/IP interne du modem** (sockets via AT), **pas** un lien data porté par l'hôte.

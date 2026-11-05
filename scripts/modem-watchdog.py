@@ -2,14 +2,27 @@
 # Watchdog modem SIM7600 : detecte un drop USB, recupere auto (PCI remove/rescan
 # xHCI + restart gateway/4g-standby), et envoie UN SEUL email par episode.
 # INV-146 : detecte aussi un modem PRESENT mais muet (gateway relancee en boucle) -> reset USB.
+# INV-184 : n'agit que sur un modem deja vu sur cette machine, et une seule recup PCI par episode.
 import os, sys, time, subprocess, smtplib, socket, glob
 from email.message import EmailMessage
 WDM = '/dev/cdc-wdm0'
 XHCI = os.getenv('MODEM_XHCI', '0000:00:14.0')
+PCI = '/sys/bus/pci'
 CHECK = int(os.getenv('WATCHDOG_CHECK_SECONDS', '60'))
 GRACE = int(os.getenv('WATCHDOG_GRACE_SECONDS', '20'))
 HOST = socket.gethostname()
+# /run : oublie au reboot, garde si le watchdog redemarre (redeploiement, crash).
+SEEN_FILE = '/run/alarm-modem-seen'            # modem vu sur cette machine depuis son demarrage
+RECOVERED_FILE = '/run/alarm-modem-recovered'  # recup PCI deja faite pour l'absence en cours
 def log(m): print(f"[modem-watchdog] {m}", flush=True)
+def absent_action(seen, recovered):
+    """INV-184 : modem absent (confirme apres GRACE) -> 'ignorer' (jamais vu : machine sans modem),
+    'recuperer' (1re absence de l'episode : une recup PCI + un email), 'attendre' (deja faite)."""
+    if not seen: return 'ignorer'
+    return 'attendre' if recovered else 'recuperer'
+def touch(path):
+    try: open(path, 'a').close()
+    except OSError as e: log(f"{path} non inscriptible : {e}")
 # INV-146 : la gateway sort quand le modem est muet (INV-126) ; 3 relances en 10 min = muet.
 MUTE_RESTARTS, MUTE_WINDOW = 3, 600
 def mute_detected(restart_times, now):
@@ -66,10 +79,10 @@ def send_email(subject, body):
         log(f"email KO: {e}"); return False
 def recover():
     log("recup: PCI remove/rescan xHCI " + XHCI)
-    try: open(f'/sys/bus/pci/devices/{XHCI}/remove', 'w').write('1')
+    try: open(f'{PCI}/devices/{XHCI}/remove', 'w').write('1')
     except Exception as e: log(f"remove KO: {e}")
     time.sleep(4)
-    try: open('/sys/bus/pci/rescan', 'w').write('1')
+    try: open(f'{PCI}/rescan', 'w').write('1')
     except Exception as e: log(f"rescan KO: {e}")
     time.sleep(8)
     subprocess.run(['systemctl', 'kill', '-s', 'KILL', 'alarm-sms-gateway'], capture_output=True)
@@ -80,12 +93,22 @@ def main():
     if '--test-email' in sys.argv:
         ok = send_email(f"[ALARME-MURGAT] Test watchdog modem ({HOST})", "Test d'alerte email — watchdog modem SIM7600 OK.")
         sys.exit(0 if ok else 1)
-    log(f"demarre (check={CHECK}s xHCI={XHCI} alerte->{ALERT_TO}) — 1 email par episode")
-    incident = False
+    log(f"demarre (check={CHECK}s xHCI={XHCI} alerte->{ALERT_TO}) — 1 recup PCI + 1 email par episode")
+    # Revue PR #296 (F4) : tue entre remove et rescan, le controleur (modem ET Arduino) resterait retire.
+    if not os.path.exists(f'{PCI}/devices/{XHCI}'):
+        log(f"controleur {XHCI} absent au demarrage -> rescan PCI")
+        try: open(f'{PCI}/rescan', 'w').write('1')
+        except Exception as e: log(f"rescan KO: {e}")
+    # En memoire ET dans /run : sans /run inscriptible, toujours au plus une recup par episode.
+    recovered, idle_logged = os.path.exists(RECOVERED_FILE), False
     restarts, last_n, mute_mailed = [], gateway_restarts(), False
     while True:
         if modem_present():
-            if incident: log("modem present a nouveau — episode clos"); incident = False
+            touch(SEEN_FILE)
+            if recovered:
+                log("modem present a nouveau — episode clos"); recovered = False
+                try: os.remove(RECOVERED_FILE)
+                except OSError: pass
             n, now = gateway_restarts(), time.time()
             if n > last_n: restarts.append(now)
             last_n = n
@@ -101,20 +124,20 @@ def main():
             time.sleep(CHECK); continue
         time.sleep(GRACE)
         if modem_present(): continue
-        if incident:
-            # episode deja signale (1 email envoye) -> retente la recup EN SILENCE, pas de 2e mail
-            log("toujours absent — nouvelle tentative de recup silencieuse")
-            recover(); time.sleep(600); continue
-        # NOUVEL episode : recup d'abord, puis UN SEUL email avec le resultat
-        incident = True; ts = time.strftime('%Y-%m-%d %H:%M:%S')
-        log("MODEM ABSENT confirme -> recuperation + 1 email")
-        recover(); time.sleep(35)
-        if modem_present():
-            send_email(f"[ALARME-MURGAT] Modem SIM7600 a droppe puis RECUPERE sur {HOST}",
-                       f"Le modem SIM7600 a disparu du bus USB sur {HOST} a {ts}, puis a ete RECUPERE automatiquement (PCI rescan + restart gateway).\nContact sec / SMS / voix / secours 4G de nouveau operationnels. Aucune action requise.")
-            incident = False
-        else:
-            send_email(f"[ALARME-MURGAT] Modem SIM7600 DOWN sur {HOST} — INTERVENTION REQUISE",
-                       f"Le modem SIM7600 a disparu du bus USB sur {HOST} a {ts}. La recuperation automatique (PCI rescan) a ECHOUE.\nIMPACT: contact sec, SMS, appels vocaux et secours 4G HORS SERVICE.\nIntervention physique probablement requise (power-cycle du HAT SIM7600). Le watchdog continue de retenter en silence (sans re-mailer).")
+        action = absent_action(os.path.exists(SEEN_FILE), recovered)
+        if action == 'ignorer' and not idle_logged:
+            idle_logged = True
+            log("aucun modem vu sur cette machine depuis son demarrage : rien a surveiller (INV-184)")
+        elif action == 'recuperer':
+            # Episode note AVANT la recup (reset PCI : Arduino du contact sec compris) : jamais deux.
+            recovered = True; touch(RECOVERED_FILE); ts = time.strftime('%Y-%m-%d %H:%M:%S')
+            log("MODEM ABSENT confirme -> recuperation (une seule par episode) + 1 email")
+            recover(); time.sleep(35)
+            if modem_present():
+                send_email(f"[ALARME-MURGAT] Modem SIM7600 a droppe puis RECUPERE sur {HOST}",
+                           f"Le modem SIM7600 a disparu du bus USB sur {HOST} a {ts}, puis a ete RECUPERE automatiquement (PCI rescan + restart gateway).\nContact sec / SMS / voix / secours 4G de nouveau operationnels. Aucune action requise.")
+            else:
+                send_email(f"[ALARME-MURGAT] Modem SIM7600 DOWN sur {HOST} — INTERVENTION REQUISE",
+                           f"Le modem SIM7600 a disparu du bus USB sur {HOST} a {ts}. La recuperation automatique (reset PCI du controleur USB) a ECHOUE.\nIMPACT: SMS, appels vocaux et secours 4G de ce modem HORS SERVICE. Le reset PCI reinitialise tout le controleur USB, Arduino du contact sec compris : si le controleur n'est pas revenu, le contact sec de cette machine est coupe aussi (email « passerelle muette » sous 10 min).\nIntervention physique probablement requise (power-cycle du HAT SIM7600), ou modem volontairement retire / deplace sur une autre machine. Le watchdog attend son retour sans nouvelle tentative (INV-184).")
         time.sleep(CHECK)
 if __name__ == '__main__': main()

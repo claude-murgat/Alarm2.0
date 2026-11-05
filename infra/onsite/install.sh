@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# infra/onsite/install.sh — installe / met à jour la stack modem on-site sur un nœud :
-#   - gateway SMS + voix + contact sec  (modem_gateway.py, port AT)
+# infra/onsite/install.sh — installe / met à jour la stack modem on-site sur un nœud. Toutes les
+# machines sur site l'ont (INV-182) : modem et Arduino se branchent sur n'importe laquelle, et sans
+# matériel rien n'échoue ni ne redémarre en boucle (INV-183, INV-184).
+#   - gateway SMS + voix + contact sec  (modem_gateway.py, port AT ; unit alarm-sms-gateway)
 #   - secours internet 4G               (alarm-4g-standby, QMI)
 #   - selection reseau auto              (alarm-modem-rat, CNMP=2 au boot)
 #   - watchdog modem                     (alarm-modem-watchdog, auto-récup + alerte email)
@@ -17,7 +19,8 @@
 # promu :stable : une seule execution manuelle par noeud suffit (bootstrap).
 #
 # Ne touche PAS aux secrets : GATEWAY_KEY dans /etc/alarm-gateway.env, SMTP_* dans
-# /opt/alarm/.env.prod.{node<N>,secrets}. Le script signale ce qui manque.
+# /opt/alarm/.env.prod.{node<N>,secrets}. Le script signale ce qui manque (et GATEWAY_SITE, le
+# site de la machine, posé à la main au provisionnement).
 # Cf docs/PROVISIONING_ONSITE.md et docs/FAILOVER_4G.md.
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -66,11 +69,26 @@ rm -f "$SUDOERS_TMP"
 # ici ne doit pas bloquer le reste de l'installation.
 bash "$REPO/scripts/dns-fallback.sh" || say "ATTENTION : dns-fallback.sh en echec, DNS de secours non pose"
 
-# 2. Code gateway -> /opt/alarm-gateway/ + accès au port série (dialout)
-if [ "$AUTO" = 1 ]; then
+# 2. Passerelle sur chaque machine (INV-182) : user système + accès aux ports série (dialout),
+#    code gateway -> /opt/alarm-gateway/, dépendances (absentes d'une machine qui n'en a jamais eu).
+if ! id alarm-gateway >/dev/null 2>&1; then
+  useradd --system --no-create-home --shell /usr/sbin/nologin -G dialout alarm-gateway
+  say "user alarm-gateway cree (groupe dialout)"
+fi
+if id -nG alarm-gateway | grep -qw dialout; then
+  say "alarm-gateway déjà dans dialout"
+else
+  usermod -aG dialout alarm-gateway
+  say "alarm-gateway ajouté à dialout (CRUCIAL — sinon Permission denied sur /dev/ttyUSB)"
+fi
+install -d -o alarm-gateway -g alarm-gateway -m750 /opt/alarm-gateway
+# --auto : alarm-gateway-sync deploie le code depuis l'image, mais ne sait que remplacer un code
+# deja la -> 1er passage : code du commit courant (celui de l'image :stable).
+GW_FROM_REPO=0
+if [ "$AUTO" = 1 ] && [ -f /opt/alarm-gateway/modem_gateway.py ]; then
   say "code gateway : laisse a alarm-gateway-sync (--auto)"
-elif id alarm-gateway >/dev/null 2>&1; then
-  install -d -o alarm-gateway -g alarm-gateway -m750 /opt/alarm-gateway
+else
+  GW_FROM_REPO=1
   for f in "$REPO"/gateway/*.py; do
     install -o alarm-gateway -g alarm-gateway -m644 "$f" "/opt/alarm-gateway/$(basename "$f")"
   done
@@ -78,18 +96,38 @@ elif id alarm-gateway >/dev/null 2>&1; then
   install -d -o alarm-gateway -g alarm-gateway -m755 /opt/alarm-gateway/voice
   install -o alarm-gateway -g alarm-gateway -m644 "$REPO"/gateway/voice/*.wav /opt/alarm-gateway/voice/
   say "code gateway -> /opt/alarm-gateway/"
-  if id -nG alarm-gateway | grep -qw dialout; then
-    say "alarm-gateway déjà dans dialout"
+fi
+gw_deps(){ python3 -c 'import serial, requests' 2>/dev/null; }
+PKGS=""
+gw_deps || PKGS="python3-serial python3-requests"
+command -v qmicli >/dev/null || PKGS="$PKGS libqmi-utils"  # secours 4G (alarm-4g-standby)
+# alarm-gateway-sync fait `pip install -r requirements.txt` quand il change (revue PR #296, F3).
+python3 -m pip --version >/dev/null 2>&1 || PKGS="$PKGS python3-pip"
+apt_install(){ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o DPkg::Lock::Timeout=120 "$@" >/dev/null; }
+if [ -n "$PKGS" ]; then
+  # shellcheck disable=SC2086
+  if apt_install $PKGS || { apt-get update -qq >/dev/null && apt_install $PKGS; }; then
+    say "paquets installes :$PKGS"
   else
-    usermod -aG dialout alarm-gateway
-    say "alarm-gateway ajouté à dialout (CRUCIAL — sinon Permission denied sur /dev/ttyUSB)"
+    say "ATTENTION : apt-get install$PKGS en echec"
   fi
-else
-  say "ATTENTION: user 'alarm-gateway' absent — gateway non déployée (créer le user d'abord)"
+fi
+# Code pose depuis le depot : ses requirements installes (meme commande qu'alarm-gateway-sync) et notes
+# comme tels, sinon le 1er deploiement d'image relancerait pip pour rien (F3).
+if [ "$GW_FROM_REPO" = 1 ]; then
+  if python3 -m pip install --quiet --break-system-packages -r "$REPO/gateway/requirements.txt"; then
+    install -D -m644 "$REPO/gateway/requirements.txt" /var/lib/alarm/cd/gateway-requirements.txt
+  else
+    say "ATTENTION : pip install -r gateway/requirements.txt en echec (alarm-gateway-sync le retentera)"
+  fi
+fi
+# Un modem branche a chaud ne doit pas etre pris par ModemManager (PROVISIONING_ONSITE §2.3, F6).
+if [ "$(systemctl is-enabled ModemManager 2>/dev/null)" != masked ]; then
+  systemctl mask --now ModemManager >/dev/null 2>&1 || true; say "ModemManager masque"
 fi
 
-# 3. Units systemd modem + bascule box/4G (INV-140)
-for u in alarm-4g-standby alarm-modem-rat alarm-modem-watchdog alarm-wan-failover; do
+# 3. Units systemd modem + bascule box/4G (INV-140) + passerelle (versionnee depuis INV-182)
+for u in alarm-4g-standby alarm-modem-rat alarm-modem-watchdog alarm-wan-failover alarm-sms-gateway; do
   inst "$REPO/infra/onsite/systemd/$u.service" "/etc/systemd/system/$u.service" 644 "$u"
 done
 
@@ -101,56 +139,56 @@ for f in alarm-disk-check.service alarm-disk-check.timer alarm-gateway-sync.serv
   inst "$REPO/infra/onsite/systemd/$f" "/etc/systemd/system/$f" 644
 done
 
-# 4. Drop-in gateway : exécuter modem_gateway.py (superset contact+voix+SMS), PAS le
-#    legacy sms_gateway.py.
-if [ -f /etc/systemd/system/alarm-sms-gateway.service ]; then
-  install -d -m755 /etc/systemd/system/alarm-sms-gateway.service.d
-  cat > /etc/systemd/system/alarm-sms-gateway.service.d/override.conf <<'OVR'
-[Service]
-ExecStart=
-ExecStart=python3 /opt/alarm-gateway/modem_gateway.py
-OVR
-  say "drop-in gateway -> modem_gateway.py"
-else
-  say "ATTENTION: alarm-sms-gateway.service absent — installer l'unit gateway d'abord"
+# 4. Ancien drop-in (unit posee a la main, ExecStart redirige vers modem_gateway.py) : l'unit du
+#    depot lance deja modem_gateway.py. Retire seulement s'il est tel que ce script le posait.
+OVR=/etc/systemd/system/alarm-sms-gateway.service.d/override.conf
+if [ -f "$OVR" ]; then
+  if printf '[Service]\nExecStart=\nExecStart=python3 /opt/alarm-gateway/modem_gateway.py\n' | cmp -s - "$OVR"; then
+    rm -f "$OVR"; rmdir --ignore-fail-on-non-empty "${OVR%/*}"; say "drop-in gateway d'origine retire"
+  else
+    say "ATTENTION : $OVR modifie a la main, conserve (verifier qu'il est encore utile)"
+  fi
 fi
 
 # 5. Variables d'env gateway non-secrètes (idempotent — ne touche pas l'existant)
 ENV=/etc/alarm-gateway.env
-if [ -f "$ENV" ]; then
-  add_env(){ grep -q "^$1=" "$ENV" || { echo "$1=$2" >> "$ENV"; say "env += $1"; }; }
-  add_env DRY_CONTACT_ENABLED true
-  add_env GATEWAY_ID "$(hostname -s)"
-  # 7 backends à interroger (le gateway trouve le leader via /health). IPs Wireguard
-  # du mesh : 10.99.0.1=node3(cloud) 10.99.0.2=node1 10.99.0.3=node2,
-  # 10.99.0.4=node4(alarm-1) 10.99.0.5=node5(alarm-2) 10.99.0.6=node6(alarm-3)
-  # 10.99.0.7=node7(alarm-4) (non votants etcd).
-  add_env NODE1_URL http://10.99.0.1:8000
-  add_env NODE2_URL http://10.99.0.2:8000
-  add_env NODE3_URL http://10.99.0.3:8000
-  add_env NODE4_URL http://10.99.0.4:8000
-  add_env NODE5_URL http://10.99.0.5:8000
-  add_env NODE6_URL http://10.99.0.6:8000
-  add_env NODE7_URL http://10.99.0.7:8000
-  grep -q "^GATEWAY_KEY=" "$ENV" || say "ATTENTION: GATEWAY_KEY manquant dans $ENV (doit matcher le backend)"
-else
-  say "ATTENTION: $ENV absent — la gateway ne démarrera pas"
+if [ ! -f "$ENV" ]; then
+  install -m640 -o root -g alarm-gateway /dev/null "$ENV"
+  # Contact sec par Arduino USB (INV-120 mode host, ferme = 0) : a la creation seulement, un fichier
+  # existant garde sa source (revue PR #296, F2).
+  printf 'DRY_CONTACT_SOURCE=host\nDRY_CONTACT_NORMAL_VALUE=0\n' >> "$ENV"
+  say "$ENV cree (root:alarm-gateway 640, contact sec par Arduino)"
 fi
+add_env(){ grep -q "^$1=" "$ENV" || { echo "$1=$2" >> "$ENV"; say "env += $1"; }; }
+add_env DRY_CONTACT_ENABLED true
+add_env GATEWAY_ID "$(hostname -s)"
+# 7 backends à interroger (le gateway trouve le leader via /health). IPs Wireguard
+# du mesh : 10.99.0.1=node3(cloud) 10.99.0.2=node1 10.99.0.3=node2,
+# 10.99.0.4=node4(alarm-1) 10.99.0.5=node5(alarm-2) 10.99.0.6=node6(alarm-3)
+# 10.99.0.7=node7(alarm-4) (non votants etcd).
+add_env NODE1_URL http://10.99.0.1:8000
+add_env NODE2_URL http://10.99.0.2:8000
+add_env NODE3_URL http://10.99.0.3:8000
+add_env NODE4_URL http://10.99.0.4:8000
+add_env NODE5_URL http://10.99.0.5:8000
+add_env NODE6_URL http://10.99.0.6:8000
+add_env NODE7_URL http://10.99.0.7:8000
+grep -q "^GATEWAY_KEY=." "$ENV" || say "ATTENTION: GATEWAY_KEY manquant dans $ENV (secret, doit matcher le backend ; a poser a la main)"
+grep -q "^GATEWAY_SITE=." "$ENV" || say "ATTENTION: GATEWAY_SITE manquant dans $ENV (site de CETTE machine : izeron ou beaufort ; sinon site par defaut du backend)"
 
-# 6. Reload + enable (boot). On NE redémarre pas la gateway ici (geste délibéré).
+# 6. Reload + enable. Pile modem et passerelle sur chaque machine (INV-182) : sans modem elles
+#    attendent sans echec ni relance en boucle, et le watchdog n'agit que sur un modem deja vu
+#    (INV-184). enable --now ne relance pas une unit deja active (en --auto : cf RESTART plus bas).
 systemctl daemon-reload
-# Pile modem seulement sur le noeud qui a la gateway (onsite-2) : ailleurs le watchdog
-# alerterait "modem absent" a tort.
-if id alarm-gateway >/dev/null 2>&1; then
-  for u in alarm-4g-standby alarm-modem-rat alarm-modem-watchdog; do
-    systemctl enable "$u" >/dev/null 2>&1 || true; say "enabled $u"
-  done
+systemctl enable alarm-modem-rat >/dev/null 2>&1 || true; say "enabled alarm-modem-rat (au boot)"
+for u in alarm-4g-standby alarm-modem-watchdog; do
+  systemctl enable --now "$u" >/dev/null 2>&1 || true; say "enabled+started $u"
+done
+if gw_deps; then
+  systemctl enable --now alarm-sms-gateway >/dev/null 2>&1 || true; say "enabled+started alarm-sms-gateway"
 else
-  # Regle par capacite, pas par nom de noeud : suit les changements d'environnement.
-  for u in alarm-4g-standby alarm-modem-rat alarm-modem-watchdog; do
-    systemctl disable --now "$u" >/dev/null 2>&1 || true
-  done
-  say "pas de user alarm-gateway : pile modem desactivee et arretee"
+  # Sans pyserial/requests elle planterait toutes les 10 s, sans fin (StartLimitIntervalSec=0).
+  say "ATTENTION : pyserial/requests absents : alarm-sms-gateway NON demarree (relancer install.sh)"
 fi
 # Le timer disque, lui, on l'active ET on le démarre tout de suite : c'est une
 # sonde read-only sans risque, et NE PAS la démarrer reproduirait la classe de bug
@@ -172,8 +210,7 @@ if [ "$AUTO" = 1 ]; then
 fi
 
 say "FAIT. À valider à la main :"
-say "  sudo systemctl restart alarm-sms-gateway                         # bascule sur modem_gateway.py"
-say "  sudo systemctl start alarm-4g-standby alarm-modem-watchdog       # + alarm-modem-rat tourne au boot"
+say "  GATEWAY_KEY et GATEWAY_SITE dans $ENV, puis : sudo systemctl restart alarm-sms-gateway"
 say "  Pour les alertes email du watchdog : SMTP_* dans /opt/alarm/.env.prod.{node<N>,secrets}"
 say "  Smoketest 4G : sudo APN=orange bash scripts/smoketest-4g.sh"
 say "  Supervision disque (timer déjà actif) : sudo /opt/alarm/disk-check.sh --dry-run    # seuils, sans email"

@@ -283,3 +283,55 @@ class TestSmsAlertStep:
     def test_a_down_pass_restarts_the_streak(self):
         passes = [(10_000, True), (10_300, False), (10_600, True), (10_900, False), (11_200, True)]
         assert self._sent(passes) == [10_000]
+
+
+class TestModemSearchStep:
+    """INV-183 : recherche du modem toutes les 15 s. Absent (aucun port SIMCom) -> attente sans
+    sortie ; present et repond -> utilise ; present mais muet 2 recherches de suite -> sortie
+    (INV-126, relance comptee par le watchdog INV-146). Alarm-1 sans modem, 2026-11-05 : la gateway
+    sortait toutes les 10 s jusqu'a `failed`, et son contact sec n'etait jamais lu."""
+
+    def _run(self, scans):
+        """scans : (sur l'USB, repond a AT) par recherche. Renvoie les actions."""
+        mute, actions = 0, []
+        for on_usb, answered in scans:
+            action, mute = _mh.modem_search_step(on_usb, answered, mute)
+            actions.append(action)
+        return actions
+
+    def test_absent_modem_waits_forever(self):
+        assert self._run([(False, False)] * 50) == ["attendre"] * 50
+
+    def test_answering_modem_is_used(self):
+        assert self._run([(True, True)]) == ["utiliser"]
+
+    def test_mute_once_waits_then_mute_again_exits(self):
+        assert _mh.MUTE_SCANS_BEFORE_EXIT == 2
+        assert self._run([(True, False), (True, False)]) == ["attendre", "sortir"]
+
+    def test_hot_plug_booting_modem_is_used_once_it_answers(self):
+        assert self._run([(False, False), (False, False), (True, False), (True, True)]) == \
+            ["attendre", "attendre", "attendre", "utiliser"]
+
+    def test_mute_count_restarts_when_the_modem_leaves_the_usb(self):
+        assert self._run([(True, False), (False, False), (True, False)]) == ["attendre"] * 3
+
+    def test_rescan_period_is_15_s(self):
+        assert _mh.MODEM_RESCAN_SECONDS == 15
+
+
+class TestRepeatLogDue:
+    """INV-183 (revue F5) : une meme erreur HTTP repetee (401 toutes les 5 s) n'est journalisee
+    qu'une fois par 10 min."""
+
+    def test_interval_is_10_min(self):
+        assert _mh.LOG_REPEAT_SECONDS == 600
+
+    def test_first_occurrence_is_logged(self):
+        assert _mh.repeat_log_due(None, 1000.0) is True
+
+    def test_repeat_within_10_min_is_silent(self):
+        assert _mh.repeat_log_due(1000.0, 1599.9) is False
+
+    def test_after_10_min_it_is_logged_again(self):
+        assert _mh.repeat_log_due(1000.0, 1600.0) is True

@@ -103,3 +103,57 @@ def test_every_allocated_wds_client_is_released(calls):
 def test_default_route_is_onlink(calls):
     routes = [l for l in calls if l.startswith("ip route replace default")]
     assert routes and all(l.endswith(" onlink") for l in routes), routes
+
+
+# INV-182 : sur une machine sans modem, le script sortait apres 60 s (« abandon ») et systemd le
+# relancait toutes les 70 s, sans fin. Il attend maintenant le modem (une ligne de journal) et monte
+# le lien des qu'il est branche. Le modem (WDM) apparait a la 35e attente, au-dela des 30 d'avant.
+HOTPLUG_SLEEP = ('#!/usr/bin/env bash\nc=$(( $(cat "$H/sl" 2>/dev/null || echo 0) + 1 )); echo $c > "$H/sl"\n'
+                 '[ $c -eq 35 ] && : > "$H/wdm"\n[ $c -ge 38 ] && kill -TERM $PPID\nexit 0\n')
+
+
+def _run_real_wait(tmp_path, qmicli, sleep):
+    """Vrai script, attente du modem intacte ; seule l'interface reseau est simulee."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, body in {"qmicli": qmicli, "ip": IP, "sleep": sleep}.items():
+        (bin_dir / name).write_text(body)
+        (bin_dir / name).chmod(0o755)
+    src = SCRIPT.read_text()
+    src = re.sub(r"^for c in /sys/class/net/ww\*.*$", "IF=wwtest", src, flags=re.M)
+    src = re.sub(r'^\[ -n "\$IF" \] .*$', ":", src, flags=re.M)
+    src = src.replace('echo Y > "/sys/class/net/$IF/qmi/raw_ip"', "true")
+    script = tmp_path / "4g.sh"
+    script.write_text(src)
+    env = {"H": str(tmp_path), "PATH": f"{bin_dir}:/usr/bin:/bin", "WDM": str(tmp_path / "wdm")}
+    return subprocess.run(["bash", str(script)], env=env, timeout=30, capture_output=True, text=True)
+
+
+def test_no_modem_waits_then_brings_up_a_hot_plugged_modem(tmp_path):
+    p = _run_real_wait(tmp_path, QMICLI_SAME_PDN, HOTPLUG_SLEEP)
+    assert "abandon" not in p.stdout and p.returncode == 0, p.stdout  # arrete par SIGTERM (teardown)
+    assert p.stdout.count("en attente") == 1, p.stdout
+    calls = (tmp_path / "calls.log").read_text().splitlines()
+    assert any(l.startswith("ip route replace default via 10.134.124.149") for l in calls)
+
+
+# Revue PR #296 (mutant M14) : modem debranche en marche -> sortie (relance systemd, qui attend son
+# retour et relit le nom de l'interface), pas de reconnexion sans fin vers un peripherique disparu.
+QMICLI_UNPLUGGED = r"""#!/usr/bin/env bash
+echo "qmicli $*" >> "$H/calls.log"
+[ -e "$WDM" ] || { echo "error: couldn't open the QmiDevice: no such file"; exit 1; }
+case "$*" in
+  *--wds-start-network*) echo "Packet data handle: '99'"; echo "    CID: '41'" ;;
+  *--wds-get-current-settings*) echo "IPv4 address: 10.134.124.148"; echo "IPv4 gateway address: 10.134.124.149" ;;
+  *--wds-get-packet-service-status*) echo "'connected'" ;;
+esac
+"""
+UNPLUG_SLEEP = ('#!/usr/bin/env bash\nc=$(( $(cat "$H/sl" 2>/dev/null || echo 0) + 1 )); echo $c > "$H/sl"\n'
+                '[ $c -eq 2 ] && rm -f "$H/wdm"\n[ $c -ge 12 ] && kill -TERM $PPID\nexit 0\n')
+
+
+def test_modem_unplugged_while_running_exits_for_a_systemd_restart(tmp_path):
+    (tmp_path / "wdm").touch()
+    p = _run_real_wait(tmp_path, QMICLI_UNPLUGGED, UNPLUG_SLEEP)
+    assert p.returncode == 1, p.stdout
+    assert "disparu" in p.stdout
