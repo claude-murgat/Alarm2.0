@@ -84,9 +84,11 @@ fi
 install -d -o alarm-gateway -g alarm-gateway -m750 /opt/alarm-gateway
 # --auto : alarm-gateway-sync deploie le code depuis l'image, mais ne sait que remplacer un code
 # deja la -> 1er passage : code du commit courant (celui de l'image :stable).
+GW_FROM_REPO=0
 if [ "$AUTO" = 1 ] && [ -f /opt/alarm-gateway/modem_gateway.py ]; then
   say "code gateway : laisse a alarm-gateway-sync (--auto)"
 else
+  GW_FROM_REPO=1
   for f in "$REPO"/gateway/*.py; do
     install -o alarm-gateway -g alarm-gateway -m644 "$f" "/opt/alarm-gateway/$(basename "$f")"
   done
@@ -99,6 +101,8 @@ gw_deps(){ python3 -c 'import serial, requests' 2>/dev/null; }
 PKGS=""
 gw_deps || PKGS="python3-serial python3-requests"
 command -v qmicli >/dev/null || PKGS="$PKGS libqmi-utils"  # secours 4G (alarm-4g-standby)
+# alarm-gateway-sync fait `pip install -r requirements.txt` quand il change (revue PR #296, F3).
+python3 -m pip --version >/dev/null 2>&1 || PKGS="$PKGS python3-pip"
 apt_install(){ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o DPkg::Lock::Timeout=120 "$@" >/dev/null; }
 if [ -n "$PKGS" ]; then
   # shellcheck disable=SC2086
@@ -107,6 +111,19 @@ if [ -n "$PKGS" ]; then
   else
     say "ATTENTION : apt-get install$PKGS en echec"
   fi
+fi
+# Code pose depuis le depot : ses requirements installes (meme commande qu'alarm-gateway-sync) et notes
+# comme tels, sinon le 1er deploiement d'image relancerait pip pour rien (F3).
+if [ "$GW_FROM_REPO" = 1 ]; then
+  if python3 -m pip install --quiet --break-system-packages -r "$REPO/gateway/requirements.txt"; then
+    install -D -m644 "$REPO/gateway/requirements.txt" /var/lib/alarm/cd/gateway-requirements.txt
+  else
+    say "ATTENTION : pip install -r gateway/requirements.txt en echec (alarm-gateway-sync le retentera)"
+  fi
+fi
+# Un modem branche a chaud ne doit pas etre pris par ModemManager (PROVISIONING_ONSITE §2.3, F6).
+if [ "$(systemctl is-enabled ModemManager 2>/dev/null)" != masked ]; then
+  systemctl mask --now ModemManager >/dev/null 2>&1 || true; say "ModemManager masque"
 fi
 
 # 3. Units systemd modem + bascule box/4G (INV-140) + passerelle (versionnee depuis INV-182)
@@ -135,11 +152,15 @@ fi
 
 # 5. Variables d'env gateway non-secrètes (idempotent — ne touche pas l'existant)
 ENV=/etc/alarm-gateway.env
-[ -f "$ENV" ] || { install -m640 -o root -g alarm-gateway /dev/null "$ENV"; say "$ENV cree (root:alarm-gateway 640)"; }
+if [ ! -f "$ENV" ]; then
+  install -m640 -o root -g alarm-gateway /dev/null "$ENV"
+  # Contact sec par Arduino USB (INV-120 mode host, ferme = 0) : a la creation seulement, un fichier
+  # existant garde sa source (revue PR #296, F2).
+  printf 'DRY_CONTACT_SOURCE=host\nDRY_CONTACT_NORMAL_VALUE=0\n' >> "$ENV"
+  say "$ENV cree (root:alarm-gateway 640, contact sec par Arduino)"
+fi
 add_env(){ grep -q "^$1=" "$ENV" || { echo "$1=$2" >> "$ENV"; say "env += $1"; }; }
 add_env DRY_CONTACT_ENABLED true
-# Contact sec par Arduino USB (INV-120 mode host, ferme = 0) ; une source deja choisie n'est pas touchee.
-grep -q "^DRY_CONTACT_SOURCE=" "$ENV" || { add_env DRY_CONTACT_SOURCE host; add_env DRY_CONTACT_NORMAL_VALUE 0; }
 add_env GATEWAY_ID "$(hostname -s)"
 # 7 backends à interroger (le gateway trouve le leader via /health). IPs Wireguard
 # du mesh : 10.99.0.1=node3(cloud) 10.99.0.2=node1 10.99.0.3=node2,

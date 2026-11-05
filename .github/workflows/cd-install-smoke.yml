@@ -568,6 +568,9 @@ jobs:
           sudo grep -qx DRY_CONTACT_NORMAL_VALUE=0 /etc/alarm-gateway.env
           if sudo grep -q '^GATEWAY_KEY' /etc/alarm-gateway.env; then echo "::error::GATEWAY_KEY ecrit"; exit 1; fi
           systemctl is-enabled alarm-modem-rat alarm-sms-gateway
+          test "$(systemctl is-enabled ModemManager || true)" = masked  # revue F6
+          sudo python3 -m pip --version  # revue F3 : alarm-gateway-sync en a besoin
+          sudo cmp gateway/requirements.txt /var/lib/alarm/cd/gateway-requirements.txt
 
       - name: Sans modem ni Arduino - tout tourne, rien ne relance (INV-182/183/184)
         run: |
@@ -589,10 +592,27 @@ jobs:
         run: |
           PID=$(systemctl show alarm-sms-gateway -p ExecMainPID --value)
           echo GATEWAY_SITE=izeron | sudo tee -a /etc/alarm-gateway.env >/dev/null
-          sudo sed -i 's/^DRY_CONTACT_NORMAL_VALUE=0$/DRY_CONTACT_NORMAL_VALUE=1/' /etc/alarm-gateway.env
+          # Revue F2 : un .env existant sans source (prod) ne recoit pas DRY_CONTACT_SOURCE/NORMAL_VALUE.
+          sudo sed -i '/^DRY_CONTACT_SOURCE=/d; /^DRY_CONTACT_NORMAL_VALUE=/d; s/^GATEWAY_ID=.*/GATEWAY_ID=alarm-9/' /etc/alarm-gateway.env
           sudo bash infra/onsite/install.sh --auto | tee /tmp/install2.log
           test "$PID" = "$(systemctl show alarm-sms-gateway -p ExecMainPID --value)"
           if grep -q "GATEWAY_SITE manquant" /tmp/install2.log; then exit 1; fi
           sudo grep -qx GATEWAY_SITE=izeron /etc/alarm-gateway.env
-          sudo grep -qx DRY_CONTACT_NORMAL_VALUE=1 /etc/alarm-gateway.env
+          sudo grep -qx GATEWAY_ID=alarm-9 /etc/alarm-gateway.env
+          if sudo grep -q '^DRY_CONTACT_SOURCE=\|^DRY_CONTACT_NORMAL_VALUE=' /etc/alarm-gateway.env; then
+            echo "::error::source du contact sec ajoutee a un .env existant"; exit 1
+          fi
           test "$(sudo grep -c '^NODE1_URL=' /etc/alarm-gateway.env)" = 1
+
+      - name: alarm-gateway-sync sur cette machine neuve - nouvelle image deployee sans pip (revue F3)
+        # Avant : gateway-requirements.txt absent -> le 1er deploiement d'image lancait pip (absent sur
+        # une machine sans passerelle d'avant) -> deploiement refuse a chaque passage.
+        run: |
+          sudo systemctl stop alarm-gateway-sync.timer
+          NEW=$(mktemp -d); cp -r gateway/. "$NEW/"; echo "# v2" >> "$NEW/modem_gateway.py"
+          docker build -q -t ghcr.io/claude-murgat/alarm-gateway:stable -f gateway/Dockerfile "$NEW"
+          sudo /usr/local/bin/alarm-gateway-sync 2>&1 | tee /tmp/sync.log
+          if grep -q "pip install" /tmp/sync.log; then echo "::error::pip relance sans changement de requirements"; exit 1; fi
+          grep -q "deploiement OK" /tmp/sync.log
+          sudo cmp "$NEW/modem_gateway.py" /opt/alarm-gateway/modem_gateway.py
+          systemctl is-active alarm-sms-gateway

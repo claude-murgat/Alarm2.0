@@ -46,7 +46,18 @@ def real_gateway_silence_check():
 
 
 @pytest.fixture(scope="session")
-def client(real_gateway_silence_check):
+def real_site_modem_check():
+    """INV-185 : meme raison qu'INV-172 (tick de fond, etats de modem laisses par d'autres tests).
+    Neutralise pour la session ; renvoie le vrai controle (test_site_modem_inv185)."""
+    from backend.app import quorum_monitor
+    real = quorum_monitor._run_site_modem_check
+    quorum_monitor._run_site_modem_check = lambda now: None
+    yield real
+    quorum_monitor._run_site_modem_check = real
+
+
+@pytest.fixture(scope="session")
+def client(real_gateway_silence_check, real_site_modem_check):
     """TestClient FastAPI avec lifespan complet (tables crees + users seeded)."""
     # Import differe : garantit que DATABASE_URL est lu apres notre setenv.
     from backend.app.main import app

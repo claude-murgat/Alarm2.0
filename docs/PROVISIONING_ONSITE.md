@@ -660,6 +660,25 @@ scripts/smoketest-4g.sh`. Runbook complet : [`FAILOVER_4G.md`](FAILOVER_4G.md).
 > passerelles sans modem ne lisent pas cette file. Plusieurs Arduino sur un même site, en revanche,
 > sont prévus (agrégation OR, INV-122).
 
+**Alertes** : un site dont aucun modem n'a donné de nouvelles depuis 10 min reçoit l'email
+`[Alarme Murgat] Site <Site> sans modem depuis N min` (INV-185, envoyé par le leader, une fois par
+épisode). Une clé `GATEWAY_KEY` absente ou par défaut donne une ligne ERROR au démarrage de la
+passerelle (`journalctl -u alarm-sms-gateway`), puis au plus un message 401 par 10 min.
+
+**Limites connues (revue PR #296)** :
+- `MODEM_XHCI` (adresse PCI du contrôleur USB, défaut `0000:00:14.0`) est celle d'onsite-2. Sur une
+  machine dont le contrôleur est ailleurs (`readlink -f /sys/bus/usb/devices/usb1` donne le
+  chemin PCI), la récupération du watchdog n'agit pas et il relance un `rescan` PCI à chacun de ses
+  démarrages (sans effet). Le régler par un drop-in :
+  `sudo systemctl edit alarm-modem-watchdog` → `[Service]` `Environment=MODEM_XHCI=0000:00:xx.x`.
+- `CNMP=2` n'est réappliqué qu'au boot (`alarm-modem-rat`) : après avoir branché un modem à chaud,
+  `sudo systemctl restart alarm-modem-rat`.
+- Le lien udev `/dev/sim7600_at` (`MODEM_AT_PORT`) est essayé sans filtre de fabricant ; s'il ne
+  pointe plus sur le SIM7600 après un déplacement, le retirer de `/etc/alarm-gateway.env`
+  (la détection automatique suffit).
+- ModemManager est masqué par `install.sh` sur chaque machine (§2.3).
+- Si `alarm-host-sync` tourne aussi sur NODE3 (OVH), la passerelle y est installée, inactive.
+
 ---
 
 ## 22. Résultat de la session de provisioning onsite-2 (2026-05-01)

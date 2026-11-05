@@ -36,6 +36,7 @@ from config import (
 from modem_detect import KNOWN_VIDS, detect_modem_port, send_at_command
 from modem_health import probe_order, probe_timeout  # INV-174
 from modem_health import MODEM_RESCAN_SECONDS, MUTE_SCANS_BEFORE_EXIT, modem_search_step  # INV-183
+from modem_health import LOG_REPEAT_SECONDS, repeat_log_due  # INV-183 (revue F5)
 from config import PRIMARY_PROBE_TIMEOUT_SECONDS  # INV-174
 from locks import at_lock  # RLock reentrant partage du port AT (cf locks.py)
 from dry_contact import parse_dc_line, raw_to_state, decide_report  # logique pure (cf dry_contact.py)
@@ -90,6 +91,18 @@ def _find_primary_url() -> str | None:
     return None
 
 
+# INV-183 (revue F5) : derniere journalisation de chaque erreur HTTP (methode, chemin, code).
+_http_error_logged: dict[str, float] = {}
+
+
+def _log_http_error(message: str) -> None:
+    """Cle refusee (401 toutes les 5 s pour le contact sec) : un message par 10 min, pas une inondation."""
+    now = time.monotonic()
+    if repeat_log_due(_http_error_logged.get(message), now):
+        _http_error_logged[message] = now
+        logger.warning(f"{message} (meme erreur journalisee au plus une fois par {LOG_REPEAT_SECONDS // 60} min)")
+
+
 # INV-156 : ne recevoir que les SMS/appels de son site (vide -> default_site cote backend)
 SITE_QUERY = f"?site={GATEWAY_SITE}" if GATEWAY_SITE else ""
 # Contact sec et modem appartiennent a un seul site : le 1er d'une liste (cluster de test)
@@ -110,7 +123,7 @@ def _get_from_backend(path: str) -> list | None:
         )
         if r.status_code == 200:
             return r.json()
-        logger.warning(f"GET {path} → HTTP {r.status_code}")
+        _log_http_error(f"GET {path} → HTTP {r.status_code}")
         return None
     except Exception as e:
         logger.warning(f"GET {path} erreur : {e}")
@@ -131,7 +144,7 @@ def _post_to_backend(path: str, json_data: dict = None) -> dict | None:
         )
         if r.status_code == 200:
             return r.json()
-        logger.warning(f"POST {path} → HTTP {r.status_code}")
+        _log_http_error(f"POST {path} → HTTP {r.status_code}")
         return None
     except Exception as e:
         logger.warning(f"POST {path} erreur : {e}")
@@ -911,8 +924,10 @@ def _wait_for_modem(manual_port: str | None):
     (port, ser) quand il repond ; (None, None) s'il est sur l'USB mais muet trop longtemps."""
     mute_scans, waiting = 0, False
     while True:
-        # Sans port SIMCom, pas de detect_modem_port : pas de balayage ni de logs toutes les 15 s.
-        on_usb = any(p.vid in KNOWN_VIDS for p in list_ports.comports())
+        if manual_port:  # port impose (lien udev, adaptateur) : pas de filtre VID, essaye s'il existe
+            on_usb = "/" not in manual_port or os.path.exists(manual_port)
+        else:  # sans port SIMCom, pas de detect_modem_port : pas de balayage ni de logs toutes les 15 s
+            on_usb = any(p.vid in KNOWN_VIDS for p in list_ports.comports())
         port, ser = detect_modem_port(manual_port=manual_port) if on_usb else (None, None)
         action, mute_scans = modem_search_step(on_usb, ser is not None, mute_scans)
         if action != "attendre":
@@ -933,6 +948,9 @@ def main():
     args = parser.parse_args()
 
     logger.info("=== Gateway Modem SIM7600E-H demarree ===")
+    if GATEWAY_KEY in ("", "changeme-in-prod"):  # INV-183 (revue F5) : une ERROR, pas un 401 toutes les 5 s
+        logger.error("GATEWAY_KEY absente ou valeur par defaut dans /etc/alarm-gateway.env : le backend refusera "
+                     "tout (401). Poser la cle du backend puis : sudo systemctl restart alarm-sms-gateway")
 
     # INV-120 V2 — poll level-based contact sec NC (opt-in via DRY_CONTACT_ENABLED). INV-183 : la
     # source hote (Arduino) demarre avant et sans le modem ; la source modem demarre avec lui.

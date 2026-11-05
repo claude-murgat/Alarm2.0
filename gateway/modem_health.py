@@ -17,6 +17,16 @@ MODEM_RESCAN_SECONDS = 15
 MUTE_SCANS_BEFORE_EXIT = 2
 
 
+# INV-183 (revue PR #296, F5) : une meme erreur HTTP repetee (cle refusee : 401 toutes les 5 s)
+# n'est journalisee qu'une fois par 10 min.
+LOG_REPEAT_SECONDS = 600
+
+
+def repeat_log_due(last_logged: float | None, now: float) -> bool:
+    """Journaliser maintenant ? Jamais journalisee, ou il y a LOG_REPEAT_SECONDS ou plus."""
+    return last_logged is None or now - last_logged >= LOG_REPEAT_SECONDS
+
+
 def modem_search_step(on_usb: bool, answered: bool, mute_scans: int) -> tuple[str, int]:
     """INV-183 : (action, recherches muettes consecutives) apres une recherche du modem.
     `on_usb` : un port serie SIMCom est enumere ; `answered` : l'un d'eux repond OK a AT.

@@ -64,6 +64,9 @@ from .logic.gateway_silence import decide_silence  # INV-172
 from .models import GatewayState  # INV-172
 from .sites import default_site  # INV-172
 from .sites import node_locations
+from sqlalchemy import or_  # INV-185
+from .logic.site_modem import decide_site_modem  # INV-185
+from .sites import known_sites  # INV-185
 
 
 logger = logging.getLogger(__name__)
@@ -455,6 +458,12 @@ async def quorum_monitor_loop() -> None:
         except Exception:
             logger.exception("quorum_monitor_loop : erreur dans le tick (continue)")
 
+        # INV-185 : horloge réelle (comme INV-168) — `advance-clock` des tests E2E ne doit pas l'émettre.
+        try:
+            await asyncio.to_thread(_run_site_modem_check, datetime.now(timezone.utc).replace(tzinfo=None))
+        except Exception:
+            logger.exception("INV-185 : erreur dans le contrôle des modems par site (continue)")
+
         # INV-168 : horloge réelle, pas clock_now() — `advance-clock` des tests E2E ne doit
         # pas pouvoir re-cloner un replica.
         try:
@@ -508,5 +517,58 @@ def _run_gateway_silence_check(now: datetime) -> None:
                 f"  - alimentation et réseau de la machine\n"
                 f"  - tunnel WireGuard (sudo wg show : dernière poignée de main récente)\n\n"
                 f"Un nouvel email partira si elle revient puis se tait de nouveau."))
+    finally:
+        db.close()
+
+
+# INV-185 : site sans modem (aucun modem-status depuis 10 min) -> un email + un audit par episode. Le
+# watchdog ignore un modem jamais vu et l'Arduino garde la passerelle vivante (INV-172 muet) : sans ce
+# controle, un site sans modem des le demarrage ne previent personne. Episodes dans SystemConfig.
+_SITE_MODEM_KEY = "site_modem_alert"
+
+
+def _run_site_modem_check(now: datetime) -> None:
+    """INV-185 : un tick (bloquant, via `asyncio.to_thread`, leader seul), horloge reelle naive UTC."""
+    db = SessionLocal()
+    try:
+        reports = []
+        for row in db.query(SystemConfig).filter(
+                or_(SystemConfig.key == "modem_status", SystemConfig.key.like("modem_status:%"))):
+            try:
+                status = json.loads(row.value)
+                reports.append((status.get("site") or default_site(db), datetime.fromisoformat(status["reported_at"])))
+            except (ValueError, KeyError, TypeError, AttributeError):
+                logger.warning("INV-185 : %s illisible, ignoré", row.key)
+        row = db.query(SystemConfig).filter(SystemConfig.key == _SITE_MODEM_KEY).first()
+        state = {site: {"since": datetime.fromisoformat(e["since"]), "emailed": e["emailed"]}
+                 for site, e in (json.loads(row.value) if row else {}).items()}
+        alerts, new_state = decide_site_modem(known_sites(db), reports, state, now)
+        if new_state != state:
+            if row is None:
+                row = SystemConfig(key=_SITE_MODEM_KEY, value="{}")
+                db.add(row)
+            row.value = json.dumps({site: {"since": e["since"].isoformat(), "emailed": e["emailed"]}
+                                    for site, e in new_state.items()})
+            db.commit()
+        if not alerts:
+            return
+        alert_email = _get_alert_email(db)
+        for site, since, last in alerts:
+            minutes = int((now - since).total_seconds() // 60)
+            name = site.capitalize()
+            log_event("site_without_modem", site=site, since=since.isoformat(), minutes=minutes)
+            logger.error("INV-185 : site %s sans modem depuis %s min", site, minutes)
+            seen = f"{last.isoformat()} UTC" if last else f"aucun depuis {since.isoformat()} UTC"
+            _alert(alert_email, f"[Alarme Murgat] Site {name} sans modem depuis {minutes} min", (
+                f"Aucun modem du site {name} n'a donné de nouvelles depuis {minutes} min "
+                f"(dernier état de modem reçu : {seen}).\n\n"
+                f"Conséquence : SMS et appels impossibles pour ce site. Ils attendent un modem du site "
+                f"(pas de secours entre sites — décision du propriétaire). Le contact sec reste lu si "
+                f"un Arduino est branché.\n\n"
+                f"À vérifier sur la machine du site qui doit porter le modem :\n"
+                f"  - branchement USB et alimentation du SIM7600 (lsusb | grep 1e0e)\n"
+                f"  - journalctl -u alarm-sms-gateway -n 50 (« En attente du modem » : modem non vu)\n"
+                f"  - GATEWAY_SITE dans /etc/alarm-gateway.env (le modem prend le site de sa machine)\n\n"
+                f"Un nouvel email partira si un modem revient puis se tait de nouveau."))
     finally:
         db.close()

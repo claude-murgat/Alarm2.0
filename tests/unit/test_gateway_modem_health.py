@@ -318,3 +318,20 @@ class TestModemSearchStep:
 
     def test_rescan_period_is_15_s(self):
         assert _mh.MODEM_RESCAN_SECONDS == 15
+
+
+class TestRepeatLogDue:
+    """INV-183 (revue F5) : une meme erreur HTTP repetee (401 toutes les 5 s) n'est journalisee
+    qu'une fois par 10 min."""
+
+    def test_interval_is_10_min(self):
+        assert _mh.LOG_REPEAT_SECONDS == 600
+
+    def test_first_occurrence_is_logged(self):
+        assert _mh.repeat_log_due(None, 1000.0) is True
+
+    def test_repeat_within_10_min_is_silent(self):
+        assert _mh.repeat_log_due(1000.0, 1599.9) is False
+
+    def test_after_10_min_it_is_logged_again(self):
+        assert _mh.repeat_log_due(1000.0, 1600.0) is True

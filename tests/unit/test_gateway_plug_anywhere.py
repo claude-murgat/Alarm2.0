@@ -81,7 +81,7 @@ class _NoWaitEvent(threading.Event):
 def gw(monkeypatch, caplog):
     caplog.set_level(logging.INFO, logger="modem_gateway")
     st = types.SimpleNamespace(events=[], started=[], sleeps=[], sleep_limit=20, ports=lambda: [],
-                               modem=lambda: (None, None), ser=_Ser())
+                               modem=lambda: (None, None), ser=_Ser(), on_sleep=lambda n: None)
 
     def fake_thread(name):
         class T:
@@ -101,6 +101,7 @@ def gw(monkeypatch, caplog):
         if len(st.sleeps) >= st.sleep_limit:
             raise _Stop
         st.sleeps.append(seconds)
+        st.on_sleep(len(st.sleeps))
 
     def comports():
         st.events.append("scan")
@@ -111,6 +112,7 @@ def gw(monkeypatch, caplog):
         return st.modem()
 
     monkeypatch.setattr(sys, "argv", ["modem_gateway.py"])
+    monkeypatch.setattr(mg, "GATEWAY_KEY", "cle-de-prod")
     monkeypatch.setattr(mg, "MODEM_AT_PORT", "")
     monkeypatch.setattr(mg, "DRY_CONTACT_ENABLED", True)
     monkeypatch.setattr(mg, "DRY_CONTACT_SOURCE", "host")
@@ -176,10 +178,64 @@ def test_arduino_absent_plugged_then_unplugged_warns_once_per_absence(gw, monkey
     monkeypatch.setattr(mg, "_report_dry_contact_state", lambda gid, state: reports.append(state))
     gw.sleep_limit = 8
     t = HostDryContact(port="", baud=115200, gateway_id="alarm-3", normal_value=0,
-                                       poll_seconds=5, liveness_seconds=5)
+                       poll_seconds=5, liveness_seconds=5)
     monkeypatch.setattr(t, "_resolve_port", lambda: next(resolved, None))
     with pytest.raises(_Stop):
         t.run()
     assert reports == ["closed"]  # Arduino branche a chaud : lu sans redemarrer la passerelle
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING and "HostDryContact" in r.message]
     assert len(warnings) == 2, [r.message for r in warnings]  # absent au depart, puis debranche
+
+
+# --- Revue PR #296 ---
+
+def test_manual_port_is_tried_without_the_simcom_vid_filter(gw, monkeypatch, tmp_path):
+    """F6 : MODEM_AT_PORT impose (lien udev, adaptateur) -> essaye des qu'il existe, sans filtre VID ;
+    absent -> attente, pas de sortie."""
+    port = tmp_path / "sim7600_at"
+    monkeypatch.setattr(mg, "MODEM_AT_PORT", str(port))
+    gw.on_sleep = lambda n: port.touch() if n == 2 else None  # branche apres 2 recherches
+    gw.modem = lambda: (str(port), gw.ser) if port.exists() else (None, None)
+    assert mg.main() == 1  # modem utilise puis muet en marche (keepalive) : sortie INV-126
+    assert gw.sleeps == [15, 15]
+    assert gw.started == ["HostDryContactMonitorThread", *MODEM_THREADS]
+
+
+@pytest.mark.parametrize("key", ["", "changeme-in-prod"])
+def test_missing_gateway_key_is_one_error_at_start(gw, monkeypatch, caplog, key):
+    monkeypatch.setattr(mg, "GATEWAY_KEY", key)
+    gw.sleep_limit = 5
+    with pytest.raises(_Stop):
+        mg.main()
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR and "GATEWAY_KEY" in r.message]
+    assert len(errors) == 1
+
+
+def test_real_gateway_key_logs_no_error(gw, caplog):
+    gw.sleep_limit = 2
+    with pytest.raises(_Stop):
+        mg.main()
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def test_repeated_http_errors_are_logged_once_per_10_min(monkeypatch, caplog):
+    """F5 : cle refusee -> 401 sur report-state toutes les 5 s ; un message par 10 min et par appel."""
+    caplog.set_level(logging.INFO, logger="modem_gateway")
+    clock = [1000.0]
+    monkeypatch.setattr(mg, "_http_error_logged", {}, raising=False)
+    monkeypatch.setattr(mg.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(mg, "_find_primary_url", lambda: "http://10.99.0.4:8000")
+    monkeypatch.setattr(mg.requests, "post", lambda *a, **kw: types.SimpleNamespace(status_code=401))
+    monkeypatch.setattr(mg.requests, "get", lambda *a, **kw: types.SimpleNamespace(status_code=401))
+
+    def http_warnings():
+        return [r.message for r in caplog.records if "HTTP 401" in r.message]
+    for _ in range(100):
+        assert mg._post_to_backend("/internal/alarms/report-state", {"state": "closed"}) is None
+        clock[0] += 5
+    assert len(http_warnings()) == 1, http_warnings()
+    mg._get_from_backend("/internal/sms/pending")  # autre appel : son propre message
+    assert len(http_warnings()) == 2
+    clock[0] += 600
+    mg._post_to_backend("/internal/alarms/report-state", {"state": "closed"})
+    assert len(http_warnings()) == 3

@@ -62,7 +62,7 @@ class TestMainLoop:
     @pytest.fixture
     def run(self, monkeypatch, tmp_path):
         def run(present, ticks=40):
-            st = {"t": 0, "sleeps": 0, "recovers": 0, "emails": []}
+            st = {"t": 0, "sleeps": 0, "recovers": 0, "emails": [], "bodies": []}
 
             def sleep(s):
                 if st["sleeps"] >= ticks:
@@ -76,7 +76,8 @@ class TestMainLoop:
             monkeypatch.setattr(_wd.time, "sleep", sleep)
             monkeypatch.setattr(_wd, "modem_present", lambda: present(st["t"]))
             monkeypatch.setattr(_wd, "recover", recover)
-            monkeypatch.setattr(_wd, "send_email", lambda subject, body: st["emails"].append(subject) or True)
+            monkeypatch.setattr(_wd, "send_email", lambda subject, body: (
+                st["emails"].append(subject), st["bodies"].append(body)) and True)
             monkeypatch.setattr(_wd, "gateway_restarts", lambda: 0)
             monkeypatch.setattr(_wd.sys, "argv", ["modem-watchdog.py"])
             with pytest.raises(_Stop):
@@ -84,6 +85,9 @@ class TestMainLoop:
             return st
         monkeypatch.setattr(_wd, "SEEN_FILE", str(tmp_path / "seen"), raising=False)
         monkeypatch.setattr(_wd, "RECOVERED_FILE", str(tmp_path / "recovered"), raising=False)
+        # /sys/bus/pci factice : controleur present (sauf test dedie)
+        (tmp_path / "pci" / "devices" / _wd.XHCI).mkdir(parents=True)
+        monkeypatch.setattr(_wd, "PCI", str(tmp_path / "pci"), raising=False)
         run.tmp = tmp_path
         return run
 
@@ -107,3 +111,32 @@ class TestMainLoop:
         (run.tmp / "recovered").touch()  # recuperation deja faite avant le redemarrage
         st = run(lambda t: False)
         assert (st["recovers"], st["emails"]) == (0, [])
+
+    # --- Revue PR #296 : mutants survivants M4/M5, F4 ---
+
+    def test_episode_is_written_to_disk_before_waiting(self, run):
+        """M4 : sans le fichier, un watchdog redemarre (redeploiement) refait une recuperation."""
+        run(lambda t: t < 120, ticks=10)
+        assert (run.tmp / "recovered").exists()
+
+    def test_episode_file_is_removed_when_the_modem_is_back(self, run):
+        """M5 : sinon un watchdog redemarre plus tard ignorerait la disparition suivante."""
+        run(lambda t: t < 120 or t >= 1000, ticks=30)
+        assert not (run.tmp / "recovered").exists()
+
+    def test_controller_left_removed_is_rescanned_at_start(self, run):
+        """F4a : watchdog tue entre `remove` et `rescan` -> modem ET Arduino coupes sans fin."""
+        (run.tmp / "pci" / "devices" / _wd.XHCI).rmdir()
+        run(lambda t: True, ticks=1)
+        assert (run.tmp / "pci" / "rescan").read_text() == "1"
+
+    def test_present_controller_is_not_rescanned(self, run):
+        run(lambda t: True, ticks=1)
+        assert not (run.tmp / "pci" / "rescan").exists()
+
+    def test_down_email_says_the_arduino_is_affected(self, run):
+        """F4b : le reset PCI coupe tout le controleur USB, Arduino du contact sec compris."""
+        st = run(lambda t: t < 120, ticks=10)
+        body = st["bodies"][0]
+        assert "n'en depend pas" not in body
+        assert "controleur USB" in body and "Arduino" in body and "contact sec de cette machine" in body
