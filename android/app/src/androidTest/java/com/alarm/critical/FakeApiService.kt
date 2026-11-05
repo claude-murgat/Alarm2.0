@@ -209,13 +209,15 @@ class FakeApiService : ApiService {
     }
 
     var clusterResponse: Response<ClusterResponse> = Response.success(ClusterResponse(
-        local_node = "node1", local_location = "izeron",
-        members = listOf(
-            ClusterMember("node1", "leader", "running", "izeron"),
-            ClusterMember("node2", "replica", "streaming", "izeron"),
-            ClusterMember("node3", "replica", "streaming", "ovh"),
-            ClusterMember("node4", "replica", "streaming", "beaufort"),
-            ClusterMember("node5", "sync_standby", "streaming", "beaufort"),
+        local_node = "node1", local_location = "izeron", local_machine = "onsite-1",
+        members = listOf(  // cluster de prod a 7 noeuds (2026-11-05)
+            ClusterMember("node1", "leader", "running", "izeron", "onsite-1", retiring = true),
+            ClusterMember("node2", "replica", "streaming", "izeron", "onsite-2", retiring = true),
+            ClusterMember("node3", "replica", "streaming", "ovh", "vps-1560caaa", retiring = false),
+            ClusterMember("node4", "replica", "streaming", "beaufort", "alarm-1", retiring = false),
+            ClusterMember("node5", "sync_standby", "streaming", "beaufort", "alarm-2", retiring = false),
+            ClusterMember("node6", "replica", "streaming", "izeron", "alarm-3", retiring = false),
+            ClusterMember("node7", "replica", "streaming", "izeron", "alarm-4", retiring = false),
         )
     ))
     override suspend fun getCluster(): Response<ClusterResponse> = clusterResponse

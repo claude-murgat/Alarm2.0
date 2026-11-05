@@ -11,11 +11,12 @@ class SupervisionActivity : MenuScreenActivity("Supervision") {
         if (isFinishing) return  // 403
         content.removeAllViews()
 
-        section("Cluster" + (cluster?.local_node?.let { " — réponse de $it" } ?: ""))
+        section("Cluster" + (cluster?.local_node?.let { " — réponse de ${nodeLabel(it, cluster.local_machine)}" } ?: ""))
         if (cluster == null) row("État du cluster indisponible")
         cluster?.members.orEmpty().forEach { m ->
             val role = when (m.role) { "leader" -> "primaire"; "replica", "sync_standby" -> "réplique"; else -> m.role ?: "?" }
-            row("${m.name} · ${place(m.location)}", "$role · ${m.state ?: "?"}")
+            row("${nodeLabel(m.name, m.machine)} · ${place(m.location)}" + if (m.retiring == true) " · bientôt obsolète" else "",
+                "$role · ${m.state ?: "?"}")
         }
 
         section("Statistiques sur 8 semaines" + if (kpi?.hors_heures_only == true) " (hors heures ouvrées)" else "")
