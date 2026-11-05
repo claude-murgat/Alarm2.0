@@ -91,22 +91,28 @@ android {
             isMinifyEnabled = false
             // null si les variables d'env ne sont pas la (build local) -> unsigned.
             signingConfig = signingConfigs.findByName("release")
-            // Cluster prod (cf .env.prod.node{1..5} + docs/PROVISIONING_ONSITE.md §22bis).
+            // Cluster prod a 7 noeuds (cf .env.prod.node* + docs/PROVISIONING_ONSITE.md §22bis).
             // Ordre cloud-first : NODE3 OVH est le seul backend joignable hors des LAN
             // des sites (UFW limite l'accès aux LAN). En 4G ou WiFi externe, les LAN ne
             // répondent pas — donc cloud en tête évite des timeouts au démarrage. Sur le
             // LAN d'un site, le failover circulaire (INV-ANDROID-402) bascule sur ses
             // noeuds si le cloud devient injoignable. Compromis : en 4G avec le cloud
-            // en panne, l'app parcourt les 4 URL LAN mortes avant de réessayer le cloud.
+            // en panne, l'app parcourt les 6 URL LAN mortes avant de réessayer le cloud.
             // IP LAN Izeron mises a jour 2026-10-12 (demenagement de juin :
             // 172.16.1.120/.121 -> 192.168.1.50/.51). Beaufort ajoute 2026-10-30
             // (decision proprietaire) : 172.16.1.120/.121 sont desormais alarm-1/-2,
             // la PROD de Beaufort (node4/node5) — le cluster de test n'existe plus,
             // d'ou la suppression du build type `clustertest` le meme jour.
+            // 2026-11-05 (decision proprietaire) : 7 noeuds. alarm-1/-2 passent en .118/.119 ;
+            // alarm-3/-4 (node6/node7) prennent .120/.121.
             buildConfigField("String", "BACKEND_URLS", "\"" + listOf(
                 "http://51.210.105.102:8000/",                              // NODE3 cloud OVH
-                "http://192.168.1.50:8000/", "http://192.168.1.51:8000/",   // onsite-1/-2 Izeron (node1/node2)
-                "http://172.16.1.120:8000/", "http://172.16.1.121:8000/"    // alarm-1/-2 Beaufort (node4/node5)
+                // onsite-1/-2 Izeron (node1/node2) : bientôt obsolètes
+                "http://192.168.1.50:8000/", "http://192.168.1.51:8000/",
+                "http://172.16.1.118:8000/", "http://172.16.1.119:8000/",   // alarm-1/-2 Beaufort (node4/node5)
+                // alarm-3/-4 (node6/node7) : futurs noeuds d'Izeron, sur le LAN de Beaufort
+                // tant qu'ils n'ont pas déménagé (leur IP changera alors : nouvel APK)
+                "http://172.16.1.120:8000/", "http://172.16.1.121:8000/"
             ).joinToString(",") + "\"")
         }
     }

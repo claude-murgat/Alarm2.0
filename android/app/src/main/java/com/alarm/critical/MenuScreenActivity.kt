@@ -191,6 +191,10 @@ fun formatDate(dateStr: String?): String {
 /** 15.0 -> "15", 2.5 -> "2.5". */
 fun Double.fmt(): String = if (this % 1.0 == 0.0) toLong().toString() else toString()
 
+/** Machine puis noeud (« alarm-3 · node6 ») ; backend d'avant sans `machine` -> le noeud seul. */
+fun nodeLabel(name: String, machine: String?): String =
+    listOfNotNull(machine?.takeIf { it.isNotBlank() && it != name }, name).joinToString(" · ")
+
 /** Lieu d'un noeud (INV-161), ecrit comme le web : "Izeron", "OVH", "-" si inconnu. */
 fun place(location: String?): String = when {
     location.isNullOrBlank() -> "-"

@@ -37,6 +37,8 @@ import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry
 import androidx.test.runner.lifecycle.Stage
 import com.alarm.critical.api.ApiProvider
 import com.alarm.critical.model.AlarmResponse
+import com.alarm.critical.model.ClusterMember
+import com.alarm.critical.model.ClusterResponse
 import com.alarm.critical.model.EscalationEntry
 import com.alarm.critical.model.ModemStatusResponse
 import com.alarm.critical.model.PhoneUpdate
@@ -45,6 +47,7 @@ import com.alarm.critical.model.UserCreateRequest
 import com.alarm.critical.model.UserResponse
 import com.alarm.critical.service.AlarmPollingService
 import org.junit.After
+import org.hamcrest.Matchers.containsString
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -221,6 +224,15 @@ class AlarmMenuAdminTest {
         launchDashboard(saved = false)
 
         onView(withId(R.id.drawerVersion))
+            .check(matches(withText("Version ${BuildConfig.VERSION_NAME} · nœud onsite-1 · node1 (Izeron)")))
+    }
+
+    @Test
+    fun noeud_sans_machine_affiche_le_nom_du_noeud() {
+        fakeApi.clusterResponse = oldBackendCluster
+        launchDashboard(saved = false)
+
+        onView(withId(R.id.drawerVersion))
             .check(matches(withText("Version ${BuildConfig.VERSION_NAME} · nœud node1 (Izeron)")))
     }
 
@@ -350,13 +362,37 @@ class AlarmMenuAdminTest {
     fun ecran_supervision_cluster_kpi_et_audit() {
         launch(SupervisionActivity::class.java)
 
-        shown("node1 · Izeron")
+        shown("CLUSTER — RÉPONSE DE ONSITE-1 · NODE1")  // titre de section en majuscules
+        shown("onsite-1 · node1 · Izeron · bientôt obsolète")
         shown("primaire · running")
-        shown("node3 · OVH")
-        shown("node5 · Beaufort")
+        shown("onsite-2 · node2 · Izeron · bientôt obsolète")
+        shown("vps-1560caaa · node3 · OVH")
+        shown("alarm-2 · node5 · Beaufort")
+        shown("alarm-3 · node6 · Izeron")
+        shown("alarm-4 · node7 · Izeron")
         shown("12 alarmes")
         shown("user_login")
     }
+
+    @Test
+    fun ecran_supervision_backend_sans_machine_affiche_le_noeud() {
+        fakeApi.clusterResponse = oldBackendCluster
+        launch(SupervisionActivity::class.java)
+
+        shown("CLUSTER — RÉPONSE DE NODE1")
+        shown("node1 · Izeron")
+        shown("node4 · Beaufort")
+        onView(withText(containsString("bientôt obsolète"))).check(doesNotExist())
+    }
+
+    /** Backend d'avant le 2026-11-05 : ni `machine`, ni `retiring`, ni `local_machine`. */
+    private val oldBackendCluster = Response.success(ClusterResponse(
+        local_node = "node1", local_location = "izeron",
+        members = listOf(
+            ClusterMember("node1", "leader", "running", "izeron"),
+            ClusterMember("node4", "replica", "streaming", "beaufort"),
+        )
+    ))
 
     @Test
     fun ecran_admin_ferme_sur_403() {
