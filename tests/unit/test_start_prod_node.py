@@ -43,7 +43,10 @@ def h(tmp_path):
 
 
 def run(h, node):
-    env = {**os.environ, "H": str(h), "PATH": f"{h / 'bin'}:{os.environ['PATH']}"}
+    # Sans les COV_CORE_* de pytest-cov : le python3 lance par le script mesurerait sa couverture sans les
+    # branches, et la fusion des mesures (-n auto en CI) echouerait (« Can't combine statement ... with branch »).
+    env = {k: v for k, v in os.environ.items() if not k.startswith("COV_CORE_")}
+    env.update(H=str(h), PATH=f"{h / 'bin'}:{os.environ['PATH']}")
     env.pop("ADVERTISE_HOST", None)
     p = subprocess.run(["bash", str(SCRIPT), "--pull", str(node)], cwd=h / "opt", env=env,
                        capture_output=True, text=True, timeout=30)
