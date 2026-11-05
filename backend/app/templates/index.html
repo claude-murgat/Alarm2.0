@@ -479,7 +479,7 @@
             <!-- INV-176..179 : panne controlee (arret reel d'un noeud T min, restauration armee sur la cible) -->
             <div class="card" id="chaosCard">
                 <h3>Panne contrôlée</h3>
-                <p style="color:#94a3b8;font-size:0.85rem;margin-bottom:10px">Arrête vraiment les conteneurs d'un nœud ou d'un site, ou coupe son tunnel wg0, pendant T minutes, puis restaure (restauration armée sur la cible avant d'agir). Refusé pendant une alarme ou un autre test, si un nœud n'est pas sain, toujours pour deux voteurs etcd (Izeron entier, node6 + node7, Legacy), et pour la coupure réseau de node3 (le runner y vit).</p>
+                <p style="color:#94a3b8;font-size:0.85rem;margin-bottom:10px">Arrête vraiment les conteneurs d'un nœud ou d'un site, ou coupe son tunnel wg0, pendant T minutes, puis restaure (restauration armée sur la cible avant d'agir). Refusé pendant une alarme ou un autre test, si un nœud n'est pas sain, toujours pour deux voteurs etcd (Izeron entier, Legacy), et pour la coupure réseau de node3 (le runner y vit).</p>
                 <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
                     <div class="form-group"><label>Cible</label><select id="chaosTarget"></select></div>
                     <div class="form-group"><label>Mode</label><select id="chaosMode"><option value="stop">Arrêt des conteneurs</option><option value="netcut">Coupure réseau (wg0)</option></select></div>
@@ -1383,7 +1383,7 @@
                     + '<th>App 4G</th><th>App LAN Izeron</th><th>Prévenu par</th></tr>';
                 const cell = (label, v) => `<td data-label="${label}" class="${v ? 'ok' : 'ko'}">${v ? 'oui' : 'non'}</td>`;
                 document.getElementById('resilienceWhatif').innerHTML = d.whatif.map(w => `<tr data-scenario="${escHtml(w.scenario)}">
-                    <td data-label="Scénario"><strong>${escHtml(w.label)}</strong>${w.untestable ? ' <span class="badge offline">non testable : arrêt total</span><br><small style="color:#94a3b8">2ᵉ voteur cloud à prévoir</small>' : ''}</td>
+                    <td data-label="Scénario"><strong>${escHtml(w.label)}</strong>${w.untestable ? ' <span class="badge offline">non testable : arrêt total</span><br><small style="color:#94a3b8">' + (w.scenario === 'legacy_unplugged' ? 'corrigé le jour du déménagement' : '2ᵉ voteur cloud à prévoir') + '</small>' : ''}</td>
                     ${cell('Leader', w.leader_possible)}
                     ${sites.map(s => cell(`Écriture ${place(s)}`, w.writable_from[s])).join('')}
                     ${gwSites.map(s => cell(`Alarmes/SMS ${place(s)}`, w.alarms_created[s])).join('')}

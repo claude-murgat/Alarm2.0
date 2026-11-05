@@ -70,7 +70,7 @@ esac
 MEMBERS = [{"name": f"node{i}", "role": "leader" if i == 3 else "replica",
             "state": "running" if i == 3 else "streaming"} for i in range(1, 8)]  # 7 noeuds depuis le 2026-11-05
 NEXT = {"id": 7, "nodes": ["node4"], "mode": "stop", "minutes": 1, "status": "claimed",
-        "voters": ["node1", "node2", "node3", "node6", "node7"]}  # etcd_voters par defaut depuis le 2026-11-05
+        "voters": ["node1", "node2", "node3"]}
 # relance, politique de compose remise, puis desarmement du filet de CE test (id 7) seulement
 RESTORE = "docker start c1 c2 && docker update --restart=unless-stopped c1 c2 >/dev/null && { pkill -f '[a]larm-chaos-7$' || true; }"
 
@@ -120,7 +120,7 @@ def test_stop_node4_probes_etcd_pins_restart_proves_arming_then_stops_and_restor
     rc, err = run(h)
     assert rc == 0, err
     curl = (h / "curl.log").read_text()
-    for ip in ("10.99.0.2", "10.99.0.3", "10.99.0.1", "10.99.0.6", "10.99.0.7"):  # etcd des 5 voters de /next
+    for ip in ("10.99.0.2", "10.99.0.3", "10.99.0.1"):  # etcd de node1, node2, node3 (voters de /next)
         assert f"GET http://{ip}:2379/health" in curl
     log = ssh_log(h)
     assert all(l.startswith("10.99.0.4 ") for l in log), log

@@ -6,7 +6,7 @@ Creer /etc/alarm-gateway.env avec ces variables pour la production.
 import os
 import socket
 
-# URLs des noeuds backend (cluster Patroni). NODE4 a NODE7 (alarm-1 a alarm-4) optionnels :
+# URLs des noeuds backend (cluster Patroni). NODE4 a NODE7 (non votants) optionnels :
 # vides par defaut, ignores dans ALL_NODE_URLS (dev/CI inchanges).
 NODE1_URL = os.getenv("NODE1_URL", "http://localhost:8000")
 NODE2_URL = os.getenv("NODE2_URL", "http://localhost:8001")

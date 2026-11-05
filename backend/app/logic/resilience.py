@@ -2,8 +2,8 @@
 ou des passerelles tombent.
 
 Topologie de prod : node1/node2 Izeron (« Legacy », bientot retires), node3 OVH, node4/node5
-Beaufort, node6/node7 Izeron ; voteurs etcd node1, node2, node3, node6, node7 (2026-11-05) ; node3
-seul relais entre les sites et facade publique de l'app ; passerelles onsite-2 (sur node2) et
+Beaufort, node6/node7 Izeron ; voteurs etcd node1-3 (node3, node6, node7 apres le demenagement) ;
+node3 seul relais entre les sites et facade publique de l'app ; passerelles onsite-2 (sur node2) et
 alarm-1 (sur node4). Tout vient de SystemConfig (sites.py), rien n'est fige ici.
 `alerted_by` encode les alertes d'aujourd'hui : sans leader, aucun email ne part (INV-085 est
 leader-gated) ; INV-170 (PR 1) ajoutera l'email « aucun leader » depuis chaque noeud.
@@ -139,7 +139,7 @@ def default_scenarios(topo: Topology) -> list:
             out.append(Scenario(f"{s}_down", f"{_place(s)} ({names[0]})", frozenset(names)))
     legacy = [n.name for n in topo.nodes if n.name in topo.retiring]
     if legacy:
-        out.append(Scenario("legacy_unplugged", f"Legacy débranché ({' + '.join(legacy)}) : contrôle du jour du déménagement",
+        out.append(Scenario("legacy_unplugged", f"Legacy débranché ({' + '.join(legacy)}) : ce que corrige le jour du déménagement",
                             frozenset(legacy)))
     for g in topo.gateways:
         out.append(Scenario(f"gateway_{g.site}", f"Passerelle {_place(g.site)} ({g.gateway_id})",

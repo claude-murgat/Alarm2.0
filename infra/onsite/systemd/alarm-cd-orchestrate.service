@@ -12,7 +12,7 @@
 #   sudo systemctl enable --now alarm-cd-orchestrate.timer
 
 [Unit]
-Description=Orchestre la chaine canary 3 -> 5 -> 4 -> 7 -> 6 -> 2 -> 1 (CD V1.5)
+Description=Orchestre la chaine canary 3 -> 7 -> 6 -> 5 -> 4 -> 2 -> 1 (CD V1.5)
 Documentation=https://github.com/claude-murgat/Alarm2.0/blob/master/docs/CD_DESIGN.md
 After=docker.service network-online.target alarm-cd-pull.service
 Wants=network-online.target

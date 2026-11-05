@@ -7,14 +7,12 @@
 #   sur NODE3 cloud (10.99.0.1) : ./scripts/start-prod-node.sh 3
 #   sur alarm-1 (10.99.0.4)     : ./scripts/start-prod-node.sh 4   (non votant)
 #   sur alarm-2 (10.99.0.5)     : ./scripts/start-prod-node.sh 5   (non votant)
-#   sur alarm-3 (10.99.0.6)     : ./scripts/start-prod-node.sh 6   (voteur, futur Izeron)
-#   sur alarm-4 (10.99.0.7)     : ./scripts/start-prod-node.sh 7   (voteur, futur Izeron)
+#   sur alarm-3 (10.99.0.6)     : ./scripts/start-prod-node.sh 6   (non votant, futur Izeron)
+#   sur alarm-4 (10.99.0.7)     : ./scripts/start-prod-node.sh 7   (non votant, futur Izeron)
 #
-# Voteurs etcd (INV-090, 2026-11-05) : 1, 2, 3, 6, 7 -> etcd + Patroni + backend.
-# Nœuds 4 et 5 NON VOTANTS : Patroni + backend seulement, AUCUN conteneur etcd local
-# (`up --no-deps patroni backend`). Ils utilisent les 5 etcd voteurs via WG, cf ETCD_HOSTS.
-# Premier demarrage d'un voteur ajoute a un cluster existant : `etcdctl member add` puis
-# ETCD_INITIAL_CLUSTER_STATE=existing (docs/REPLACE_ONSITE_NODE.md, « Ajouter un voteur »).
+# Nœuds 4 a 7 NON VOTANTS etcd : Patroni + backend seulement, AUCUN conteneur etcd
+# local (`up --no-deps patroni backend`). Ils utilisent les 3 etcd votants
+# (10.99.0.1/.2/.3) via WG, cf ETCD_HOSTS de .env.prod.node4 a 7.
 #
 # Pourquoi ce wrapper :
 # - Evite la confusion entre .env.node1 (DEV/CI mono-host) et .env.prod.node1
@@ -47,8 +45,8 @@ for arg in "$@"; do
       echo "Argument inconnu : $arg"
       echo "Usage : $0 [--pull|--build] <1|2|3|4|5|6|7>"
       echo "  1 = onsite-1 (10.99.0.2), 2 = onsite-2 (10.99.0.3), 3 = NODE3 cloud (10.99.0.1)"
-      echo "  4 = alarm-1 (10.99.0.4), 5 = alarm-2 (10.99.0.5) : non votants, sans etcd local"
-      echo "  6 = alarm-3 (10.99.0.6), 7 = alarm-4 (10.99.0.7) : voteurs etcd"
+      echo "  4 = alarm-1 (10.99.0.4), 5 = alarm-2 (10.99.0.5), 6 = alarm-3 (10.99.0.6),"
+      echo "  7 = alarm-4 (10.99.0.7) : non votants, sans etcd local"
       echo "  --pull  : pull l'image depuis GHCR (PROD V1+, cf docs/CD_DESIGN.md §3)"
       echo "  --build : build l'image localement (defaut, retro-compat avant CD V1)"
       exit 1
@@ -64,11 +62,11 @@ fi
 ENV_FILE=".env.prod.node${NODE}"
 PROJECT="node${NODE}"
 
-# Voteurs 1, 2, 3, 6, 7 : tous les services (etcd inclus), commande inchangee (tableaux vides).
-# Non votants 4 et 5 : Patroni + backend seuls, --no-deps -> jamais de conteneur etcd.
+# Votants 1-3 : tous les services (etcd inclus), commande inchangee (tableaux vides).
+# Non votants 4 a 7 : Patroni + backend seuls, --no-deps -> jamais de conteneur etcd.
 SERVICES=()
 NO_DEPS=()
-if [[ "$NODE" =~ ^[45]$ ]]; then
+if [[ "$NODE" =~ ^[4-7]$ ]]; then
   SERVICES=(patroni backend)
   NO_DEPS=(--no-deps)
 fi

@@ -62,8 +62,8 @@ if [[ -z "$GATEWAY_KEY" ]]; then
   exit 1
 fi
 
-# UP_SERVICES : vide pour les voteurs 1, 2, 3, 6, 7 (etcd compris, INV-090) ; Patroni +
-# backend seuls pour les non votants 4 et 5 (--no-deps : jamais de conteneur etcd).
+# UP_SERVICES : vide pour les votants 1-3 (commande compose inchangee) ; Patroni +
+# backend seuls pour les non votants 4 a 7 (--no-deps : jamais de conteneur etcd).
 UP_SERVICES=""
 case "$NODE" in
   1) WG_IP="10.99.0.2"; NODE_NAME="node1" ;;
@@ -71,8 +71,8 @@ case "$NODE" in
   3) WG_IP="10.99.0.1"; NODE_NAME="node3" ;;
   4) WG_IP="10.99.0.4"; NODE_NAME="node4"; UP_SERVICES=" --no-deps patroni backend" ;;
   5) WG_IP="10.99.0.5"; NODE_NAME="node5"; UP_SERVICES=" --no-deps patroni backend" ;;
-  6) WG_IP="10.99.0.6"; NODE_NAME="node6" ;;
-  7) WG_IP="10.99.0.7"; NODE_NAME="node7" ;;
+  6) WG_IP="10.99.0.6"; NODE_NAME="node6"; UP_SERVICES=" --no-deps patroni backend" ;;
+  7) WG_IP="10.99.0.7"; NODE_NAME="node7"; UP_SERVICES=" --no-deps patroni backend" ;;
 esac
 
 log() { echo "[rollback-$NODE_NAME] $*" >&2; }

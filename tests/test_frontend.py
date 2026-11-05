@@ -1156,13 +1156,13 @@ class TestResiliencePanel:
                 {"name": "node3", "site": "ovh", "voter": True, "reachable": True, "role": "leader", "state": "running", "version": "1.0.1", "machine": "OVH", "retiring": False, "group": "OVH"},
                 {"name": "node4", "site": "beaufort", "voter": False, "reachable": False, "role": "replica", "state": "streaming", "version": None, "machine": "alarm-1", "retiring": False, "group": "Beaufort"},
                 {"name": "node5", "site": "beaufort", "voter": False, "reachable": True, "role": "replica", "state": "streaming", "version": "1.0.1", "machine": "alarm-2", "retiring": False, "group": "Beaufort"},
-                {"name": "node6", "site": "izeron", "voter": True, "reachable": True, "role": "replica", "state": "streaming", "version": "1.0.1", "machine": "alarm-3", "retiring": False, "group": "Izeron"},
+                {"name": "node6", "site": "izeron", "voter": False, "reachable": True, "role": "replica", "state": "streaming", "version": "1.0.1", "machine": "alarm-3", "retiring": False, "group": "Izeron"},
             ],
             "gateways": [
                 {"gateway_id": "onsite-2", "host": "node2", "site": "izeron", "registered": True, "last_seen_s": 125.4},
                 {"gateway_id": "alarm-1", "host": "node4", "site": "beaufort", "registered": False, "last_seen_s": None},
             ],
-            "leader": "node3", "etcd_voters_up": 4,
+            "leader": "node3", "etcd_voters_up": 3,
         },
         "whatif": [
             {"scenario": "ovh_down", "label": "OVH (node3)", "untestable": False, "leader_possible": True,
@@ -1175,6 +1175,12 @@ class TestResiliencePanel:
              "escalation_running": False, "alarms_created": {"izeron": False, "beaufort": False},
              "sms_calls": {"izeron": False, "beaufort": False}, "app_4g_reachable": False, "app_izeron_lan": False,
              "alerted_by": ["email INV-170 (après PR 1)"], "sentence": "Leader : non (1/3 voteurs etcd joignables)."},
+            {"scenario": "legacy_unplugged", "label": "Legacy débranché (node1 + node2) : ce que corrige le jour du déménagement",
+             "untestable": True, "leader_possible": False, "why": "1/3 voteurs etcd joignables",
+             "writable_from": {"izeron": False, "ovh": False, "beaufort": False}, "escalation_running": False,
+             "alarms_created": {"izeron": False, "beaufort": False}, "sms_calls": {"izeron": False, "beaufort": False},
+             "app_4g_reachable": False, "app_izeron_lan": False, "alerted_by": ["email INV-170 (après PR 1)"],
+             "sentence": "Leader : non (1/3 voteurs etcd joignables)."},
         ],
     }
 
@@ -1214,7 +1220,7 @@ class TestResiliencePanel:
         expect(node6).to_have_text("alarm-3 · node6")
         expect(node6.locator(".badge")).to_have_count(0)
         expect(row("node6").locator("td[data-label='Lieu']")).to_have_text("Izeron")
-        expect(row("node6").locator("td[data-label='Voteur']")).to_contain_text("oui")
+        expect(row("node6").locator("td[data-label='Voteur']")).not_to_contain_text("oui")
 
     def test_whatif_table_cells_and_untestable_row(self, dashboard: Page):
         card = self._open(dashboard)
@@ -1230,6 +1236,11 @@ class TestResiliencePanel:
         expect(both).to_contain_text("email INV-170 (après PR 1)")
         expect(both.locator("td.ok")).to_have_count(0)
         expect(ovh).not_to_contain_text("non testable")
+        # INV-175 (2026-11-05) : « Legacy débranché » sans leader aujourd'hui, corrigé le jour du déménagement
+        legacy = card.locator("#resilienceWhatif tr[data-scenario='legacy_unplugged']")
+        expect(legacy).to_contain_text("non testable : arrêt total")
+        expect(legacy).to_contain_text("corrigé le jour du déménagement")
+        expect(legacy).not_to_contain_text("2ᵉ voteur cloud")
 
     def test_refresh_button_reloads(self, dashboard: Page):
         card = self._open(dashboard)

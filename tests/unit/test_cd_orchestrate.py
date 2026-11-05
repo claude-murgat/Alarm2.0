@@ -7,8 +7,7 @@ aucun site, pendant 2 jours (4 versions jamais deployees), plus 1 h de cooldown 
 Le vrai script tourne (copie dans un dossier temporaire, a cote d'un faux `alarm-cd-canary.sh`
 resolu via son SCRIPT_DIR) contre de faux `docker` / `ssh` (PATH) qui journalisent leurs appels.
 
-7 noeuds depuis le 2026-11-05. node6/node7 (alarm-3/alarm-4) voteurs etcd le meme jour (INV-090) :
-VOTERS = 1 2 3 6 7, ordre `3 5 4 7 6 2 1` (non votants, puis nouveaux voteurs, puis voteurs Legacy).
+7 noeuds depuis le 2026-11-05 (node6/node7 = alarm-3/alarm-4, non votants) : ordre `3 7 6 5 4 2 1`.
 """
 import fcntl
 import os
@@ -93,39 +92,26 @@ def test_beaufort_down_does_not_block_other_sites_then_catches_up(cd):
     assert at_digest(cd) == [1, 2, 3, 4, 5, 6, 7]
 
 
-def test_node6_node7_unreachable_no_voter_restarted(cd):
-    """2026-11-05 : alarm-3/alarm-4 voteurs ; injoignables -> aucun voteur (node3, node2, node1 compris)."""
+def test_node6_node7_not_yet_installed_do_not_block_the_others(cd):
+    """2026-11-05 : alarm-3/alarm-4 annonces avant leur installation : reportes a chaque passage."""
     rc, deployed, err = run(cd, down=(6, 7))
     assert rc == 0, err
-    assert deployed == [5, 4]
+    assert deployed == [3, 5, 4, 2, 1]
     assert outcome(cd) == "partial"
-    assert "quorum" in err
     assert "node7 (Izeron) injoignable : reporte au prochain passage" in err
     assert "node6 (Izeron) injoignable : reporte au prochain passage" in err
 
-    rc, deployed, err = run(cd)  # revenus : tous les voteurs au tick suivant, les non votants sautes
-    assert (rc, deployed) == (0, [3, 7, 6, 2, 1]), err
+    rc, deployed, err = run(cd)  # installes : deployes au tick suivant, les autres sautes
+    assert (rc, deployed) == (0, [7, 6]), err
     assert outcome(cd) == "success"
 
 
-@pytest.mark.parametrize("voter", [2, 7])
-def test_voter_down_no_voter_restarted_non_voters_deployed(cd, voter):
-    rc, deployed, err = run(cd, down=(voter,))
+def test_voter_down_no_voter_restarted_non_voters_deployed(cd):
+    rc, deployed, err = run(cd, down=(2,))
     assert rc == 0, err
-    assert deployed == [5, 4]
+    assert deployed == [7, 6, 5, 4]
     assert outcome(cd) == "partial"
     assert "quorum" in err
-
-
-def test_voter_at_digest_but_unreachable_blocks_the_other_voters(cd):
-    """Le preflight couvre TOUS les voteurs des qu'un voteur est a deployer, meme ceux deja a jour."""
-    for n in IP:
-        (cd / "state" / f"node{n}.digest").write_text(DIGEST if n != 1 else "sha256:old")
-    rc, deployed, err = run(cd, down=(7,))
-    assert (rc, deployed) == (0, []), err
-    assert outcome(cd) == "partial"
-    assert "quorum" in err
-    assert "10.99.0.7" in (cd / "ssh.log").read_text().split()
 
 
 def test_canary_failure_halts_chain_and_cooldown_holds(cd):
@@ -142,7 +128,7 @@ def test_canary_failure_halts_chain_and_cooldown_holds(cd):
     # Cooldown (1 h) expire : la chaine est retentee.
     (cd / "state" / "orchestrate.state").write_text(f"{DIGEST}\tfailure\t{int(time.time()) - 3601}\n")
     rc, deployed, err = run(cd)
-    assert (rc, deployed) == (0, [3, 5, 4, 7, 6, 2, 1]), err
+    assert (rc, deployed) == (0, [3, 7, 6, 5, 4, 2, 1]), err
     assert outcome(cd) == "success"
 
 
@@ -178,7 +164,7 @@ def test_unready_beaufort_node_is_deferred_without_halting_izeron(cd):
     """2026-11-02 : alarm-1 sur sa 4G de secours, DNS mort, registre illisible -> canary exit 3."""
     rc, deployed, err = run(cd, unready=(4,))
     assert rc == 0, err
-    assert deployed == [3, 5, 4, 7, 6, 2, 1]  # 4 tente, reporte ; les voteurs deployes quand meme
+    assert deployed == [3, 7, 6, 5, 4, 2, 1]  # 4 tente, reporte ; 2 et 1 deployes quand meme
     assert outcome(cd) == "partial"
     assert at_digest(cd) == [1, 2, 3, 5, 6, 7]
     assert "node4 (Beaufort) pas pret : reporte au prochain passage" in err
@@ -192,26 +178,11 @@ def test_unready_voter_defers_the_following_voters(cd):
     """Un votant pas pret est peut-etre tombe : redemarrer un autre votant perdrait le quorum."""
     rc, deployed, err = run(cd, unready=(3,))
     assert rc == 0, err
-    assert deployed == [3, 5, 4]  # 7, 6, 2 et 1 (voteurs) reportes sans etre touches
+    assert deployed == [3, 7, 6, 5, 4]  # 2 et 1 (votants) reportes sans etre touches
     assert outcome(cd) == "partial"
-    assert at_digest(cd) == [4, 5]
-    assert "node7 (Izeron, votant) reporte" in err
+    assert at_digest(cd) == [4, 5, 6, 7]
     assert "node2 (Izeron, votant) reporte" in err
 
     rc, deployed, err = run(cd)
-    assert (rc, deployed) == (0, [3, 7, 6, 2, 1]), err
-    assert outcome(cd) == "success"
-
-
-def test_unready_new_voter_defers_the_following_voters(cd):
-    """2026-11-05 : node7 (alarm-4) est un voteur : pas pret, il reporte 6, 2 et 1 comme node3."""
-    rc, deployed, err = run(cd, unready=(7,))
-    assert rc == 0, err
-    assert deployed == [3, 5, 4, 7]
-    assert outcome(cd) == "partial"
-    assert at_digest(cd) == [3, 4, 5]
-    assert "node6 (Izeron, votant) reporte" in err
-
-    rc, deployed, err = run(cd)
-    assert (rc, deployed) == (0, [7, 6, 2, 1]), err
+    assert (rc, deployed) == (0, [3, 2, 1]), err
     assert outcome(cd) == "success"

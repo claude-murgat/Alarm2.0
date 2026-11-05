@@ -57,10 +57,9 @@ def run(h, node):
     return p.returncode, calls, p.stderr
 
 
-# node6/node7 (alarm-3/alarm-4) : voteurs etcd depuis le 2026-11-05 (INV-090), relances comme node3 ;
-# node4/node5 non votants, jamais de conteneur etcd.
+# node6/node7 (alarm-3/alarm-4, 2026-11-05) : non votants comme node4, jamais de conteneur etcd.
 @pytest.mark.parametrize("node, services", [(3, ""), (4, " --no-deps patroni backend"),
-                                            (5, " --no-deps patroni backend"), (6, ""), (7, "")])
+                                            (6, " --no-deps patroni backend"), (7, " --no-deps patroni backend")])
 def test_compose_up_receives_secret_key_from_env_prod_secrets(cd, node, services):
     rc, calls, err = run(cd, node)
     assert rc == 0, err

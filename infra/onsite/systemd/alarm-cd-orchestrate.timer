@@ -11,7 +11,7 @@
 # pendant un soak en cours et n'apporte rien (la promo :stable est rare).
 
 [Unit]
-Description=Timer pour orchestrer la chaine canary 3 -> 5 -> 4 -> 7 -> 6 -> 2 -> 1 (CD V1.5)
+Description=Timer pour orchestrer la chaine canary 3 -> 7 -> 6 -> 5 -> 4 -> 2 -> 1 (CD V1.5)
 Documentation=https://github.com/claude-murgat/Alarm2.0/blob/master/docs/CD_DESIGN.md
 
 [Timer]
