@@ -63,7 +63,8 @@ class DashboardActivity : AppCompatActivity() {
     private var lastBandeauCase: String? = null
 
     // INV-ANDROID-705 : mise a jour integree
-    private var nextUpdateCheck = 0L
+    private var nextUpdateCheck = Long.MAX_VALUE  // INV-ANDROID-705 : premiere verification a onResume
+    private var updateCheck: Job? = null
     private var readyUpdate: Pair<String, File>? = null
     private var updatePostponed = false
 
@@ -281,12 +282,12 @@ class DashboardActivity : AppCompatActivity() {
         }
     }
 
-    /** INV-ANDROID-705 : a l'ouverture puis toutes les 6 h ; bandeau quand un APK verifie est pret. */
+    /** INV-ANDROID-705 : a chaque retour au premier plan puis toutes les 15 min ; bandeau quand un APK verifie est pret. */
     private fun checkUpdateIfDue() {
         val now = android.os.SystemClock.elapsedRealtime()
-        if (now < nextUpdateCheck) return
+        if (now < nextUpdateCheck || updateCheck?.isActive == true) return  // jamais deux telechargements du meme APK a la fois
         nextUpdateCheck = now + AppUpdate.CHECK_INTERVAL_MS
-        lifecycleScope.launch {
+        updateCheck = lifecycleScope.launch {
             val update = AppUpdate.findVerifiedUpdate(this@DashboardActivity) ?: return@launch
             readyUpdate = update
             if (!updatePostponed) showUpdate("Mise à jour disponible : ${update.first}")
@@ -379,6 +380,7 @@ class DashboardActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        nextUpdateCheck = 0L  // INV-ANDROID-705 : app rouverte, les serveurs ont pu etre mis a jour entre-temps
         syncOncallFromChain()
         askBatteryOptimizationExemptionOnce()
         askFullScreenIntentPermissionOnce()
