@@ -32,6 +32,7 @@ case " $(cat "$H/down" 2>/dev/null) " in *" $ip "*) exit 255 ;; esac
 """
 CANARY = r"""#!/usr/bin/env bash
 echo "$2" >> "$H/canary.log"
+printf '%s\n' "$@" > "$H/args.$2"
 case " $(cat "$H/fail" 2>/dev/null) " in *" $2 "*) exit 2 ;; esac
 case " $(cat "$H/unready" 2>/dev/null) " in *" $2 "*) exit 3 ;; esac  # prerequis KO, rien touche
 """
@@ -186,3 +187,18 @@ def test_unready_voter_defers_the_following_voters(cd):
     rc, deployed, err = run(cd)
     assert (rc, deployed) == (0, [3, 2, 1]), err
     assert outcome(cd) == "success"
+
+
+def test_canary_told_the_nodes_still_to_restart_and_the_voters(cd):
+    """INV-187 : cible leader Patroni -> le canary bascule d'abord vers un replica sain, de preference
+    pas un noeud encore a redemarrer dans ce passage, puis un votant etcd."""
+    rc, deployed, err = run(cd)
+    assert rc == 0, err
+    args = {n: (cd / f"args.{n}").read_text().split("\n") for n in deployed}
+
+    def opt(n, name):
+        return args[n][args[n].index(name) + 1]
+
+    assert [opt(n, "--pending") for n in deployed] == [
+        "7 6 5 4 2 1", "6 5 4 2 1", "5 4 2 1", "4 2 1", "2 1", "1", ""]
+    assert {opt(n, "--voters") for n in deployed} == {"1 2 3"}

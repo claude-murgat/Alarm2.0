@@ -6,8 +6,9 @@ Cf docs/CD_DESIGN.md §6 (Observabilité du déploiement). Le contrat doit garan
   - kind/status sont validés (pas de valeur arbitraire en table)
   - GET /events est admin-only
   - GET /state agrège correctement le dernier event par (node, image)
+  - kind=switchover accepté (INV-187 : bascule Patroni avant de redémarrer le leader)
 
-Budget P4 : 5 tests max. Ici : 5 tests.
+Budget P4 : 5 tests max par PR. Ici : 5 tests (PR 4) + 1 (INV-187).
 """
 import os
 
@@ -141,3 +142,17 @@ def test_post_event_on_replica_returns_503(client):
         assert "replica" in r.json().get("detail", "").lower(), r.json()
     finally:
         is_leader.set()
+
+
+def test_post_switchover_event_accepted(client):
+    """INV-187 : le canary trace la bascule Patroni planifiée faite avant de redémarrer le leader."""
+    body = {
+        "node": "node1",
+        "image": "alarm-backend",
+        "kind": "switchover",
+        "status": "success",
+        "actor": "orchestrator-canary",
+        "details": {"from": "node1", "to": "node2"},
+    }
+    r = client.post("/api/deployments/events", json=body, headers=_gw_headers())
+    assert r.status_code == 201, r.text
