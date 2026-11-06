@@ -197,7 +197,8 @@ un KO laisse `alarm-node-check.service` en `failed`. Lecture seule : il ne corri
 Contrôlé : modèle et BIOS, UEFI, entrées legacy, Secure Boot, première entrée de démarrage, Debian 13,
 `dpkg --audit`, DNS de secours, ufw, chrony, watchdog systemd, journal persistant, ModemManager,
 Docker, `wg0` (adresse du plan, poignée de main NODE3 < 5 min), clé/site/contact sec de la
-passerelle (la clé n'est jamais affichée), units `enabled`. **Non contrôlable depuis Linux** : AC
+passerelle (la clé n'est jamais affichée), units `enabled`, `archive_timeout` de la configuration
+dynamique Patroni (§9.6, INV-188 ; INFO si Patroni ne répond pas). **Non contrôlable depuis Linux** : AC
 Recovery, Wake on LAN, mot de passe du BIOS (§3, sur place).
 
 KO attendus au premier passage (inventaire du 2026-11-06) : `bios` sur alarm-1 et alarm-2,
@@ -268,6 +269,25 @@ leader les **re-clone seul, un par un**, après 10 min de blocage chacun (il suf
 innocente le leader). Rien à faire : suivre `patronictl list` (onglet Cluster du web). `patronictl
 reinit` à la main seulement si rien ne bouge (cluster en pause, aucun replica sain).
 
+### 9.6. Configuration dynamique Patroni (etcd)
+`patroni/patroni.yml` ne sert qu'à la création du cluster ; la configuration qui fait foi est celle
+stockée dans etcd, commune à tous les membres. Valeurs attendues : `ttl` 20, `loop_wait` 8,
+`retry_timeout` 7, `maximum_lag_on_failover` 1048576, `max_wal_senders` 10, `max_replication_slots`
+10, `wal_keep_size` 128MB, `max_slot_wal_keep_size` 8GB, `archive_mode` on avec `archive_command`
+'true' (toléré : rien n'est archivé), **`archive_timeout` 0**.
+- Lire : `docker exec nodeN-patroni-1 patronictl -c /etc/patroni/patroni.yml show-config` (ou
+  `curl -s http://10.99.0.N:8008/config`).
+- Changer : `… patronictl … edit-config -p <paramètre>=<valeur> --force`. Paramètre `sighup`
+  (`archive_timeout`, `wal_keep_size`…) : reload, appliqué seul sur tous les membres. Paramètre
+  `postmaster` (`max_wal_senders`…) : « Pending restart », redémarrer les replicas puis le leader après
+  bascule (détail : [`CD_DESIGN.md`](CD_DESIGN.md) §9quater).
+
+**2026-11-06** : `archive_timeout '10'` avec `archive_command 'true'` forçait un segment WAL de 16 Mo
+toutes les 10 s (~6 Go/h vers les 6 replicas, 4,6 Go de `pg_wal` sur le leader, replicas de Beaufort
+re-clonés). Corrigé à chaud par `edit-config -p archive_timeout=0 --force` (reload, ~6 Ko/min de WAL
+ensuite). Désormais détecté par `alarm-node-check` (`patroni_archive`, INV-188). Un `archive_timeout` non nul
+n'a de sens qu'avec de vraies sauvegardes (pgBackRest, projet à venir).
+
 ---
 
 ## 10. Historique
@@ -276,3 +296,4 @@ reinit` à la main seulement si rien ne bouge (cluster en pause, aucun replica s
   / A19 / A19, Secure Boot sur alarm-3 seulement ; incident alarm-2 (Legacy + entrée Windows) ; standard
   BIOS A19, Secure Boot activé ; contrôle quotidien `alarm-node-check` (INV-186) ; scripts de
   provisioning versionnés (`scripts/provision/`).
+- **2026-11-06 (suite)** : incident `archive_timeout` (§9.6) ; contrôle `patroni_archive` (INV-188).

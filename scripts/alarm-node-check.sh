@@ -80,6 +80,23 @@ chk passerelle_cle "GATEWAY_KEY $kd" [ "$kd" = definie ]
 s=$(gv GATEWAY_SITE); chk passerelle_site "GATEWAY_SITE=${s:-absent} (attendu $site)" [ "$s" = "$site" ]
 c=$(gv DRY_CONTACT_SOURCE); chk passerelle_contact_sec "DRY_CONTACT_SOURCE=${c:-absent} (attendu host)" [ "$c" = host ]
 
+# Patroni (INV-188) : configuration dynamique (etcd), lue sur l'API du membre local. Le port 8008 est
+# lie a ADVERTISE_HOST (IP WireGuard), pas a 127.0.0.1. Un archive_timeout sans vrai archivage force
+# un segment WAL de 16 Mo toutes les N s (incident du 2026-11-06 : 6 Go/h vers les replicas).
+pc=$(curl -fsS --max-time 5 "http://$wg_ip:8008/config" 2>/dev/null | python3 -c '
+import json, sys
+p = json.load(sys.stdin).get("postgresql", {}).get("parameters", {})
+print(p.get("archive_timeout") or 0); print(p.get("archive_command") or "")' 2>/dev/null)
+if [ -z "$pc" ]; then
+  out INFO patroni_archive "API Patroni http://$wg_ip:8008/config injoignable ou illisible : non controle"
+else
+  { read -r at; IFS= read -r ac; } <<<"$pc"
+  forced=1; [[ "$at" =~ ^0+[a-z]*$ ]] && forced=0  # 0, 0s, 0min : aucune bascule forcee
+  case "$ac" in ""|true|/bin/true|/usr/bin/true|:) real=0 ;; *) real=1 ;; esac
+  chk patroni_archive "archive_timeout=$at archive_command='$ac' (attendu archive_timeout=0 sans vrai archivage : patronictl edit-config -p archive_timeout=0)" \
+    [ "$forced$real" != 10 ]
+fi
+
 for unit in $STD_UNITS; do
   e=$(systemctl is-enabled "$unit" 2>/dev/null); chk "unit:$unit" "${e:-absente}" [ "$e" = enabled ]
 done
