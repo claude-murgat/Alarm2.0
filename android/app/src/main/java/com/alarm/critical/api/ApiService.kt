@@ -107,6 +107,10 @@ interface ApiService {
         @Body request: Map<String, Double>
     ): Response<Map<String, Double>>
 
+    /** INV-ANDROID-705 : version du serveur, pour la mise a jour integree. */
+    @GET("health")
+    suspend fun getHealth(): Response<HealthResponse>
+
     @GET("api/cluster")
     suspend fun getCluster(): Response<ClusterResponse>
 

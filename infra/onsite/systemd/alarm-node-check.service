@@ -1,0 +1,18 @@
+# /etc/systemd/system/alarm-node-check.service
+# INV-186 : conformite de la machine au standard sur site (docs/STANDARD_MACHINE.md), lecture seule.
+# Lance chaque jour par alarm-node-check.timer. Ecarts : journalctl -u alarm-node-check -p warning
+# (les lignes KO sont au niveau warning ; un KO laisse l'unit « failed »).
+# Pas de [Install] : active uniquement par le timer.
+[Unit]
+Description=Alarm 2.0 - Conformite de la machine au standard sur site (INV-186)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/alarm-node-check --journal
+TimeoutStartSec=120
+StandardOutput=journal
+StandardError=journal
+# <4> / <6> en tete de ligne = niveau warning / info dans le journal (prefixe retire).
+SyslogLevelPrefix=yes

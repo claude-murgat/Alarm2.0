@@ -70,6 +70,9 @@ data class FcmTokenDeleteRequest(val device_id: String)
 
 data class HeartbeatResponse(val status: String, val timestamp: String)
 
+/** GET /health (INV-164) : `version` = release du serveur, ex. "1.8.0" (INV-ANDROID-705). */
+data class HealthResponse(val version: String?)
+
 /** INV-ANDROID-606 : une entree de GET /api/config/escalation (public). */
 data class EscalationEntry(val position: Int, val user_id: Int)
 
@@ -113,7 +116,8 @@ data class PhoneUpdate(val phone_number: String)
 /** POST /api/config/escalation/bulk : la chaine complete, dans l'ordre. */
 data class EscalationBulkRequest(val user_ids: List<Int>)
 
-/** GET /api/cluster (INV-161). `machine`, `retiring`, `local_machine` : absents d'un backend d'avant le 2026-11-05. */
+/** GET /api/cluster (INV-161). `machine`, `retiring`, `local_machine` : absents d'un backend d'avant le 2026-11-05 ;
+ *  `group` (« Izeron », « Legacy (Izeron) »...) : absent d'un backend qui ne l'envoie pas encore. */
 data class ClusterResponse(
     val local_node: String?, val local_location: String?, val members: List<ClusterMember>?,
     val local_machine: String? = null,
@@ -121,7 +125,7 @@ data class ClusterResponse(
 
 data class ClusterMember(
     val name: String, val role: String?, val state: String?, val location: String?,
-    val machine: String? = null, val retiring: Boolean? = null,
+    val machine: String? = null, val retiring: Boolean? = null, val group: String? = null,
 )
 
 /** GET /api/stats/kpi. */

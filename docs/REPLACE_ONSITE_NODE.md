@@ -24,9 +24,9 @@ Cible (décision du propriétaire du 2026-11-05 ; remplace le plan du 2026-10-22
 Pour remplacer un voteur, on garde le **même `NODE_NAME` et la même IP WireGuard** que le nœud remplacé. Ainsi `.env.prod.nodeN`, `ETCD_INITIAL_CLUSTER`, l'orchestrateur CD (`alarm-cd-orchestrate`, `NODES_ORDER=(3 5 4 7 6)`, `VOTERS=(3 6 7)`) et les URLs de l'app ne changent pas. Seuls changent la clé WireGuard, les clés SSH et l'IP LAN (et `node_machines`, pour l'affichage).
 
 ## 0. Avant le jour J (nouvelle machine prête, hors cluster)
-- Provisionnement de base fait : `docs/PROVISIONING_ONSITE.md` §2-§12, Docker §14, `/opt/alarm` cloné, `infra/onsite/install.sh` lancé.
+- Machine au standard ([`docs/STANDARD_MACHINE.md`](STANDARD_MACHINE.md)), ajoutée au plan (`STD_PLAN` de `infra/onsite/standard.env`, avec le `NODE_NAME` et l'IP WireGuard du nœud remplacé), provisionnée par [`scripts/provision/`](../scripts/provision/README.md) jusqu'à `30-secrets.sh` (`00-base`, `10-harden`, `install.sh`, clé WireGuard). `sudo alarm-node-check` : seuls `wg0`/`wg0_node3` peuvent être KO tant que l'ancien nœud porte l'IP.
 - Passerelle : posée et démarrée par `install.sh` sur **chaque** machine (INV-182) ; poser `GATEWAY_KEY` et `GATEWAY_SITE` dans `/etc/alarm-gateway.env` (`docs/PROVISIONING_ONSITE.md` §21). Si la machine porte le modem : modem testé (SMS + appel).
-- Timers CD installés : `alarm-cd-pull` (`infra/onsite/systemd/alarm-cd-pull.*`, **non installé par `install.sh`**), `alarm-host-sync`, `alarm-gateway-sync`.
+- Timers CD installés : `alarm-cd-pull` (`infra/onsite/systemd/alarm-cd-pull.*`, **non installé par `install.sh`** : posé par `scripts/provision/10-harden.sh`), `alarm-host-sync`, `alarm-gateway-sync`.
 - Images `:stable` déjà en cache (`alarm-cd-pull` a tourné une fois).
 - Clé WireGuard prod générée (`wg genkey`), mais `wg0` prod **pas encore monté** : l'IP 10.99.0.X est encore portée par l'ancien nœud.
 - Secrets copiés depuis l'ancien nœud, mode 600, propriétaire `alarm` :
@@ -105,7 +105,7 @@ Un nœud non votant n'a **aucun conteneur etcd** : son Patroni utilise les 3 etc
 
 **Avant l'arrivée de node6/node7** (le dépôt les annonce déjà) : chaque passage du CD les trouve injoignables et les reporte (`partial`, sans cooldown, les 5 autres sont déployés, INV-167) ; la panne contrôlée refuse toute demande (« membre absent du cluster Patroni : node6 », INV-176) — pour tester avant leur arrivée, enregistrer `node_locations` sans eux (SystemConfig).
 
-1. **Avant** : comme le §0 ci-dessus (provisionnement, timers CD, `.env.prod.secrets`, clé SSH de l'orchestrateur). WireGuard : générer la clé de la machine, déclarer son peer `10.99.0.X/32` **sur NODE3 seulement** (relais, `infra/onsite/peers.md`), noter la clé publique dans `peers.md`. `wg0` monté avec 10.99.0.X, puis vérifier que les votants répondent à travers le relais : `curl -s http://10.99.0.1:2379/health` (idem `.2`, `.3`).
+1. **Avant** : comme le §0 ci-dessus (provisionnement, timers CD, `.env.prod.secrets`, clé SSH de l'orchestrateur), dans l'ordre de [`scripts/provision/README.md`](../scripts/provision/README.md). WireGuard (`20-wireguard-node.sh` sur la machine, `21-wireguard-node3.sh` sur NODE3) : générer la clé de la machine, déclarer son peer `10.99.0.X/32` **sur NODE3 seulement** (relais, `infra/onsite/peers.md`), noter la clé publique dans `peers.md`. `wg0` monté avec 10.99.0.X, puis vérifier que les votants répondent à travers le relais : `curl -s http://10.99.0.1:2379/health` (idem `.2`, `.3`).
 2. **Capacité de réplication, une seule fois avant le 1er ajout** : 4 replicas + un clonage dépassent `max_wal_senders=5`. `patroni/patroni.yml` (10) ne sert qu'au bootstrap. À 7 nœuds (6 replicas + un clonage = 7), 10 suffit encore : avant node6/node7, vérifier seulement `$P show-config` (`max_wal_senders: 10`, `max_replication_slots: 10`). Sur le cluster en service, sans alarme active :
    ```bash
    P="docker exec node3-patroni-1 patronictl -c /etc/patroni/patroni.yml"
@@ -113,7 +113,7 @@ Un nœud non votant n'a **aucun conteneur etcd** : son Patroni utilise les 3 etc
    $P list                                # « Pending restart » sur chaque membre
    $P restart alarm-cluster <replica> --force   # chaque replica d'abord, le leader en dernier
    ```
-3. **Démarrer** : `cd /opt/alarm && ./scripts/start-prod-node.sh --pull N` (N = 4 ou 5 ; 6 et 7 sont voteurs depuis le jour du déménagement). Le script ne lance que `patroni` et `backend` (`--no-deps`). Ni `ETCD_INITIAL_CLUSTER_STATE`, ni `etcdctl member add` : le nœud n'est pas membre etcd. Patroni se clone en replica depuis le leader.
+3. **Démarrer** : `cd /opt/alarm && ./scripts/start-prod-node.sh --pull N` (N = 4 ou 5 ; 6 et 7 sont voteurs depuis le jour du déménagement), ou `sudo bash scripts/provision/40-join.sh` qui le lance et attend `streaming`. Le script ne lance que `patroni` et `backend` (`--no-deps`). Ni `ETCD_INITIAL_CLUSTER_STATE`, ni `etcdctl member add` : le nœud n'est pas membre etcd. Patroni se clone en replica depuis le leader.
 4. **Vérifier** :
    ```bash
    docker compose --env-file .env.prod.nodeN -p nodeN ps   # patroni + backend, PAS d'etcd

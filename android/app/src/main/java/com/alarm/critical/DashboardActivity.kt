@@ -20,6 +20,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.drawerlayout.widget.DrawerLayout
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -32,12 +33,15 @@ import com.alarm.critical.model.FcmTokenDeleteRequest
 import com.alarm.critical.model.sitesLabel
 import com.alarm.critical.service.AlarmPollingService
 import com.alarm.critical.service.AlarmSoundManager
+import com.alarm.critical.update.AppUpdate
+import com.alarm.critical.update.UpdateProvider
 import com.alarm.critical.util.AppLogger
 import com.alarm.critical.view.ArcTimerView
 import com.alarm.critical.view.SignalBarsView
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.*
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -57,6 +61,11 @@ class DashboardActivity : AppCompatActivity() {
     // INV-ANDROID-306/307 : track le dernier cas affiche du bandeau "Connexion perdue"
     // pour ne logger qu'aux TRANSITIONS (eviter spam 1 ligne/seconde).
     private var lastBandeauCase: String? = null
+
+    // INV-ANDROID-705 : mise a jour integree
+    private var nextUpdateCheck = 0L
+    private var readyUpdate: Pair<String, File>? = null
+    private var updatePostponed = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -182,10 +191,14 @@ class DashboardActivity : AppCompatActivity() {
             acknowledgeCurrentAlarm()
         }
 
+        findViewById<Button>(R.id.updateButton).setOnClickListener { installUpdate() }
+
         // Mise a jour du statut toutes les secondes
         statusUpdateJob = lifecycleScope.launch {
             while (isActive) {
                 updateStatus()
+                checkUpdateIfDue()
+                if (updatePostponed && !alarmInProgress()) installUpdate()
                 delay(1000)
             }
         }
@@ -265,6 +278,63 @@ class DashboardActivity : AppCompatActivity() {
             val cluster = try { ApiProvider.service.getCluster().body() } catch (e: Exception) { null }
             versionText.text = "Version ${BuildConfig.VERSION_NAME} · nœud ${cluster?.local_node?.let { nodeLabel(it, cluster.local_machine) } ?: "?"}" +
                 (cluster?.local_location?.takeIf { it.isNotBlank() }?.let { " (${place(it)})" } ?: "")
+        }
+    }
+
+    /** INV-ANDROID-705 : a l'ouverture puis toutes les 6 h ; bandeau quand un APK verifie est pret. */
+    private fun checkUpdateIfDue() {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now < nextUpdateCheck) return
+        nextUpdateCheck = now + AppUpdate.CHECK_INTERVAL_MS
+        lifecycleScope.launch {
+            val update = AppUpdate.findVerifiedUpdate(this@DashboardActivity) ?: return@launch
+            readyUpdate = update
+            if (!updatePostponed) showUpdate("Mise à jour disponible : ${update.first}")
+        }
+    }
+
+    private fun showUpdate(text: String) {
+        findViewById<TextView>(R.id.updateBannerText).text = text
+        findViewById<View>(R.id.updateBanner).visibility = View.VISIBLE
+    }
+
+    /** Alarme en cours (acquittee ou non) ou sonnerie : jamais d'installation (telephone d'astreinte). */
+    private fun alarmInProgress() = AlarmPollingService.alarms.isNotEmpty() || AlarmSoundManager(this).isPlaying()
+
+    /** Bouton « Mettre a jour », relance a la fin de l'alarme si elle a ete reportee. */
+    private fun installUpdate() {
+        val (version, apk) = readyUpdate ?: return
+        if (alarmInProgress()) {
+            if (!updatePostponed) AppLogger.log("MiseAJour", "installation de $version reportee : alarme en cours")
+            updatePostponed = true
+            showUpdate("Mise à jour $version reportée : alarme en cours")
+            return
+        }
+        updatePostponed = false
+        showUpdate("Mise à jour disponible : $version")
+        val backend = UpdateProvider.backend
+        if (!backend.canInstall(this)) {
+            AppLogger.log("MiseAJour", "autorisation « applis inconnues » absente : invite affichee")
+            AlertDialog.Builder(this)
+                .setTitle("Autorisation nécessaire")
+                .setMessage("Pour installer la mise à jour, Android doit autoriser Alarme Murgat à installer " +
+                    "des applications (une seule fois). Activez « Autoriser cette source », puis revenez " +
+                    "appuyer sur « Mettre à jour ».")
+                .setPositiveButton("Ouvrir les réglages") { _, _ ->
+                    startActivity(Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        android.net.Uri.parse("package:$packageName")))
+                }
+                .setNegativeButton("Annuler", null)
+                .show()
+            return
+        }
+        AppLogger.log("MiseAJour", "installation de $version lancee")
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                backend.install(this@DashboardActivity, apk)
+            } catch (e: Exception) {
+                AppLogger.log("MiseAJour", "installation de $version impossible : ${e.message}")
+            }
         }
     }
 

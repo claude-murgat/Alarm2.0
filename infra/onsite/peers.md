@@ -49,8 +49,8 @@ restent sur leurs machines respectives uniquement (`/etc/wireguard/privatekey` m
 | `10.99.0.1` (NODE3) | `GDN64aY60tBSWKN4qA6GBd/JhistmDP2oF1qN0Xj9gw=` | 2026-05-02 |
 | `10.99.0.2` (onsite-1) | `iO0HHo7Lbuvqs4rV6C456dSm8d+T3ef96CHA9m32CHE=` | 2026-05-06 |
 | `10.99.0.3` (onsite-2) | `IdbW+fqdOhFPSIO6XRp5oego+U/shypsOllOjYHQhi8=` | 2026-05-01 |
-| `10.99.0.6` (alarm-3) | _clé à générer au provisioning_ | — |
-| `10.99.0.7` (alarm-4) | _clé à générer au provisioning_ | — |
+| `10.99.0.6` (alarm-3) | `kO/o+xzXVeKNQywK4UDupDRdnM7mZ5cBYauo32OxU2A=` | 2026-11-05 |
+| `10.99.0.7` (alarm-4) | `q4Lcr+AqCZBEDwyz052eWqRfY4D9Vg3gfoFi4dioFWY=` | 2026-11-05 |
 
 ## Mesh handshakes vérifiés (mesh 3-way complet)
 

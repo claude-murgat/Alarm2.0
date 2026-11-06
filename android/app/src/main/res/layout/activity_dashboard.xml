@@ -217,6 +217,37 @@
                     android:layout_marginTop="10dp" />
             </LinearLayout>
 
+            <!-- ==================== MISE A JOUR (INV-ANDROID-705) ==================== -->
+            <LinearLayout
+                android:id="@+id/updateBanner"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:background="@drawable/card_default"
+                android:padding="16dp"
+                android:visibility="gone"
+                android:layout_marginBottom="12dp">
+
+                <TextView
+                    android:id="@+id/updateBannerText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textSize="14sp"
+                    android:textColor="#f1f5f9"
+                    android:textStyle="bold" />
+
+                <Button
+                    android:id="@+id/updateButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="42dp"
+                    android:text="Mettre à jour"
+                    android:backgroundTint="#00A2E5"
+                    android:textColor="#FFFFFF"
+                    android:textSize="14sp"
+                    android:textStyle="bold"
+                    android:layout_marginTop="10dp" />
+            </LinearLayout>
+
             <!-- ==================== CARTE ALARME HERO ==================== -->
             <LinearLayout
                 android:id="@+id/alarmCard"

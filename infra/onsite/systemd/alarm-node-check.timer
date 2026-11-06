@@ -1,0 +1,14 @@
+# /etc/systemd/system/alarm-node-check.timer
+# INV-186 : controle de conformite quotidien, le matin (resultat visible en debut de journee).
+[Unit]
+Description=Timer du controle de conformite au standard sur site (quotidien)
+
+[Timer]
+OnCalendar=*-*-* 06:00:00
+RandomizedDelaySec=30min
+# Machine eteinte a 06:00 (coupure de courant) : controle rattrape au demarrage.
+Persistent=true
+Unit=alarm-node-check.service
+
+[Install]
+WantedBy=timers.target
