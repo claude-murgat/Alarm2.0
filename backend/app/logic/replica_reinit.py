@@ -4,6 +4,7 @@ Un replica (role `replica` / `sync_standby`) est bloque s'il n'est pas `streamin
 est sur une timeline plus ancienne que le leader. Bloque sans interruption depuis `after`
 (SystemConfig `replica_reinit_after_minutes`, defaut 10 min) → le leader demande a son
 Patroni un `POST /reinitialize` (efface ses donnees et le re-clone depuis le leader).
+Un a la fois, et seulement si un replica sain prouve que le leader sert bien ses WAL.
 
 L'appelant (`quorum_monitor`, sur le leader seul) lit GET /cluster a chaque tick et garde en
 memoire `stuck_since` (debut de la serie bloquee, renvoye a jour par `decide_reinit`) et
@@ -18,13 +19,15 @@ REINIT_AFTER_DEFAULT = timedelta(minutes=10)
 # Au plus un reinit (ou une alerte garde-fou) par membre et par heure.
 REINIT_COOLDOWN = timedelta(minutes=60)
 _REPLICA_ROLES = ("replica", "sync_standby")
+# = maximum_lag_on_failover de patroni/patroni.yml : un replica que Patroni jugerait apte a devenir leader.
+HEALTHY_MAX_LAG = 1048576
 
 
 @dataclass(frozen=True)  # pragma: no mutate (INV-168 — frozen=False est equivalent : aucun code ne mute ce verdict)
 class ReinitDecision:
     """- stuck_since : a garder pour le tick suivant (membres bloques en ce moment seulement).
     - target : membre /cluster a re-cloner ce tick (un seul), sinon None ; reason : pourquoi.
-    - blocked : plus de la moitie des replicas bloques → pas de reinit, alerte pour ces membres.
+    - blocked : aucun replica sain → pas de reinit, alerte pour ces membres.
     """
     stuck_since: dict
     target: Optional[dict] = None
@@ -38,6 +41,11 @@ def _is_stuck(member: dict, leader_timeline) -> bool:
         timeline is not None and leader_timeline is not None and timeline < leader_timeline)
 
 
+def _is_healthy(member: dict, leader_timeline) -> bool:
+    lag = member.get("lag")  # "unknown" si Patroni ne connait pas la position du membre
+    return not _is_stuck(member, leader_timeline) and isinstance(lag, int) and lag <= HEALTHY_MAX_LAG
+
+
 def decide_reinit(cluster: dict, stuck_since: dict, last_handled: dict,
                   now: datetime, after: timedelta) -> ReinitDecision:
     """Un tick INV-168. `cluster` = JSON de GET {PATRONI_URL}/cluster."""
@@ -48,18 +56,23 @@ def decide_reinit(cluster: dict, stuck_since: dict, last_handled: dict,
     if cluster.get("pause") or leader is None or leader.get("state") != "running":
         return ReinitDecision(stuck_since={})
     replicas = [m for m in members if m.get("role") in _REPLICA_ROLES]
-    stuck = {m["name"]: m for m in replicas if _is_stuck(m, leader.get("timeline"))}
+    leader_timeline = leader.get("timeline")
+    stuck = {m["name"]: m for m in replicas if _is_stuck(m, leader_timeline)}
     since = {name: stuck_since.get(name, now) for name in stuck}
-    due = [name for name in stuck if now - since[name] >= after
-           and (name not in last_handled or now - last_handled[name] >= REINIT_COOLDOWN)]
+    cooling = [name for name in stuck if name in last_handled and now - last_handled[name] < REINIT_COOLDOWN]
+    due = [name for name in stuck if now - since[name] >= after and name not in cooling]
     if not due:
         return ReinitDecision(stuck_since=since)
-    # Garde-fou : la majorite des replicas bloques = probleme cote leader ou reseau.
-    if 2 * len(stuck) > len(replicas):
+    # Garde-fou : aucun replica sain = sans doute un probleme cote leader ou reseau.
+    if not any(_is_healthy(m, leader_timeline) for m in replicas):
         return ReinitDecision(stuck_since=since, blocked=tuple(due))
-    target = stuck[due[0]]
+    # Un a la fois : un membre traite il y a moins d'1 h et encore bloque fait attendre les autres.
+    if cooling:
+        return ReinitDecision(stuck_since=since)
+    # Jamais traite d'abord, puis le plus ancien : un POST qui echoue sans fin n'affame personne.
+    target = stuck[min(due, key=lambda name: (name in last_handled, last_handled.get(name, now)))]
     reason = (f"state={target.get('state')} timeline={target.get('timeline')} "
-              f"leader_timeline={leader.get('timeline')}")
+              f"leader_timeline={leader_timeline}")
     return ReinitDecision(stuck_since=since, target=target, reason=reason)
 
 

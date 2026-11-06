@@ -142,44 +142,76 @@ def test_one_reinit_per_member_per_hour():
     assert _decide(cluster, since, {"node4": NOW - timedelta(minutes=60)}).target["name"] == "node4"
 
 
-def test_one_reinit_per_tick_then_the_next():
-    """Incident : node4 ET node5 bloques (2 replicas sur 4, pas plus de la moitie)."""
+def test_reinits_one_at_a_time():
+    """node4 ET node5 bloques : le suivant attend que le precedent repasse streaming ou
+    la fin de son heure de cooldown (jamais traite d'abord)."""
     cluster = _prod(node4=_m("node4", **INCIDENT), node5=_m("node5", **INCIDENT))
     since = {"node4": NOW - AFTER, "node5": NOW - AFTER}
     assert _decide(cluster, since).target["name"] == "node4"
-    assert _decide(cluster, since, {"node4": NOW}).target["name"] == "node5"
+    d = _decide(cluster, since, {"node4": NOW - timedelta(minutes=59, seconds=59)})
+    assert (d.target, d.blocked, d.stuck_since) == (None, (), since), "node4 encore en re-clonage"
+    back = _prod(node5=_m("node5", **INCIDENT))
+    assert _decide(back, {"node5": NOW - AFTER}, {"node4": NOW}).target["name"] == "node5"
+    assert _decide(cluster, since, {"node4": NOW - timedelta(minutes=60)}).target["name"] == "node5"
 
 
-def test_more_than_half_stuck_blocks_reinit():
-    """3 replicas sur 4 bloques : probleme cote leader ou reseau, email seul."""
-    stuck = _m("node1", **INCIDENT), _m("node4", **INCIDENT), _m("node5", **INCIDENT)
-    cluster = _prod(node1=stuck[0], node4=stuck[1], node5=stuck[2])
-    d = _decide(cluster, {n: NOW - AFTER for n in ("node1", "node4", "node5")})
+def test_oldest_handled_member_goes_first():
+    """POST en echec sans fin sur node4 : il ne doit pas affamer node5."""
+    cluster = _prod(node4=_m("node4", **INCIDENT), node5=_m("node5", **INCIDENT))
+    since = {"node4": NOW - timedelta(hours=4), "node5": NOW - timedelta(hours=4)}
+    handled = {"node4": NOW - timedelta(hours=2), "node5": NOW - timedelta(hours=3)}
+    assert _decide(cluster, since, handled).target["name"] == "node5"
+
+
+def test_incident_2026_11_06_site_reboot():
+    """Beaufort redemarre pendant un failover : leader node2 (timeline 257), node1/node3
+    streaming lag 0, node4/node6/node7 bloques, node5 absent de /cluster. 3 replicas sur 5
+    bloques, mais deux sains prouvent que le leader va bien : re-clonage, un a la fois."""
+    stuck = {"state": "running", "timeline": 256}
+    cluster = {"members": [_m("node2", role="leader", state="running", timeline=257),
+                           _m("node1", timeline=257), _m("node3", timeline=257),
+                           _m("node4", **stuck), _m("node6", **stuck), _m("node7", **stuck)]}
+    since = {n: NOW - AFTER for n in ("node4", "node6", "node7")}
+    d = _decide(cluster, since)
+    assert (d.target["name"], d.blocked) == ("node4", ())
+    assert d.reason == "state=running timeline=256 leader_timeline=257"
+    d = _decide(cluster, since, {"node4": NOW})
+    assert (d.target, d.blocked) == (None, ())
+
+
+def test_no_healthy_replica_blocks_reinit():
+    """Tous les replicas bloques : rien ne prouve que le leader va bien, email seul."""
+    names = ("node1", "node2", "node4", "node5")
+    cluster = _prod(**{n: _m(n, **INCIDENT) for n in names})
+    d = _decide(cluster, {n: NOW - AFTER for n in names})
     assert d.target is None
-    assert d.blocked == ("node1", "node4", "node5")
+    assert d.blocked == names
 
 
-def test_guard_counts_replicas_stuck_since_this_tick():
-    """2 bloques depuis 10 min + 1 depuis ce tick = 3 sur 4 : garde-fou quand meme."""
-    cluster = _prod(node1=_m("node1", **INCIDENT), node4=_m("node4", **INCIDENT), node5=_m("node5", **INCIDENT))
-    d = _decide(cluster, {"node4": NOW - AFTER, "node5": NOW - AFTER})
-    assert d.target is None
-    assert d.blocked == ("node4", "node5")
+@pytest.mark.parametrize("lag, reinit", [(0, True), (1_048_576, True), (1_048_577, False), ("unknown", False)])
+def test_only_an_up_to_date_replica_proves_the_leader(lag, reinit):
+    """node2 seul suit le leader : il ne l'innocente que si son lag <= maximum_lag_on_failover."""
+    node2 = _m("node2")
+    node2["lag"] = lag
+    stuck = ("node1", "node4", "node5")
+    cluster = _prod(node2=node2, **{n: _m(n, **INCIDENT) for n in stuck})
+    d = _decide(cluster, {n: NOW - AFTER for n in stuck})
+    assert (d.target is not None, d.blocked) == (reinit, () if reinit else stuck)
 
 
 def test_guard_silent_while_nothing_is_due():
     """Glitch general (ex. juste apres un failover) : rien de du, donc ni reinit ni email."""
-    cluster = _prod(node1=_m("node1", state="starting"), node4=_m("node4", **INCIDENT),
-                    node5=_m("node5", **INCIDENT))
+    cluster = _prod(node1=_m("node1", state="starting"), node2=_m("node2", state="starting"),
+                    node4=_m("node4", **INCIDENT), node5=_m("node5", **INCIDENT))
     d = _decide(cluster)
     assert (d.target, d.blocked) == (None, ())
 
 
 def test_guard_respects_the_hourly_cooldown():
-    cluster = _prod(node1=_m("node1", **INCIDENT), node4=_m("node4", **INCIDENT), node5=_m("node5", **INCIDENT))
-    since = {n: NOW - AFTER for n in ("node1", "node4", "node5")}
-    d = _decide(cluster, since, {"node1": NOW, "node4": NOW})
-    assert d.blocked == ("node5",)
+    names = ("node1", "node2", "node4", "node5")
+    cluster = _prod(**{n: _m(n, **INCIDENT) for n in names})
+    d = _decide(cluster, {n: NOW - AFTER for n in names}, {"node1": NOW, "node4": NOW})
+    assert d.blocked == ("node2", "node5")
 
 
 @pytest.mark.parametrize("raw, expected", [

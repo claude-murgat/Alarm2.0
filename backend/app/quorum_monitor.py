@@ -257,7 +257,7 @@ def _alert(alert_email: Optional[str], subject: str, body: str) -> None:
 def _run_replica_reinit_check(now: datetime) -> None:
     """INV-168 : un tick (bloquant, via `asyncio.to_thread`, leader seul).
 
-    Re-clone au plus un replica bloqué (POST /reinitialize sur SON Patroni), audit + email.
+    Re-clone un replica bloqué à la fois (POST /reinitialize sur SON Patroni), audit + email.
     Un échec HTTP est tracé, pas levé ; le membre attend alors 1 h avant un nouvel essai.
     """
     try:
@@ -281,9 +281,10 @@ def _run_replica_reinit_check(now: datetime) -> None:
         for name in d.blocked:
             _last_handled[name] = now
         names = ", ".join(d.blocked)
-        logger.error("INV-168 : plus de la moitié des replicas bloqués (%s), aucun reinit", names)
+        logger.error("INV-168 : aucun replica sain (streaming, à jour), replicas bloqués (%s) : aucun reinit",
+                     names)
         _alert(alert_email, "[Alarme Murgat] Replicas bloqués, pas de re-clonage automatique", (
-            f"Plus de la moitié des replicas ne suivent plus le leader ({names}). "
+            f"Aucun replica ne suit correctement le leader (bloqués : {names}). "
             f"Cela ressemble à un problème côté leader ou réseau : aucun re-clonage "
             f"automatique n'est lancé.\n\nIntervention manuelle requise : patronictl list, "
             f"puis patronictl reinit alarm-cluster <nœud> --force si nécessaire."))

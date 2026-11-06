@@ -92,13 +92,39 @@ def test_stuck_replica_reinitialized_once_audited_and_emailed(patroni):
     assert "node4" in mail.call_args.kwargs["subject"]
 
 
-def test_more_than_half_stuck_emails_without_reinit(patroni):
-    patroni["cluster"] = {"members": _members(1, 4, 5)}
+def test_no_healthy_replica_emails_without_reinit(patroni):
+    patroni["cluster"] = {"members": _members(1, 2, 4, 5)}
     with patch("backend.app.quorum_monitor.send_alert_email") as mail:
         _ticks(0, 10, 11, 30)
     assert patroni["posts"] == []
     assert mail.call_count == 1, "une alerte, puis silence pendant le cooldown d'1 h"
     assert mail.call_args.kwargs["to"] == _ALERT_EMAIL
+
+
+def test_incident_2026_11_06_reinit_one_at_a_time(patroni):
+    """Beaufort redemarre pendant un failover : leader node2 (timeline 257), node1/node3 sains,
+    node4/node6/node7 bloques (3 replicas sur 5), node5 absent. node4 a 10 min, rien tant
+    qu'il est bloque, node6 des qu'il repasse streaming, puis node7."""
+    def cluster(*stuck):
+        return {"members": [_member(2, role="leader", state="running", timeline=257)] + [
+            _member(n, state="running", timeline=256) if n in stuck else _member(n, timeline=257)
+            for n in (1, 3, 4, 6, 7)]}
+
+    def reinitialized():
+        return [url.split("/")[2].split(":")[0] for url, _, _ in patroni["posts"]]
+
+    patroni["cluster"] = cluster(4, 6, 7)
+    with patch("backend.app.quorum_monitor.send_alert_email") as mail:
+        _ticks(0, 10, 11, 30)
+        assert reinitialized() == ["10.99.0.4"], "un seul reinit tant que node4 est bloque"
+        patroni["cluster"] = cluster(6, 7)
+        _ticks(31)
+        assert reinitialized() == ["10.99.0.4", "10.99.0.6"]
+        patroni["cluster"] = cluster(7)
+        _ticks(32)
+    assert reinitialized() == ["10.99.0.4", "10.99.0.6", "10.99.0.7"]
+    assert [c.kwargs["subject"] for c in mail.call_args_list] == [
+        f"[Alarme Murgat] Replica node{n} re-cloné automatiquement" for n in (4, 6, 7)]
 
 
 def test_reinit_http_failure_is_audited_and_does_not_raise(patroni):
