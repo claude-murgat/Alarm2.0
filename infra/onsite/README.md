@@ -26,6 +26,9 @@ pour la procédure complète et les explications.
 | `systemd/alarm-sms-gateway.service` | `/etc/systemd/system/alarm-sms-gateway.service` | Passerelle `modem_gateway.py` (SMS, appels, contact sec) sur chaque machine ; attend le modem sans sortir (INV-182/183) |
 | `systemd/alarm-disk-check.service` | `/etc/systemd/system/alarm-disk-check.service` | Sonde remplissage disque (`/` + `/var/lib/docker`) → alerte email si seuil dépassé (oneshot, lancé par le timer) |
 | `systemd/alarm-disk-check.timer` | `/etc/systemd/system/alarm-disk-check.timer` | Timer 15 min de la sonde disque (garde-fou anti-saturation, cf incident WAL 2026-06-22) |
+| `standard.env` | `/usr/local/share/alarm/standard.env` | Valeurs attendues de la **machine standard** (plan des machines, modèle, BIOS, Secure Boot, units…) : `docs/STANDARD_MACHINE.md`, lu par `alarm-node-check` et `scripts/provision/` |
+| `systemd/alarm-node-check.service` | `/etc/systemd/system/alarm-node-check.service` | Contrôle de conformité au standard (INV-186), lecture seule ; KO au niveau warning du journal |
+| `systemd/alarm-node-check.timer` | `/etc/systemd/system/alarm-node-check.timer` | Le lance chaque jour à 06:00 (rattrapé au démarrage) |
 | `install.sh` | *(exécutable)* | **Installe toute la stack modem + la supervision disque** : units ci-dessus + scripts `/opt/alarm/{4g-standby.sh,modem-set-rat.py,modem-watchdog.py,disk-check.sh,send-alert-email.py}` (sources dans `scripts/`) + user `alarm-gateway` (groupe `dialout`) + code gateway `→ /opt/alarm-gateway/` + `/etc/alarm-gateway.env` (valeurs non secrètes) |
 
 ## Stack modem on-site (gateway SMS/voix + secours 4G + watchdog)
@@ -98,4 +101,5 @@ Détails (adressage, clés publiques à déclarer côté OVH, MTU 1280, ufw) :
 dans le même commit.** Sinon la 2e machine on-site divergera silencieusement et le clone
 deviendra impossible.
 
-Pour cloner le standard sur une nouvelle machine, voir `docs/PROVISIONING_ONSITE.md` §21.
+Pour mettre une nouvelle machine au standard : `docs/STANDARD_MACHINE.md` et
+`scripts/provision/README.md` ; vérifier ensuite `sudo alarm-node-check` (INV-186).

@@ -9,6 +9,7 @@
 #   - supervision disque                 (alarm-disk-check.timer, alerte email si fs plein)
 #   - panne controlee « coupure reseau » (alarm-chaos-net + sudoers alarm-cd, INV-177/178)
 #   - DNS de secours                     (resolveur public apres celui du LAN, INV-181)
+#   - conformite au standard             (alarm-node-check.timer, quotidien, INV-186)
 #
 # Idempotent — sans danger à re-lancer. À exécuter en root depuis la racine d'un
 # checkout du repo (typiquement /opt/alarm qui est un checkout git) :
@@ -68,6 +69,12 @@ rm -f "$SUDOERS_TMP"
 # 4G (box morte) garde le VPN mais perd registre, GitHub et SMTP (alarm-1, 2026-11-02). Un echec
 # ici ne doit pas bloquer le reste de l'installation.
 bash "$REPO/scripts/dns-fallback.sh" || say "ATTENTION : dns-fallback.sh en echec, DNS de secours non pose"
+
+# 1e. Conformite au standard sur site (INV-186, docs/STANDARD_MACHINE.md) : le controle et les valeurs
+# attendues (un seul fichier, infra/onsite/standard.env), lances chaque jour par alarm-node-check.timer.
+install -d -m755 /usr/local/share/alarm
+inst "$REPO/infra/onsite/standard.env" /usr/local/share/alarm/standard.env 644
+inst "$REPO/scripts/alarm-node-check.sh" /usr/local/bin/alarm-node-check 755
 
 # 2. Passerelle sur chaque machine (INV-182) : user système + accès aux ports série (dialout),
 #    code gateway -> /opt/alarm-gateway/, dépendances (absentes d'une machine qui n'en a jamais eu).
@@ -135,7 +142,7 @@ done
 #     cf incident WAL 2026-06-22). Pas de stack modem requise -> tourne aussi sur node3.
 # 3c. Timers de deploiement auto (oneshot : pas de redemarrage, le prochain tick prend le neuf).
 for f in alarm-disk-check.service alarm-disk-check.timer alarm-gateway-sync.service alarm-gateway-sync.timer \
-         alarm-host-sync.service alarm-host-sync.timer; do
+         alarm-host-sync.service alarm-host-sync.timer alarm-node-check.service alarm-node-check.timer; do
   inst "$REPO/infra/onsite/systemd/$f" "/etc/systemd/system/$f" 644
 done
 
@@ -195,8 +202,8 @@ fi
 # de l'incident (rien ne surveillait). enable --now est idempotent.
 systemctl enable --now alarm-disk-check.timer >/dev/null 2>&1 || true; say "enabled+started alarm-disk-check.timer"
 # Idem : la bascule box/4G ne fait rien sans route 4G (onsite-1) et remet toujours la box
-# en priorite a l'arret ; les timers de deploiement auto doivent tourner pour exister.
-for u in alarm-wan-failover alarm-gateway-sync.timer alarm-host-sync.timer; do
+# en priorite a l'arret ; les timers de deploiement auto et de conformite doivent tourner pour exister.
+for u in alarm-wan-failover alarm-gateway-sync.timer alarm-host-sync.timer alarm-node-check.timer; do
   systemctl enable --now "$u" >/dev/null 2>&1 || true; say "enabled+started $u"
 done
 
@@ -213,6 +220,7 @@ say "FAIT. À valider à la main :"
 say "  GATEWAY_KEY et GATEWAY_SITE dans $ENV, puis : sudo systemctl restart alarm-sms-gateway"
 say "  Pour les alertes email du watchdog : SMTP_* dans /opt/alarm/.env.prod.{node<N>,secrets}"
 say "  Smoketest 4G : sudo APN=orange bash scripts/smoketest-4g.sh"
+say "  Conformite au standard (INV-186, aussi chaque jour par le timer) : sudo alarm-node-check"
 say "  Supervision disque (timer déjà actif) : sudo /opt/alarm/disk-check.sh --dry-run    # seuils, sans email"
 say "                                          sudo /opt/alarm/disk-check.sh --test-email  # vérifie la chaîne SMTP"
 say "  (mêmes SMTP_* que le watchdog — requis aussi sur node3 : /opt/alarm/.env.prod.{node3,secrets})"

@@ -64,6 +64,7 @@
   (`/run/alarm-modem-seen`) ; modem disparu → **une seule** récupération PCI et un email par
   épisode, puis attente de son retour (avant : nouvelle récupération toutes les ~10 min, sans fin,
   qui réinitialisait aussi l'Arduino du contact sec).
+  Modem non détecté après un déplacement : [`STANDARD_MACHINE.md`](STANDARD_MACHINE.md) §9.4.
 - **Correctif vs design existant** : l'esquisse `ARCHITECTURE_SMS_VOIX.md` utilise `nmcli`
   (NetworkManager) et `AT+NETOPEN`. Or les nœuds n'embarquent pas NetworkManager, et `NETOPEN`
   active la **pile TCP/IP interne du modem** (sockets via AT), **pas** un lien data porté par l'hôte.

@@ -1,5 +1,11 @@
 # Provisioning d'un nœud on-site — Alarme Murgat
 
+> **Machine standard (matériel, BIOS, installation, plan d'adressage, services) :
+> [`STANDARD_MACHINE.md`](STANDARD_MACHINE.md)** — il prime sur ce document en cas de contradiction.
+> Gestes reproductibles : [`scripts/provision/`](../scripts/provision/README.md) ; conformité contrôlée
+> chaque jour par `alarm-node-check` (INV-186). Ce document garde le détail et l'historique des
+> premières installations (onsite-1, onsite-2, NODE3).
+>
 > **Standard de référence pour le provisioning des machines on-site du cluster Patroni.**
 > Si tu modifies une machine en prod, **mets à jour ce fichier dans le même commit** sinon
 > les machines divergeront silencieusement et le clone deviendra impossible.
@@ -25,7 +31,8 @@ bases pour cluster et CD. La SIM7600 et la gateway sont en Phase 2 (séparée).
 
 - User d'admin/ops sur la machine : `alarm`
 - IP Wireguard internes : `10.99.0.1/24` (cloud), `10.99.0.2/24` (onsite-1), `10.99.0.3/24` (onsite-2)
-- Hostname : `onsite-1.alarm.local`, `onsite-2.alarm.local`
+- Hostname : `onsite-1.alarm.local`, `onsite-2.alarm.local` (historique) ; machines standard : `alarm-N`
+  (plan complet : `STANDARD_MACHINE.md` §5)
 - Code & configs versionnées : repo `claude-murgat/Alarm2.0` cloné dans `/opt/alarm`
 - Configs système versionnées : `infra/onsite/` du repo, déployées par symlink ou copie
 
@@ -44,11 +51,11 @@ La 2e (`onsite-1`) suit le même chemin en remplaçant les valeurs marquées `<!
 | Élément | Cible | Pourquoi |
 |---|---|---|
 | RAM | ≥ 8 Go | Patroni + Postgres + Backend + etcd + buffers |
-| Disque | ≥ 120 Go SSD | OS + Docker images + pgdata + WAL + logs + 20% snapshots LVM |
+| Disque | ≥ 120 Go SSD | OS + Docker images + pgdata + WAL + logs (sans LVM, `STANDARD_MACHINE.md` §4) |
 | CPU | 2 cœurs minimum | Goertzel DTMF + Patroni heartbeats |
 | Watchdog hardware | iTCO/AMD ou TPM | Reboot auto si kernel locked |
 | USB libre | 1 port USB micro-B | Waveshare SIM7600 (Phase 2) |
-| OS | Debian 12 (bookworm) | Aligné CI |
+| OS | Debian 13 (trixie) | Installé partout ; choix d'installation : `STANDARD_MACHINE.md` §4 |
 
 ### État initial constaté (machine onsite-2, 172.16.1.120, 2026-05-01)
 
@@ -310,17 +317,11 @@ sysctl vm.swappiness  # doit afficher 1
 
 ---
 
-## 10. Layout disque (LVM)
+## 10. Layout disque
 
-Cible :
-- `/boot` ext4 hors LVM
-- VG `alarm-vg` sur le reste, LVs séparés pour root / docker / pgdata / logs
-- `noatime,nodiratime` partout
-- 20%+ d'espace libre VG pour snapshots
-
-**Si la machine est déjà installée sans LVM** : on documente l'écart en §1 État initial,
-et on inscrit "Réévaluer le layout LVM au prochain reset" en §13 Améliorations. Pas de
-repartitionnement live (trop risqué).
+**Standard (2026-11-06) : sans LVM**, partitionnement assisté de l'installeur Debian (GPT : ESP
+`/boot/efi`, `/` ext4, swap), comme toutes les machines en service : `STANDARD_MACHINE.md` §4.
+L'ancienne cible LVM (VG `alarm-vg`, snapshots) n'est plus visée.
 
 ---
 
@@ -334,7 +335,7 @@ sudo wdctl  # doit lister un device
 ```
 
 Config `/etc/systemd/system.conf.d/watchdog.conf` (depuis
-`infra/onsite/systemd/watchdog.conf`) :
+`scripts/provision/10-harden.sh`, qui l'écrit) :
 ```
 [Manager]
 RuntimeWatchdogSec=30s
@@ -596,7 +597,7 @@ côté on-site → cluster en panne). Toujours :
 - [x] **Phase 2 — Waveshare SIM7600** : DÉPLOYÉE (2026-06) — gateway SMS/voix (`modem_gateway.py`) + **secours internet 4G/LTE** (QMI, pas ECM) + **watchdog modem** (auto-récup drop USB + alerte email). Déploiement reproductible en une commande : `sudo bash infra/onsite/install.sh`. Runbook : [`FAILOVER_4G.md`](FAILOVER_4G.md). SIM réelle = Sosh (APN `orange`). **Contact sec** : lu depuis 2026-06-18 par un **Arduino UNO R4 sur USB** (`DRY_CONTACT_SOURCE=host`, firmware `gateway/firmware/dry_contact_r4/`), **découplé du modem** (cf INV-120) — auparavant sur GPIO 43 du modem, abandonné car couplé au circuit d'allumage PWR (un contact fermé empêchait le boot du module).
 - [ ] **Phase 3 — CD V1** : build GHCR, promotion `:stable`, pull-based via systemd timer, canary order, auto-rollback
 - [ ] **Phase 4 — CD V2** : auto-fix prod via bot IA (après ≥10 PRs propres consécutives du bot)
-- [ ] Layout LVM si la machine n'a pas été installée avec (réévaluer au prochain reset)
+- [x] ~~Layout LVM~~ : abandonné, standard sans LVM (`STANDARD_MACHINE.md` §4, 2026-11-06)
 - [ ] Console série / IPMI / out-of-band management — non disponible sur mini-PC business standard
 - [ ] TPM hardware (si non présent) — sécurise les clés au boot
 
@@ -609,6 +610,10 @@ côté on-site → cluster en panne). Toujours :
 ---
 
 ## 21. Procédure de clone vers la 2e machine on-site
+
+> **Depuis le 2026-11-06** : une nouvelle machine suit l'ordre de
+> [`scripts/provision/README.md`](../scripts/provision/README.md) (standard :
+> [`STANDARD_MACHINE.md`](STANDARD_MACHINE.md)). Le texte ci-dessous est l'historique onsite-1/onsite-2.
 
 Suivre cette doc en remplaçant les valeurs marquées `<!-- onsite-2 -->` par les valeurs
 de la nouvelle machine. Spécifiquement :
@@ -1026,6 +1031,10 @@ chown alarm:alarm .env.prod.secrets
 ---
 
 ## 23. Historique des changements
+
+- **2026-11-06** : machine standard (`STANDARD_MACHINE.md` : OptiPlex 9020M, BIOS A19, UEFI + Secure
+  Boot, Debian 13 sans LVM), scripts `scripts/provision/`, contrôle quotidien `alarm-node-check`
+  (INV-186) ; ce document y renvoie (Debian 12 et LVM retirés).
 
 - **2026-11-05** : passerelle et pile modem sur **chaque** machine sur site (INV-182/183/184) ;
   modem et Arduino branchables n'importe où ; seuls `GATEWAY_KEY` et `GATEWAY_SITE` à poser à la
