@@ -22,9 +22,9 @@ _ALERT_EMAIL = "direction.technique@charlesmurgat.test"
 T0 = datetime(2030, 1, 1, 12, 0, tzinfo=timezone.utc)
 
 
-def _member(n, role="replica", state="streaming", timeline=256):
+def _member(n, role="replica", state="streaming", timeline=256, lag=0):
     return {"name": f"node{n}", "role": role, "state": state, "api_url": f"http://10.99.0.{n}:8008/patroni",
-            "host": f"10.99.0.{n}", "port": 5432, "timeline": timeline, "lag": 0}
+            "host": f"10.99.0.{n}", "port": 5432, "timeline": timeline, "lag": lag}
 
 
 def _members(*stuck):
@@ -125,6 +125,19 @@ def test_incident_2026_11_06_reinit_one_at_a_time(patroni):
     assert reinitialized() == ["10.99.0.4", "10.99.0.6", "10.99.0.7"]
     assert [c.kwargs["subject"] for c in mail.call_args_list] == [
         f"[Alarme Murgat] Replica node{n} re-cloné automatiquement" for n in (4, 6, 7)]
+
+
+def test_only_lagging_beaufort_replicas_streaming_still_reinit(patroni):
+    """Lags mesures en prod le 2026-11-06 (Beaufort via OVH) : seuls node4/node7 suivent, avec
+    64 Mo / 32 Mo de lag stable. Ils prouvent que le leader va bien : node1 re-clone."""
+    lags = {4: 67_109_384, 7: 33_554_952}
+    patroni["cluster"] = {"members": [_member(2, role="leader", state="running", timeline=257)] + [
+        _member(n, timeline=257, lag=lags[n]) if n in lags else _member(n, state="running", timeline=256)
+        for n in (1, 3, 4, 6, 7)]}
+    with patch("backend.app.quorum_monitor.send_alert_email") as mail:
+        _ticks(0, 10)
+    assert patroni["posts"] == [("http://10.99.0.1:8008/reinitialize", "POST", {"force": True})]
+    assert mail.call_args.kwargs["subject"] == "[Alarme Murgat] Replica node1 re-cloné automatiquement"
 
 
 def test_reinit_http_failure_is_audited_and_does_not_raise(patroni):

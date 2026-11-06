@@ -188,15 +188,14 @@ def test_no_healthy_replica_blocks_reinit():
     assert d.blocked == names
 
 
-@pytest.mark.parametrize("lag, reinit", [(0, True), (1_048_576, True), (1_048_577, False), ("unknown", False)])
-def test_only_an_up_to_date_replica_proves_the_leader(lag, reinit):
-    """node2 seul suit le leader : il ne l'innocente que si son lag <= maximum_lag_on_failover."""
-    node2 = _m("node2")
-    node2["lag"] = lag
-    stuck = ("node1", "node4", "node5")
-    cluster = _prod(node2=node2, **{n: _m(n, **INCIDENT) for n in stuck})
-    d = _decide(cluster, {n: NOW - AFTER for n in stuck})
-    assert (d.target is not None, d.blocked) == (reinit, () if reinit else stuck)
+def test_streaming_replica_with_a_large_lag_proves_the_leader():
+    """Prod 2026-11-06 : node4/node7 (Beaufort, via OVH) streaming sains avec 32-64 Mo de lag
+    stable. Seuls eux suivent : le leader sert ses WAL, les bloques sont re-clones."""
+    node4, node5 = _m("node4"), _m("node5")
+    node4["lag"], node5["lag"] = 67_109_384, 33_554_952
+    cluster = _prod(node1=_m("node1", **INCIDENT), node2=_m("node2", **INCIDENT), node4=node4, node5=node5)
+    d = _decide(cluster, {"node1": NOW - AFTER, "node2": NOW - AFTER})
+    assert (d.target["name"], d.blocked) == ("node1", ())
 
 
 def test_guard_silent_while_nothing_is_due():

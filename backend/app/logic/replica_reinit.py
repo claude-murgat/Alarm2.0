@@ -19,8 +19,6 @@ REINIT_AFTER_DEFAULT = timedelta(minutes=10)
 # Au plus un reinit (ou une alerte garde-fou) par membre et par heure.
 REINIT_COOLDOWN = timedelta(minutes=60)
 _REPLICA_ROLES = ("replica", "sync_standby")
-# = maximum_lag_on_failover de patroni/patroni.yml : un replica que Patroni jugerait apte a devenir leader.
-HEALTHY_MAX_LAG = 1048576
 
 
 @dataclass(frozen=True)  # pragma: no mutate (INV-168 — frozen=False est equivalent : aucun code ne mute ce verdict)
@@ -41,11 +39,6 @@ def _is_stuck(member: dict, leader_timeline) -> bool:
         timeline is not None and leader_timeline is not None and timeline < leader_timeline)
 
 
-def _is_healthy(member: dict, leader_timeline) -> bool:
-    lag = member.get("lag")  # "unknown" si Patroni ne connait pas la position du membre
-    return not _is_stuck(member, leader_timeline) and isinstance(lag, int) and lag <= HEALTHY_MAX_LAG
-
-
 def decide_reinit(cluster: dict, stuck_since: dict, last_handled: dict,
                   now: datetime, after: timedelta) -> ReinitDecision:
     """Un tick INV-168. `cluster` = JSON de GET {PATRONI_URL}/cluster."""
@@ -63,8 +56,9 @@ def decide_reinit(cluster: dict, stuck_since: dict, last_handled: dict,
     due = [name for name in stuck if now - since[name] >= after and name not in cooling]
     if not due:
         return ReinitDecision(stuck_since=since)
-    # Garde-fou : aucun replica sain = sans doute un probleme cote leader ou reseau.
-    if not any(_is_healthy(m, leader_timeline) for m in replicas):
+    # Garde-fou : aucun replica sain (streaming sur la timeline du leader, lag ignore : 32-64 Mo
+    # stables a Beaufort via OVH) = sans doute un probleme cote leader ou reseau.
+    if len(stuck) == len(replicas):
         return ReinitDecision(stuck_since=since, blocked=tuple(due))
     # Un a la fois : un membre traite il y a moins d'1 h et encore bloque fait attendre les autres.
     if cooling:

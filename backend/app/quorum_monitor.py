@@ -281,7 +281,7 @@ def _run_replica_reinit_check(now: datetime) -> None:
         for name in d.blocked:
             _last_handled[name] = now
         names = ", ".join(d.blocked)
-        logger.error("INV-168 : aucun replica sain (streaming, à jour), replicas bloqués (%s) : aucun reinit",
+        logger.error("INV-168 : aucun replica sain (streaming sur la timeline du leader), replicas bloqués (%s) : aucun reinit",
                      names)
         _alert(alert_email, "[Alarme Murgat] Replicas bloqués, pas de re-clonage automatique", (
             f"Aucun replica ne suit correctement le leader (bloqués : {names}). "
