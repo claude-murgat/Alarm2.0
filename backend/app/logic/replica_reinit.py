@@ -4,6 +4,7 @@ Un replica (role `replica` / `sync_standby`) est bloque s'il n'est pas `streamin
 est sur une timeline plus ancienne que le leader. Bloque sans interruption depuis `after`
 (SystemConfig `replica_reinit_after_minutes`, defaut 10 min) → le leader demande a son
 Patroni un `POST /reinitialize` (efface ses donnees et le re-clone depuis le leader).
+Un a la fois, et seulement si un replica sain prouve que le leader sert bien ses WAL.
 
 L'appelant (`quorum_monitor`, sur le leader seul) lit GET /cluster a chaque tick et garde en
 memoire `stuck_since` (debut de la serie bloquee, renvoye a jour par `decide_reinit`) et
@@ -24,7 +25,7 @@ _REPLICA_ROLES = ("replica", "sync_standby")
 class ReinitDecision:
     """- stuck_since : a garder pour le tick suivant (membres bloques en ce moment seulement).
     - target : membre /cluster a re-cloner ce tick (un seul), sinon None ; reason : pourquoi.
-    - blocked : plus de la moitie des replicas bloques → pas de reinit, alerte pour ces membres.
+    - blocked : aucun replica sain → pas de reinit, alerte pour ces membres.
     """
     stuck_since: dict
     target: Optional[dict] = None
@@ -48,18 +49,24 @@ def decide_reinit(cluster: dict, stuck_since: dict, last_handled: dict,
     if cluster.get("pause") or leader is None or leader.get("state") != "running":
         return ReinitDecision(stuck_since={})
     replicas = [m for m in members if m.get("role") in _REPLICA_ROLES]
-    stuck = {m["name"]: m for m in replicas if _is_stuck(m, leader.get("timeline"))}
+    leader_timeline = leader.get("timeline")
+    stuck = {m["name"]: m for m in replicas if _is_stuck(m, leader_timeline)}
     since = {name: stuck_since.get(name, now) for name in stuck}
-    due = [name for name in stuck if now - since[name] >= after
-           and (name not in last_handled or now - last_handled[name] >= REINIT_COOLDOWN)]
+    cooling = [name for name in stuck if name in last_handled and now - last_handled[name] < REINIT_COOLDOWN]
+    due = [name for name in stuck if now - since[name] >= after and name not in cooling]
     if not due:
         return ReinitDecision(stuck_since=since)
-    # Garde-fou : la majorite des replicas bloques = probleme cote leader ou reseau.
-    if 2 * len(stuck) > len(replicas):
+    # Garde-fou : aucun replica sain (streaming sur la timeline du leader, lag ignore : 32-64 Mo
+    # stables a Beaufort via OVH) = sans doute un probleme cote leader ou reseau.
+    if len(stuck) == len(replicas):
         return ReinitDecision(stuck_since=since, blocked=tuple(due))
-    target = stuck[due[0]]
+    # Un a la fois : un membre traite il y a moins d'1 h et encore bloque fait attendre les autres.
+    if cooling:
+        return ReinitDecision(stuck_since=since)
+    # Jamais traite d'abord, puis le plus ancien : un POST qui echoue sans fin n'affame personne.
+    target = stuck[min(due, key=lambda name: (name in last_handled, last_handled.get(name, now)))]
     reason = (f"state={target.get('state')} timeline={target.get('timeline')} "
-              f"leader_timeline={leader.get('timeline')}")
+              f"leader_timeline={leader_timeline}")
     return ReinitDecision(stuck_since=since, target=target, reason=reason)
 
 
