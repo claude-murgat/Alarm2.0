@@ -4,7 +4,8 @@ passerelles + scenarios de panne calcules ; GET /api/resilience/whatif pour un s
 
 Patroni et les /health des autres noeuds sont simules par `urlopen` (motif de
 test_cluster_location_inv161.py) : 10.99.0.4 (node4) ne repond pas. 7 noeuds depuis le 2026-11-05 :
-node6/node7 (alarm-3/alarm-4) etiquetes Izeron, non votants.
+node6/node7 (alarm-3/alarm-4) etiquetes Izeron, non votants. Etat final du jour du demenagement : node1/node2
+retires, 5 noeuds, voteurs node3, node6, node7, passerelle d'Izeron alarm-3 (node6).
 """
 import io
 import json
@@ -17,7 +18,7 @@ import pytest
 pytestmark = pytest.mark.integration
 
 MEMBERS = [{"name": f"node{i}", "role": "leader" if i == 3 else "replica",
-            "state": "running" if i == 3 else "streaming", "host": f"10.99.0.{i}"} for i in range(1, 8)]
+            "state": "running" if i == 3 else "streaming", "host": f"10.99.0.{i}"} for i in range(3, 8)]
 
 
 @pytest.fixture
@@ -55,19 +56,19 @@ def user1_headers(client):
 
 @pytest.fixture
 def stale_gateway():
-    """onsite-2 vue il y a 125 s via report-state ; alarm-1 jamais vue."""
+    """alarm-3 (passerelle d'Izeron) vue il y a 125 s via report-state ; alarm-1 jamais vue."""
     from backend.app.clock import now as clock_now
     from backend.app.database import SessionLocal
     from backend.app.models import GatewayState
     db = SessionLocal()
     try:
-        db.query(GatewayState).filter(GatewayState.gateway_id.in_(["onsite-2", "alarm-1"])).delete(
+        db.query(GatewayState).filter(GatewayState.gateway_id.in_(["alarm-3", "alarm-1"])).delete(
             synchronize_session=False)
-        db.add(GatewayState(gateway_id="onsite-2", state="closed", site="izeron",
+        db.add(GatewayState(gateway_id="alarm-3", state="closed", site="izeron",
                             last_seen=clock_now() - timedelta(seconds=125)))
         db.commit()
         yield
-        db.query(GatewayState).filter(GatewayState.gateway_id == "onsite-2").delete(synchronize_session=False)
+        db.query(GatewayState).filter(GatewayState.gateway_id == "alarm-3").delete(synchronize_session=False)
         db.commit()
     finally:
         db.close()
@@ -78,46 +79,46 @@ def test_live_nodes_and_gateways(client, admin_headers, fake_cluster, stale_gate
     assert r.status_code == 200, r.text
     live = r.json()["live"]
     nodes = {n["name"]: n for n in live["nodes"]}
-    assert list(nodes) == [f"node{i}" for i in range(1, 8)]
+    assert list(nodes) == [f"node{i}" for i in range(3, 8)]
     assert nodes["node3"] == {"name": "node3", "site": "ovh", "voter": True, "reachable": True,
                               "role": "leader", "state": "running", "version": "v-3",
                               "machine": "OVH", "retiring": False, "group": "OVH"}
     assert nodes["node4"] == {"name": "node4", "site": "beaufort", "voter": False, "reachable": False,
                               "role": "replica", "state": "streaming", "version": None,
                               "machine": "alarm-1", "retiring": False, "group": "Beaufort"}
-    assert nodes["node6"] == {"name": "node6", "site": "izeron", "voter": False, "reachable": True,
+    assert nodes["node6"] == {"name": "node6", "site": "izeron", "voter": True, "reachable": True,
                               "role": "replica", "state": "streaming", "version": "v-6",
                               "machine": "alarm-3", "retiring": False, "group": "Izeron"}
     assert (nodes["node7"]["machine"], nodes["node7"]["site"]) == ("alarm-4", "izeron")
-    assert [n for n in nodes if nodes[n]["retiring"]] == ["node1", "node2"]
-    assert (nodes["node1"]["machine"], nodes["node1"]["group"]) == ("onsite-1", "Legacy (Izeron)")
-    assert [n for n in nodes if nodes[n]["voter"]] == ["node1", "node2", "node3"]
-    assert nodes["node1"]["voter"] and nodes["node1"]["reachable"] and nodes["node1"]["version"] == "v-1"
+    assert [n for n in nodes if nodes[n]["retiring"]] == []  # plus de groupe « Legacy (Izeron) »
+    assert [n for n in nodes if nodes[n]["voter"]] == ["node3", "node6", "node7"]
     assert live["leader"] == "node3"
     assert live["etcd_voters_up"] == 3
     # Une sonde /health par membre Patroni
     assert sorted(u for u in fake_cluster if u.endswith("/health")) == [
-        f"http://10.99.0.{i}:8000/health" for i in range(1, 8)]
+        f"http://10.99.0.{i}:8000/health" for i in range(3, 8)]
     gws = {g["gateway_id"]: g for g in live["gateways"]}
-    assert set(gws) == {"onsite-2", "alarm-1"}
-    assert gws["onsite-2"]["site"] == "izeron" and gws["onsite-2"]["host"] == "node2"
-    assert gws["onsite-2"]["registered"] is True and 120 <= gws["onsite-2"]["last_seen_s"] <= 130
+    assert set(gws) == {"alarm-3", "alarm-1"}
+    assert gws["alarm-3"]["site"] == "izeron" and gws["alarm-3"]["host"] == "node6"
+    assert gws["alarm-3"]["registered"] is True and 120 <= gws["alarm-3"]["last_seen_s"] <= 130
     assert gws["alarm-1"] == {"gateway_id": "alarm-1", "host": "node4", "site": "beaufort",
                               "registered": False, "last_seen_s": None}
 
 
 def test_whatif_default_scenarios(client, admin_headers, fake_cluster):
     whatif = {w["scenario"]: w for w in client.get("/api/resilience", headers=admin_headers).json()["whatif"]}
-    assert {"izeron_one_node", "ovh_down", "izeron_both", "beaufort_both", "legacy_unplugged",
-            "gateway_izeron"} <= set(whatif)
+    assert set(whatif) == {"izeron_one_node", "beaufort_one_node", "ovh_down", "izeron_both", "beaufort_both",
+                           "gateway_izeron", "gateway_beaufort"}  # plus de « Legacy debranche »
     both = whatif["izeron_both"]
     assert both["untestable"] is True and both["leader_possible"] is False
     assert both["why"] == "1/3 voteurs etcd joignables"  # node3 seul voteur restant
     assert both["alerted_by"] == ["email INV-170 (après PR 1)"]
-    assert both["label"] == "Izeron entier (node1 + node2 + node6 + node7)"
-    assert whatif["izeron_one_node"]["label"] == "Un nœud à Izeron (node1)"
+    assert both["label"] == "Izeron entier (node6 + node7)"
+    assert whatif["izeron_one_node"]["label"] == "Un nœud à Izeron (node7)"  # node6 porte la passerelle
+    assert whatif["izeron_one_node"]["leader_possible"] is True
     beaufort = whatif["beaufort_both"]  # inchange avec 7 noeuds
     assert beaufort["label"] == "Beaufort entier (node4 + node5)" and beaufort["untestable"] is False
+    assert beaufort["why"] == "3/3 voteurs etcd joignables"
     assert beaufort["alarms_created"] == {"izeron": True, "beaufort": False}
     assert beaufort["alerted_by"] == ["email INV-144"]
     ovh = whatif["ovh_down"]
@@ -136,7 +137,7 @@ def test_whatif_adhoc(client, admin_headers):
     assert o["leader_possible"] is True
     assert o["writable_from"]["beaufort"] is False and o["alarms_created"]["beaufort"] is False
     assert o["alarms_created"]["izeron"] is True
-    g = client.get("/api/resilience/whatif?gateways=onsite-2", headers=admin_headers).json()
+    g = client.get("/api/resilience/whatif?gateways=alarm-3", headers=admin_headers).json()
     assert g["alarms_created"] == {"izeron": False, "beaufort": True} and g["alerted_by"] == ["email INV-144"]
 
 
@@ -151,11 +152,17 @@ def test_patroni_unreachable_503(client, admin_headers, patroni_down):
     assert "Patroni" in r.text
 
 
-def test_legacy_unplugged_today_has_no_leader(client, admin_headers, fake_cluster):
-    """INV-175 (2026-11-05) : onsite-1/2 (retiring_nodes) debranches avec les 3 voteurs d'aujourd'hui ->
-    node3 seul voteur, aucun leader, non testable : ce que corrige le jour du demenagement."""
-    whatif = {w["scenario"]: w for w in client.get("/api/resilience", headers=admin_headers).json()["whatif"]}
-    legacy = whatif["legacy_unplugged"]
-    assert legacy["label"] == "Legacy débranché (node1 + node2) : ce que corrige le jour du déménagement"
-    assert legacy["untestable"] is True and legacy["leader_possible"] is False
-    assert legacy["why"] == "1/3 voteurs etcd joignables"
+def test_gateway_host_is_configurable(client, admin_headers, fake_cluster):
+    """La passerelle d'Izeron peut etre sur alarm-4 (node7) : `gateway_hosts` la deplace sans redeploiement."""
+    from backend.app.database import SessionLocal
+    from backend.app.models import SystemConfig
+    db = SessionLocal()
+    try:
+        db.add(SystemConfig(key="gateway_hosts", value="alarm-4:node7,alarm-1:node4"))
+        db.commit()
+        live = client.get("/api/resilience", headers=admin_headers).json()["live"]
+        assert {g["gateway_id"]: g["host"] for g in live["gateways"]} == {"alarm-4": "node7", "alarm-1": "node4"}
+    finally:
+        db.query(SystemConfig).filter(SystemConfig.key == "gateway_hosts").delete()
+        db.commit()
+        db.close()

@@ -58,7 +58,7 @@ def load_env(*paths):
                         k, v = line.split('=', 1); cfg[k.strip()] = v.strip().strip('"').strip("'")
         except OSError: pass
     return cfg
-_env = load_env('/opt/alarm/.env.prod.node2', '/opt/alarm/.env.prod.secrets')
+_env = load_env('/opt/alarm/.env.prod.node3', '/opt/alarm/.env.prod.secrets')  # SMTP_* identiques dans chaque .env.prod (node1/2 retires)
 def cfg(k, d=None): return os.getenv(k) or _env.get(k, d)
 ALERT_TO = cfg('MODEM_ALERT_EMAIL') or cfg('SMTP_FROM', 'direction_technique@charlesmurgat.com')
 def modem_present():

@@ -7,7 +7,7 @@ Cf docs/CD_DESIGN.md §6 (Observabilité du déploiement). Le contrat doit garan
   - GET /events est admin-only
   - GET /state agrège correctement le dernier event par (node, image)
 
-Budget P4 : 5 tests max. Ici : 5 tests.
+Budget P4 : 5 tests max. Ici : 6 tests (le 6e, email de fin de chaine apres le demenagement, INV-167).
 """
 import os
 
@@ -141,3 +141,29 @@ def test_post_event_on_replica_returns_503(client):
         assert "replica" in r.json().get("detail", "").lower(), r.json()
     finally:
         is_leader.set()
+
+
+def test_complete_deployment_email_on_last_node_node6(client, monkeypatch):
+    """INV-167, jour du demenagement : NODES_ORDER=(3 5 4 7 6), node6 est le dernier noeud ; son
+    canary_promoted (et lui seul) envoie « Deploiement complet termine »."""
+    from backend.app.api import deployments
+    from backend.app.database import SessionLocal
+    from backend.app.models import SystemConfig
+    sent = []
+    monkeypatch.setattr(deployments, "send_alert_email", lambda **kw: sent.append(kw))
+    db = SessionLocal()
+    added = not db.query(SystemConfig).filter(SystemConfig.key == "alert_email").first()
+    if added:
+        db.add(SystemConfig(key="alert_email", value="ops@example.com"))
+        db.commit()
+    try:
+        for node in ("node3", "node7", "node6"):
+            r = client.post("/api/deployments/events", headers=_gw_headers(),
+                            json={"node": node, "image": "alarm-backend", "kind": "canary_promoted", "status": "success"})
+            assert r.status_code in (200, 201), r.text
+    finally:
+        if added:
+            db.query(SystemConfig).filter(SystemConfig.key == "alert_email").delete()
+            db.commit()
+        db.close()
+    assert [m["subject"] for m in sent] == ["[CD] Deploiement complet termine (alarm-backend)"]

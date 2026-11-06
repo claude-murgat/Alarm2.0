@@ -20,7 +20,7 @@ pytestmark = pytest.mark.integration
 GATEWAY_KEY = os.environ.setdefault("GATEWAY_KEY", "test-gateway-key-cd")
 GW = {"X-Gateway-Key": GATEWAY_KEY}
 MEMBERS = [{"name": f"node{i}", "role": "leader" if i == 3 else "replica",
-            "state": "running" if i == 3 else "streaming", "host": f"10.99.0.{i}"} for i in range(1, 8)]
+            "state": "running" if i == 3 else "streaming", "host": f"10.99.0.{i}"} for i in range(3, 8)]
 UNFINISHED = ("pending", "claimed", "running")
 ALARM_BUSY = ("active", "escalated", "acknowledged")
 
@@ -110,14 +110,14 @@ def test_non_admin_forbidden(clean, client, user1_headers):
 def test_whole_izeron_refused_quorum(clean, client, admin_headers):
     r = client.post("/api/chaos", json={"nodes": "site:izeron", "mode": "stop", "minutes": 2}, headers=admin_headers)
     assert r.status_code == 409, r.text
-    assert r.json()["detail"] == "node1, node2 : quorum etcd perdu — refusé"
+    assert r.json()["detail"] == "node6, node7 : quorum etcd perdu — refusé"  # jour J : Izeron = node6 + node7
     assert client.get("/api/chaos", headers=admin_headers).json() == []
 
 
-def test_node6_alone_accepted_and_izeron_with_node6_node7_still_refused(clean, client, admin_headers):
-    """2026-11-05 : node6/node7 (alarm-3/alarm-4) etiquetes Izeron, non votants."""
-    r = client.post("/api/chaos", json={"nodes": "site:izeron", "mode": "stop", "minutes": 2}, headers=admin_headers)
-    assert r.status_code == 409 and r.json()["detail"] == "node1, node2 : quorum etcd perdu — refusé"
+def test_node6_alone_accepted_and_two_voters_still_refused(clean, client, admin_headers):
+    """Jour du demenagement : node6/node7 (alarm-3/alarm-4) voteurs ; jamais deux voteurs, un seul permis."""
+    r = client.post("/api/chaos", json={"nodes": "node3,node7", "mode": "stop", "minutes": 2}, headers=admin_headers)
+    assert r.status_code == 409 and r.json()["detail"] == "node3, node7 : quorum etcd perdu — refusé"
     created = _request(client, admin_headers, nodes="node6")
     assert created["nodes"] == ["node6"] and created["status"] == "pending"
 
@@ -154,7 +154,7 @@ def test_request_then_claim_once(clean, client, admin_headers):
     claimed = r.json()
     assert claimed["id"] == created["id"] and claimed["status"] == "claimed" and claimed["claimed_at"]
     assert claimed["nodes"] == ["node4", "node5"] and claimed["mode"] == "stop"
-    assert claimed["voters"] == ["node1", "node2", "node3"]  # etcd_voters, pour la sonde etcd du runner
+    assert claimed["voters"] == ["node3", "node6", "node7"]  # etcd_voters, pour la sonde etcd du runner
     assert client.get("/internal/chaos/next", headers=GW).json() is None
     assert _row(client, admin_headers, created["id"])["status"] == "claimed"
 
@@ -175,14 +175,14 @@ def test_internal_next_on_replica_503(clean, client, admin_headers):
 
 def test_voters_read_from_etcd_voters_config(clean, client, admin_headers):
     from backend.app.models import SystemConfig
-    clean.add(SystemConfig(key="etcd_voters", value="node1,node4,node5"))
+    clean.add(SystemConfig(key="etcd_voters", value="node6,node4,node5"))
     clean.commit()
     try:
         r = client.post("/api/chaos", json={"nodes": "site:beaufort", "mode": "stop", "minutes": 2}, headers=admin_headers)
         assert r.status_code == 409, r.text
         assert r.json()["detail"] == "node4, node5 : quorum etcd perdu — refusé"
-        created = _request(client, admin_headers, nodes="site:izeron")  # node1 seul voteur d'Izeron ici
-        assert created["nodes"] == ["node1", "node2", "node6", "node7"]  # alarm-3/4 etiquetes Izeron (INV-161)
+        created = _request(client, admin_headers, nodes="site:izeron")  # node6 seul voteur d'Izeron ici
+        assert created["nodes"] == ["node6", "node7"]
     finally:
         clean.query(SystemConfig).filter(SystemConfig.key == "etcd_voters").delete()
         clean.commit()

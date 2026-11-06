@@ -11,16 +11,15 @@
 #      halt canary, exit 2.
 #   Prerequis KO (SSH, digest distant illisible), rien n'est touche -> exit 3 (reporte par l'orchestrateur).
 #
-# Designe pour tourner sur NODE3 cloud OVH (le seul qui voit les 7 noeuds via WG).
-# L'humain enchaine les 7 commandes manuellement V1 (ordre de alarm-cd-orchestrate.sh) :
+# Designe pour tourner sur NODE3 cloud OVH (le seul qui voit les 5 noeuds via WG).
+# L'humain enchaine les 5 commandes manuellement V1 (ordre de alarm-cd-orchestrate.sh) :
 #   ./scripts/alarm-cd-canary.sh --node 3   # NODE3 d'abord
-#   ./scripts/alarm-cd-canary.sh --node 7   # alarm-4 (non votant, futur Izeron)
-#   ./scripts/alarm-cd-canary.sh --node 6   # alarm-3 (non votant, futur Izeron)
 #   ./scripts/alarm-cd-canary.sh --node 5   # alarm-2 (non votant)
 #   ./scripts/alarm-cd-canary.sh --node 4   # alarm-1 (non votant)
-#   ./scripts/alarm-cd-canary.sh --node 2   # onsite-2 ensuite
-#   ./scripts/alarm-cd-canary.sh --node 1   # onsite-1 en dernier (le plus critique)
-# Noeuds 4 a 7 : start-prod-node.sh ne relance que Patroni + backend (pas d'etcd local).
+#   ./scripts/alarm-cd-canary.sh --node 7   # alarm-4 (voteur, Izeron)
+#   ./scripts/alarm-cd-canary.sh --node 6   # alarm-3 (voteur, Izeron) en dernier
+# Noeuds 4 et 5 : start-prod-node.sh ne relance que Patroni + backend (pas d'etcd local).
+# onsite-1/onsite-2 (1 et 2) : retires le jour du demenagement (INV-090), refuses.
 #
 # V1.5 (cf doc) : promotion auto entre etapes apres 5 deploiements clean.
 #
@@ -70,7 +69,7 @@ HELP
   esac
 done
 
-if [[ -z "$NODE" || ! "$NODE" =~ ^[1-7]$ ]]; then
+if [[ -z "$NODE" || ! "$NODE" =~ ^[3-7]$ ]]; then
   echo "ERREUR : --node <1-7> requis" >&2
   exit 1
 fi
@@ -80,17 +79,13 @@ if [[ -z "$GATEWAY_KEY" ]]; then
   exit 1
 fi
 
-# Mapping node -> IP WG. Cohérent avec .env.prod.node{1..7} :
-#   node1 -> onsite-1 -> 10.99.0.2
-#   node2 -> onsite-2 -> 10.99.0.3
+# Mapping node -> IP WG. Cohérent avec .env.prod.node{3..7} :
 #   node3 -> NODE3 cloud -> 10.99.0.1
 #   node4 -> alarm-1 -> 10.99.0.4 (non votant)
 #   node5 -> alarm-2 -> 10.99.0.5 (non votant)
-#   node6 -> alarm-3 -> 10.99.0.6 (non votant, futur Izeron)
-#   node7 -> alarm-4 -> 10.99.0.7 (non votant, futur Izeron)
+#   node6 -> alarm-3 -> 10.99.0.6 (voteur, Izeron)
+#   node7 -> alarm-4 -> 10.99.0.7 (voteur, Izeron)
 case "$NODE" in
-  1) WG_IP="10.99.0.2"; NODE_NAME="node1" ;;
-  2) WG_IP="10.99.0.3"; NODE_NAME="node2" ;;
   3) WG_IP="10.99.0.1"; NODE_NAME="node3" ;;
   4) WG_IP="10.99.0.4"; NODE_NAME="node4" ;;
   5) WG_IP="10.99.0.5"; NODE_NAME="node5" ;;
@@ -118,11 +113,11 @@ ssh_target() {
       "${SSH_USER}@${WG_IP}" "$@"
 }
 
-# Decouvre le leader Patroni via GET /health role=primary sur les 7 IPs WG.
+# Decouvre le leader Patroni via GET /health role=primary sur les 5 IPs WG.
 # POST /api/deployments/events requiert le leader (replicas -> 503 'replica').
 discover_leader() {
   local ip role
-  for ip in 10.99.0.1 10.99.0.2 10.99.0.3 10.99.0.4 10.99.0.5 10.99.0.6 10.99.0.7; do
+  for ip in 10.99.0.1 10.99.0.4 10.99.0.5 10.99.0.6 10.99.0.7; do
     role=$(curl -fsS --max-time 3 "http://${ip}:8000/health" 2>/dev/null \
       | python3 -c "import sys,json;print(json.load(sys.stdin).get('role',''))" 2>/dev/null \
       || echo "")

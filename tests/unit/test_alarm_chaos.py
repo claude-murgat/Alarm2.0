@@ -68,9 +68,9 @@ case "$url" in
 esac
 """
 MEMBERS = [{"name": f"node{i}", "role": "leader" if i == 3 else "replica",
-            "state": "running" if i == 3 else "streaming"} for i in range(1, 8)]  # 7 noeuds depuis le 2026-11-05
+            "state": "running" if i == 3 else "streaming"} for i in range(3, 8)]  # node1/node2 retires (jour J)
 NEXT = {"id": 7, "nodes": ["node4"], "mode": "stop", "minutes": 1, "status": "claimed",
-        "voters": ["node1", "node2", "node3"]}
+        "voters": ["node3", "node6", "node7"]}
 # relance, politique de compose remise, puis desarmement du filet de CE test (id 7) seulement
 RESTORE = "docker start c1 c2 && docker update --restart=unless-stopped c1 c2 >/dev/null && { pkill -f '[a]larm-chaos-7$' || true; }"
 
@@ -120,7 +120,7 @@ def test_stop_node4_probes_etcd_pins_restart_proves_arming_then_stops_and_restor
     rc, err = run(h)
     assert rc == 0, err
     curl = (h / "curl.log").read_text()
-    for ip in ("10.99.0.2", "10.99.0.3", "10.99.0.1"):  # etcd de node1, node2, node3 (voters de /next)
+    for ip in ("10.99.0.1", "10.99.0.6", "10.99.0.7"):  # etcd de node3, node6, node7 (voters de /next)
         assert f"GET http://{ip}:2379/health" in curl
     log = ssh_log(h)
     assert all(l.startswith("10.99.0.4 ") for l in log), log
@@ -204,13 +204,13 @@ def test_partial_stop_failure_restarts_every_listed_node_at_once(h):
 @pytest.mark.parametrize("mode", ["stop", "netcut"])
 def test_etcd_voter_unhealthy_stops_nothing(h, mode):
     claim(h, mode=mode)
-    (h / "etcd_down").write_text("http://10.99.0.3:2379/health\n")  # etcd de node2 tombe, Patroni sain
+    (h / "etcd_down").write_text("http://10.99.0.6:2379/health\n")  # etcd de node6 tombe, Patroni sain
     rc, err = run(h)
     assert rc == 1, err
     assert ssh_log(h) == []
     assert [p["kind"] for p in posted(h)] == ["started", "failed"]
     reason = posted(h)[1]["details"]["reason"]
-    assert "etcd" in reason and "node2" in reason
+    assert "etcd" in reason and "node6" in reason
 
 
 def test_cancel_or_alarm_during_window_restores_early(h):
@@ -390,3 +390,12 @@ def test_netcut_cut_without_effect_fails_and_restores(h, answer):
     assert [p["kind"] for p in posted(h)] == ["started", "failed"]
     reason = posted(h)[1]["details"]["reason"]
     assert "coupure non effective" in reason and "node4" in reason
+
+
+def test_onsite_node_unknown_after_move_day_stops_nothing(h):
+    """Jour du demenagement : node1/node2 retires de la liste du runner -> `failed` sans aucun SSH."""
+    claim(h, nodes=["node1"])
+    rc, err = run(h)
+    assert rc == 1, err
+    assert ssh_log(h) == []
+    assert "noeud inconnu du runner : node1" in posted(h)[-1]["details"]["reason"]

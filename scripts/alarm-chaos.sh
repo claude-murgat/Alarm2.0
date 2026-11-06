@@ -32,10 +32,10 @@ LOCK_FILE="${LOCK_FILE:-${STATE_DIR}/orchestrate.lock}"
 # shortcut: MINUTE_SECONDS=1 dans tests/unit/test_alarm_chaos.py (une minute de panne = une seconde) ; ne jamais le regler en prod.
 MINUTE_SECONDS="${MINUTE_SECONDS:-60}"
 HEALTHY_TIMEOUT="${HEALTHY_TIMEOUT:-300}"
-NODE_IPS="10.99.0.1 10.99.0.2 10.99.0.3 10.99.0.4 10.99.0.5 10.99.0.6 10.99.0.7"
+NODE_IPS="10.99.0.1 10.99.0.4 10.99.0.5 10.99.0.6 10.99.0.7"
 # IP WG par nom de projet compose (cf alarm-cd-orchestrate.sh NODE_IP, indexe par numero).
-declare -A NODE_IP=([node1]=10.99.0.2 [node2]=10.99.0.3 [node3]=10.99.0.1 [node4]=10.99.0.4 [node5]=10.99.0.5
-                    [node6]=10.99.0.6 [node7]=10.99.0.7)
+# node1/node2 (onsite-1/2) retires le jour du demenagement (INV-090) : inconnus -> `failed` sans SSH.
+declare -A NODE_IP=([node3]=10.99.0.1 [node4]=10.99.0.4 [node5]=10.99.0.5 [node6]=10.99.0.6 [node7]=10.99.0.7)
 
 log() { echo "[alarm-chaos] $*" >&2; }
 py() { python3 -c "import sys, json; d = json.load(sys.stdin); $1"; }

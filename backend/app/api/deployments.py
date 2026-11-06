@@ -61,7 +61,7 @@ _ALLOWED_STATUS = {"success", "failure", "in_progress"}
 
 
 class DeploymentEventIn(BaseModel):
-    node: str = Field(..., description="node1 | node2 | node3")
+    node: str = Field(..., description="node3 | node4 | node5 | node6 | node7")
     image: str = Field(..., description="alarm-backend | alarm-patroni")
     kind: str
     from_digest: Optional[str] = None
@@ -133,8 +133,8 @@ def insert_event(
 
     # Hook notification email (cf §6 doc).
     # Envoyes uniquement pour les events significatifs : rollback, abort,
-    # emergency_promote, et canary_promoted sur node1 (= deploiement complet
-    # termine, dernier noeud de l'ordre canary NODE3 -> onsite-2 -> onsite-1).
+    # emergency_promote, et canary_promoted sur node6 (= deploiement complet
+    # termine, dernier noeud de l'ordre canary 3 -> 5 -> 4 -> 7 -> 6, INV-167).
     # Les pull/canary_start intermediaires sont silencieux pour eviter le bruit.
     _maybe_send_email(row, db)
 
@@ -158,8 +158,8 @@ def _maybe_send_email(event: DeploymentEvent, db: Session) -> None:
     le proprietaire doit avoir configure son email de contact).
     """
     should_send = event.kind in _EMAIL_TRIGGER_KINDS
-    # canary_promoted UNIQUEMENT pour node1 = fin de la sequence canary 3 -> 2 -> 1
-    if event.kind == "canary_promoted" and event.node == "node1":
+    # canary_promoted UNIQUEMENT pour node6 = fin de la sequence canary 3 -> 5 -> 4 -> 7 -> 6 (jour J ; node1 avant)
+    if event.kind == "canary_promoted" and event.node == "node6":
         should_send = True
 
     if not should_send:
