@@ -814,6 +814,39 @@ Premier test conseillé : `stop node5` 2 min, puis `node4`, puis `node3` (= « O
 
 ---
 
+## 9quater. Configuration dynamique Patroni (etcd) (INV-188, 2026-11-06)
+
+`patroni/patroni.yml` (`bootstrap.dcs`) ne sert **qu'à la création** du cluster. Ensuite, la configuration qui fait foi est la configuration **dynamique**, stockée dans etcd et commune à tous les membres : la modifier sur un membre la change pour tous, et le dépôt ne la voit pas.
+
+Valeurs attendues (prod au 2026-11-06) :
+
+| Clé | Valeur | Application |
+|---|---|---|
+| `ttl` / `loop_wait` / `retry_timeout` | `20` / `8` / `7` | Patroni, sans redémarrage |
+| `maximum_lag_on_failover` | `1048576` | Patroni, sans redémarrage |
+| `postgresql.parameters.max_wal_senders` | `10` | **redémarrage** |
+| `postgresql.parameters.max_replication_slots` | `10` | **redémarrage** |
+| `postgresql.parameters.wal_keep_size` | `128MB` (bootstrap : 64MB) | reload |
+| `postgresql.parameters.max_slot_wal_keep_size` | `8GB` (absent du bootstrap) | reload |
+| `postgresql.parameters.archive_mode` / `archive_command` | `on` / `'true'` toléré (rien n'est archivé) | redémarrage / reload |
+| `postgresql.parameters.archive_timeout` | **`0`** tant qu'`archive_command` n'archive rien | reload |
+
+```bash
+P="docker exec node3-patroni-1 patronictl -c /etc/patroni/patroni.yml"   # nodeN-patroni-1 sur nodeN
+$P show-config                                    # lire (ou : curl -s http://10.99.0.N:8008/config)
+$P edit-config -p archive_timeout=0 --force       # paramètre PostgreSQL (-p), sans éditeur
+$P edit-config -s loop_wait=8 --force             # clé Patroni (-s)
+$P list                                           # « Pending restart » = redémarrage nécessaire
+```
+
+- **Reload** (paramètre `sighup` : `archive_timeout`, `archive_command`, `wal_keep_size`, `max_slot_wal_keep_size`) : Patroni l'applique seul sur chaque membre en un `loop_wait`, aucune coupure.
+- **Redémarrage** (paramètre `postmaster` : `max_wal_senders`, `max_replication_slots`, `archive_mode`, `wal_level`) : `patronictl list` affiche « Pending restart » ; sans alarme active, `$P restart alarm-cluster <replica> --force` sur chaque replica, puis bascule planifiée (`$P switchover alarm-cluster --leader <leader> --candidate <replica> --force`, cf. INV-187) avant de redémarrer l'ancien leader.
+- **Contrôle** : `alarm-node-check` (INV-186) lit `GET http://<IP WireGuard>:8008/config` chaque jour sur alarm-1 à alarm-4 et passe KO `patroni_archive` si `archive_timeout` est non nul sans vraie `archive_command` (INV-188). Les autres valeurs ne sont pas contrôlées.
+- **Incident du 2026-11-06** : `archive_mode on`, `archive_command 'true'` et `archive_timeout '10'` dans la configuration dynamique. PostgreSQL forçait un segment WAL de 16 Mo toutes les 10 s : ~100 Mo/min (~6 Go/h) de WAL quasi vides vers les 6 replicas, 4,6 Go de `pg_wal` sur le leader, replicas de Beaufort (relais OVH) re-clonés après la moindre coupure (INV-168). Corrigé à chaud par `edit-config -p archive_timeout=0 --force` (reload) : ~6 Ko/min.
+- **Sauvegardes réelles** (pgBackRest) : projet séparé. Il posera une vraie `archive_command` (et `archive_timeout` s'il le faut) ; le contrôle l'accepte.
+
+---
+
 ## 10. Métriques de réussite Phase 3
 
 Pour considérer Phase 3 « livrée », tous ces points doivent être verts :
@@ -946,3 +979,4 @@ Dans ce flux, on a remplacé 8 h de service KO + nuit blanche pour l'humain par 
 - **2026-10-29** — **Déploiement indépendant par site** (§4, INV-167) après l'incident node4/5 hors ligne 2 jours (préflight `exit 1` → aucun déploiement, 4 versions bloquées). État par nœud `node<N>.digest`, nœud injoignable reporté sans bloquer les autres ni déclencher de cooldown (outcome `partial`), votants redémarrés seulement si les 3 répondent. Remplace la consigne du 2026-10-27 ci-dessus.
 - **2026-10-30** — **Panne contrôlée** (§9ter, INV-176..179) : `scripts/alarm-chaos.sh` + `alarm-chaos.{service,timer}` sur NODE3 (manuel, désactivé), API `/api/chaos` + `/internal/chaos/*`, carte « Panne contrôlée » dans l'onglet Tests. Verrou de l'orchestrateur déplacé de `/run/alarm-cd-orchestrate/lock` vers `/var/lib/alarm/cd/orchestrate.lock` pour être partagé avec le runner.
 - **2026-10-30 (suite)** — **Coupure réseau** (§9ter, INV-177/178 étendus) : mode `netcut` du runner, helper root `scripts/alarm-chaos-net.sh` → `/usr/local/bin/alarm-chaos-net` (timer systemd de restauration armé sur la cible avant la coupure), alias sudoers `ALARM_CHAOS`. `infra/onsite/install.sh` pose désormais la sudoers `alarm-cd` (après `visudo -c -q -f`) et le helper : plus de pose à la main (§3.3 de PROVISIONING_ONSITE). Coupure d'OVH refusée en V1.
+- **2026-11-06** — **Configuration dynamique Patroni** (§9quater, INV-188) : valeurs attendues, lecture et modification (`show-config`, `edit-config`, reload ou redémarrage) ; incident `archive_timeout '10'` sans archivage (~6 Go/h de WAL), corrigé à chaud ; contrôle quotidien `patroni_archive` dans `alarm-node-check`.

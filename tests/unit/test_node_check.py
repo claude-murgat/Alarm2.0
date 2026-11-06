@@ -3,7 +3,9 @@
 2026-11-06 : 4 OptiPlex 9020M avec 3 versions de BIOS, Secure Boot sur une seule, alarm-2 qui ne
 redemarrait pas seule (Boot List Option Legacy). Le vrai script tourne contre un faux /sys et /etc
 (ALARM_ROOT) et de fausses commandes (PATH), avec le vrai infra/onsite/standard.env.
+INV-188 : configuration dynamique Patroni (faux curl) sans archive_timeout inutile.
 """
+import json
 import os
 import pathlib
 import re
@@ -33,6 +35,8 @@ FAKES = {
     "ufw": 'cat "$H/ufw"',
     "chronyc": 'cat "$H/chronyc"',
     "ip": 'cat "$H/ip_wg0"',
+    # INV-188 : API Patroni du membre local (GET :8008/config) ; exit 7 = connexion refusee
+    "curl": '[ -f "$H/patroni_down" ] && exit 7; echo "$*" > "$H/curl_args"; cat "$H/patroni_config"',
     "wg": '[ -f "$H/wg_down" ] && { echo "Unable to access interface: No such device" >&2; exit 1; }; cat "$H/wg"',
     "systemctl": r'''case "$1" in
   show) cat "$H/watchdog" ;;
@@ -40,6 +44,21 @@ FAKES = {
   is-active) cat "$H/active/$2" 2>/dev/null || echo active ;;
 esac''',
 }
+
+
+def patroni_config(**params):
+    """GET :8008/config de prod (2026-11-06, apres correction : archive_timeout 0)."""
+    p = {"wal_level": "replica", "hot_standby": "on", "max_wal_senders": 10, "max_replication_slots": 10,
+         "wal_keep_size": "128MB", "max_slot_wal_keep_size": "8GB",
+         "archive_mode": "on", "archive_command": "true", "archive_timeout": 0}
+    p.update(params)
+    p = {k: v for k, v in p.items() if v is not None}
+    return json.dumps({"ttl": 20, "loop_wait": 8, "retry_timeout": 7, "maximum_lag_on_failover": 1048576,
+                       "postgresql": {"use_pg_rewind": True, "parameters": p}})
+
+
+# Configuration dynamique trouvee en prod le 2026-11-06 : un segment WAL de 16 Mo force toutes les 10 s
+INCIDENT = patroni_config(archive_timeout="10")
 
 
 def write(p, content):
@@ -68,7 +87,7 @@ def h(tmp_path):
                                        f"GATEWAY_ID=alarm-3\nGATEWAY_KEY={KEY}\nGATEWAY_SITE=izeron\n")
     for f, v in (("hostname", "alarm-3\n"), ("efibootmgr", EFI_OK), ("dpkg_audit", ""), ("ufw", "Status: active\n"),
                  ("chronyc", "Reference ID    : 4D4D4D4D (ntp)\nStratum         : 3\nLeap status     : Normal\n"),
-                 ("watchdog", "30s\n"), ("wg", handshake(30)),
+                 ("watchdog", "30s\n"), ("wg", handshake(30)), ("patroni_config", patroni_config()),
                  ("ip_wg0", "5: wg0    inet 10.99.0.6/24 scope global wg0\\       valid_lft forever\n"),
                  ("enabled/ModemManager", "masked\n")):
         write(tmp_path / f, v)
@@ -89,7 +108,7 @@ def checks(lines, status):
 
 FAMILIES = {"modele", "bios", "demarrage", "entrees_legacy", "secure_boot", "premier_demarrage", "os",
             "dpkg_audit", "dns_secours", "ufw", "chrony", "watchdog", "journald", "modemmanager", "docker",
-            "wg0", "wg0_node3", "passerelle_cle", "passerelle_site", "passerelle_contact_sec"}
+            "wg0", "wg0_node3", "passerelle_cle", "passerelle_site", "passerelle_contact_sec", "patroni_archive"}
 
 
 def test_conforming_machine_is_all_ok_and_never_prints_the_gateway_key(h):
@@ -152,6 +171,8 @@ DEVIATIONS = {
                                     f"DRY_CONTACT_SOURCE=modem\nGATEWAY_KEY={KEY}\nGATEWAY_SITE=izeron\n"),
                     ["passerelle_contact_sec"]),
     "unit": (lambda h: write(h / "enabled/alarm-host-sync.timer", "disabled\n"), ["unit:alarm-host-sync.timer"]),
+    # INV-188 : incident du 2026-11-06 (archive_timeout '10' et archive_command 'true')
+    "patroni_archive_timeout": (lambda h: write(h / "patroni_config", INCIDENT), ["patroni_archive"]),
 }
 
 
@@ -200,3 +221,45 @@ def test_install_sh_installs_the_check_and_a_daily_timer():
     timer = (REPO / "infra/onsite/systemd/alarm-node-check.timer").read_text()
     assert "ExecStart=/usr/local/bin/alarm-node-check --journal" in service
     assert re.search(r"^OnCalendar=", timer, re.M) and "Persistent=true" in timer
+
+
+def test_patroni_config_is_read_from_the_local_member_on_its_wireguard_address(h):
+    """INV-188 : le port 8008 est lie a ADVERTISE_HOST (IP WireGuard du plan), pas a 127.0.0.1."""
+    run(h)
+    args = (h / "curl_args").read_text()
+    assert "http://10.99.0.6:8008/config" in args
+    assert re.search(r"(--max-time|-m) ?\d", args), args  # Patroni muet : le controle ne bloque pas
+
+
+@pytest.mark.parametrize("command,timeout", [("", 60), ("/bin/true", "10s"), (":", "1min")])
+def test_forced_wal_switch_without_real_archiving_is_ko(h, command, timeout):
+    """INV-188 : archive_timeout non nul et archive_command sans effet."""
+    write(h / "patroni_config", patroni_config(archive_command=command, archive_timeout=timeout))
+    rc, lines, out = run(h)
+    assert rc == 1, out
+    assert checks(lines, "KO") == ["patroni_archive"], out
+
+
+@pytest.mark.parametrize("params", [
+    {"archive_command": "pgbackrest --stanza=alarm archive-push %p", "archive_timeout": 60},  # sauvegardes futures
+    {"archive_timeout": None},  # absent = 0
+    {"archive_timeout": "0"},
+])
+def test_archive_timeout_zero_or_real_archiving_is_ok(h, params):
+    write(h / "patroni_config", patroni_config(**params))
+    rc, lines, out = run(h)
+    assert rc == 0, out
+    assert "patroni_archive" in checks(lines, "OK"), out
+
+
+@pytest.mark.parametrize("broken", ["down", "garbage"])
+def test_unreachable_patroni_is_info_not_ko(h, broken):
+    """INV-188 : Patroni arrete ou machine pas encore dans le cluster : pas de faux KO."""
+    if broken == "down":
+        write(h / "patroni_down", "")
+    else:
+        write(h / "patroni_config", "<html>Bad Gateway</html>")
+    rc, lines, out = run(h)
+    assert rc == 0, out
+    assert "patroni_archive" in checks(lines, "INFO"), out
+    assert "patroni_archive" not in checks(lines, "OK") + checks(lines, "KO"), out
