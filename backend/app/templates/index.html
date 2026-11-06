@@ -43,6 +43,21 @@
         /* INV-161 : en-tete de groupe (Izeron, Beaufort, OVH, Legacy (Izeron) separe en dernier) */
         tr.group-row td { font-weight: 600; color: #94a3b8; background: #33415533; }
         tr.group-row.legacy td { color: #f59e0b; border-top: 2px solid #f59e0b; }
+        /* INV-161 (2026-11-06) : onglet Cluster, une carte par groupe ; couleur du site = --site (bordure, texte de la puce), --site-bg (fond de la puce) */
+        .site-card { background: #0f172a; border-left: 4px solid var(--site); }
+        .site-izeron { --site: #3b82f6; --site-bg: #3b82f633; }
+        .site-beaufort { --site: #14b8a6; --site-bg: #14b8a633; }
+        .site-ovh { --site: #a855f7; --site-bg: #a855f733; }
+        .site-other { --site: #94a3b8; --site-bg: #94a3b833; }
+        .site-legacy { --site: #f59e0b; --site-bg: #f59e0b33; border-style: dashed; border-color: #f59e0b66 #f59e0b66 #f59e0b66 var(--site); }
+        .site-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; margin-bottom: 8px; }
+        .site-head .status-dot { width: 10px; height: 10px; margin: 0; }
+        .site-chip { padding: 2px 12px; border-radius: 999px; font-weight: 700; background: var(--site-bg); color: var(--site); }
+        .site-sum { color: #94a3b8; font-size: 0.85rem; }
+        .site-note { color: #f59e0b; font-size: 0.85rem; margin-bottom: 8px; }
+        .site-card table { table-layout: fixed; }  /* memes colonnes d'une carte a l'autre */
+        .site-card th:first-child { width: 34%; }
+        tr.leader { background: #22c55e1a; font-weight: 600; }
         .badge.critical { background: #ef444433; color: #ef4444; }
         .badge.high { background: #f59e0b33; color: #f59e0b; }
         .badge.medium { background: #3b82f633; color: #3b82f6; }
@@ -569,10 +584,7 @@
             </div>
             <div class="card">
                 <h3>Membres du cluster</h3>
-                <table class="cards">
-                    <thead><tr><th>Nœud</th><th>Lieu</th><th>Role</th><th>Etat</th><th>Host</th><th>Port</th><th>Timeline</th><th>Lag</th></tr></thead>
-                    <tbody id="clusterMembers"></tbody>
-                </table>
+                <div id="clusterMembers"></div>
             </div>
         </div>
     </div>
@@ -1492,23 +1504,36 @@
                     nodeLabel(data.local_machine, data.local_node) + (data.local_location ? ` (${place(data.local_location)})` : '');
                 document.getElementById('clusterLocalRole').textContent = data.local_role || '-';
 
-                const tbody = document.getElementById('clusterMembers');
-                tbody.innerHTML = byGroup(data.members || []).map(([g, ms]) => groupRow(g, 8) + ms.map(m => {
-                    const isLeader = m.role === 'leader';
-                    const isDown = m.state === 'stopped' || m.state === 'unknown';
-                    const color = isLeader ? '#22c55e' : isDown ? '#ef4444' : '#94a3b8';
-                    const lag = m.lag != null ? m.lag : '-';
-                    return `<tr data-node="${escHtml(m.name)}" style="color:${color}">
-                        <td data-label="Nœud"><strong>${escHtml(nodeLabel(m.machine, m.name))}</strong>${retiringBadge(m.retiring)}</td>
-                        <td data-label="Lieu">${place(m.location)}</td>
-                        <td data-label="Role"><span class="badge" style="background:${isLeader ? '#22c55e33' : '#33415533'};color:${color}">${m.role || '-'}</span></td>
-                        <td data-label="Etat">${m.state || '-'}</td>
-                        <td data-label="Host">${m.host || '-'}</td>
-                        <td data-label="Port">${m.port || '-'}</td>
-                        <td data-label="Timeline">${m.timeline || '-'}</td>
-                        <td data-label="Lag">${lag}</td>
-                    </tr>`;
-                }).join('')).join('');
+                // INV-161 (2026-11-06) : une carte par groupe. Point vert si chaque membre est le leader running
+                // ou suit le leader (streaming sur sa timeline, sinon bloque au sens d'INV-168)
+                const members = data.members || [];
+                const leader = members.find(m => m.role === 'leader');
+                const inSync = m => m === leader ? m.state === 'running' : !!leader && m.state === 'streaming' && m.timeline === leader.timeline;
+                const siteClass = { Izeron: 'site-izeron', Beaufort: 'site-beaufort', OVH: 'site-ovh', [LEGACY_GROUP]: 'site-legacy' };
+                document.getElementById('clusterMembers').innerHTML = byGroup(members).map(([g, ms]) => {
+                    const ok = ms.every(inSync);
+                    const dot = ok ? 'Tous les membres suivent le leader' : 'Un membre ne suit pas le leader (arrêté ou sur une ancienne timeline)';
+                    const sum = `${ms.length} machine${ms.length > 1 ? 's' : ''} · ${ms.filter(m => m.state === 'streaming').length} en flux`
+                        + (ms.includes(leader) ? ' · leader ici' : '');
+                    return `<section class="card site-card ${siteClass[g] || 'site-other'}" data-group="${escHtml(g)}">
+                        <div class="site-head"><span class="status-dot ${ok ? 'online' : 'offline'}" role="img" aria-label="${dot}" title="${dot}"></span>
+                            <span class="site-chip">${escHtml(g)}</span><span class="site-sum">${sum}</span></div>
+                        ${g === LEGACY_GROUP ? '<div class="site-note">bientôt obsolète — à débrancher le jour du déménagement</div>' : ''}
+                        <table class="cards"><thead><tr><th>Nœud</th><th>Role</th><th>Etat</th><th>Timeline</th><th>Lag</th><th>Host</th></tr></thead>
+                        <tbody>${ms.map(m => {
+                            const isLeader = m === leader;
+                            const isDown = m.state === 'stopped' || m.state === 'unknown';
+                            const color = isLeader ? '#22c55e' : isDown ? '#ef4444' : '#94a3b8';
+                            return `<tr data-node="${escHtml(m.name)}"${isLeader ? ' class="leader"' : ''} style="color:${color}">
+                                <td data-label="Nœud"><strong>${escHtml(nodeLabel(m.machine, m.name))}</strong>${retiringBadge(m.retiring)}</td>
+                                <td data-label="Role"><span class="badge" style="background:${isLeader ? '#22c55e33' : '#33415533'};color:${color}">${escHtml(m.role || '-')}</span></td>
+                                <td data-label="Etat">${escHtml(m.state || '-')}</td>
+                                <td data-label="Timeline">${escHtml(m.timeline || '-')}</td>
+                                <td data-label="Lag">${escHtml(m.lag ?? '-')}</td>
+                                <td data-label="Host">${escHtml(m.host || '-')}</td>
+                            </tr>`;
+                        }).join('')}</tbody></table></section>`;
+                }).join('');
             } catch (e) {
                 document.getElementById('quorumBanner').textContent = 'Erreur: ' + e.message;
                 document.getElementById('quorumBanner').style.background = '#ef444433';

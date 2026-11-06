@@ -761,10 +761,31 @@ class TestCluster:
         assert rows.count() >= 1, f"Attendu au moins 1 membre, got {rows.count()}"
 
 
+def _member(name, machine, group, role="replica", state="streaming", timeline=7):
+    location = {"Beaufort": "beaufort", "OVH": "ovh"}.get(group, "izeron")
+    return {"name": name, "machine": machine, "location": location, "group": group, "retiring": group == "Legacy (Izeron)",
+            "role": role, "state": state, "timeline": timeline, "lag": 0, "host": "10.99.0." + {"1": "2", "2": "3", "3": "1"}.get(name[-1], name[-1]), "port": 5432}
+
+
 class TestClusterTab:
-    """INV-161 (2026-11-05) — onglet Cluster : « machine · nœud », lieu, badge « bientôt obsolète », groupes
-    d'affichage (`group`, « Legacy (Izeron) » en dernier). /api/cluster simulé (page.route) : se teste sans
-    cluster. Hors CI : lancé localement (FRONTEND_URL)."""
+    """INV-161 (2026-11-05, amendé le 2026-11-06) — onglet Cluster : « machine · nœud », badge « bientôt
+    obsolète », une carte par groupe d'affichage (`group`) : ordre, couleur, résumé, point d'état, leader, note
+    Legacy. /api/cluster simulé (page.route) : se teste sans cluster. Hors CI : lancé localement (FRONTEND_URL)."""
+
+    # Les 7 nœuds de prod (2026-11-06), dans le désordre ; leader alarm-1 (Beaufort)
+    PROD = {"local_node": "node6", "local_machine": "alarm-3", "local_role": "secondary", "local_location": "izeron",
+            "cluster_writable": True, "quorum": {"total": 7, "healthy": 7, "has_quorum": True},
+            "members": [
+                _member("node2", "onsite-2", "Legacy (Izeron)"),
+                _member("node7", "alarm-4", "Izeron"),
+                _member("node3", "OVH", "OVH"),
+                _member("node5", "alarm-2", "Beaufort"),
+                _member("node1", "onsite-1", "Legacy (Izeron)"),
+                _member("node4", "alarm-1", "Beaufort", role="leader", state="running"),
+                _member("node6", "alarm-3", "Izeron"),
+            ]}
+    CARDS = {"Izeron": ["node6", "node7"], "Beaufort": ["node4", "node5"], "OVH": ["node3"],
+             "Legacy (Izeron)": ["node1", "node2"]}
 
     CLUSTER = {"local_node": "node6", "local_machine": "alarm-3", "local_role": "secondary", "local_location": "izeron",
                "cluster_writable": True, "quorum": {"total": 5, "healthy": 5, "has_quorum": True},
@@ -776,36 +797,105 @@ class TestClusterTab:
                    {"name": "node8", "machine": "<b>pc</b>", "retiring": False, "location": "beaufort", "group": "Beaufort", "role": "replica", "state": "streaming"},
                ]}
 
-    def _open(self, page: Page):
-        page.route("**/api/cluster", lambda route: route.fulfill(json=self.CLUSTER))
+    def _open(self, page: Page, data=None):
+        data = data or self.CLUSTER
+        page.route("**/api/cluster", lambda route: route.fulfill(json=data))
         page.locator(".tab:text('Cluster')").click()
         page.evaluate("loadCluster()")  # charge une fois au login (loadAll), puis sur changement en direct
-        expect(page.locator("#clusterMembers tr[data-node]")).to_have_count(5)
+        expect(page.locator("#clusterMembers tr[data-node]")).to_have_count(len(data["members"]))
         return lambda name: page.locator(f"#clusterMembers tr[data-node='{name}']")
 
-    def test_members_show_machine_site_and_retiring_badge(self, dashboard: Page):
+    @staticmethod
+    def _card(page: Page, group):
+        return page.locator(f"#clusterMembers .site-card[data-group='{group}']")
+
+    def test_members_show_machine_and_retiring_badge(self, dashboard: Page):
         row = self._open(dashboard)
         node1 = row("node1").locator("td[data-label='Nœud']")
         expect(node1).to_contain_text("onsite-1 · node1")
         expect(node1.locator(".badge.retiring")).to_have_text("bientôt obsolète")
-        expect(row("node1").locator("td[data-label='Lieu']")).to_have_text("Izeron")
         node6 = row("node6").locator("td[data-label='Nœud']")
         expect(node6).to_have_text("alarm-3 · node6")
         expect(node6.locator(".badge")).to_have_count(0)
         expect(row("node9").locator("td[data-label='Nœud']")).to_have_text("node9")  # machine inconnue : le nom seul
-        expect(row("node9").locator("td[data-label='Lieu']")).to_have_text("-")
 
-    def test_members_grouped_with_legacy_last(self, dashboard: Page):
-        """Une ligne d'en-tête par groupe, ordre du contrat avec l'app Android (PR #297) : Izeron, Beaufort,
-        OVH, autres libellés, « Legacy (Izeron) » en dernier et séparé ; nœuds triés par nom dans leur groupe."""
+    def test_one_card_per_group_in_order_with_its_machines(self, dashboard: Page):
+        """Ordre du contrat avec l'app Android (PR #297) : Izeron, Beaufort, OVH, « Legacy (Izeron) » en
+        dernier ; titre de carte = le groupe ; chaque machine dans la carte de son groupe, triées par nom."""
+        self._open(dashboard, self.PROD)
+        cards = dashboard.locator("#clusterMembers .site-card")
+        expect(cards).to_have_count(4)
+        assert [c.get_attribute("data-group") for c in cards.all()] == list(self.CARDS)
+        for group, nodes in self.CARDS.items():
+            card = self._card(dashboard, group)
+            expect(card.locator(".site-chip")).to_have_text(group)
+            assert [r.get_attribute("data-node") for r in card.locator("tr[data-node]").all()] == nodes, group
+        expect(self._card(dashboard, "Izeron").locator("tr[data-node='node6'] td[data-label='Nœud']")).to_have_text("alarm-3 · node6")
+
+    def test_each_card_has_its_site_colour(self, dashboard: Page):
+        """Une classe de couleur par site ; couleurs de bordure toutes différentes ; Legacy en pointillés."""
+        self._open(dashboard, self.PROD)
+        classes = {"Izeron": "site-izeron", "Beaufort": "site-beaufort", "OVH": "site-ovh", "Legacy (Izeron)": "site-legacy"}
+        for group, cls in classes.items():
+            expect(self._card(dashboard, group)).to_have_class(re.compile(rf"\b{cls}\b"))
+        borders = {g: self._card(dashboard, g).evaluate("e => getComputedStyle(e).borderLeftColor") for g in classes}
+        assert len(set(borders.values())) == 4, borders
+        assert self._card(dashboard, "Legacy (Izeron)").evaluate("e => getComputedStyle(e).borderLeftStyle") == "dashed"
+        assert self._card(dashboard, "Izeron").evaluate("e => getComputedStyle(e).borderLeftStyle") == "solid"
+
+    def test_other_label_card_is_grey_before_legacy(self, dashboard: Page):
         self._open(dashboard)
-        rows = dashboard.locator("#clusterMembers tr")
-        expect(rows).to_have_count(9)
-        order = [rows.nth(i).get_attribute("data-node") or rows.nth(i).inner_text().strip() for i in range(9)]
-        assert order == ["Izeron", "node6", "Beaufort", "node8", "Lieu inconnu", "node9",
-                         "Legacy (Izeron)", "node1", "node2"], order
-        expect(dashboard.locator("#clusterMembers tr.group-row.legacy")).to_have_text("Legacy (Izeron)")
-        expect(dashboard.locator("#clusterMembers tr.group-row:not(.legacy)")).to_have_count(3)
+        cards = dashboard.locator("#clusterMembers .site-card")
+        assert [c.get_attribute("data-group") for c in cards.all()] == ["Izeron", "Beaufort", "Lieu inconnu", "Legacy (Izeron)"]
+        expect(self._card(dashboard, "Lieu inconnu")).to_have_class(re.compile(r"\bsite-other\b"))
+
+    def test_card_summary_says_leader_only_where_it_is(self, dashboard: Page):
+        self._open(dashboard, self.PROD)
+        expected = {"Izeron": "2 machines · 2 en flux", "Beaufort": "2 machines · 1 en flux · leader ici",
+                    "OVH": "1 machine · 1 en flux", "Legacy (Izeron)": "2 machines · 2 en flux"}
+        for group, text in expected.items():
+            expect(self._card(dashboard, group).locator(".site-sum")).to_have_text(text)
+
+    def test_leader_row_highlighted_in_its_card(self, dashboard: Page):
+        self._open(dashboard, self.PROD)
+        leader = dashboard.locator("#clusterMembers tr.leader")
+        expect(leader).to_have_count(1)
+        expect(self._card(dashboard, "Beaufort").locator("tr.leader")).to_have_attribute("data-node", "node4")
+        expect(leader.locator("td[data-label='Role'] .badge")).to_have_text("leader")
+        for label, value in {"Etat": "running", "Timeline": "7", "Lag": "0", "Host": "10.99.0.4"}.items():
+            expect(leader.locator(f"td[data-label='{label}']")).to_have_text(value)
+
+    def test_legacy_card_says_it_will_be_unplugged(self, dashboard: Page):
+        self._open(dashboard, self.PROD)
+        expect(self._card(dashboard, "Legacy (Izeron)").locator(".site-note")).to_have_text(
+            "bientôt obsolète — à débrancher le jour du déménagement")
+        expect(dashboard.locator("#clusterMembers .site-note")).to_have_count(1)
+
+    def test_status_dot_green_when_every_member_follows_the_leader(self, dashboard: Page):
+        self._open(dashboard, self.PROD)
+        for group in self.CARDS:
+            dot = self._card(dashboard, group).locator(".status-dot")
+            expect(dot).to_have_class(re.compile(r"\bonline\b"))
+            expect(dot).to_have_attribute("aria-label", re.compile(r"\S"))
+
+    def test_status_dot_red_when_a_member_is_off_the_leader_timeline(self, dashboard: Page):
+        """alarm-4 « running » sur une ancienne timeline (INV-168) ; onsite-2 « streaming » mais timeline 6."""
+        data = {**self.PROD, "members": [
+            {**m, "state": "running", "timeline": 6} if m["name"] == "node7" else
+            {**m, "timeline": 6} if m["name"] == "node2" else m for m in self.PROD["members"]]}
+        self._open(dashboard, data)
+        for group, state in {"Izeron": "offline", "Beaufort": "online", "OVH": "online", "Legacy (Izeron)": "offline"}.items():
+            expect(self._card(dashboard, group).locator(".status-dot")).to_have_class(re.compile(rf"\b{state}\b"))
+        expect(self._card(dashboard, "Izeron").locator(".site-sum")).to_have_text("2 machines · 1 en flux")
+
+    def test_cards_fit_a_phone_without_horizontal_scroll(self, dashboard: Page):
+        dashboard.set_viewport_size({"width": 375, "height": 800})
+        self._open(dashboard, self.PROD)
+        expect(dashboard.locator("#clusterMembers .site-card")).to_have_count(4)
+        assert dashboard.evaluate("document.documentElement.scrollWidth") <= 375
+        scrolling = dashboard.evaluate("""[...document.querySelectorAll('#clusterMembers .site-card, #clusterMembers table')]
+            .filter(e => e.scrollWidth > e.clientWidth).map(e => e.className || e.tagName)""")
+        assert not scrolling, f"Défilement horizontal dans : {scrolling}"
 
     def test_local_node_shows_machine_and_site(self, dashboard: Page):
         self._open(dashboard)
