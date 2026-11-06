@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
 import android.provider.Settings
+import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.espresso.Espresso.onView
 import androidx.test.espresso.action.ViewActions.click
@@ -28,6 +29,7 @@ import com.alarm.critical.model.AlarmResponse
 import com.alarm.critical.model.HealthResponse
 import com.alarm.critical.service.AlarmPollingService
 import com.alarm.critical.service.AlarmSoundManager
+import com.alarm.critical.update.AppUpdate
 import com.alarm.critical.update.UpdateBackend
 import com.alarm.critical.update.UpdateProvider
 import com.alarm.critical.util.AppLogger
@@ -165,6 +167,21 @@ class SelfUpdateTest {
 
         assertTrue("installation lancee", waitFor { fakeUpdate.installs.size == 1 })
         assertArrayEquals("l'APK verifie est installe", fakeUpdate.apk, fakeUpdate.installs.single().readBytes())
+    }
+
+    @Test
+    fun serveur_mis_a_jour_pendant_que_l_app_est_ouverte_bandeau_au_retour_au_premier_plan() {
+        // 2026-11-06 : app ouverte avant le deploiement des serveurs -> rien pendant 6 h, sauf arret force
+        launch(server = "1.8.0")
+        nothingOffered("a l'ouverture, serveur a la meme version")
+
+        fakeApi.healthResponse = Response.success(HealthResponse("1.9.0"))  // serveurs deployes ensuite
+        scenario!!.moveToState(Lifecycle.State.CREATED)  // app en arriere-plan
+        scenario!!.moveToState(Lifecycle.State.RESUMED)  // rouverte depuis les applis recentes
+
+        assertTrue("bandeau « $BANNER » attendu au retour au premier plan", shown(BANNER))
+        assertEquals("verification de fond toutes les 15 min (reprise apres un 404 avant publication de la release)",
+            15 * 60_000L, AppUpdate.CHECK_INTERVAL_MS)
     }
 
     @Test
