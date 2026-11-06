@@ -797,8 +797,13 @@ class TestClusterTab:
                    {"name": "node8", "machine": "<b>pc</b>", "retiring": False, "location": "beaufort", "group": "Beaufort", "role": "replica", "state": "streaming"},
                ]}
 
-    def _open(self, page: Page, data=None):
+    def _open(self, page: Page, data=None, versions=None):
+        """`versions` : réponse de /api/resilience (défaut : 1.9.1 partout) ou un handler de route."""
         data = data or self.CLUSTER
+        if not callable(versions):
+            body = versions or {"live": {"nodes": [{"name": m["name"], "reachable": True, "version": "1.9.1"} for m in data["members"]]}}
+            versions = lambda route: route.fulfill(json=body)
+        page.route("**/api/resilience", versions)
         page.route("**/api/cluster", lambda route: route.fulfill(json=data))
         page.locator(".tab:text('Cluster')").click()
         page.evaluate("loadCluster()")  # charge une fois au login (loadAll), puis sur changement en direct
@@ -905,6 +910,38 @@ class TestClusterTab:
         cell = self._open(dashboard)("node8").locator("td[data-label='Nœud']")
         expect(cell).to_have_text("<b>pc</b> · node8")
         expect(cell.locator("b")).to_have_count(0)
+
+    @staticmethod
+    def _versions(row, names):
+        return {n: row(n).locator("td[data-label='Version']") for n in names}
+
+    def test_each_node_shows_its_version(self, dashboard: Page):
+        """Déploiement en cours : OVH en 1.9.1, les autres en 1.9.0, onsite-2 injoignable, alarm-4 sans version."""
+        nodes = [{"name": m["name"], "reachable": m["name"] != "node2",
+                  "version": {"node3": "1.9.1", "node7": None}.get(m["name"], "1.9.0")} for m in self.PROD["members"]]
+        row = self._open(dashboard, self.PROD, {"live": {"nodes": nodes}})
+        expected = {"node3": "1.9.1", "node4": "1.9.0", "node6": "1.9.0", "node2": "injoignable", "node7": "?"}
+        for name, cell in self._versions(row, expected).items():
+            expect(cell).to_have_text(expected[name])
+
+    def test_version_unknown_when_resilience_fails(self, dashboard: Page):
+        row = self._open(dashboard, self.PROD, lambda route: route.fulfill(status=503, json={"detail": "Patroni unreachable"}))
+        for cell in self._versions(row, ["node1", "node4"]).values():
+            expect(cell).to_have_text("?")
+
+    def test_cards_do_not_wait_for_versions(self, dashboard: Page):
+        """La sonde des nœuds prend jusqu'à quelques secondes : les cartes s'affichent avant, « … » en attendant."""
+        pending = []
+        row = self._open(dashboard, self.PROD, lambda route: pending.append(route))
+        cell = row("node5").locator("td[data-label='Version']")
+        expect(cell).to_have_text("…")
+        expect(dashboard.locator("#clusterMembers .site-card")).to_have_count(4)
+        for _ in range(100):  # le handler de route est appelé quand Playwright traite ses événements
+            if pending:
+                break
+            dashboard.wait_for_timeout(50)
+        pending[-1].fulfill(json={"live": {"nodes": [{"name": "node5", "reachable": True, "version": "1.9.1"}]}})
+        expect(cell).to_have_text("1.9.1")
 
 
 # ---------------------------------------------------------------------------

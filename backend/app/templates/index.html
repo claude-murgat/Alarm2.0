@@ -1479,6 +1479,19 @@
             chaosSeen = keys;
         }
 
+        // INV-161 (2026-11-06) : version de chaque nœud, lue dans /api/resilience (sonde /health de chaque nœud, INV-175)
+        let clusterGen = 0;
+        async function fillClusterVersions(gen) {
+            let nodes = [];
+            try { nodes = (await api('/api/resilience')).live.nodes; } catch (_) {}
+            if (gen !== clusterGen) return;  // les cartes ont été redessinées depuis : la réponse la plus récente gagne
+            const byName = Object.fromEntries(nodes.map(n => [n.name, n]));
+            document.querySelectorAll('#clusterMembers tr[data-node] td[data-label="Version"]').forEach(td => {
+                const n = byName[td.parentElement.dataset.node];
+                td.textContent = !n ? '?' : n.reachable ? (n.version || '?') : 'injoignable';
+            });
+        }
+
         async function loadCluster() {
             try {
                 const data = await api('/api/cluster');
@@ -1519,7 +1532,7 @@
                         <div class="site-head"><span class="status-dot ${ok ? 'online' : 'offline'}" role="img" aria-label="${dot}" title="${dot}"></span>
                             <span class="site-chip">${escHtml(g)}</span><span class="site-sum">${sum}</span></div>
                         ${g === LEGACY_GROUP ? '<div class="site-note">bientôt obsolète — à débrancher le jour du déménagement</div>' : ''}
-                        <table class="cards"><thead><tr><th>Nœud</th><th>Role</th><th>Etat</th><th>Timeline</th><th>Lag</th><th>Host</th></tr></thead>
+                        <table class="cards"><thead><tr><th>Nœud</th><th>Role</th><th>Etat</th><th>Version</th><th>Timeline</th><th>Lag</th><th>Host</th></tr></thead>
                         <tbody>${ms.map(m => {
                             const isLeader = m === leader;
                             const isDown = m.state === 'stopped' || m.state === 'unknown';
@@ -1528,12 +1541,14 @@
                                 <td data-label="Nœud"><strong>${escHtml(nodeLabel(m.machine, m.name))}</strong>${retiringBadge(m.retiring)}</td>
                                 <td data-label="Role"><span class="badge" style="background:${isLeader ? '#22c55e33' : '#33415533'};color:${color}">${escHtml(m.role || '-')}</span></td>
                                 <td data-label="Etat">${escHtml(m.state || '-')}</td>
+                                <td data-label="Version">…</td>
                                 <td data-label="Timeline">${escHtml(m.timeline || '-')}</td>
                                 <td data-label="Lag">${escHtml(m.lag ?? '-')}</td>
                                 <td data-label="Host">${escHtml(m.host || '-')}</td>
                             </tr>`;
                         }).join('')}</tbody></table></section>`;
                 }).join('');
+                fillClusterVersions(++clusterGen);  // sans attendre : la sonde des nœuds prend jusqu'à quelques s
             } catch (e) {
                 document.getElementById('quorumBanner').textContent = 'Erreur: ' + e.message;
                 document.getElementById('quorumBanner').style.background = '#ef444433';
