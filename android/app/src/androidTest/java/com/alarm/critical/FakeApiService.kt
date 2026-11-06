@@ -222,6 +222,14 @@ class FakeApiService : ApiService {
     ))
     override suspend fun getCluster(): Response<ClusterResponse> = clusterResponse
 
+    // INV-ANDROID-705 : version du serveur (defaut "dev" : jamais de mise a jour)
+    var healthResponse: Response<HealthResponse> = Response.success(HealthResponse("dev"))
+    var healthCallCount = 0
+    override suspend fun getHealth(): Response<HealthResponse> {
+        healthCallCount++
+        return healthResponse
+    }
+
     var kpiResponse: Response<KpiResponse> = Response.success(KpiResponse(12, 25.0, 18.5, true))
     override suspend fun getKpi(auth: String, weeks: Int): Response<KpiResponse> = kpiResponse
 

@@ -1200,6 +1200,7 @@ Si `last_tick_at < now - 120s` → `/health` renvoie 503 avec `escalation_loop: 
 ### INV-164 [M] ✅ /health donne la version déployée (2026-10-29)
 `/health` (réponse `200` comme `503`) renvoie `commit` = sha git complet de l'image (variable `GIT_SHA`) et `version` = **numéro de release** lu dans `APP_VERSION` (ex. `1.6.1`). Sans `APP_VERSION` : `version` = 7 premiers caractères de `GIT_SHA` ; sans les deux (build local, dev, tests) : `version = commit = "dev"`. L'image backend reçoit les deux au build (`ARG`/`ENV` du `backend/Dockerfile`, `build-args` de `cd-build.yml` : `GIT_SHA` = sha construit, le même que le tag `sha-<court>` ; `APP_VERSION` = contenu du fichier `VERSION` à la racine). Le fichier `VERSION` est bumpé dans la PR de release, avant le tag : l'image construite au merge porte déjà le numéro, alors que le tag n'existe pas encore. La version OpenAPI de FastAPI vaut la même `version`.
 - **Pourquoi** : plan du propriétaire du 2026-10-29 : savoir quel commit tourne sur chaque nœud sans `docker inspect`.
+- **Lu par l'app Android** pour sa mise à jour intégrée (INV-ANDROID-705) : seule une `version` exactement `X.Y.Z` y déclenche une mise à jour.
 - **Couverture** : Integration `test_version_permissions_inv162_164.py` : `test_health_version_dev_without_git_sha`, `test_health_version_from_git_sha` (RED avant le correctif : champs absents), `test_health_version_is_release_number_from_app_version` (RED avant `APP_VERSION` : sha court renvoyé).
 
 ---
