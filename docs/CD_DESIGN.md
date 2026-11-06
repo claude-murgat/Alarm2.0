@@ -257,7 +257,7 @@ L'orchestration tourne **depuis NODE3 cloud** (`alarm-cd-orchestrator.service` q
 
 ### Questions ouvertes
 
-- **Q4.1** Si NODE3 est **actuellement primary Patroni** quand on commence le canary, faut-il forcer un `failover` Patroni vers onsite-1 ou onsite-2 **avant** de redémarrer NODE3, pour éviter une bascule pendant le restart ? `patronictl switchover --master node3 --candidate node1` est explicite et < 5 s. **Forte recommandation**.
+- **Q4.1** Si NODE3 est **actuellement primary Patroni** quand on commence le canary, faut-il forcer un `failover` Patroni vers onsite-1 ou onsite-2 **avant** de redémarrer NODE3, pour éviter une bascule pendant le restart ? `patronictl switchover --master node3 --candidate node1` est explicite et < 5 s. **Forte recommandation**. **Tranché le 2026-11-06 (Q4.1 et Q4.3, tout nœud leader) : oui, cf « Bascule planifiée du leader » ci-dessous (INV-187).**
 - **Q4.2** Le replication lag < 100 ms est-il atteignable de façon fiable depuis NODE3 cloud (RTT 16.6 ms vers onsite) ? À mesurer une fois le cluster up. Si non, relâcher à 1 s pour NODE3 spécifiquement.
 - **Q4.3** Si onsite-2 est **simultanément** le primary Patroni au moment où on veut l'updater (étape 2/3), même question — switchover préventif ? Ou bien on fait confiance à INV-091 (failover < 60 s tolérable) ?
 - **Q4.4** Comment gérer un déploiement qui touche **uniquement le backend** vs un qui touche **patroni** (Postgres) ? Le restart patroni nécessite un pg_basebackup au boot du replica (cf compose `start_period: 60s`). Le canary doit tolérer cette fenêtre. Proposition : critère soak `replication lag` reporté de 90 s pour les déploiements qui touchent l'image patroni.
@@ -277,6 +277,24 @@ Sites : node1 + node2 = Izeron, node3 = OVH, node4 + node5 = Beaufort, node6 + n
 - **Codes de sortie** : `0` rien à faire / cooldown / `success` / `partial` ; `1` erreur de config (`GATEWAY_KEY`, canary introuvable) ; `2` canary en échec.
 - **Forcer le redéploiement d'un nœud** : `rm /var/lib/alarm/cd/node<N>.digest` puis `sudo systemctl start alarm-cd-orchestrate.service`. Un nœud retiré durablement doit sortir de `NODES_ORDER`, sinon chaque tick le signale injoignable.
 - **Couverture** : `tests/unit/test_cd_orchestrate.py` (vrai script, faux `ssh`/`docker`/canary).
+
+### Bascule planifiée du leader avant son redémarrage (2026-11-06, INV-187)
+
+**Constat** (prod 2026-11-05/06) : chaque étape canary relance Patroni + backend (`docker compose up -d`). Sur le **leader**, c'est une perte brutale : Patroni ne bascule qu'après son TTL (~15-35 s sans écriture), nouvelle timeline à chaque fois (285 → 290 en un jour), et les replicas hors ligne à ce moment reviennent sur l'ancienne timeline avec leurs WAL déjà supprimés (re-clonage, INV-168). Décision du propriétaire : des déploiements « doux ».
+
+`alarm-cd-canary.sh`, une fois établi que la cible doit être redémarrée et **avant** `canary_start` :
+
+1. Lit `GET :8008/cluster` (API Patroni de la cible, sinon d'un autre des 7 nœuds). Illisible → exit `3`, pas de redémarrage.
+2. Cible **pas leader** → rien de plus, comme avant.
+3. Cible **leader** → choisit un candidat : non leader, `streaming`, sur la timeline du leader, sans `nofailover` ; d'abord un nœud **qui n'est plus à redémarrer dans ce passage** (`--pending`, fourni par l'orchestrateur), puis un **votant etcd** (`--voters`, = `VOTERS` de l'orchestrateur), puis le **plus petit lag**. Aucun → event `switchover/failure` `no_candidate`, exit `3`.
+4. `POST http://<IP WG cible>:8008/switchover` `{"leader": "nodeN", "candidate": "nodeM"}` (Patroni répond de façon synchrone, ~20 s au plus ; sa réponse est journalisée), puis interroge `/cluster` toutes les 2 s jusqu'à ce qu'**un autre membre soit leader et la cible replica**, au plus `SWITCHOVER_TIMEOUT` = **60 s** depuis la demande. Dépassé → event `switchover/failure` `timeout`, exit `3`.
+5. Bascule faite → event `switchover/success` `{"from", "to"}`, puis `canary_start` et le redémarrage habituel (la cible est désormais un replica).
+
+Exit `3` = « pas prêt » pour l'orchestrateur : nœud reporté au prochain passage (15 min), sans cooldown ; un votant reporté reporte les votants suivants. **Jamais** de redémarrage du leader sans bascule terminée. Les événements post-bascule suivent le nouveau leader grâce au re-discover de `post_event` (premier POST en 503 « replica » sur l'ancien leader).
+
+Avec l'ordre `3 7 6 5 4 2 1`, au plus deux bascules par passage : node3 leader au départ → bascule vers node1 ou node2 (tous encore à redémarrer, votants préférés) ; ce nœud, leader à son tour, bascule vers un nœud déjà à jour quand vient son tour.
+
+**Non couvert** : `alarm-cd-rollback.sh` (retour arrière, cible déjà basculée par le canary dans le cas nominal) et les redémarrages manuels. **Couverture** : `tests/unit/test_cd_canary_switchover.py`, `tests/unit/test_cd_orchestrate.py` ; non vérifié sur un vrai Patroni.
 
 ---
 
@@ -346,6 +364,7 @@ CREATE TABLE deployment_events (
   image        TEXT NOT NULL,                -- 'alarm-backend' | 'alarm-patroni'
   kind         TEXT NOT NULL,                -- 'pull' | 'canary_start' | 'canary_promoted'
                                              -- | 'rollback' | 'abort' | 'manual_override'
+                                             -- | 'switchover' (INV-187)
   from_digest  TEXT,                         -- digest de l'image avant action
   to_digest    TEXT,                         -- digest de l'image après action
   status       TEXT NOT NULL,                -- 'success' | 'failure' | 'in_progress'
