@@ -21,7 +21,8 @@
 #     CONTINUE avec les suivants. Un votant etcd (VOTERS = 1 2 3) n'est redemarre que
 #     si TOUS les votants repondent (quorum) ; sinon seuls les non votants sont deployes.
 #   - Canary exit 3 (prerequis KO : SSH, registre/DNS injoignable depuis la cible,
-#     rien n'est touche) -> reporte comme un injoignable ; un votant reporte
+#     rien n'est touche ; ou cible leader Patroni sans bascule terminee, INV-187)
+#     -> reporte comme un injoignable ; un votant reporte
 #     reporte aussi les votants suivants du passage.
 #   - Etat global /var/lib/alarm/cd/orchestrate.state : <digest>\t<outcome>\t<ts>,
 #     outcome = success (7 noeuds a jour) | partial (noeuds en attente, repris
@@ -235,7 +236,8 @@ log "Lance la chaine canary ${TODO[*]} (soak ${SOAK}s par etape)"
 # Chaine sequentielle. Noeud injoignable -> reporte (PENDING), on continue.
 # Canary en echec -> halt (une image cassee ne doit pas se propager).
 PENDING=()
-for NODE in "${TODO[@]}"; do
+for i in "${!TODO[@]}"; do
+  NODE=${TODO[$i]}
   if [[ "$DOWN" == *" $NODE "* ]]; then
     log "WARN : node${NODE} (${NODE_SITE[$NODE]}) injoignable : reporte au prochain passage"
     PENDING+=("$NODE")
@@ -255,12 +257,18 @@ for NODE in "${TODO[@]}"; do
   # parce que `$?` apres `if !` est le code apres negation (toujours 0 sur la
   # branche fail), pas l'exit code reel du canary. set -e desactive ici par
   # `|| true` indirect via `rc=$?` — on traite l'erreur explicitement.
+  #
+  # --pending / --voters (INV-187) : si node<N> est le leader Patroni, le canary le fait
+  # basculer vers un replica sain, de preference pas un noeud encore a redemarrer dans ce
+  # passage (sinon seconde bascule), puis un votant etcd.
   rc=0
   "$CANARY" \
     --node "$NODE" \
     --soak "$SOAK" \
     --api-base "$API_BASE" \
-    --gateway-key "$GATEWAY_KEY" || rc=$?
+    --gateway-key "$GATEWAY_KEY" \
+    --pending "${TODO[*]:i+1}" \
+    --voters "${VOTERS[*]}" || rc=$?
   if (( rc == 3 )); then
     # Prerequis du canary KO (SSH, registre/DNS injoignable depuis la cible), rien n'est touche :
     # pas une image cassee, on reporte (2026-11-02 : alarm-1 en 4G sans DNS bloquait Izeron 1 h).

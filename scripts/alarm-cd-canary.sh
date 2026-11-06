@@ -3,13 +3,16 @@
 #
 # Cf docs/CD_DESIGN.md §4 (Ordre canary) + §6 (Observabilite). Ce script :
 #   1. Lit le digest local courant + le digest distant `:stable` sur la cible.
-#   2. Si different, POST kind=canary_start dans deployment_events.
+#   2. Si different et la cible est le leader Patroni : bascule planifiee vers un replica
+#      sain (POST /switchover, kind=switchover) ; pas de bascule terminee -> exit 3 (INV-187).
+#      Puis POST kind=canary_start dans deployment_events.
 #   3. SSH vers la cible et lance `start-prod-node.sh --pull <N>`.
 #   4. Poll `/health` pendant le soak (default 600s, sample 30s).
 #   5. Si soak vert -> POST kind=canary_promoted, exit 0.
 #   6. Si soak rouge -> POST kind=rollback (PR 6 enrichit avec l'action),
 #      halt canary, exit 2.
 #   Prerequis KO (SSH, digest distant illisible), rien n'est touche -> exit 3 (reporte par l'orchestrateur).
+#   Cible leader Patroni sans bascule terminee (INV-187) -> exit 3, cible pas redemarree.
 #
 # Designe pour tourner sur NODE3 cloud OVH (le seul qui voit les 7 noeuds via WG).
 # L'humain enchaine les 7 commandes manuellement V1 (ordre de alarm-cd-orchestrate.sh) :
@@ -44,6 +47,9 @@ SSH_USER="${SSH_USER:-alarm}"
 REMOTE_REPO="${REMOTE_REPO:-/opt/alarm}"
 DRY_RUN=0
 GATEWAY_KEY="${GATEWAY_KEY:-}"
+PENDING=""                 # noeuds encore a redemarrer dans ce passage (orchestrateur)
+VOTERS="1 2 3"             # votants etcd (INV-090), passes par l'orchestrateur
+SWITCHOVER_TIMEOUT="${SWITCHOVER_TIMEOUT:-60}"  # bascule Patroni (INV-187), env pour les tests
 
 # --- Args ---
 while [[ $# -gt 0 ]]; do
@@ -52,6 +58,8 @@ while [[ $# -gt 0 ]]; do
     --soak)        SOAK_SECONDS="$2"; shift 2 ;;
     --api-base)    API_BASE="$2"; shift 2 ;;
     --gateway-key) GATEWAY_KEY="$2"; shift 2 ;;
+    --pending)     PENDING="$2"; shift 2 ;;
+    --voters)      VOTERS="$2"; shift 2 ;;
     --dry-run)     DRY_RUN=1; shift ;;
     -h|--help)
       cat <<'HELP'
@@ -62,6 +70,9 @@ Options :
   --soak <secs>      Duree du soak post-restart (default: 600 = 10 min).
   --api-base <url>   API backend pour POST events (default: http://10.99.0.1:8000).
   --gateway-key <k>  X-Gateway-Key pour POST events (sinon lit env GATEWAY_KEY).
+  --pending "<N..>"  Noeuds encore a redemarrer dans ce passage : evites comme nouveau
+                     leader si la cible est le leader Patroni (default: aucun).
+  --voters "<N..>"   Votants etcd, preferes comme nouveau leader (default: "1 2 3").
   --dry-run          Affiche les actions sans les executer.
 HELP
       exit 0
@@ -274,6 +285,78 @@ JSON
   done
   log "WARN : POST event $kind a echoue definitivement"
 }
+
+# --- 2a. Cible leader Patroni : bascule planifiee AVANT le restart (INV-187) ---
+# Redemarrer le leader = le perdre brutalement : ~15-35 s sans ecriture, nouvelle timeline,
+# et les replicas hors ligne a ce moment reviennent sur l'ancienne, WAL supprimes (re-clonage,
+# INV-168 ; prod 2026-11-05/06, timeline 285 -> 290 en un jour). Le leader passe d'abord la
+# main a un replica sain ; sans bascule terminee il n'est PAS redemarre : exit 3, reporte.
+#
+# Vue du cluster (GET :8008/cluster) : "<leader> <role de la cible> <candidat>" ("-" = aucun).
+# Candidat : replica `streaming` sur la timeline du leader, pas `nofailover` ; d'abord un noeud
+# qui n'est plus a redemarrer dans ce passage, puis un votant etcd, puis le plus petit lag.
+CLUSTER_VIEW_PY='
+import json, sys
+members = json.load(sys.stdin)["members"]
+target = sys.argv[1]
+pending, voters = (["node" + n for n in a.split()] for a in sys.argv[2:4])
+leader = next((m for m in members if m["role"] == "leader"), {})
+tl = leader.get("timeline")
+ok = [m for m in members if m["role"] != "leader" and m.get("state") == "streaming"
+      and m.get("timeline", tl) == tl and not m.get("tags", {}).get("nofailover")]
+ok.sort(key=lambda m: (m["name"] in pending, m["name"] not in voters,
+                       m["lag"] if isinstance(m.get("lag"), int) else float("inf")))
+role = next((m["role"] for m in members if m["name"] == target), "absent")
+print(leader.get("name", "-"), role, ok[0]["name"] if ok else "-")
+'
+# Lu sur la cible, sinon sur un autre noeud (meme etat : il vient d'etcd).
+cluster_view() {
+  local ip
+  for ip in "$WG_IP" 10.99.0.1 10.99.0.2 10.99.0.3 10.99.0.4 10.99.0.5 10.99.0.6 10.99.0.7; do
+    curl -fsS --max-time 5 "http://${ip}:8008/cluster" 2>/dev/null \
+      | python3 -c "$CLUSTER_VIEW_PY" "$NODE_NAME" "$PENDING" "$VOTERS" 2>/dev/null && return 0
+  done
+  return 1
+}
+# Bascule terminee : un leader elu ET la cible redevenue replica.
+switched() {
+  local role
+  read -r PG_LEADER role _ <<< "$(cluster_view)"
+  [[ "$PG_LEADER" != "-" && "$role" =~ ^(replica|sync_standby|quorum_standby)$ ]]
+}
+
+if ! VIEW=$(cluster_view); then
+  log "ERREUR : etat Patroni (GET :8008/cluster) illisible : $NODE_NAME est peut-etre le leader, pas redemarre. Exit 3."
+  exit 3
+fi
+read -r PG_LEADER _ CANDIDATE <<< "$VIEW"
+if [[ "$PG_LEADER" == "$NODE_NAME" ]]; then
+  if [[ "$CANDIDATE" == "-" ]]; then
+    log "ERREUR : $NODE_NAME est le leader Patroni et aucun replica sain (streaming, meme timeline) ne peut le remplacer : pas redemarre. Exit 3."
+    post_event "switchover" "failure" '{"reason": "no_candidate"}'
+    exit 3
+  fi
+  log "$NODE_NAME est le leader Patroni : bascule vers $CANDIDATE avant le restart"
+  if (( DRY_RUN )); then
+    echo "DRY-RUN > POST http://${WG_IP}:8008/switchover leader=$NODE_NAME candidate=$CANDIDATE"
+  else
+    DEADLINE=$(( $(date +%s) + SWITCHOVER_TIMEOUT ))
+    RESP=$(curl -sS --max-time "$SWITCHOVER_TIMEOUT" -X POST "http://${WG_IP}:8008/switchover" \
+      -H "Content-Type: application/json" \
+      -d "{\"leader\": \"$NODE_NAME\", \"candidate\": \"$CANDIDATE\"}" 2>&1 || true)
+    log "Patroni /switchover : $RESP"
+    until switched; do
+      if (( $(date +%s) >= DEADLINE )); then
+        log "ERREUR : bascule vers $CANDIDATE non terminee en ${SWITCHOVER_TIMEOUT}s : $NODE_NAME pas redemarre. Exit 3."
+        post_event "switchover" "failure" "{\"candidate\": \"$CANDIDATE\", \"reason\": \"timeout\"}"
+        exit 3
+      fi
+      sleep 2
+    done
+    log "Bascule faite : leader $PG_LEADER, $NODE_NAME replica"
+    post_event "switchover" "success" "{\"from\": \"$NODE_NAME\", \"to\": \"$PG_LEADER\"}"
+  fi
+fi
 
 log "POST kind=canary_start"
 post_event "canary_start" "in_progress" "{\"soak_seconds\": $SOAK_SECONDS}"

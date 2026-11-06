@@ -214,7 +214,8 @@ class DeploymentEvent(Base):
     image = Column(String, nullable=False)
     kind = Column(String, nullable=False, index=True)
     # kind ∈ {'pull', 'canary_start', 'canary_promoted', 'rollback', 'abort',
-    #         'manual_override', 'emergency_promote', 'emergency_aborted_network'}
+    #         'manual_override', 'emergency_promote', 'emergency_aborted_network',
+    #         'switchover' (INV-187)}
     from_digest = Column(String, nullable=True)  # sha256:... avant
     to_digest = Column(String, nullable=True)    # sha256:... après
     status = Column(String, nullable=False)      # 'success' | 'failure' | 'in_progress'
