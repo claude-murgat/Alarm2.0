@@ -9,6 +9,7 @@
 #   - alarm-chaos.{service,timer,sh} + alarm-chaos-net : panne controlee (INV-176..179)
 #   - infra/onsite/install.sh complet + vraie passerelle sur une machine sans modem ni
 #     Arduino (INV-182/183/184)
+#   - alarm-node-check.{service,timer} + standard.env : controle de conformite quotidien (INV-186)
 #
 # Pourquoi ce workflow existe :
 #   La PR initiale de fix `fix/cd-pull-lock-runtime-dir` corrige un bug ou le
@@ -47,6 +48,9 @@ on:
       - 'scripts/4g-standby.sh'
       - 'scripts/modem-watchdog.py'
       - 'gateway/**'
+      - 'scripts/alarm-node-check.sh'
+      - 'infra/onsite/systemd/alarm-node-check.*'
+      - 'infra/onsite/standard.env'
       - '.github/workflows/cd-install-smoke.yml'
   push:
     branches: [master]
@@ -66,6 +70,9 @@ on:
       - 'scripts/4g-standby.sh'
       - 'scripts/modem-watchdog.py'
       - 'gateway/**'
+      - 'scripts/alarm-node-check.sh'
+      - 'infra/onsite/systemd/alarm-node-check.*'
+      - 'infra/onsite/standard.env'
       - '.github/workflows/cd-install-smoke.yml'
 
 jobs:
@@ -571,6 +578,15 @@ jobs:
           test "$(systemctl is-enabled ModemManager || true)" = masked  # revue F6
           sudo python3 -m pip --version  # revue F3 : alarm-gateway-sync en a besoin
           sudo cmp gateway/requirements.txt /var/lib/alarm/cd/gateway-requirements.txt
+
+      - name: Conformite au standard (INV-186) - units valides, timer actif, runner hors plan -> code 0
+        run: |
+          sudo systemd-analyze verify /etc/systemd/system/alarm-node-check.service /etc/systemd/system/alarm-node-check.timer
+          systemctl is-enabled alarm-node-check.timer
+          systemctl is-active alarm-node-check.timer
+          sudo cmp infra/onsite/standard.env /usr/local/share/alarm/standard.env
+          sudo /usr/local/bin/alarm-node-check | tee /tmp/check.log
+          grep -q "^INFO machine .* absente du plan standard" /tmp/check.log
 
       - name: Sans modem ni Arduino - tout tourne, rien ne relance (INV-182/183/184)
         run: |
