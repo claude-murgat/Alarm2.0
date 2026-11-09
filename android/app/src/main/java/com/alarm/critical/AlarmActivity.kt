@@ -20,7 +20,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
-import com.alarm.critical.api.ApiProvider
+import com.alarm.critical.api.Auth
 import com.alarm.critical.model.AlarmResponse
 import com.alarm.critical.service.AlarmSoundManager
 import com.alarm.critical.view.ArcTimerView
@@ -48,7 +48,6 @@ class AlarmActivity : AppCompatActivity() {
 
     private lateinit var soundManager: AlarmSoundManager
     private var alarmId: Int = 0
-    private var token: String? = null
     private var bgPulseAnimator: ValueAnimator? = null
     private var iconPulseAnimator: ObjectAnimator? = null
     private var iconPulseAnimatorY: ObjectAnimator? = null
@@ -70,8 +69,6 @@ class AlarmActivity : AppCompatActivity() {
 
         alarmId = intent.getIntExtra("alarm_id", 0)
         shown = java.lang.ref.WeakReference(this)
-        token = intent.getStringExtra("token")
-            ?: getSharedPreferences("alarm_prefs", MODE_PRIVATE).getString("token", null)
 
         soundManager = AlarmSoundManager(this)
 
@@ -257,14 +254,14 @@ class AlarmActivity : AppCompatActivity() {
     }
 
     private fun acknowledgeAlarm(id: Int) {
-        if (token == null) {
+        if (getSharedPreferences("alarm_prefs", MODE_PRIVATE).getString("token", null) == null) {
             Toast.makeText(this, "Non authentifie", Toast.LENGTH_SHORT).show()
             return
         }
 
         lifecycleScope.launch {
             try {
-                val response = ApiProvider.service.acknowledgeAlarm("Bearer $token", id)
+                val response = Auth.call(this@AlarmActivity) { acknowledgeAlarm(it, id) }
                 if (response.isSuccessful) {
                     AlarmPollingService.onAckSucceeded(response.body())
                     // Coupe la sonnerie et passe au vert seulement si plus rien n'est a acquitter
