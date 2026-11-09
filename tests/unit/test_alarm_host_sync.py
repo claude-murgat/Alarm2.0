@@ -87,3 +87,19 @@ def test_clean_clone_is_deployed(repos):
     p = run(repos)
     assert p.returncode == 0, p.stderr
     assert git(repos["work"], "rev-parse", "HEAD") == repos["target"]
+
+
+def test_cd_state_dir_declared_only_by_alarm_units():
+    """INV-141 (2026-11-09) : systemd redonne recursivement un StateDirectory au User de l'unit qui demarre.
+    Units root + units alarm sur /var/lib/alarm/cd -> digests.tsv repassait en root 644 et alarm-cd-pull
+    echouait (« Permission non accordee », onsite-1 et onsite-2)."""
+    repo = SCRIPT.parents[1]
+    owners = {}
+    for unit in sorted((repo / "infra" / "onsite" / "systemd").glob("*.service")):
+        lines = [line.strip() for line in unit.read_text().splitlines()]
+        if "StateDirectory=alarm/cd" in lines:
+            owners[unit.name] = next((line.split("=", 1)[1] for line in lines if line.startswith("User=")), "root")
+    assert "alarm-cd-pull.service" in owners
+    assert {u: o for u, o in owners.items() if o != "alarm"} == {}
+    for script in ("alarm-host-sync.sh", "alarm-gateway-sync.sh"):  # units root : creent le dossier eux-memes
+        assert 'mkdir -p "$STATE_DIR"' in (repo / "scripts" / script).read_text(), script
