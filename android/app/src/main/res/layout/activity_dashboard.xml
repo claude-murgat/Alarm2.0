@@ -236,11 +236,24 @@
                     android:textColor="#f1f5f9"
                     android:textStyle="bold" />
 
+                <!-- INV-ANDROID-706 : progression du telechargement de l'APK -->
+                <ProgressBar
+                    android:id="@+id/updateBannerProgress"
+                    style="?android:attr/progressBarStyleHorizontal"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:max="100"
+                    android:progressTint="#00A2E5"
+                    android:contentDescription="Progression du téléchargement de la mise à jour"
+                    android:visibility="gone"
+                    android:layout_marginTop="10dp" />
+
                 <Button
                     android:id="@+id/updateButton"
                     android:layout_width="match_parent"
                     android:layout_height="42dp"
                     android:text="Mettre à jour"
+                    android:contentDescription="Mettre à jour l'application"
                     android:backgroundTint="#00A2E5"
                     android:textColor="#FFFFFF"
                     android:textSize="14sp"
@@ -527,6 +540,8 @@
                     android:text="Escalade" android:drawableStart="@android:drawable/ic_menu_call" />
                 <TextView android:id="@+id/drawerModems" style="@style/DrawerItem"
                     android:text="Sites et modems" android:drawableStart="@android:drawable/ic_menu_mapmode" />
+                <TextView android:id="@+id/drawerUpdate" style="@style/DrawerItem"
+                    android:text="Mises à jour" android:drawableStart="@android:drawable/ic_menu_rotate" />
 
                 <!-- Entrees admin : GONE pour les autres (le serveur reste le vrai garde, 403) -->
                 <LinearLayout

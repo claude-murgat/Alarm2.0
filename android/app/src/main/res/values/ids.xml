@@ -8,7 +8,4 @@
     <item name="updateLastCheck" type="id" />
     <item name="updateCheckButton" type="id" />
     <item name="updateInstallButton" type="id" />
-    <!-- RED : remplaces par le layout du tableau de bord -->
-    <item name="drawerUpdate" type="id" />
-    <item name="updateBannerProgress" type="id" />
 </resources>

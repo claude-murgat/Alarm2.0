@@ -212,14 +212,14 @@ class UpdateScreenTest {
         val dashboard = launchDashboard(server = "1.9.0")
 
         assertTrue("bandeau pendant le telechargement",
-            shows(R.id.updateBannerText, "Mise à jour 1.9.0 : téléchargement… 42 %"))
+            shows(R.id.updateBannerText, "Mise à jour 1.9.0 : téléchargement… 42\u00A0%"))
         visible(R.id.updateBannerProgress)
         assertEquals("barre du bandeau", 42, progressOf(R.id.updateBannerProgress))
         gone(R.id.updateButton)
 
         dashboard.openUpdateScreen()
         assertTrue("ecran pendant le telechargement",
-            shows(R.id.updateState, "Version 1.9.0 disponible — téléchargement… 42 %"))
+            shows(R.id.updateState, "Version 1.9.0 disponible — téléchargement… 42\u00A0%"))
         visible(R.id.updateProgress)
         assertEquals("barre de l'ecran", 42, progressOf(R.id.updateProgress))
         onView(withId(R.id.updateCheckButton)).check(matches(not(isEnabled())))  // verification en cours

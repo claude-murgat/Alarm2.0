@@ -723,7 +723,7 @@ Décision du propriétaire du 2026-11-05.
 - **Couverture** : Espresso `SelfUpdateTest` (téléchargement et installeur remplacés par un faux via `UpdateProvider.override`) : bandeau, adresse de téléchargement et installation de l'APK vérifié ; serveur mis à jour pendant que l'app est ouverte → bandeau au retour au premier plan, intervalle de 15 min ; même version, plus ancienne, comparaison numérique ; version qui n'est pas `X.Y.Z` ; build `debug` ; empreinte différente ; alarme en cours (non acquittée puis acquittée) puis installation à la fin de l'alarme ; autorisation absente.
 - **Non testé** : la vraie boîte de confirmation d'Android et la mise à jour sans confirmation d'Android 12+ (il faut deux APK release signés avec la clé de prod).
 
-### INV-ANDROID-706 [H] ❌ Écran « Mises à jour » et progression du téléchargement (2026-11-09)
+### INV-ANDROID-706 [H] ✅ Écran « Mises à jour » et progression du téléchargement (2026-11-09)
 Demande du propriétaire du 2026-11-09. La mise à jour intégrée (INV-ANDROID-705) se voit et se relance depuis un écran du menu. Le serveur reste la seule source de disponibilité (`version` de `GET /health`).
 - **Entrée du menu** « Mises à jour », pour tous (INV-ANDROID-011) : écran du même modèle que les autres (titre, retour, portrait).
 - **L'écran affiche** :
@@ -731,7 +731,7 @@ Demande du propriétaire du 2026-11-09. La mise à jour intégrée (INV-ANDROID-
   - **Dernière version annoncée par le serveur** : `version` de `GET /health` à la dernière vérification, « inconnue » si le serveur n'a pas répondu (erreur dont 503, injoignable, pas de `version`) ;
   - **État**, en une phrase :
     - « À jour » : rien à proposer (même version, plus ancienne, ou version qui n'est pas `X.Y.Z`) ;
-    - « Version X.Y.Z disponible — téléchargement… N % » avec une barre de progression, N = octets reçus / `Content-Length` de l'APK (sans `Content-Length` : barre indéterminée, sans pourcentage) ;
+    - « Version X.Y.Z disponible — téléchargement… N % » avec une barre de progression, N = octets reçus / `Content-Length` de l'APK (espace insécable avant « % » ; sans `Content-Length` : barre indéterminée, sans pourcentage) ;
     - « Version X.Y.Z prête à installer » : APK vérifié ;
     - « Mise à jour reportée : alarme en cours » ;
     - « Téléchargement impossible, nouvel essai à la prochaine vérification » : 404, réseau, empreinte différente ;
@@ -745,7 +745,8 @@ Demande du propriétaire du 2026-11-09. La mise à jour intégrée (INV-ANDROID-
 - **Un seul état** partagé par le bandeau et l'écran : ils affichent toujours la même chose. Un APK prêt le reste si la vérification suivante n'aboutit pas (serveur injoignable, empreinte injoignable) ; un report pour alarme survit aux vérifications suivantes.
 - **Accessibilité** : boutons décrits pour TalkBack, barres de progression étiquetées.
 - **Pourquoi** : le propriétaire ne voyait rien entre l'annonce d'une version par le serveur et l'apparition du bandeau (téléchargement de l'APK sans retour visible), ni pourquoi rien n'était proposé ; il fallait attendre la vérification suivante (15 min ou retour au premier plan).
-- **Couverture** : Espresso `UpdateScreenTest` (même faux que `SelfUpdateTest`, téléchargement retenu pour observer la progression).
+- **Couverture** : Espresso `UpdateScreenTest` (faux du même modèle que celui de `SelfUpdateTest`, APK retenu à 42 % pour observer la progression) : `menu_ouvre_l_ecran_versions_installee_et_annoncee_a_jour`, `progression_du_telechargement_sur_le_bandeau_et_l_ecran_puis_prete`, `verifier_maintenant_relance_la_verification_sans_quitter_l_ecran`, `installer_depuis_l_ecran_installe_l_apk_verifie`, `alarme_en_cours_installation_reportee_puis_lancee_a_la_fin_de_l_alarme`, `telechargement_impossible_etat_d_echec`, `serveur_injoignable_version_annoncee_inconnue_un_apk_pret_le_reste`, `build_debug_message_de_developpement`. RED 0/8 puis verts 8/8 sur émulateur (AVD alarm_repro, 2026-11-09), `SelfUpdateTest` 8/8 ; suite complète 99/99.
+- **Non testé** : la vraie progression d'OkHttp (`Content-Length` de GitHub) et la boîte « Autorisation nécessaire » ouverte depuis l'écran (même code que le bandeau, testé par `SelfUpdateTest`).
 ---
 
 ## 9. Tests et isolation
