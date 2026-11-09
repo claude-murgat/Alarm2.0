@@ -64,7 +64,7 @@ class SelfUpdateTest {
         val downloads = CopyOnWriteArrayList<String>()
         val installs = CopyOnWriteArrayList<File>()
 
-        override fun download(url: String, dest: File) {
+        override fun download(url: String, dest: File, onProgress: (Int) -> Unit) {
             // Format de `sha256sum` (android-release.yml) : « <hex>  <nom> »
             dest.writeBytes(if (url.endsWith(".sha256")) "$sha  ${url.substringAfterLast('/').removeSuffix(".sha256")}\n".toByteArray() else apk)
             downloads += url

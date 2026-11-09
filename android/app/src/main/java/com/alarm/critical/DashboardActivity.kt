@@ -17,6 +17,7 @@ import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.drawerlayout.widget.DrawerLayout
@@ -35,14 +36,14 @@ import com.alarm.critical.model.sitesLabel
 import com.alarm.critical.service.AlarmPollingService
 import com.alarm.critical.service.AlarmSoundManager
 import com.alarm.critical.update.AppUpdate
-import com.alarm.critical.update.UpdateProvider
+import com.alarm.critical.update.UpdateState
+import com.alarm.critical.update.showDownload
 import com.alarm.critical.util.AppLogger
 import com.alarm.critical.view.ArcTimerView
 import com.alarm.critical.view.SignalBarsView
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.*
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -64,9 +65,6 @@ class DashboardActivity : AppCompatActivity() {
 
     // INV-ANDROID-705 : mise a jour integree
     private var nextUpdateCheck = Long.MAX_VALUE  // INV-ANDROID-705 : premiere verification a onResume
-    private var updateCheck: Job? = null
-    private var readyUpdate: Pair<String, File>? = null
-    private var updatePostponed = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -150,6 +148,7 @@ class DashboardActivity : AppCompatActivity() {
             R.id.drawerAlarms to AlarmsActivity::class.java,
             R.id.drawerEscalation to EscalationActivity::class.java,
             R.id.drawerModems to ModemsActivity::class.java,
+            R.id.drawerUpdate to UpdateActivity::class.java,
             R.id.drawerTeam to TeamActivity::class.java,
             R.id.drawerChain to ChainActivity::class.java,
             R.id.drawerSupervision to SupervisionActivity::class.java,
@@ -189,14 +188,15 @@ class DashboardActivity : AppCompatActivity() {
             acknowledgeCurrentAlarm()
         }
 
-        findViewById<Button>(R.id.updateButton).setOnClickListener { installUpdate() }
+        findViewById<Button>(R.id.updateButton).setOnClickListener { AppUpdate.install(this) }
+        lifecycleScope.launch { AppUpdate.state.collect { showUpdate(it) } }
 
         // Mise a jour du statut toutes les secondes
         statusUpdateJob = lifecycleScope.launch {
             while (isActive) {
                 updateStatus()
                 checkUpdateIfDue()
-                if (updatePostponed && !alarmInProgress()) installUpdate()
+                if (AppUpdate.state.value.postponed) AppUpdate.install(this@DashboardActivity)  // reportee : relance a la fin de l'alarme
                 delay(1000)
             }
         }
@@ -279,61 +279,25 @@ class DashboardActivity : AppCompatActivity() {
         }
     }
 
-    /** INV-ANDROID-705 : a chaque retour au premier plan puis toutes les 15 min ; bandeau quand un APK verifie est pret. */
+    /** INV-ANDROID-705 : a chaque retour au premier plan puis toutes les 15 min (une verification deja en cours : seconde suivante). */
     private fun checkUpdateIfDue() {
         val now = android.os.SystemClock.elapsedRealtime()
-        if (now < nextUpdateCheck || updateCheck?.isActive == true) return  // jamais deux telechargements du meme APK a la fois
-        nextUpdateCheck = now + AppUpdate.CHECK_INTERVAL_MS
-        updateCheck = lifecycleScope.launch {
-            val update = AppUpdate.findVerifiedUpdate(this@DashboardActivity) ?: return@launch
-            readyUpdate = update
-            if (!updatePostponed) showUpdate("Mise à jour disponible : ${update.first}")
-        }
+        if (now >= nextUpdateCheck && AppUpdate.check(this)) nextUpdateCheck = now + AppUpdate.CHECK_INTERVAL_MS
     }
 
-    private fun showUpdate(text: String) {
-        findViewById<TextView>(R.id.updateBannerText).text = text
-        findViewById<View>(R.id.updateBanner).visibility = View.VISIBLE
-    }
-
-    /** Alarme en cours (acquittee ou non) ou sonnerie : jamais d'installation (telephone d'astreinte). */
-    private fun alarmInProgress() = AlarmPollingService.alarms.isNotEmpty() || AlarmSoundManager(this).isPlaying()
-
-    /** Bouton « Mettre a jour », relance a la fin de l'alarme si elle a ete reportee. */
-    private fun installUpdate() {
-        val (version, apk) = readyUpdate ?: return
-        if (alarmInProgress()) {
-            if (!updatePostponed) AppLogger.log("MiseAJour", "installation de $version reportee : alarme en cours")
-            updatePostponed = true
-            showUpdate("Mise à jour $version reportée : alarme en cours")
-            return
+    /** INV-ANDROID-705/706 : bandeau pendant le telechargement (progression), puis APK pret ; cache sinon. */
+    private fun showUpdate(s: UpdateState) {
+        val text = when (s.phase) {
+            UpdateState.Phase.DOWNLOADING -> "Mise à jour ${s.version} : téléchargement…${s.percentText}"
+            UpdateState.Phase.READY -> if (s.postponed) "Mise à jour ${s.version} reportée : alarme en cours"
+                                       else "Mise à jour disponible : ${s.version}"
+            else -> null
         }
-        updatePostponed = false
-        showUpdate("Mise à jour disponible : $version")
-        val backend = UpdateProvider.backend
-        if (!backend.canInstall(this)) {
-            AppLogger.log("MiseAJour", "autorisation « applis inconnues » absente : invite affichee")
-            AlertDialog.Builder(this)
-                .setTitle("Autorisation nécessaire")
-                .setMessage("Pour installer la mise à jour, Android doit autoriser Alarme Murgat à installer " +
-                    "des applications (une seule fois). Activez « Autoriser cette source », puis revenez " +
-                    "appuyer sur « Mettre à jour ».")
-                .setPositiveButton("Ouvrir les réglages") { _, _ ->
-                    startActivity(Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                        android.net.Uri.parse("package:$packageName")))
-                }
-                .setNegativeButton("Annuler", null)
-                .show()
-            return
-        }
-        AppLogger.log("MiseAJour", "installation de $version lancee")
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                backend.install(this@DashboardActivity, apk)
-            } catch (e: Exception) {
-                AppLogger.log("MiseAJour", "installation de $version impossible : ${e.message}")
-            }
-        }
+        findViewById<TextView>(R.id.updateBannerText).text = text.orEmpty()
+        findViewById<View>(R.id.updateBanner).visibility = if (text == null) View.GONE else View.VISIBLE
+        findViewById<ProgressBar>(R.id.updateBannerProgress).showDownload(s)
+        findViewById<View>(R.id.updateButton).visibility =
+            if (s.phase == UpdateState.Phase.READY) View.VISIBLE else View.GONE
     }
 
     private fun performLogout() {
