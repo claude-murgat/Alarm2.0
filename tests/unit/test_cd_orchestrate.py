@@ -35,6 +35,11 @@ echo "$2" >> "$H/canary.log"
 printf '%s\n' "$@" > "$H/args.$2"
 case " $(cat "$H/fail" 2>/dev/null) " in *" $2 "*) exit 2 ;; esac
 case " $(cat "$H/unready" 2>/dev/null) " in *" $2 "*) exit 3 ;; esac  # prerequis KO, rien touche
+# :stable promu pendant ce canary (nouveau digest unique, cache de NODE3 mis a jour) ; une ligne = une promotion
+if grep -qx "$2" "$H/promote" 2>/dev/null; then
+  printf 'sha256:%064d\n' "$(wc -l < "$H/canary.log")" > "$H/digest"
+  sed -i "0,/^$2\$/{//d}" "$H/promote"
+fi
 """
 
 
@@ -52,11 +57,12 @@ def cd(tmp_path):
     return tmp_path
 
 
-def run(h, down=(), fail=(), default_lock=False, unready=()):
+def run(h, down=(), fail=(), default_lock=False, unready=(), promote=()):
     """Un tick du timer. Retourne (exit code, noeuds passes au canary, stderr)."""
     (h / "down").write_text(" ".join(IP[n] for n in down))
     (h / "fail").write_text(" ".join(map(str, fail)))
     (h / "unready").write_text(" ".join(map(str, unready)))
+    (h / "promote").write_text("".join(f"{n}\n" for n in promote))
     (h / "canary.log").write_text("")
     env = {**os.environ, "H": str(h), "PATH": f"{h / 'bin'}:{os.environ['PATH']}",
            "STATE_DIR": str(h / "state"), "LOCK_FILE": str(h / "lock"),
@@ -202,3 +208,27 @@ def test_canary_told_the_nodes_still_to_restart_and_the_voters(cd):
     assert [opt(n, "--pending") for n in deployed] == [
         "7 6 5 4 2 1", "6 5 4 2 1", "5 4 2 1", "4 2 1", "2 1", "1", ""]
     assert {opt(n, "--voters") for n in deployed} == {"1 2 3"}
+
+
+ORDER = [3, 7, 6, 5, 4, 2, 1]
+
+
+def test_image_promoted_during_a_pass_triggers_a_new_pass_right_away(cd):
+    """2026-11-09 : 1.9.3 promue a 08:25Z pendant un passage commence a 08:20Z ; node3 (OVH), node7 et
+    node6 sont restes un passage de plus sur l'ancienne version. Promotion au canary node6 (3e appel)."""
+    rc, deployed, err = run(cd, promote=(6,))
+    assert rc == 0, err
+    assert deployed == ORDER + ORDER  # 2e passage : le vrai canary sort aussitot sur un noeud deja a jour
+    new = (cd / "digest").read_text().strip()
+    assert new != DIGEST
+    assert all((cd / "state" / f"node{n}.digest").read_text().strip() == new for n in IP)
+    assert (cd / "state" / "orchestrate.state").read_text().split("\t")[:2] == [new, "success"]
+    assert f"nouvelle image promue pendant le passage ({new}) : nouveau passage tout de suite" in err.lower()
+
+
+def test_new_pass_bounded_to_three_per_tick(cd):
+    """Garde-fou : une image promue a chaque passage (node1 = dernier canary) -> 3 passages, puis le tick suivant."""
+    rc, deployed, err = run(cd, promote=(1, 1, 1, 1))
+    assert rc == 0, err
+    assert deployed == ORDER * 3
+    assert "3 passages faits, repris au prochain tick" in err

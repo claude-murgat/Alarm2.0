@@ -29,6 +29,8 @@
 #     au tick suivant, SANS cooldown) | failure (un canary a fail).
 #   - Meme digest + outcome=failure + cooldown < 1 h -> skip (anti-boucle si
 #     :stable est casse).
+#   - :stable promu pendant le passage (digest du cache NODE3 change) -> nouveau
+#     passage tout de suite, au plus MAX_PASSES par tick (2026-11-09).
 #
 # Pre-requis (cf docs/CD_DESIGN.md §3 + §4) :
 #   - alarm-cd-pull.timer actif sur les 7 noeuds (pour que les images soient
@@ -63,6 +65,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Cf §5 doc — "hystérésis : pas de nouvelle tentative de pull :stable sur ce
 # noeud pendant 1 h". Ici on porte ça au niveau orchestration (chaine entiere).
 COOLDOWN_AFTER_FAIL=3600
+# Image promue pendant un passage -> nouveau passage aussitot (INV-167, 2026-11-09), au plus 3 par tick.
+MAX_PASSES=3
 # Soak entre etapes (override possible via env). 120 s depuis le 2026-10-20 (choix proprietaire :
 # ~10 min de deploiement au lieu de ~35) ; toujours un noeud a la fois, rollback auto conserve.
 SOAK="${SOAK:-120}"
@@ -292,8 +296,22 @@ done
 if (( ${#PENDING[@]} > 0 )); then
   log "Chaine canary partielle : $LOCAL_DIGEST deploye, en attente : ${PENDING[*]} (repris au prochain passage, sans cooldown)"
   printf '%s\t%s\t%s\n' "$LOCAL_DIGEST" "partial" "$NOW" > "$STATE_FILE"
-  exit 0
+else
+  log "Chaine canary complete : $LOCAL_DIGEST deploye sur les 7 noeuds"
+  printf '%s\t%s\t%s\n' "$LOCAL_DIGEST" "success" "$NOW" > "$STATE_FILE"
 fi
-log "Chaine canary complete : $LOCAL_DIGEST deploye sur les 7 noeuds"
-printf '%s\t%s\t%s\n' "$LOCAL_DIGEST" "success" "$NOW" > "$STATE_FILE"
+
+# Le digest est fige au debut du passage, mais chaque canary deploie le :stable le plus recent de sa
+# cible : les noeuds deja passes gardent l'ancienne image. Nouveau passage tout de suite (le canary d'un
+# noeud deja a jour sort aussitot, sans bascule ni soak). Le verrou est repris par le passage suivant.
+NEW_DIGEST=$(get_local_digest)
+if [[ -n "$NEW_DIGEST" && "$NEW_DIGEST" != "$LOCAL_DIGEST" ]]; then
+  PASS=${CD_PASS:-1}
+  if (( PASS < MAX_PASSES )); then
+    log "Nouvelle image promue pendant le passage ($NEW_DIGEST) : nouveau passage tout de suite"
+    export CD_PASS=$((PASS + 1))
+    exec "$BASH" "${BASH_SOURCE[0]}" "$@"
+  fi
+  log "Nouvelle image promue pendant le passage ($NEW_DIGEST) : ${MAX_PASSES} passages faits, repris au prochain tick"
+fi
 exit 0
