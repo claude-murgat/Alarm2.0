@@ -76,6 +76,12 @@ install -d -m755 /usr/local/share/alarm
 inst "$REPO/infra/onsite/standard.env" /usr/local/share/alarm/standard.env 644
 inst "$REPO/scripts/alarm-node-check.sh" /usr/local/bin/alarm-node-check 755
 
+# 1f. Copie des sauvegardes de la base envoyee par NODE3 en `alarm` (INV-190, sur alarm-1 ; dossier vide
+# ailleurs). 0700 : mots de passe haches et telephones. Pas de user alarm (CI) : rien.
+if id alarm >/dev/null 2>&1; then
+  install -d -m 700 -o alarm -g alarm /var/lib/alarm/db-backup
+fi
+
 # 2. Passerelle sur chaque machine (INV-182) : user système + accès aux ports série (dialout),
 #    code gateway -> /opt/alarm-gateway/, dépendances (absentes d'une machine qui n'en a jamais eu).
 if ! id alarm-gateway >/dev/null 2>&1; then

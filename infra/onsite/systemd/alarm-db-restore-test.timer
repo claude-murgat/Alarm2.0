@@ -1,0 +1,14 @@
+# /etc/systemd/system/alarm-db-restore-test.timer
+# INV-190 : test de restauration le 1er de chaque mois, apres la sauvegarde de la nuit (03:00-03:30 UTC).
+[Unit]
+Description=Timer du test de restauration mensuel de la sauvegarde de la base (INV-190)
+
+[Timer]
+OnCalendar=*-*-01 05:00:00 UTC
+RandomizedDelaySec=30min
+# NODE3 eteint le 1er : test rattrape au demarrage.
+Persistent=true
+Unit=alarm-db-restore-test.service
+
+[Install]
+WantedBy=timers.target

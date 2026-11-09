@@ -1,0 +1,14 @@
+# /etc/systemd/system/alarm-db-backup.timer
+# INV-190 : sauvegarde de la base chaque nuit vers 03:00 UTC (heure creuse), sur NODE3.
+[Unit]
+Description=Timer de la sauvegarde quotidienne de la base alarm_db (INV-190)
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 UTC
+RandomizedDelaySec=30min
+# NODE3 eteint a 03:00 : sauvegarde rattrapee au demarrage.
+Persistent=true
+Unit=alarm-db-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -44,13 +44,12 @@ case "$tool" in
     if grep -qx "$2" "$H/dump_fail" 2>/dev/null; then printf 'PGDMP tronque'; echo "pg_dump: error: connection lost" >&2; exit 1; fi
     cat "$H/dump_content" ;;
   pg_restore)
-    content=$(cat)
     if [ "$1" = --list ]; then
-      [[ "$content" == PGDMP* ]] || { echo "pg_restore: error: input file does not appear to be a valid archive" >&2; exit 1; }
+      [[ "$(cat)" == PGDMP* ]] || { echo "pg_restore: error: input file does not appear to be a valid archive" >&2; exit 1; }
       printf ';\n; Archive created at 2026-11-09 03:05:12 UTC\n3345; 0 16386 TABLE DATA public users alarm\n'
     else
-      printf '%s' "$content" > "$H/restored"
-      [ -f "$H/restore_fail" ] && { echo "pg_restore: error: could not execute query" >&2; exit 1; }
+      cat > "$H/restored"
+      if [ -f "$H/restore_fail" ]; then echo "pg_restore: error: could not execute query" >&2; exit 1; fi
     fi ;;
   pg_isready) exit 0 ;;
   psql) t=${@: -1}; cat "$H/count.${t##* }" 2>/dev/null || echo 3 ;;
@@ -67,6 +66,8 @@ cat "$H/cluster.json"
 SSH = r'''#!/usr/bin/env bash
 echo "$*" >> "$H/ssh.log"
 [ -f "$H/ssh_down" ] && { echo "ssh: connect to host 10.99.0.4 port 22: Connection timed out" >&2; exit 255; }
+# disque plein sur alarm-1 : SSH repond, l'ecriture echoue
+[[ -f "$H/disk_full" && "${@: -1}" == *"cat >"* ]] && { echo "cat: write error: No space left on device" >&2; exit 1; }
 exec bash -c "${@: -1}"
 '''
 MAILER = '#!/usr/bin/env bash\n{ echo "SUJET $1"; cat; } >> "$H/mail"\n'
@@ -242,8 +243,9 @@ def test_copy_to_alarm1_over_wireguard_ssh(h):
     assert "alarm@10.99.0.4" in ssh and "BatchMode=yes" in ssh and "ConnectTimeout=10" in ssh, ssh
 
 
-def test_copy_failure_keeps_the_local_dump_and_alerts(h):
-    (h / "ssh_down").write_text("")
+@pytest.mark.parametrize("failure", ["ssh_down", "disk_full"])
+def test_copy_failure_keeps_the_local_dump_and_alerts(h, failure):
+    (h / failure).write_text("")
     rc, err = run(h)
     assert rc == 1, err
     assert len(dumps(h / "backup")) == 1
@@ -302,8 +304,9 @@ def test_monthly_restore_test_restores_the_newest_dump_in_a_throwaway_container(
     assert len(set(names)) == 2  # nom unique a chaque test
 
 
-@pytest.mark.parametrize("case", ["pg_restore_en_echec", "users_vide", "aucune_sauvegarde"])
-def test_restore_test_failure_alerts_and_always_removes_the_container(h, case):
+@pytest.mark.parametrize("case,reason", [("pg_restore_en_echec", "pg_restore"), ("users_vide", "table users vide"),
+                                         ("aucune_sauvegarde", "aucune sauvegarde")])
+def test_restore_test_failure_alerts_and_always_removes_the_container(h, case, reason):
     if case != "aucune_sauvegarde":
         (h / "backup" / stamp(1)).write_text(DUMP)
     if case == "pg_restore_en_echec":
@@ -315,7 +318,8 @@ def test_restore_test_failure_alerts_and_always_removes_the_container(h, case):
     names, _ = containers_run(h)
     assert read(h, "removed").split() == names
     assert read(h, "containers").strip() == ""
-    assert "SUJET [ALARME-MURGAT] Test de restauration" in read(h, "mail")
+    mail = read(h, "mail")
+    assert "SUJET [ALARME-MURGAT] Test de restauration" in mail and reason in mail, mail
 
 
 def test_units_daily_backup_and_monthly_restore_test_as_alarm():

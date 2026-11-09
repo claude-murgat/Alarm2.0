@@ -500,6 +500,10 @@ Tous les containers, volumes et networks de l'essai ont été supprimés.
 
 ## 16. Backup PostgreSQL — préparation
 
+> **2026-11-09** : en place, sous une autre forme : dump logique quotidien depuis NODE3, 14 jours,
+> copie sur alarm-1, test de restauration mensuel (INV-190, [`CD_DESIGN.md`](CD_DESIGN.md) §9quinquies).
+> Le plan pgBackRest ci-dessous (restauration à un instant donné) reste un projet ultérieur.
+
 > Activation différée jusqu'à formation du quorum cluster. Configuration documentée ici
 > pour cohérence.
 

@@ -97,6 +97,17 @@ else
     [ "$forced$real" != 10 ]
 fi
 
+# Copie des sauvegardes de la base (INV-190), sur la machine qui la recoit de NODE3 : temoin independant
+# de NODE3 (arrete, timer desactive : aucun email). Date de reception = mtime (renommee une fois complete).
+if [ "$node" = "${STD_DB_BACKUP_COPY_NODE:-}" ]; then
+  bt=$(find "$R$STD_DB_BACKUP_DIR" -maxdepth 1 -name 'alarm_db-*.dump' -printf '%T@\n' 2>/dev/null | sort -n | tail -1)
+  bt=${bt%.*}; [[ "$bt" =~ ^[0-9]+$ ]] || bt=0
+  bage=$(( $(date +%s) - bt )); fresh=0
+  (( bt > 0 && bage <= STD_DB_BACKUP_MAX_AGE_HOURS * 3600 )) && fresh=1
+  if (( bt > 0 )); then bd="copie la plus recente recue il y a $((bage / 3600)) h"; else bd="aucune copie dans $STD_DB_BACKUP_DIR"; fi
+  chk sauvegarde_base "$bd (max $STD_DB_BACKUP_MAX_AGE_HOURS h, INV-190)" [ "$fresh" = 1 ]
+fi
+
 for unit in $STD_UNITS; do
   e=$(systemctl is-enabled "$unit" 2>/dev/null); chk "unit:$unit" "${e:-absente}" [ "$e" = enabled ]
 done

@@ -1,0 +1,27 @@
+# /etc/systemd/system/alarm-db-restore-test.service
+#
+# INV-190 : test de restauration mensuel. La sauvegarde la plus recente de NODE3 est restauree dans un
+# conteneur PostgreSQL 16 jetable (sans reseau), les tables cles doivent avoir des lignes, le conteneur
+# est toujours supprime. Echec -> email + unit failed. Lance par alarm-db-restore-test.timer.
+#
+# DEPLOIEMENT : NODE3 seulement, a la main (docs/CD_DESIGN.md §9quinquies). Pas de [Install].
+
+[Unit]
+Description=Alarm 2.0 - Test de restauration mensuel de la sauvegarde de la base (INV-190)
+Documentation=https://github.com/claude-murgat/Alarm2.0/blob/master/docs/CD_DESIGN.md
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Groupe docker (conteneur jetable), lecture des sauvegardes (dossier 0700 alarm).
+User=alarm
+Group=alarm
+StateDirectory=alarm/db-backup
+StateDirectoryMode=0700
+UMask=0077
+# Premier lancement : telechargement de postgres:16-alpine, puis restauration de quelques Mo.
+TimeoutStartSec=900
+ExecStart=/usr/local/bin/alarm-db-backup --restore-test
+StandardOutput=journal
+StandardError=journal
