@@ -128,11 +128,19 @@ Pas de build sur PR (les images preview ne servent pas à grand-chose tant qu'on
 
 **Prérequis vérifiés par le workflow avant la promo** :
 
-1. ✅ CI verte sur master @ sha (garanti par le trigger `workflow_run`)
+1. ✅ CI verte sur master @ sha (garanti par le trigger `workflow_run`), **ou** PR déjà testée sur le même arbre (job `decide`, ci-dessous)
 2. ✅ CD Build + CD Install Smoke verts sur le même sha (poll 5 min max)
 3. ✅ Le sha existe sur master (paranoia)
 4. ✅ Pas de revert de ce sha dans `git log master`
 5. ✅ Images `:sha-<short>` existent sur GHCR (cd-build a publié)
+
+**Promotion immédiate d'un commit déjà testé (2026-11-09, INV-190)** : le workflow se déclenche aussi à la fin de **CD Build** (push master). Un job `decide` (`.github/scripts/promote_decision.py`, testé par `tests/unit/test_promote_decision.py`) promeut **tout de suite**, sans attendre la CI master (~35 min), si :
+
+- le commit est le `merge_commit_sha` d'**exactement une** PR mergée (`GET /repos/{owner}/{repo}/commits/{sha}/pulls`) ;
+- il a **le même arbre** que la tête de cette PR (`<sha>^{tree}`, lu par l'API) — vrai pour nos squash/merge faits après `gh pr update-branch` ;
+- sur cette tête, les checks requis sont **tous** `completed/success` : `Tier 1 — Unit (logique pure)`, `Tier 1.5 — Mutation testing (logic pure, blocking)`, `Tier 2 — Integration (FastAPI TestClient + SQLite)`, `Tier 3 — E2E cluster (worker 1/2)` et `(worker 2/2)`, `Prod config check (INV-076 — /api/test/* disabled)` (noms des jobs de `pr.yml`, épinglés par le test).
+
+Le moindre doute (pas de PR, arbre différent, check absent, en échec ou en cours, API en erreur, révision de `:stable` illisible) → rien, la CI master promeut comme avant. **Jamais de retour arrière** (les deux déclencheurs) : un sha égal à la révision de `:stable` (label `org.opencontainers.image.revision`) ou ancêtre de celle-ci n'est pas (re)promu — sans cette garde, la CI master d'un commit précédent, finie après la promotion rapide du suivant, remettrait l'ancien code en `:stable`. Les autres vérifications du job `promote` (provenance, sha sur master, pas de revert, CD Build + CD Install Smoke verts, images présentes) restent identiques. Pourquoi : release 1.9.5, PR #321 (VERSION seul, CI verte sur sa tête, à jour de master) mergée à 14:37:03Z, CD Build fini à 14:37:32Z, puis ~35 min de CI master avant `:stable`, puis pull (5 min) et tick orchestrateur (15 min) : ~1 h avant que node3 annonce la version aux téléphones (INV-ANDROID-705).
 
 Si tous OK : re-tag :stable, POST `kind=manual_override` `actor=github-actions:auto-promote` dans `deployment_events` (si `vars.CD_API_BASE` configuré — V1 limitation : runner GH-hosted hors mesh WG, donc step skip aujourd'hui ; les events sont posés par les scripts canary depuis NODE3 ensuite).
 
@@ -202,6 +210,8 @@ sudo systemctl daemon-reload && sudo systemctl enable --now alarm-gateway-sync.t
 ```
 
 **Pourquoi 5 min et pas 1 min** : 1 min augmente la charge GHCR API et n'apporte rien (la promo `:stable` est manuelle, pas une course de seconde). 5 min est une fenêtre acceptable entre promo et propagation. Si plus rapide est demandé, le workflow de promo peut **trigger** le pull via webhook (à instrumenter en V2).
+
+**Gardé à 5 min le 2026-11-09** (accélération promo + tick orchestrateur 2 min) : seul le pull de NODE3 est sur le chemin critique (les canaries font leur propre `--pull` sur la cible) ; il coûte en moyenne 2,5 min, au pire 5,5 min, et l'objectif ~10-15 min est tenu sans y toucher. Passer à 2 min ferait 7 nœuds × 3 `imagetools inspect` × 30/h = 630 requêtes/h vers GHCR au lieu de 252, pour 1,5 min de gain moyen, et le timer est posé à la main sur chacun des 7 nœuds (pas par `install.sh`).
 
 ### Alternatives considérées
 
@@ -273,8 +283,9 @@ Sites : node1 + node2 = Izeron, node3 = OVH, node4 + node5 = Beaufort, node6 + n
 - **Nœud pas prêt** (canary `exit 3` : SSH coupé depuis le préflight, ou digest distant illisible depuis la cible, registre ou DNS injoignable ; rien n'est touché) → `WARN node<N> (site) pas prêt : reporté au prochain passage`, la chaîne **continue**, sans cooldown. Un votant reporté ainsi reporte les votants suivants (quorum). Cas du 2026-11-02 : alarm-1 en 4G de secours sans DNS bloquait Izeron 1 h à chaque passage.
 - **Quorum etcd** : un votant n'est redémarré que si **les 3 votants** répondent au préflight (redémarrer un votant pendant qu'un autre est absent perdrait le quorum, INV-090). Sinon aucun votant ce passage, mais les non votants 4 à 7 joignables sont déployés. Les votants sont le tableau `VOTERS=(1 2 3)` du script : le jour du déménagement, seuls `VOTERS` et `NODES_ORDER` changent (`docs/REPLACE_ONSITE_NODE.md`).
 - **Canary en échec** (health KO → rollback, ou tout exit ≠ 0 du canary) → halt, `failure`, cooldown 1 h, comme avant : une image cassée ne se propage pas.
-- **`orchestrate.state`** : `<digest>\t<outcome>\t<ts>`, outcome = `success` (7 nœuds à jour) | `partial` (nœuds en attente) | `failure`. `partial` **n'a pas de cooldown** : le tick suivant (15 min) reprend aussitôt les seuls nœuds en attente. Un nœud qui revient reçoit le digest **courant** (rattrapage), même s'il n'a pas changé depuis.
+- **`orchestrate.state`** : `<digest>\t<outcome>\t<ts>`, outcome = `success` (7 nœuds à jour) | `partial` (nœuds en attente) | `failure`. `partial` **n'a pas de cooldown** : le tick suivant (2 min, 15 min avant le 2026-11-09) reprend aussitôt les seuls nœuds en attente. Un nœud qui revient reçoit le digest **courant** (rattrapage), même s'il n'a pas changé depuis.
 - **Codes de sortie** : `0` rien à faire / cooldown / `success` / `partial` ; `1` erreur de config (`GATEWAY_KEY`, canary introuvable) ; `2` canary en échec.
+- **Tick 2 min** (2026-11-09, 15 min avant ; gigue 30 s au lieu de 2 min) : `OnUnitActiveSec=2min`. Un tick sans travail (7 nœuds au digest du cache NODE3) ne lit que ce cache et les `node<N>.digest` : **ni verrou, ni SSH, ni sonde `/health`, aucun log**. Le verrou partagé avec `alarm-chaos.sh` (INV-178) et la découverte du leader Patroni ne viennent qu'ensuite, quand il y a un passage à lancer. Avant, la découverte (7 `curl /health` + une ligne de log) tournait à chaque tick, avant même le verrou.
 - **Forcer le redéploiement d'un nœud** : `rm /var/lib/alarm/cd/node<N>.digest` puis `sudo systemctl start alarm-cd-orchestrate.service`. Un nœud retiré durablement doit sortir de `NODES_ORDER`, sinon chaque tick le signale injoignable.
 - **Couverture** : `tests/unit/test_cd_orchestrate.py` (vrai script, faux `ssh`/`docker`/canary).
 
@@ -290,7 +301,7 @@ Sites : node1 + node2 = Izeron, node3 = OVH, node4 + node5 = Beaufort, node6 + n
 4. `POST http://<IP WG cible>:8008/switchover` `{"leader": "nodeN", "candidate": "nodeM"}` (Patroni répond de façon synchrone, ~20 s au plus ; sa réponse est journalisée), puis interroge `/cluster` toutes les 2 s jusqu'à ce qu'**un autre membre soit leader et la cible replica**, au plus `SWITCHOVER_TIMEOUT` = **60 s** depuis la demande. Dépassé → event `switchover/failure` `timeout`, exit `3`.
 5. Bascule faite → event `switchover/success` `{"from", "to"}`, puis `canary_start` et le redémarrage habituel (la cible est désormais un replica).
 
-Exit `3` = « pas prêt » pour l'orchestrateur : nœud reporté au prochain passage (15 min), sans cooldown ; un votant reporté reporte les votants suivants. **Jamais** de redémarrage du leader sans bascule terminée. Les événements post-bascule suivent le nouveau leader grâce au re-discover de `post_event` (premier POST en 503 « replica » sur l'ancien leader).
+Exit `3` = « pas prêt » pour l'orchestrateur : nœud reporté au prochain passage (tick 2 min), sans cooldown ; un votant reporté reporte les votants suivants. **Jamais** de redémarrage du leader sans bascule terminée. Les événements post-bascule suivent le nouveau leader grâce au re-discover de `post_event` (premier POST en 503 « replica » sur l'ancien leader).
 
 Avec l'ordre `3 7 6 5 4 2 1`, au plus deux bascules par passage : node3 leader au départ → bascule vers node1 ou node2 (tous encore à redémarrer, votants préférés) ; ce nœud, leader à son tour, bascule vers un nœud déjà à jour quand vient son tour.
 
@@ -757,7 +768,7 @@ ssh -p 50922 -i ~/.ssh/alarm_node3 alarm@51.210.105.102 '
 ssh -p 50922 -i ~/.ssh/alarm_node3 alarm@51.210.105.102 '
   sudo systemctl enable --now alarm-cd-orchestrate.timer
   sudo systemctl is-enabled alarm-cd-orchestrate.timer   # enabled
-  sudo systemctl list-timers alarm-cd-orchestrate.timer  # next fire dans < 15 min
+  sudo systemctl list-timers alarm-cd-orchestrate.timer  # next fire dans < 3 min
 '
 ```
 
@@ -780,6 +791,21 @@ curl -fsS http://10.99.0.1:8000/api/deployments/state -H "Authorization: Bearer 
 # Forcer un cycle (apres mise a jour du :stable sans attendre le tick timer) :
 sudo systemctl start alarm-cd-orchestrate.service
 ```
+
+**Réinstallation après modification de l'orchestrateur ou de son timer** (à la main : `install.sh`/`alarm-host-sync` ne posent pas ces units). **À faire après le merge du 2026-11-09** (tick 15 min → 2 min, no-op sans verrou ni sonde) :
+```bash
+ssh -p 50922 -i ~/.ssh/alarm_node3 alarm@51.210.105.102 '
+  cd /opt/alarm && git pull
+  sudo install -m 755 scripts/alarm-cd-orchestrate.sh /usr/local/bin/alarm-cd-orchestrate
+  sudo install -m 644 infra/onsite/systemd/alarm-cd-orchestrate.service /etc/systemd/system/
+  sudo install -m 644 infra/onsite/systemd/alarm-cd-orchestrate.timer   /etc/systemd/system/
+  sudo systemctl daemon-reload
+  sudo systemctl restart alarm-cd-orchestrate.timer
+  systemctl list-timers alarm-cd-orchestrate.timer   # next fire dans < 3 min
+  systemctl cat alarm-cd-orchestrate.timer | grep -E "^(OnUnitActiveSec|RandomizedDelaySec)="   # 2min / 30s
+'
+```
+Sans cette réinstallation, NODE3 garde le timer 15 min : la promotion rapide (§2) marche quand même, mais node3 n'annonce la version qu'au tick suivant (jusqu'à ~17 min).
 
 ---
 
@@ -1057,3 +1083,4 @@ Dans ce flux, on a remplacé 8 h de service KO + nuit blanche pour l'humain par 
 - **2026-10-30 (suite)** — **Coupure réseau** (§9ter, INV-177/178 étendus) : mode `netcut` du runner, helper root `scripts/alarm-chaos-net.sh` → `/usr/local/bin/alarm-chaos-net` (timer systemd de restauration armé sur la cible avant la coupure), alias sudoers `ALARM_CHAOS`. `infra/onsite/install.sh` pose désormais la sudoers `alarm-cd` (après `visudo -c -q -f`) et le helper : plus de pose à la main (§3.3 de PROVISIONING_ONSITE). Coupure d'OVH refusée en V1.
 - **2026-11-06** — **Configuration dynamique Patroni** (§9quater, INV-188) : valeurs attendues, lecture et modification (`show-config`, `edit-config`, reload ou redémarrage) ; incident `archive_timeout '10'` sans archivage (~6 Go/h de WAL), corrigé à chaud ; contrôle quotidien `patroni_archive` dans `alarm-node-check`.
 - **2026-11-09** — **Sauvegardes de la base** (§9quinquies, INV-191, décision du propriétaire) : `scripts/alarm-db-backup.sh` + `alarm-db-backup.{service,timer}` (chaque nuit : `pg_dump -Fc` depuis un replica sain, sinon le leader, vérifié, 14 jours sur NODE3, copie sur alarm-1) et `alarm-db-restore-test.{service,timer}` (chaque mois : restauration dans un conteneur jetable) sur NODE3, posés à la main ; échec → email (`send-alert-email.py`) ; contrôle `sauvegarde_base` sur alarm-1 (INV-186) ; procédure de restauration à côté puis échange de noms. Pas de chiffrement (justifié §9quinquies). pgBackRest reste un projet ultérieur.
+- **2026-11-09** — **Version annoncée ~10 min après le merge au lieu d'~1 h** (choix du propriétaire : l'app attend toujours que le serveur annonce la version, INV-ANDROID-705 ; c'est le pipeline qui accélère). Mesure release 1.9.5 : merge PR #321 14:37:03Z, CD Build fini 14:37:32Z, puis ~35 min de CI master avant `:stable`, pull 5 min, tick orchestrateur 15 min ± 2. (1) **Promotion immédiate** d'un commit au même arbre que sa PR verte (§2, INV-190, `.github/scripts/promote_decision.py`), garde anti-retour-arrière de `:stable` ; (2) **tick orchestrateur 2 min** (gigue 30 s), no-op sans verrou ni réseau ni log (§4, INV-167) ; pull gardé à 5 min (§3). **Réinstaller à la main `alarm-cd-orchestrate.{sh,service,timer}` sur NODE3** (§9bis).

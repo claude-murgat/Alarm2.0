@@ -1,14 +1,15 @@
 # /etc/systemd/system/alarm-cd-orchestrate.timer
 #
-# Cf docs/CD_DESIGN.md §4 (canary V1.5). Active la chaine canary toutes les
-# 15 min sur NODE3 — le script est idempotent (skip silencieux si pas de
-# nouveau :stable depuis le dernier deploiement reussi).
+# Cf docs/CD_DESIGN.md §4 (canary V1.5) et INV-167. Lance la chaine canary toutes les
+# 2 min sur NODE3 — le script est idempotent (skip silencieux, sans verrou ni reseau,
+# si pas de nouveau :stable depuis le dernier deploiement reussi).
 #
-# 15 min : compromis entre reactivite et budget chaine canary. Une chaine
-# complete prend ~25 min (5 etapes × restart + soak 2 min), donc 15 min entre 2 fires
-# laisse un cycle entier pour terminer + le lock empeche les overlaps.
-# Plus court (ex: 5 min comme alarm-cd-pull) augmente le risque de tick
-# pendant un soak en cours et n'apporte rien (la promo :stable est rare).
+# 2 min (15 min jusqu'au 2026-11-09) : le tick etait le plus gros temps mort entre la
+# promotion :stable et l'annonce de la version par node3 (release 1.9.5 : ~1 h de bout
+# en bout). Un tick sans travail ne coute qu'un `docker image inspect` local et 7 lectures
+# de fichier. Un tick pendant une chaine en cours ne fait rien (systemd ne relance pas une
+# unit active, et le verrou couvre un lancement a la main).
+# REINSTALLER A LA MAIN sur NODE3 apres modification (docs/CD_DESIGN.md §9bis).
 
 [Unit]
 Description=Timer pour orchestrer la chaine canary 3 -> 7 -> 6 -> 5 -> 4 -> 2 -> 1 (CD V1.5)
@@ -19,11 +20,12 @@ Documentation=https://github.com/claude-murgat/Alarm2.0/blob/master/docs/CD_DESI
 # apres boot) de pourvoir le cache local si un :stable a ete promu pendant
 # l'arret de la machine.
 OnBootSec=15min
-# Ensuite : toutes les 15 min.
-OnUnitActiveSec=15min
-# Jitter +/- 2 min : evite que le tick tombe systematiquement sur la fin d'un
-# soak ou pendant le pull (qui prennent du temps deterministe).
-RandomizedDelaySec=2min
+# Ensuite : toutes les 2 min.
+OnUnitActiveSec=2min
+# Gigue 30 s (2 min avant le 2026-11-09) : seul NODE3 a ce timer, rien a etaler cote
+# registre ; 2 min de gigue doubleraient l'attente moyenne. Un tick qui tombe pendant
+# le pull de NODE3 voit encore l'ancien digest et ne fait rien : le suivant deploie.
+RandomizedDelaySec=30s
 # Persistent=true : si la machine etait eteinte au moment du run prevu,
 # rattraper au boot suivant. Coherent avec alarm-cd-pull.timer.
 Persistent=true

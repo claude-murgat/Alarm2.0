@@ -16,7 +16,8 @@
 #   - Etat par noeud : /var/lib/alarm/cd/node<N>.digest = digest deploye avec
 #     succes sur node<N> (ecrit apres son canary OK). Un noeud deja au digest
 #     courant de :stable (cache local NODE3) est saute.
-#   - Les 7 noeuds au digest courant -> no-op silencieux (95 % des ticks).
+#   - Les 7 noeuds au digest courant -> no-op silencieux (95 % des ticks) : ni verrou,
+#     ni SSH, ni sonde /health, aucun log (tick 2 min depuis le 2026-11-09).
 #   - Noeud injoignable (SSH) -> WARN, reporte au prochain passage, la chaine
 #     CONTINUE avec les suivants. Un votant etcd (VOTERS = 1 2 3) n'est redemarre que
 #     si TOUS les votants repondent (quorum) ; sinon seuls les non votants sont deployes.
@@ -108,27 +109,6 @@ discover_leader() {
   return 1
 }
 
-if [[ -z "$API_BASE" ]]; then
-  if leader_ip=$(discover_leader); then
-    API_BASE="http://${leader_ip}:8000"
-    log "Leader Patroni detecte : $API_BASE"
-  else
-    API_BASE="$API_BASE_DEFAULT"
-    log "WARN : aucun leader Patroni joignable, fallback $API_BASE (POST events risque 503)"
-  fi
-fi
-
-# Lock exclusif : empeche deux orchestrate concurrents si le timer triggere
-# avant la fin du precedent (chaine canary = ~30 min, timer = 15 min, overlap
-# theoriquement possible).
-exec 9>"$LOCK_FILE"
-if ! flock -n 9; then
-  log "Lock $LOCK_FILE deja pris (orchestrate en cours), skip ce cycle"
-  exit 0
-fi
-
-mkdir -p "$STATE_DIR"
-
 # Lit l'image actuellement en cache local sur CE noeud (NODE3) — c'est le
 # noeud qui pilote, donc son cache reflete ce qui a ete pulle par le timer.
 get_local_digest() {
@@ -143,15 +123,6 @@ if [[ -z "$LOCAL_DIGEST" ]]; then
   log "Pas d'image ${IMAGE}:${TAG} en cache local — le timer pull n'a pas encore tourne (ou registry KO). Skip."
   exit 0
 fi
-
-# Lit l'historique : <digest>\t<outcome>\t<unix_ts>
-LAST_DIGEST=""
-LAST_OUTCOME=""
-LAST_TS=0
-if [[ -f "$STATE_FILE" ]]; then
-  IFS=$'\t' read -r LAST_DIGEST LAST_OUTCOME LAST_TS < "$STATE_FILE" || true
-fi
-NOW=$(date +%s)
 
 # Noeuds a deployer = ceux dont node<N>.digest != digest courant. Un noeud
 # revenu apres une absence est donc rattrape au tick suivant, meme si le
@@ -169,6 +140,27 @@ if (( ${#TODO[@]} == 0 )); then
   # Pas de log par tour (idem Q6.1 doc — 95 % des tours sont des no-op).
   exit 0
 fi
+
+# Lock exclusif : empeche deux orchestrate concurrents (systemd ne relance pas une unit encore
+# active ; le verrou couvre un lancement a la main) et tout test d'alarm-chaos.sh pendant un
+# deploiement (INV-178). Pris APRES le test no-op (tick 2 min depuis le 2026-11-09) : un tick
+# sans travail ne lit que le cache docker et les node<N>.digest, il ne gene jamais le runner.
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  log "Lock $LOCK_FILE deja pris (orchestrate en cours), skip ce cycle"
+  exit 0
+fi
+
+mkdir -p "$STATE_DIR"
+
+# Lit l'historique : <digest>\t<outcome>\t<unix_ts>
+LAST_DIGEST=""
+LAST_OUTCOME=""
+LAST_TS=0
+if [[ -f "$STATE_FILE" ]]; then
+  IFS=$'\t' read -r LAST_DIGEST LAST_OUTCOME LAST_TS < "$STATE_FILE" || true
+fi
+NOW=$(date +%s)
 
 # Cooldown : meme digest deja tente, un canary a fail recemment. Un passage
 # partial (noeuds injoignables) ne declenche PAS de cooldown.
@@ -192,6 +184,16 @@ if [[ -z "${GATEWAY_KEY:-}" ]]; then
   exit 1
 fi
 export GATEWAY_KEY
+
+if [[ -z "$API_BASE" ]]; then
+  if leader_ip=$(discover_leader); then
+    API_BASE="http://${leader_ip}:8000"
+    log "Leader Patroni detecte : $API_BASE"
+  else
+    API_BASE="$API_BASE_DEFAULT"
+    log "WARN : aucun leader Patroni joignable, fallback $API_BASE (POST events risque 503)"
+  fi
+fi
 
 # Preflight SSH : les noeuds a deployer, plus TOUS les votants des que l'un d'eux
 # est a deployer. Un noeud injoignable n'arrete plus la chaine : jusqu'au
