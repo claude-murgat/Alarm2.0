@@ -252,6 +252,57 @@ def test_archive_timeout_zero_or_real_archiving_is_ok(h, params):
     assert "patroni_archive" in checks(lines, "OK"), out
 
 
+def alarm1(h):
+    """alarm-1 (node4, Beaufort) : la machine qui recoit de NODE3 la copie des sauvegardes de la base (INV-190)."""
+    (h / "hostname").write_text("alarm-1\n")
+    write(h / "ip_wg0", "5: wg0    inet 10.99.0.4/24 scope global wg0\n")
+    write(h / "root/etc/alarm-gateway.env", f"DRY_CONTACT_SOURCE=host\nGATEWAY_KEY={KEY}\nGATEWAY_SITE=beaufort\n")
+    d = h / "root/var/lib/alarm/db-backup"
+    d.mkdir(parents=True)
+    return d
+
+
+def received(d, name, hours_ago):
+    write(d / name, "PGDMP")
+    t = time.time() - hours_ago * 3600
+    os.utime(d / name, (t, t))
+
+
+@pytest.mark.parametrize("copies,status", [
+    ({"alarm_db-20261109T031502Z-node3.dump": 3, "alarm_db-20261107T030940Z-node3.dump": 51}, "OK"),
+    # NODE3 n'a rien envoye la nuit derniere ; une copie en cours (temporaire) ne compte pas
+    ({"alarm_db-20261108T032211Z-node3.dump": 27, ".alarm_db-20261109T031502Z-node3.dump.tmp": 0}, "KO"),
+    ({}, "KO"),
+], ids=["recente", "plus_de_26h", "aucune"])
+def test_db_backup_copy_on_alarm1_received_less_than_26_hours_ago(h, copies, status):
+    """INV-190 : temoin independant de NODE3 (arrete, timer desactive : aucun email)."""
+    d = alarm1(h)
+    for name, hours in copies.items():
+        received(d, name, hours)
+    rc, lines, out = run(h)
+    assert "sauvegarde_base" in checks(lines, status), out
+    assert checks(lines, "KO") == (["sauvegarde_base"] if status == "KO" else []), out
+    assert rc == (1 if status == "KO" else 0), out
+
+
+def test_db_backup_copy_checked_only_on_the_machine_that_receives_it(h):
+    rc, lines, out = run(h)  # alarm-3
+    assert rc == 0, out
+    assert "sauvegarde_base" not in [l.split()[1] for l in lines], out
+
+
+def test_db_backup_copy_same_machine_and_dir_in_standard_env_install_sh_and_backup_script():
+    std = STANDARD.read_text()
+    node = re.search(r"^STD_DB_BACKUP_COPY_NODE=(\S+)$", std, re.M).group(1)
+    copy_dir = re.search(r"^STD_DB_BACKUP_DIR=(\S+)$", std, re.M).group(1)
+    ip = re.search(rf"=({node}):([\d.]+):", std).group(2)
+    backup = (REPO / "scripts/alarm-db-backup.sh").read_text()
+    assert f'COPY_IP="${{COPY_IP:-{ip}}}"' in backup
+    assert f'COPY_DIR="${{COPY_DIR:-{copy_dir}}}"' in backup
+    assert re.search(rf"install -d -m ?0?700 -o alarm -g alarm {re.escape(copy_dir)}\b",
+                     (REPO / "infra/onsite/install.sh").read_text())
+
+
 @pytest.mark.parametrize("broken", ["down", "garbage"])
 def test_unreachable_patroni_is_info_not_ko(h, broken):
     """INV-188 : Patroni arrete ou machine pas encore dans le cluster : pas de faux KO."""
