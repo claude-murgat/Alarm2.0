@@ -27,6 +27,9 @@ ufw allow from "$net" to any port 22 proto tcp comment 'SSH LAN site' >/dev/null
 ufw allow from 10.99.0.0/24 to any port 22 proto tcp comment 'SSH mesh WG prod (CD orchestrator)' >/dev/null
 ufw allow 51820/udp comment 'Wireguard' >/dev/null
 ufw allow in on wg0 comment 'Wireguard mesh prod inter-noeuds' >/dev/null
+# Patroni (conteneur, reseau Docker du projet 172.18.0.0/16) -> etcd local par l'IP WireGuard : ce trafic arrive
+# par le pont Docker, pas par wg0 ; sans cette regle chaque voteur passait par un etcd distant (2026-11-09).
+ufw allow from 172.18.0.0/16 to "$WG_IP" port 2379 proto tcp comment 'Patroni (conteneur) -> etcd local' >/dev/null
 ufw allow from "$net" to any port 8000 proto tcp comment 'Backend LAN site (apps Android)' >/dev/null
 ufw --force enable >/dev/null
 
