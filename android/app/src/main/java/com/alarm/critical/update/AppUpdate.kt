@@ -19,8 +19,9 @@ import java.security.MessageDigest
 
 /** INV-ANDROID-705 : cote reseau et installeur de la mise a jour integree, remplace par un faux dans les tests. */
 interface UpdateBackend {
-    /** Ecrit le contenu de [url] dans [dest] ; leve une exception en cas d'echec (dont HTTP 404). */
-    fun download(url: String, dest: File)
+    /** Ecrit le contenu de [url] dans [dest] ; leve une exception en cas d'echec (dont HTTP 404).
+     *  [onProgress] : pourcentage recu, quand la taille (Content-Length) est connue (INV-ANDROID-706). */
+    fun download(url: String, dest: File, onProgress: (Int) -> Unit = {})
     /** Android autorise-t-il l'app a installer des applications (« applis inconnues ») ? */
     fun canInstall(context: Context): Boolean
     /** Lance l'installation de [apk] ; Android demande confirmation, sauf mise a jour silencieuse (12+). */
@@ -123,7 +124,7 @@ object AppUpdate {
 object GitHubUpdateBackend : UpdateBackend {
     private val http by lazy { OkHttpClient() }  // suit la redirection de GitHub vers son stockage
 
-    override fun download(url: String, dest: File) {
+    override fun download(url: String, dest: File, onProgress: (Int) -> Unit) {
         http.newCall(Request.Builder().url(url).build()).execute().use { r ->
             if (!r.isSuccessful) throw IOException("HTTP ${r.code}")
             dest.outputStream().use { r.body!!.byteStream().copyTo(it) }
