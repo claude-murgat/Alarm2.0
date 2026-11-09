@@ -658,7 +658,7 @@ class DashboardActivity : AppCompatActivity() {
                 durationView.visibility = View.VISIBLE
 
                 ackButton.visibility = View.GONE
-                ackStatus.text = "Acquittee par $ackerName"
+                ackStatus.text = "Acquittée par $ackerName"  // INV-ANDROID-205
                 ackStatus.visibility = View.VISIBLE
 
                 val remaining = alarm.ack_remaining_seconds ?: 0
@@ -671,7 +671,7 @@ class DashboardActivity : AppCompatActivity() {
                 // Alarme active non acquittee
                 setCardState(alarmCard, alarmDot, "active")
                 currentAlarm = alarm
-                alarmLine.text = "Alarme active \u00b7 $sites"
+                alarmLine.text = "\ud83d\udd34 Alarme active \u00b7 $sites"  // INV-ANDROID-100
                 alarmLine.setTextColor(Color.parseColor("#ef4444"))
 
                 titleView.text = alarm.title
@@ -696,7 +696,7 @@ class DashboardActivity : AppCompatActivity() {
                 // Alarme acquittee par nous
                 setCardState(alarmCard, alarmDot, "acked")
                 currentAlarm = alarm
-                alarmLine.text = "Acquittee \u00b7 $sites"
+                alarmLine.text = "\ud83d\udfe2 Acquitt\u00e9e \u00b7 $sites"  // INV-ANDROID-100
                 alarmLine.setTextColor(Color.parseColor("#22c55e"))
 
                 titleView.text = alarm.title
@@ -718,7 +718,7 @@ class DashboardActivity : AppCompatActivity() {
                 // Alarme disparue pendant ack
                 setCardState(alarmCard, alarmDot, "calm")
                 alarmGoneDuringAck = true
-                alarmLine.text = "Tout est calme"
+                alarmLine.text = "⚪ Tout est calme"  // INV-ANDROID-100
                 alarmLine.setTextColor(Color.parseColor("#94a3b8"))
                 titleView.visibility = View.GONE
                 messageView.visibility = View.GONE
@@ -733,7 +733,7 @@ class DashboardActivity : AppCompatActivity() {
                 setCardState(alarmCard, alarmDot, "calm")
                 currentAlarm = null
                 isAcknowledged = false
-                alarmLine.text = "Tout est calme"
+                alarmLine.text = "⚪ Tout est calme"  // INV-ANDROID-100
                 alarmLine.setTextColor(Color.parseColor("#94a3b8"))
 
                 titleView.visibility = View.GONE
@@ -811,7 +811,7 @@ class DashboardActivity : AppCompatActivity() {
                         findViewById<Button>(R.id.dashboardAckButton).visibility = View.GONE
 
                         val statusText = findViewById<TextView>(R.id.ackStatusText)
-                        statusText.text = "Acquittee"
+                        statusText.text = "Acquittée"  // INV-ANDROID-202
                         statusText.visibility = View.VISIBLE
 
                         val remaining = response.body()?.ack_remaining_seconds ?: 1800

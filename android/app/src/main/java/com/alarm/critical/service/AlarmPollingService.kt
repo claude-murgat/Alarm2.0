@@ -54,7 +54,8 @@ class AlarmPollingService : Service() {
         // Une vraie reactivation n'arrive qu'apres 30 min : 15 s ne masque rien.
         // Une garde par alarme : acquitter Beaufort ne doit pas annuler celle d'Izeron.
         const val ACK_GRACE_MS = 15_000L
-        private val ackGrace = java.util.concurrent.ConcurrentHashMap<Int, Pair<AlarmResponse, Long>>()
+        // internal : les tests la vident entre deux cas (meme alarme 42 acquittee d'un test a l'autre)
+        internal val ackGrace = java.util.concurrent.ConcurrentHashMap<Int, Pair<AlarmResponse, Long>>()
 
         fun onAckSucceeded(acked: AlarmResponse?) {
             acked ?: return
