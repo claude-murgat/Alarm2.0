@@ -14,6 +14,8 @@ import time
 
 import pytest
 
+from _timing import wait_next_escalation_tick
+
 pytestmark = pytest.mark.integration
 
 GW_KEY = "test-gateway-key-INV-144"
@@ -84,7 +86,8 @@ def _advance(client, minutes):
 
 def _pending_call(client):
     """Attend que la boucle ait cree l'appel de user1 (preuve qu'elle a tourne)."""
-    deadline = time.time() + 20  # le passage du tick a 1 s n'agit qu'apres l'attente en cours (<= 10 s)
+    wait_next_escalation_tick()  # le passage du tick a 1 s n'agit qu'apres l'attente en cours (<= 10 s)
+    deadline = time.time() + 20
     while time.time() < deadline:
         calls = client.get("/internal/calls/pending", headers=GW).json()
         call = next((c for c in calls if c["to_number"] == "+33600000144"), None)

@@ -16,6 +16,8 @@ import time
 
 import pytest
 
+from _timing import wait_next_escalation_tick
+
 pytestmark = pytest.mark.integration
 
 GW_KEY = "test-gateway-key-INV-155"
@@ -54,6 +56,7 @@ def _send(client, h, site, title="multisite"):
 
 
 def _wait_for(cond, seconds=20):
+    wait_next_escalation_tick()  # le passage du tick a 1 s n'agit qu'apres l'attente en cours (<= 10 s)
     deadline = time.time() + seconds
     while time.time() < deadline:
         if cond():

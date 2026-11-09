@@ -272,9 +272,9 @@ jobs:
 
       - name: Lancer le service (Type=oneshot blocking)
         # Sans /etc/alarm/cd.env et sans image GHCR en cache, le script doit :
-        #   1. Acquerir le lock (pas de Permission denied sur /run)
-        #   2. Detecter qu'il n'y a pas d'image :stable cachee
-        #   3. Log "Pas d'image ... Skip" + exit 0 propre
+        #   1. Detecter qu'il n'y a pas d'image :stable cachee (avant le verrou depuis
+        #      le 2026-11-09 : un tick sans travail ne prend pas le verrou, INV-167)
+        #   2. Log "Pas d'image ... Skip" + exit 0 propre
         # On tolere un exit non-0 (cas ou Docker n'est pas dispo sur le runner),
         # mais on echoue si "Permission denied" apparait.
         run: |

@@ -17,6 +17,7 @@ AUDITABLE_EVENTS = {
     "gateway_silent",  # INV-172
     "site_without_modem",  # INV-185
     "cluster_leader_lost",  # INV-170
+    "node_down", "node_recovered",  # INV-189
     "test_go_offline", "test_heartbeat_pause",  # INV-138 (onglet Tests en prod)
 }
 

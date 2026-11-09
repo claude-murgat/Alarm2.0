@@ -30,6 +30,8 @@ for a in "$@"; do case "$a" in alarm@*) ip=${a#alarm@} ;; esac; done
 echo "$ip" >> "$H/ssh.log"
 case " $(cat "$H/down" 2>/dev/null) " in *" $ip "*) exit 255 ;; esac
 """
+# Decouverte du leader Patroni (GET /health des 7 noeuds) : journalisee, toujours en echec ici.
+CURL = '#!/usr/bin/env bash\necho "$*" >> "$H/curl.log"\nexit 7\n'
 CANARY = r"""#!/usr/bin/env bash
 echo "$2" >> "$H/canary.log"
 printf '%s\n' "$@" > "$H/args.$2"
@@ -47,7 +49,7 @@ fi
 def cd(tmp_path):
     for d in ("bin", "cd", "state"):
         (tmp_path / d).mkdir()
-    for name, body, where in (("docker", DOCKER, "bin"), ("ssh", SSH, "bin"),
+    for name, body, where in (("docker", DOCKER, "bin"), ("ssh", SSH, "bin"), ("curl", CURL, "bin"),
                               ("alarm-cd-canary.sh", CANARY, "cd"),
                               ("alarm-cd-orchestrate.sh", SCRIPT.read_text(), "cd")):
         f = tmp_path / where / name
@@ -57,7 +59,7 @@ def cd(tmp_path):
     return tmp_path
 
 
-def run(h, down=(), fail=(), default_lock=False, unready=(), promote=()):
+def run(h, down=(), fail=(), default_lock=False, unready=(), promote=(), api_base="http://test"):
     """Un tick du timer. Retourne (exit code, noeuds passes au canary, stderr)."""
     (h / "down").write_text(" ".join(IP[n] for n in down))
     (h / "fail").write_text(" ".join(map(str, fail)))
@@ -66,7 +68,9 @@ def run(h, down=(), fail=(), default_lock=False, unready=(), promote=()):
     (h / "canary.log").write_text("")
     env = {**os.environ, "H": str(h), "PATH": f"{h / 'bin'}:{os.environ['PATH']}",
            "STATE_DIR": str(h / "state"), "LOCK_FILE": str(h / "lock"),
-           "API_BASE": "http://test", "GATEWAY_KEY": "k", "SOAK": "0"}
+           "API_BASE": api_base, "GATEWAY_KEY": "k", "SOAK": "0"}
+    if api_base is None:  # cas de prod sans API_BASE dans /etc/alarm/cd.env : decouverte du leader
+        del env["API_BASE"]
     if default_lock:  # chemin par defaut du script, celui que prend aussi alarm-chaos.sh
         del env["LOCK_FILE"]
     p = subprocess.run(["bash", str(h / "cd" / "alarm-cd-orchestrate.sh")], env=env,
@@ -145,6 +149,43 @@ def test_all_nodes_at_digest_nothing_done(cd):
     rc, deployed, err = run(cd)
     assert (rc, deployed, err) == (0, [], "")
     assert not (cd / "ssh.log").exists()
+
+
+def at_current_digest(h):
+    for n in IP:
+        (h / "state" / f"node{n}.digest").write_text(DIGEST + "\n")
+
+
+def test_no_op_tick_is_silent_and_cheap_without_api_base(cd):
+    """Tick toutes les 2 min (2026-11-09) : rien a faire -> aucun log, ni SSH, ni sonde /health."""
+    at_current_digest(cd)
+    rc, deployed, err = run(cd, api_base=None)
+    assert (rc, deployed, err) == (0, [], "")
+    assert not (cd / "ssh.log").exists()
+    assert not (cd / "curl.log").exists()
+
+
+def test_no_op_tick_leaves_the_lock_to_the_chaos_runner(cd):
+    """INV-178 : rien a deployer -> le tick ne touche pas au verrou partage, donc rien a dire si
+    alarm-chaos.sh le tient (avant : « Lock ... deja pris » toutes les 2 min pendant une panne)."""
+    at_current_digest(cd)
+    with open(cd / "state" / "orchestrate.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        rc, deployed, err = run(cd, default_lock=True)
+    assert (rc, deployed, err) == (0, [], "")
+
+
+def test_deploy_tick_discovers_the_leader_only_when_there_is_work(cd):
+    rc, deployed, err = run(cd, api_base=None)
+    assert (rc, deployed) == (0, ORDER), err
+    assert "aucun leader Patroni joignable" in err  # faux curl : aucun /health ne repond
+
+
+def test_orchestrator_timer_ticks_every_2_min():
+    """INV-167 : tick 2 min (15 min jusqu'au 2026-11-09), gigue 30 s au plus."""
+    timer = (SCRIPT.parents[1] / "infra" / "onsite" / "systemd" / "alarm-cd-orchestrate.timer").read_text()
+    lines = {line.strip() for line in timer.splitlines()}
+    assert {"OnUnitActiveSec=2min", "RandomizedDelaySec=30s"} <= lines
 
 
 def test_node_behind_caught_up_even_if_digest_unchanged_since_success(cd):
