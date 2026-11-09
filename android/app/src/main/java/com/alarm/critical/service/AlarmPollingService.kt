@@ -523,58 +523,10 @@ class AlarmPollingService : Service() {
         }
     }
 
+    /** INV-ANDROID-505 : nouveau token en prefs (fait par Auth.refresh) et en memoire. */
     private suspend fun tryRefreshToken(): Boolean {
-        val prefs = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
-        // INV-079 : lire le refresh_token persiste au login. Si absent (cas
-        // legacy : login pre-INV-079 ou apres un logout/clear), refresh
-        // impossible → retourne false → forceLogout() prendra le relais.
-        val refresh = prefs.getString("refresh_token", null)
-        if (refresh.isNullOrEmpty()) {
-            Log.w(TAG, "Refresh impossible : aucun refresh_token stocke (login pre-INV-079 ?)")
-            com.alarm.critical.util.AppLogger.log(
-                "Auth",
-                "Refresh impossible : refresh_token absent en SharedPreferences (INV-079)"
-            )
-            return false
-        }
-        return try {
-            val response = ApiProvider.service.refreshToken(
-                com.alarm.critical.model.RefreshRequest(refresh_token = refresh)
-            )
-            if (response.isSuccessful) {
-                val newToken = response.body()?.access_token
-                if (newToken != null) {
-                    token = newToken
-                    prefs.edit().putString("token", newToken).apply()
-                    Log.i(TAG, "Token renouvelé avec succès")
-                    com.alarm.critical.util.AppLogger.log(
-                        "Auth",
-                        "Refresh OK (INV-079) : nouveau access token stocke"
-                    )
-                    true
-                } else {
-                    com.alarm.critical.util.AppLogger.log(
-                        "Auth",
-                        "Refresh 2xx mais body sans access_token (incoherence backend)"
-                    )
-                    false
-                }
-            } else {
-                Log.w(TAG, "Refresh token échoué: ${response.code()}")
-                com.alarm.critical.util.AppLogger.log(
-                    "Auth",
-                    "Refresh KO HTTP ${response.code()} : refresh_token rejeté par /auth/refresh (revoque, expire, ou backend pre-INV-079)"
-                )
-                false
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Refresh token erreur: ${e.message}")
-            com.alarm.critical.util.AppLogger.log(
-                "Auth",
-                "Refresh erreur reseau : ${e.message}"
-            )
-            false
-        }
+        token = com.alarm.critical.api.Auth.refresh(this, token) ?: return false
+        return true
     }
 
     private fun forceLogout() {

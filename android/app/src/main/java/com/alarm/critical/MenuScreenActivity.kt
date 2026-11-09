@@ -15,7 +15,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
-import com.alarm.critical.api.ApiProvider
+import com.alarm.critical.api.Auth
 import com.alarm.critical.api.ApiService
 import com.google.android.material.chip.Chip
 import com.google.android.material.chip.ChipGroup
@@ -52,13 +52,12 @@ abstract class MenuScreenActivity(private val screenTitle: String) : AppCompatAc
         lifecycleScope.launch { load() }
     }
 
-    /** Appel API avec le token courant (relu : le service peut l'avoir rafraichi).
+    /** Appel API avec le token courant, renouvele sur 401 (INV-ANDROID-508).
      *  Renvoie le corps si 2xx, sinon null apres un toast ; un 403 ferme l'ecran. */
     protected suspend fun <T> api(call: suspend ApiService.(auth: String) -> Response<T>): T? {
         if (isFinishing) return null
-        val token = getSharedPreferences("alarm_prefs", MODE_PRIVATE).getString("token", "")
         val resp = try {
-            ApiProvider.service.call("Bearer $token")
+            Auth.call(this, call)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

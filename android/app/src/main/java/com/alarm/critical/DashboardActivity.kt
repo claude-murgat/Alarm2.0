@@ -27,6 +27,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import android.util.Log
 import com.alarm.critical.api.ApiProvider
+import com.alarm.critical.api.Auth
 import com.alarm.critical.model.AlarmResponse
 import com.alarm.critical.model.FcmTokenRequest
 import com.alarm.critical.model.FcmTokenDeleteRequest
@@ -46,7 +47,6 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 class DashboardActivity : AppCompatActivity() {
-    private var token: String? = null
     private var statusUpdateJob: Job? = null
     private var historyJob: Job? = null
     private var soundManager: AlarmSoundManager? = null
@@ -71,8 +71,6 @@ class DashboardActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_dashboard)
-
-        token = intent.getStringExtra("token")
 
         // Permission notification Android 13+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -119,10 +117,9 @@ class DashboardActivity : AppCompatActivity() {
             try {
                 val fcmToken = FirebaseMessaging.getInstance().token.await()
                 val deviceId = prefs.getString("device_token", "unknown") ?: "unknown"
-                ApiProvider.service.registerFcmToken(
-                    "Bearer $token",
-                    FcmTokenRequest(token = fcmToken, device_id = deviceId)
-                )
+                Auth.call(this@DashboardActivity) {
+                    registerFcmToken(it, FcmTokenRequest(token = fcmToken, device_id = deviceId))
+                }
                 Log.d("Dashboard", "FCM token registered: ${fcmToken.take(20)}...")
             } catch (e: Exception) {
                 Log.e("Dashboard", "FCM token registration failed: ${e.message}")
@@ -261,7 +258,7 @@ class DashboardActivity : AppCompatActivity() {
     private fun refreshAdminRole() {
         lifecycleScope.launch {
             try {
-                val me = ApiProvider.service.getMe("Bearer $token").body() ?: return@launch
+                val me = Auth.call(this@DashboardActivity) { getMe(it) }.body() ?: return@launch
                 getSharedPreferences("alarm_prefs", MODE_PRIVATE).edit()
                     .putBoolean("is_admin", me.is_admin).apply()
                 updateAdminMenu()
@@ -341,7 +338,7 @@ class DashboardActivity : AppCompatActivity() {
 
     private fun performLogout() {
         val prefs = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
-        val t = token
+        val t = prefs.getString("token", null)
         val deviceId = prefs.getString("device_token", null)
 
         // Supprimer le token FCM cote backend avant de partir. Hors lifecycleScope :
@@ -374,7 +371,6 @@ class DashboardActivity : AppCompatActivity() {
 
     private fun startPollingService() {
         val intent = Intent(this, AlarmPollingService::class.java)
-        intent.putExtra(AlarmPollingService.EXTRA_TOKEN, token)
         ContextCompat.startForegroundService(this, intent)
     }
 
@@ -794,11 +790,10 @@ class DashboardActivity : AppCompatActivity() {
 
     private fun acknowledgeCurrentAlarm() {
         val alarm = currentAlarm ?: return
-        val t = token ?: return
 
         lifecycleScope.launch {
             try {
-                val response = ApiProvider.service.acknowledgeAlarm("Bearer $t", alarm.id)
+                val response = Auth.call(this@DashboardActivity) { acknowledgeAlarm(it, alarm.id) }
                 if (response.isSuccessful) {
                     AlarmPollingService.onAckSucceeded(response.body())
                     // INV-ANDROID-009 : une alarme d'un autre site reste a acquitter -> on continue de sonner
@@ -837,10 +832,9 @@ class DashboardActivity : AppCompatActivity() {
     }
 
     private fun loadHistory() {
-        val t = token ?: return
         lifecycleScope.launch {
             try {
-                val response = ApiProvider.service.getAlarmHistory("Bearer $t")
+                val response = Auth.call(this@DashboardActivity) { getAlarmHistory(it) }
                 if (response.isSuccessful) {
                     val allAlarms = response.body() ?: emptyList()
                     val pastAlarms = allAlarms.filter { it.status in listOf("resolved", "acknowledged") }
