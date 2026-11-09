@@ -167,7 +167,7 @@ changent avec le site (déménagement) : elles ne sont qu'ici et dans `/etc/netw
 | Docker CE | dépôt `download.docker.com` (trixie) ; `/etc/docker/daemon.json` : `json-file`, 10 Mo × 3 | `00-base.sh` |
 | Dépôt | `/opt/alarm` (clone git, propriétaire `alarm`), aligné sur le commit `:stable` par `alarm-host-sync` | à la main puis CD |
 | ModemManager | **masqué** (il prendrait le port du SIM7600) | `10-harden.sh`, `install.sh` |
-| ufw, fail2ban | actifs (`infra/onsite/fail2ban/sshd.local`) | `10-harden.sh` |
+| ufw, fail2ban | actifs (`infra/onsite/fail2ban/sshd.local`) ; ufw : SSH et backend ouverts au LAN, tout `wg0`, et `172.18.0.0/16` (réseau Docker du projet) → IP WireGuard port 2379, pour que Patroni joigne l'etcd local (2026-11-09 ; NODE3, hors provisioning : même règle posée à la main vers `10.99.0.1` le 2026-11-09, comme sur onsite-1 et onsite-2) | `10-harden.sh` |
 | Mises à jour | `unattended-upgrades`, sécurité seulement, **sans redémarrage automatique** | `10-harden.sh` |
 | Heure | `chrony` (`infra/onsite/chrony.conf`), `systemd-timesyncd` désactivé | `10-harden.sh` |
 | Journal | persistant (`/var/log/journal`, 2 Go max) | `10-harden.sh` |
