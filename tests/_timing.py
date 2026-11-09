@@ -37,3 +37,18 @@ def wait_escalation_ticks(n: int = 1) -> None:
     """
     tick = escalation_tick_seconds()
     time.sleep(n * tick + max(1.5, 0.2 * tick))
+
+
+def wait_next_escalation_tick(timeout: float = 30) -> None:
+    """Tier 2 (TestClient, meme processus) : attend le debut du prochain tick de la boucle.
+
+    La boucle ne relit `escalation_tick_seconds` qu'en debut de tick : apres un passage a 1 s,
+    elle peut finir un sommeil de 10 s (tick remis a 10 s par le teardown du test precedent).
+    Un tick commence apres l'appel a relu la valeur : la boucle tourne alors a la nouvelle cadence.
+    """
+    from backend.app import escalation
+    start = escalation.last_tick_at
+    deadline = time.monotonic() + timeout
+    while escalation.last_tick_at == start:
+        assert time.monotonic() < deadline, "la boucle d'escalade n'a pas demarre de tick"
+        time.sleep(0.05)

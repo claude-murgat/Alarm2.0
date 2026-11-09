@@ -376,10 +376,6 @@ async def escalation_loop():
                         alarm.escalation_count += 1
                         # Reset timer pour le prochain palier
                         alarm.created_at = now
-                        notified_ids = _get_notified_user_ids(db, alarm.id)
-                        log_event("alarm_escalated", db=db, alarm_id=alarm.id,
-                                  from_user=decision.from_user_id, to_user=decision.to_user_id,
-                                  notified_user_ids=notified_ids)
 
                     # FCM cumulative : rappel aux notifies pour toutes les alarmes eligibles.
                     for alarm_id in alarm_ids_needing_reminder:
@@ -394,9 +390,13 @@ async def escalation_loop():
                             except Exception:
                                 pass  # FCM best-effort
                     db.commit()
-                    # INV-144 : apres le commit (l'audit a sa propre session ; SQLite verrouille
-                    # pendant la transaction) et seulement une fois l'escalade enregistree.
+                    # INV-100 / INV-144 : audits apres le commit (l'audit a sa propre session ; SQLite
+                    # verrouille depuis le flush d'INV-142 : avant, l'audit attendait 5 s, boucle figee,
+                    # puis etait perdu) et seulement une fois l'escalade enregistree.
                     for decision in actions.escalations:
+                        log_event("alarm_escalated", db=db, alarm_id=decision.alarm_id,
+                                  from_user=decision.from_user_id, to_user=decision.to_user_id,
+                                  notified_user_ids=_get_notified_user_ids(db, decision.alarm_id))
                         if decision.without_call:
                             _report_escalation_without_call(db, alarm_by_id[decision.alarm_id], decision)
 
@@ -591,6 +591,7 @@ def escalate_active_alarms_now(db: Session, by_user: Optional[int] = None) -> in
     if not chain:
         return 0
     escalated = 0
+    audits = []
     for alarm in db.query(Alarm).filter(Alarm.status.in_(["active", "escalated"])).all():
         current_position = next((ec.position for ec in chain if ec.user_id == alarm.assigned_user_id), -1)
         next_user = _find_next_user(db, chain, current_position, alarm.assigned_user_id)
@@ -613,12 +614,14 @@ def escalate_active_alarms_now(db: Session, by_user: Optional[int] = None) -> in
         notified_ids = [n[0] for n in db.query(AlarmNotification.user_id)
                         .filter(AlarmNotification.alarm_id == alarm.id).all()]
         extra = {"by_user": by_user} if by_user is not None else {}
-        log_event("alarm_escalated", db=db, alarm_id=alarm.id, from_user=prev_user,
-                  to_user=next_user.user_id, notified_user_ids=notified_ids, **extra)
+        audits.append(dict(alarm_id=alarm.id, from_user=prev_user, to_user=next_user.user_id,
+                           notified_user_ids=notified_ids, **extra))
         for uid in notified_ids:  # FCM a tous les notifies (escalade cumulative)
             try:
                 send_fcm_to_user(db, uid, alarm.title, alarm.message, alarm_data(alarm))
             except Exception:
                 pass
     db.commit()
+    for audit in audits:  # apres le commit, comme la boucle (INV-100)
+        log_event("alarm_escalated", db=db, **audit)
     return escalated
