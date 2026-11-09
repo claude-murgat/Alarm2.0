@@ -57,7 +57,19 @@ def real_site_modem_check():
 
 
 @pytest.fixture(scope="session")
-def client(real_gateway_silence_check, real_site_modem_check):
+def real_node_down_check():
+    """INV-189 : meme raison (tick de fond, faux Patroni d'autres tests : un episode ouvert par un
+    tick reel pourrait signaler un noeud plus tard). Neutralise pour la session ; renvoie le vrai
+    controle (test_node_down_inv189)."""
+    from backend.app import quorum_monitor
+    real = quorum_monitor._run_node_down_check
+    quorum_monitor._run_node_down_check = lambda now: None
+    yield real
+    quorum_monitor._run_node_down_check = real
+
+
+@pytest.fixture(scope="session")
+def client(real_gateway_silence_check, real_site_modem_check, real_node_down_check):
     """TestClient FastAPI avec lifespan complet (tables crees + users seeded)."""
     # Import differe : garantit que DATABASE_URL est lu apres notre setenv.
     from backend.app.main import app

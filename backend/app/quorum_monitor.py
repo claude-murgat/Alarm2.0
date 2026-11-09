@@ -574,3 +574,7 @@ def _run_site_modem_check(now: datetime) -> None:
                 f"Un nouvel email partira si un modem revient puis se tait de nouveau."))
     finally:
         db.close()
+
+
+def _run_node_down_check(now: datetime) -> None:  # RED : stub (INV-189)
+    pass
