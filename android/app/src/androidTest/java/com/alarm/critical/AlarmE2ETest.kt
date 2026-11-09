@@ -126,6 +126,24 @@ class AlarmE2ETest {
         return idling
     }
 
+    /**
+     * Attente bornee d'une assertion (INV-ANDROID-801) : rejoue [assertion] jusqu'a ce qu'elle
+     * passe, sinon relance la derniere erreur. Pour un etat que le dashboard affiche au tick 1 Hz
+     * suivant un appel API (un IdlingResource sur l'appel rend la main avant ce tick).
+     */
+    private fun eventually(timeoutMs: Long = 15_000, assertion: () -> Unit) {
+        val end = android.os.SystemClock.uptimeMillis() + timeoutMs
+        while (true) {
+            try {
+                assertion()
+                return
+            } catch (e: Throwable) {
+                if (android.os.SystemClock.uptimeMillis() > end) throw e
+            }
+            android.os.SystemClock.sleep(200)
+        }
+    }
+
     private fun unregisterAll() {
         IdlingRegistry.getInstance().resources.forEach {
             IdlingRegistry.getInstance().unregister(it)
@@ -146,9 +164,16 @@ class AlarmE2ETest {
                     "android.permission.POST_NOTIFICATIONS"
                 )
         }
+        // Sans ca, la demande de permission de MainActivity masque l'ecran de login
+        // (meme garde que AlarmTestAccountTest, AlarmMenuAdminTest, LogoutDeviceTest)
+        InstrumentationRegistry.getInstrumentation().uiAutomation
+            .grantRuntimePermission("com.alarm.critical", "android.permission.READ_PHONE_STATE")
 
         fakeApi = FakeApiService()
         ApiProvider.override(fakeApi)
+        // INV-ANDROID-209 : la garde d'ack (15 s) est statique ; sans ce reset, l'alarme 42
+        // acquittee par le test precedent masque l'alarme 42 active du suivant.
+        com.alarm.critical.service.AlarmPollingService.ackGrace.clear()
 
         com.alarm.critical.service.AlarmPollingService.heartbeatLostSince = 0L
         com.alarm.critical.service.AlarmPollingService.heartbeatLostAlarm = false
@@ -297,8 +322,11 @@ class AlarmE2ETest {
 
         val scenario = launchDashboard()
 
-        onView(withId(R.id.systemStatus))
-            .check(matches(withSubstring("Connecte")))
+        // Le 2e heartbeat rend la main avant le tick UI 1 Hz qui affiche son resultat
+        eventually {
+            onView(withId(R.id.systemStatus))
+                .check(matches(withSubstring("Connecte")))
+        }
 
         scenario.close()
     }
@@ -370,10 +398,16 @@ class AlarmE2ETest {
 
         val scenario = launchDashboard()
 
+        // Les 4 heartbeats peuvent etre les sondes de findPrimaryUrl (URL courante puis chaque
+        // URL), avant la boucle qui arme la perte : on attend l'etat affiche, borne.
+        // INV-ANDROID-104 (revise 2026-06-03) : passe le delai, bandeau d'info
+        // « Serveur injoignable » ; « Connexion perdue » est reserve a la sonnerie (INV-308).
+        eventually {
+            onView(withId(R.id.connectionLostAlert))
+                .check(matches(isDisplayed()))
+        }
         onView(withId(R.id.connectionLostAlert))
-            .check(matches(isDisplayed()))
-        onView(withId(R.id.connectionLostAlert))
-            .check(matches(withSubstring("Connexion perdue")))
+            .check(matches(withSubstring("Serveur injoignable")))
 
         com.alarm.critical.service.AlarmPollingService.heartbeatLossTimeoutMs = 120_000L
         scenario.close()
@@ -442,10 +476,15 @@ class AlarmE2ETest {
         fakeApi.resetCallCount()
         waitForPolls(2)
 
-        onView(withId(R.id.currentAlarmLine))
-            .check(matches(withSubstring("\uD83D\uDD34")))
-        onView(withId(R.id.dashboardAckButton))
-            .check(matches(withEffectiveVisibility(Visibility.VISIBLE)))
+        // INV-ANDROID-209 (2026-10-14) : pendant ACK_GRACE_MS apres l'ack, la meme alarme
+        // renvoyee "active" est un poll perime et reste acquittee. Une vraie reactivation
+        // arrive apres la suspension de 30 min : on l'attend donc au-dela de la garde, borne.
+        eventually(com.alarm.critical.service.AlarmPollingService.ACK_GRACE_MS + 10_000) {
+            onView(withId(R.id.currentAlarmLine))
+                .check(matches(withSubstring("\uD83D\uDD34")))
+            onView(withId(R.id.dashboardAckButton))
+                .check(matches(withEffectiveVisibility(Visibility.VISIBLE)))
+        }
 
         scenario.close()
     }
@@ -633,13 +672,12 @@ class AlarmE2ETest {
 
     @Test
     fun test16_refreshTokenIsCalledAndWorks() {
-        // Configurer le fake pour que le refresh retourne un nouveau token
-        fakeApi.loginResponse = Response.success(
-            com.alarm.critical.model.TokenResponse(
-                access_token = "refreshed-token",
-                token_type = "bearer",
-                user = com.alarm.critical.model.UserResponse(1, "user1@alarm.local", "user1", false, true)
-            )
+        // INV-ANDROID-505 (revise 2026-06-15, INV-079) : le refresh envoie dans le body de
+        // POST /auth/refresh le refresh_token memorise au login, et stocke le nouvel access.
+        val prefs = context.getSharedPreferences("alarm_prefs", Context.MODE_PRIVATE)
+        prefs.edit().putString("refresh_token", "refresh-uuid-du-login").commit()
+        fakeApi.refreshTokenResponse = Response.success(
+            com.alarm.critical.model.RefreshResponse(access_token = "refreshed-token")
         )
         // Raccourcir l'intervalle de refresh pour le test (3s)
         com.alarm.critical.service.AlarmPollingService.tokenRefreshIntervalMs = 3000L
@@ -649,12 +687,12 @@ class AlarmE2ETest {
 
         val scenario = launchDashboard()
 
-        // Attendre que le refresh automatique s'exécute (3s + marge)
-        Thread.sleep(6000)
-
-        // Vérifier que le token a été mis à jour dans les prefs
-        val prefs = context.getSharedPreferences("alarm_prefs", Context.MODE_PRIVATE)
-        assertEquals("refreshed-token", prefs.getString("token", null))
+        // Attendre le refresh automatique (3 s), borne
+        eventually {
+            assertEquals("refreshed-token", prefs.getString("token", null))
+        }
+        assertEquals("refresh_token du login envoye", "refresh-uuid-du-login",
+            fakeApi.lastRefreshRequestPayload?.refresh_token)
 
         com.alarm.critical.service.AlarmPollingService.tokenRefreshIntervalMs = 12 * 60 * 60 * 1000L
         scenario.close()
