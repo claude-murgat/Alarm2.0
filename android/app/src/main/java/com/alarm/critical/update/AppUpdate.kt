@@ -57,7 +57,7 @@ object UpdateProvider {
 
 object AppUpdate {
     private const val TAG = "MiseAJour"
-    const val CHECK_INTERVAL_MS = 6 * 3600_000L
+    const val CHECK_INTERVAL_MS = 15 * 60_000L  // reprise rapide apres un 404 (release pas encore publiee)
     private const val RELEASES = "https://github.com/claude-murgat/Alarm2.0/releases/download"
     private val RELEASE = Regex("""(\d{1,6})\.(\d{1,6})\.(\d{1,6})""")
 
