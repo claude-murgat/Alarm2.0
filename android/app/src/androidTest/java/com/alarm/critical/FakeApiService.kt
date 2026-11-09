@@ -50,6 +50,15 @@ class FakeApiService : ApiService {
     var loginCalled = false
     var heartbeatCallCount = 0
 
+    // INV-ANDROID-508 : jetons expires. getMe, l'historique et l'acquittement
+    // repondent alors 401 « Invalid token », comme le backend.
+    val expiredTokens = mutableSetOf<String>()
+
+    private fun <T> rejected(auth: String): Response<T>? =
+        if (auth.removePrefix("Bearer ") in expiredTokens)
+            Response.error(401, okhttp3.ResponseBody.create(null, """{"detail":"Invalid token"}"""))
+        else null
+
     // IdlingResource : notifié à chaque appel polling/heartbeat
     var pollingIdlingResource: PollingIdlingResource? = null
     var heartbeatIdlingResource: PollingIdlingResource? = null
@@ -94,6 +103,7 @@ class FakeApiService : ApiService {
     val acknowledgedIds = mutableListOf<Int>()
 
     override suspend fun acknowledgeAlarm(auth: String, alarmId: Int): Response<AlarmResponse> {
+        rejected<AlarmResponse>(auth)?.let { return it }
         acknowledgeCalledWith = Pair(auth, alarmId)
         acknowledgedIds += alarmId
         return acknowledgeResponses[alarmId] ?: acknowledgeResponse
@@ -105,7 +115,7 @@ class FakeApiService : ApiService {
 
     override suspend fun getAlarmHistory(auth: String, days: Int): Response<List<AlarmResponse>> {
         lastHistoryDays = days
-        return alarmHistoryResponse
+        return rejected(auth) ?: alarmHistoryResponse
     }
 
     // INV-082 : signature mise a jour pour matcher ApiService.refreshToken
@@ -116,9 +126,14 @@ class FakeApiService : ApiService {
         RefreshResponse(access_token = "fake-refreshed-token", token_type = "bearer")
     )
     var lastRefreshRequestPayload: RefreshRequest? = null
+    var refreshCallCount = 0
+    /** INV-ANDROID-508 : latence de /auth/refresh, pour faire arriver un 2e 401 pendant le 1er refresh. */
+    var refreshDelayMs = 0L
 
     override suspend fun refreshToken(request: RefreshRequest): Response<RefreshResponse> {
+        refreshCallCount++
         lastRefreshRequestPayload = request
+        kotlinx.coroutines.delay(refreshDelayMs)
         return refreshTokenResponse
     }
 
@@ -147,7 +162,7 @@ class FakeApiService : ApiService {
     var meResponse: Response<UserResponse> = Response.success(
         UserResponse(1, "user1@alarm.local", "user1", false, true)
     )
-    override suspend fun getMe(auth: String): Response<UserResponse> = meResponse
+    override suspend fun getMe(auth: String): Response<UserResponse> = rejected(auth) ?: meResponse
 
     var activeEscalationResponse: Response<ActiveEscalationResponse> = Response.success(
         ActiveEscalationResponse(

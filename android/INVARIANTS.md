@@ -597,6 +597,14 @@ Sur `refreshToken.isSuccessful`, `newToken = body.access_token` → `prefs.putSt
 MainActivity : `savedToken != null → goToDashboard(savedToken)` + `return` (skip login UI).
 - **Pourquoi** : UX. Relogin forcé uniquement si token absent (après logout explicite ou premier lancement).
 
+### INV-ANDROID-508 [C] ✅ Appels des écrans : token courant des prefs ; 401 → un refresh, puis la requête est rejouée une fois (2026-11-09)
+Tout appel authentifié lancé par un écran lit le token **courant** dans `prefs.token` au moment de l'appel, jamais une copie prise à l'ouverture de l'écran (extra `token` de l'intent). Cela couvre le dashboard (acquittement, historique, `/auth/me`, enregistrement FCM), l'acquittement d'`AlarmActivity` et les écrans du menu (INV-ANDROID-011).
+Sur HTTP 401, l'app renouvelle l'access token **une fois** via `POST /auth/refresh` avec `prefs.refresh_token` (le même code que le service, cf INV-ANDROID-505), stocke le nouveau token en prefs, puis rejoue la requête **une fois** avec lui.
+- **Deux 401 simultanés → un seul `POST /auth/refresh`** : le renouvellement est sérialisé. Si le token des prefs a changé depuis l'appel en échec, il est réutilisé sans rappeler le serveur.
+- **Refresh impossible** (pas de `refresh_token`, 401 de `/auth/refresh`, erreur réseau) → l'erreur d'origine s'affiche comme avant (ex. toast « Échec (HTTP 401) : Invalid token »). Pas de nouvelle tentative, pas de déconnexion, pas de nouvelle UI. La sonnerie et le bandeau d'INV-ANDROID-506 restent le travail du service de polling.
+- **Pourquoi** : demande du propriétaire (2026-11-09, app 1.9.4) : « HTTP 401 Invalid token en changeant d'écran ». L'access JWT vit 24 h et le backend répond 401 « Invalid token » dès qu'il a expiré. Seul le service de polling le renouvelait (401 du poll, toutes les 12 h, INV-ANDROID-504). Or ce service ne tourne pas pour un utilisateur hors astreinte : son token n'était jamais renouvelé et chaque écran du menu affichait l'erreur. De plus, le dashboard gardait le token de son ouverture : ouvert depuis plus de 24 h, son bouton Acquitter envoyait un token expiré, même quand le service avait renouvelé celui des prefs.
+- **Couverture** : Espresso `TokenRefreshTest`.
+
 ---
 
 ## 7. FCM et push
