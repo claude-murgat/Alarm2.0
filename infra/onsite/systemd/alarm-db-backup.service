@@ -1,13 +1,13 @@
 # /etc/systemd/system/alarm-db-backup.service
 #
-# INV-190 : sauvegarde logique quotidienne de alarm_db (pg_dump depuis un replica sain), verifiee,
+# INV-191 : sauvegarde logique quotidienne de alarm_db (pg_dump depuis un replica sain), verifiee,
 # 14 jours sur NODE3, copie sur alarm-1. Lance par alarm-db-backup.timer. Echec -> email + unit failed.
 #
 # DEPLOIEMENT : uniquement sur NODE3 cloud, a la main comme l'orchestrateur CD (docs/CD_DESIGN.md
 # §9quinquies) — PAS pose par install.sh. Pas de [Install] : active uniquement par le timer.
 
 [Unit]
-Description=Alarm 2.0 - Sauvegarde quotidienne de la base alarm_db (INV-190)
+Description=Alarm 2.0 - Sauvegarde quotidienne de la base alarm_db (INV-191)
 Documentation=https://github.com/claude-murgat/Alarm2.0/blob/master/docs/CD_DESIGN.md
 After=docker.service network-online.target
 Wants=network-online.target

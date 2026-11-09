@@ -1,7 +1,7 @@
 # /etc/systemd/system/alarm-db-backup.timer
-# INV-190 : sauvegarde de la base chaque nuit vers 03:00 UTC (heure creuse), sur NODE3.
+# INV-191 : sauvegarde de la base chaque nuit vers 03:00 UTC (heure creuse), sur NODE3.
 [Unit]
-Description=Timer de la sauvegarde quotidienne de la base alarm_db (INV-190)
+Description=Timer de la sauvegarde quotidienne de la base alarm_db (INV-191)
 
 [Timer]
 OnCalendar=*-*-* 03:00:00 UTC

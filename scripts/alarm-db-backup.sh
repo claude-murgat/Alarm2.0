@@ -1,5 +1,5 @@
 #!/bin/bash
-# alarm-db-backup.sh [--restore-test] — sauvegarde logique de la base alarm_db (INV-190).
+# alarm-db-backup.sh [--restore-test] — sauvegarde logique de la base alarm_db (INV-191).
 #
 # Sur NODE3 (en `alarm`, groupe docker), lance par alarm-db-backup.timer (chaque jour vers 03:00 UTC) :
 #   1. vue du cluster (GET :8008/cluster) : un replica sain (streaming sur la timeline du leader,
@@ -40,7 +40,7 @@ log() { echo "[$UNIT] $*" >&2; }
 
 fail() {
   log "ERREUR : $*"
-  printf '%s\n\nMachine : %s\nJournal : journalctl -u %s -n 50\nProcedure : docs/CD_DESIGN.md §9quinquies (INV-190)\n' \
+  printf '%s\n\nMachine : %s\nJournal : journalctl -u %s -n 50\nProcedure : docs/CD_DESIGN.md §9quinquies (INV-191)\n' \
       "$*" "$(hostname -s)" "$UNIT" \
     | "$MAILER" "[ALARME-MURGAT] $WHAT en echec ($(hostname -s))" >&2 \
     || log "email d'alerte NON envoye ($MAILER)"

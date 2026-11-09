@@ -1,4 +1,4 @@
-"""INV-190 : sauvegarde logique quotidienne de alarm_db sur NODE3, copie sur alarm-1, test de restauration mensuel.
+"""INV-191 : sauvegarde logique quotidienne de alarm_db sur NODE3, copie sur alarm-1, test de restauration mensuel.
 
 Jusqu'au 2026-11-09 la base n'avait aucune sauvegarde (seulement la replication Patroni). Le vrai script tourne
 contre de faux `docker` / `curl` / `ssh` et un faux mailer (PATH) : faux Patroni (GET :8008/cluster de

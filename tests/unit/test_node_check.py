@@ -253,7 +253,7 @@ def test_archive_timeout_zero_or_real_archiving_is_ok(h, params):
 
 
 def alarm1(h):
-    """alarm-1 (node4, Beaufort) : la machine qui recoit de NODE3 la copie des sauvegardes de la base (INV-190)."""
+    """alarm-1 (node4, Beaufort) : la machine qui recoit de NODE3 la copie des sauvegardes de la base (INV-191)."""
     (h / "hostname").write_text("alarm-1\n")
     write(h / "ip_wg0", "5: wg0    inet 10.99.0.4/24 scope global wg0\n")
     write(h / "root/etc/alarm-gateway.env", f"DRY_CONTACT_SOURCE=host\nGATEWAY_KEY={KEY}\nGATEWAY_SITE=beaufort\n")
@@ -275,7 +275,7 @@ def received(d, name, hours_ago):
     ({}, "KO"),
 ], ids=["recente", "plus_de_26h", "aucune"])
 def test_db_backup_copy_on_alarm1_received_less_than_26_hours_ago(h, copies, status):
-    """INV-190 : temoin independant de NODE3 (arrete, timer desactive : aucun email)."""
+    """INV-191 : temoin independant de NODE3 (arrete, timer desactive : aucun email)."""
     d = alarm1(h)
     for name, hours in copies.items():
         received(d, name, hours)
