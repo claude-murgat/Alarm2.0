@@ -818,18 +818,19 @@ Premier test conseillé : `stop node5` 2 min, puis `node4`, puis `node3` (= « O
 
 `patroni/patroni.yml` (`bootstrap.dcs`) ne sert **qu'à la création** du cluster. Ensuite, la configuration qui fait foi est la configuration **dynamique**, stockée dans etcd et commune à tous les membres : la modifier sur un membre la change pour tous, et le dépôt ne la voit pas.
 
-Valeurs attendues (prod au 2026-11-06) :
+Valeurs de la prod (relevées le 2026-11-09 : la configuration dynamique ne contient que les 4 paramètres `archive_*` / `max_slot_wal_keep_size` ; le reste est la valeur par défaut de Patroni) :
 
-| Clé | Valeur | Application |
-|---|---|---|
-| `ttl` / `loop_wait` / `retry_timeout` | `20` / `8` / `7` | Patroni, sans redémarrage |
-| `maximum_lag_on_failover` | `1048576` | Patroni, sans redémarrage |
-| `postgresql.parameters.max_wal_senders` | `10` | **redémarrage** |
-| `postgresql.parameters.max_replication_slots` | `10` | **redémarrage** |
-| `postgresql.parameters.wal_keep_size` | `128MB` (bootstrap : 64MB) | reload |
-| `postgresql.parameters.max_slot_wal_keep_size` | `8GB` (absent du bootstrap) | reload |
-| `postgresql.parameters.archive_mode` / `archive_command` | `on` / `'true'` toléré (rien n'est archivé) | redémarrage / reload |
-| `postgresql.parameters.archive_timeout` | **`0`** tant qu'`archive_command` n'archive rien | reload |
+| Clé | Prod | Bootstrap (`patroni.yml`) | Application |
+|---|---|---|---|
+| `ttl` / `loop_wait` / `retry_timeout` | `30` / `10` / `10` (défaut) | `20` / `8` / `7` — écart assumé : la prod garde les défauts (décision du 2026-11-09), le bootstrap sert au cluster de la CI | Patroni, sans redémarrage |
+| `postgresql.use_pg_rewind` | `false` (défaut) | `true` — à activer en prod après essai (décision du 2026-11-09) | Patroni, sans redémarrage |
+| `maximum_lag_on_failover` | `1048576` (défaut) | `1048576` | Patroni, sans redémarrage |
+| `postgresql.parameters.max_wal_senders` | `10` (défaut Patroni) | `10` | **redémarrage** |
+| `postgresql.parameters.max_replication_slots` | `10` (défaut Patroni) | `10` | **redémarrage** |
+| `postgresql.parameters.wal_keep_size` | `128MB` (défaut Patroni) | `128MB` | reload |
+| `postgresql.parameters.max_slot_wal_keep_size` | `8GB` | `8GB` | reload |
+| `postgresql.parameters.archive_mode` / `archive_command` | `on` / `'true'` toléré (rien n'est archivé) | absents (pas d'archivage) | redémarrage / reload |
+| `postgresql.parameters.archive_timeout` | **`0`** tant qu'`archive_command` n'archive rien | absent | reload |
 
 ```bash
 P="docker exec node3-patroni-1 patronictl -c /etc/patroni/patroni.yml"   # nodeN-patroni-1 sur nodeN
