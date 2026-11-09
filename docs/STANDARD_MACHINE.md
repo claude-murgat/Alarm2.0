@@ -198,7 +198,9 @@ Contrôlé : modèle et BIOS, UEFI, entrées legacy, Secure Boot, première entr
 `dpkg --audit`, DNS de secours, ufw, chrony, watchdog systemd, journal persistant, ModemManager,
 Docker, `wg0` (adresse du plan, poignée de main NODE3 < 5 min), clé/site/contact sec de la
 passerelle (la clé n'est jamais affichée), units `enabled`, `archive_timeout` de la configuration
-dynamique Patroni (§9.6, INV-188 ; INFO si Patroni ne répond pas). **Non contrôlable depuis Linux** : AC
+dynamique Patroni (§9.6, INV-188 ; INFO si Patroni ne répond pas) ; **sur alarm-1 seulement**
+(`STD_DB_BACKUP_COPY_NODE`), copie des sauvegardes de la base envoyée chaque nuit par NODE3 reçue
+depuis moins de 26 h (`sauvegarde_base`, INV-191, [`CD_DESIGN.md`](CD_DESIGN.md) §9quinquies). **Non contrôlable depuis Linux** : AC
 Recovery, Wake on LAN, mot de passe du BIOS (§3, sur place).
 
 KO attendus au premier passage (inventaire du 2026-11-06) : `bios` sur alarm-1 et alarm-2,
@@ -297,3 +299,5 @@ n'a de sens qu'avec de vraies sauvegardes (pgBackRest, projet à venir).
   BIOS A19, Secure Boot activé ; contrôle quotidien `alarm-node-check` (INV-186) ; scripts de
   provisioning versionnés (`scripts/provision/`).
 - **2026-11-06 (suite)** : incident `archive_timeout` (§9.6) ; contrôle `patroni_archive` (INV-188).
+- **2026-11-09** : sauvegardes de la base (INV-191) : copie reçue sur alarm-1 dans `/var/lib/alarm/db-backup`
+  (créé `0700 alarm` par `install.sh`), contrôle `sauvegarde_base` (moins de 26 h).

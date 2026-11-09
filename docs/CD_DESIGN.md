@@ -870,7 +870,82 @@ $P list                                           # « Pending restart » = red�
 - **Redémarrage** (paramètre `postmaster` : `max_wal_senders`, `max_replication_slots`, `archive_mode`, `wal_level`) : `patronictl list` affiche « Pending restart » ; sans alarme active, `$P restart alarm-cluster <replica> --force` sur chaque replica, puis bascule planifiée (`$P switchover alarm-cluster --leader <leader> --candidate <replica> --force`, cf. INV-187) avant de redémarrer l'ancien leader.
 - **Contrôle** : `alarm-node-check` (INV-186) lit `GET http://<IP WireGuard>:8008/config` chaque jour sur alarm-1 à alarm-4 et passe KO `patroni_archive` si `archive_timeout` est non nul sans vraie `archive_command` (INV-188). Les autres valeurs ne sont pas contrôlées.
 - **Incident du 2026-11-06** : `archive_mode on`, `archive_command 'true'` et `archive_timeout '10'` dans la configuration dynamique. PostgreSQL forçait un segment WAL de 16 Mo toutes les 10 s : ~100 Mo/min (~6 Go/h) de WAL quasi vides vers les 6 replicas, 4,6 Go de `pg_wal` sur le leader, replicas de Beaufort (relais OVH) re-clonés après la moindre coupure (INV-168). Corrigé à chaud par `edit-config -p archive_timeout=0 --force` (reload) : ~6 Ko/min.
-- **Sauvegardes réelles** (pgBackRest) : projet séparé. Il posera une vraie `archive_command` (et `archive_timeout` s'il le faut) ; le contrôle l'accepte.
+- **Sauvegardes réelles** (pgBackRest) : projet séparé. Il posera une vraie `archive_command` (et `archive_timeout` s'il le faut) ; le contrôle l'accepte. Depuis le 2026-11-09, dump logique quotidien sans archivage des WAL (§9quinquies, INV-191) : rien ne change ici.
+
+---
+
+## 9quinquies. Sauvegardes de la base (INV-191, 2026-11-09)
+
+Décision du propriétaire du 2026-11-09 : la base `alarm_db` n'avait **aucune** sauvegarde (la réplication Patroni recopie aussi une suppression ou une migration ratée sur les 7 membres). Restauration à un instant donné (pgBackRest, archivage des WAL) : projet ultérieur.
+
+- **Chaque nuit** (`alarm-db-backup.timer`, 03:00 UTC + jusqu'à 30 min, NODE3 seulement) : `scripts/alarm-db-backup.sh` (`/usr/local/bin/alarm-db-backup`, en `alarm`) choisit dans `GET :8008/cluster` un replica sain (`streaming` sur la timeline du leader, node3 d'abord, lu dans son conteneur), sinon le leader ; `pg_dump -Fc` dans `node3-patroni-1` (PostgreSQL 16), vérifié par `pg_restore --list`, renommé `alarm_db-<AAAAMMJJTHHMMSSZ>-<nœud>.dump` dans `/var/lib/alarm/db-backup` (0700, fichiers 0600). 14 jours gardés (après une sauvegarde réussie seulement), copie sur **alarm-1** (`alarm@10.99.0.4:/var/lib/alarm/db-backup`, SSH dans WireGuard), même rétention. Une sauvegarde déjà en cours : tour sauté.
+- **Chaque mois** (`alarm-db-restore-test.timer`, le 1er à 05:00 UTC + jusqu'à 30 min) : la plus récente est restaurée dans un conteneur `postgres:16-alpine` jetable (`--network none`), `users`, `escalation_config` et `system_config` doivent avoir des lignes ; conteneur toujours supprimé.
+- **Échec** (sauvegarde, copie ou test de restauration) : email `[ALARME-MURGAT] … en echec (<machine>)` par `/opt/alarm/send-alert-email.py` (même voie SMTP que la supervision disque, secrets `/opt/alarm/.env.prod.*` : indépendante du cluster), unit `failed`. Témoin indépendant de NODE3 : `alarm-node-check` sur alarm-1, contrôle `sauvegarde_base` KO si la copie la plus récente a plus de 26 h (INV-186).
+- **Pas de chiffrement** : NODE3 et alarm-1 portent déjà la base en clair (membres du cluster) ; la clé devrait vivre sur NODE3 pour le test mensuel, et la perdre perdrait les sauvegardes. Fichiers 0600 `alarm`, transport SSH dans WireGuard.
+
+**Installation sur NODE3** (à la main comme l'orchestrateur §9bis, prérequis SSH identiques ; une fois le commit promu `:stable`), en `alarm` sur NODE3 (`ssh -p 50922 -i ~/.ssh/alarm_node3 alarm@51.210.105.102`) :
+```bash
+cd /opt/alarm && { test -f scripts/alarm-db-backup.sh || git pull --ff-only; }   # alarm-host-sync l'a normalement deja aligne
+sudo install -m 755 scripts/alarm-db-backup.sh /usr/local/bin/alarm-db-backup
+sudo install -m 755 scripts/send-alert-email.py /opt/alarm/send-alert-email.py   # deja pose par install.sh (supervision disque)
+sudo install -m 644 infra/onsite/systemd/alarm-db-backup.service infra/onsite/systemd/alarm-db-backup.timer \
+  infra/onsite/systemd/alarm-db-restore-test.service infra/onsite/systemd/alarm-db-restore-test.timer /etc/systemd/system/
+# Mot de passe de l'utilisateur PostgreSQL `alarm`, lu dans le backend en service, jamais affiche (root:alarm 640)
+sudo install -d -m 750 -o root -g alarm /etc/alarm
+sudo install -m 640 -o root -g alarm /dev/null /etc/alarm/db-backup.env
+docker inspect node3-backend-1 -f '{{range .Config.Env}}{{println .}}{{end}}' \
+  | sed -n 's|^DATABASE_URL=postgresql://alarm:\([^@]*\)@.*|PGPASSWORD=\1|p' | sudo tee /etc/alarm/db-backup.env >/dev/null
+sudo grep -c '^PGPASSWORD=.' /etc/alarm/db-backup.env                 # 1
+ssh -o BatchMode=yes alarm@10.99.0.4 'ls -ld /var/lib/alarm/db-backup'   # drwx------ alarm (pose par install.sh sur alarm-1)
+echo "Test de la voie d'alerte des sauvegardes" | /opt/alarm/send-alert-email.py "[ALARME-MURGAT] Test alerte sauvegarde (NODE3)"
+#   -> « email OK » attendu ; « SMTP incomplet » : /opt/alarm/.env.prod.secrets pas lisible par alarm (chown alarm, 600)
+docker pull postgres:16-alpine
+sudo systemctl daemon-reload
+sudo systemctl start alarm-db-backup.service && sudo journalctl -u alarm-db-backup -n 20 --no-pager   # Source, Sauvegarde OK, Copie OK
+sudo systemctl start alarm-db-restore-test.service && sudo journalctl -u alarm-db-restore-test -n 5 --no-pager   # Test de restauration OK
+sudo systemctl enable --now alarm-db-backup.timer alarm-db-restore-test.timer
+systemctl list-timers 'alarm-db-*'
+```
+**Sur alarm-1** : rien à la main en temps normal (`alarm-host-sync` applique `install.sh`, qui crée `/var/lib/alarm/db-backup` en `0700 alarm`, et le nouveau contrôle). Si la copie échoue avant ce passage : `sudo install -d -m 700 -o alarm -g alarm /var/lib/alarm/db-backup`. Contrôle : `sudo alarm-node-check | grep sauvegarde_base` (KO « aucune copie » jusqu'à la première sauvegarde, puis OK).
+
+**Restaurer** (perte ou corruption de données ; de préférence sans alarme en cours). La base restaurée est créée **à côté** (`alarm_db_restore`), vérifiée, puis échangée de nom avec `alarm_db`, gardée sous `alarm_db_avant_restauration` : retour arrière possible, coupure de quelques secondes. Tout se fait en `alarm` (propriétaire de `alarm_db`, droit `CREATEDB`), sans superutilisateur. Procédure essayée le 2026-11-09 sur un conteneur PostgreSQL 16 jetable, avec une session ouverte pendant l'échange (pas sur le cluster de prod).
+```bash
+# Sur NODE3 en alarm. NODE3 perdu : sur alarm-1, memes chemins, avec N=node4 IP=10.99.0.4
+N=node3 IP=10.99.0.1
+ls -l /var/lib/alarm/db-backup/                                  # choisir la sauvegarde
+F=/var/lib/alarm/db-backup/alarm_db-<AAAAMMJJTHHMMSSZ>-<noeud>.dump
+export PGPASSWORD=$(docker inspect $N-backend-1 -f '{{range .Config.Env}}{{println .}}{{end}}' \
+  | sed -n 's|^DATABASE_URL=postgresql://alarm:\([^@]*\)@.*|\1|p')
+read -r LN L < <(curl -fsS http://$IP:8008/cluster | python3 -c 'import json,sys; m=next(m for m in json.load(sys.stdin)["members"] if m["role"]=="leader"); print(m["name"], m["host"])')
+[ "$LN" = "$N" ] && L=127.0.0.1                                  # leader local : dans son conteneur (ufw)
+P="docker exec -i -e PGPASSWORD $N-patroni-1"
+$P pg_restore --list < "$F" | head -5                            # archive lisible
+$P psql -h "$L" -U alarm -d postgres -c 'CREATE DATABASE alarm_db_restore'
+$P pg_restore -h "$L" -U alarm -d alarm_db_restore --no-owner --exit-on-error < "$F"
+$P psql -h "$L" -U alarm -d alarm_db_restore -c 'SELECT count(*) FROM users' -c 'SELECT position, user_id FROM escalation_config ORDER BY 1'
+# Echange de nom : les sessions ouvertes sur alarm_db sont coupees
+$P psql -h "$L" -U alarm -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+ALTER DATABASE alarm_db WITH ALLOW_CONNECTIONS false;
+SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity WHERE datname = 'alarm_db';
+ALTER DATABASE alarm_db RENAME TO alarm_db_avant_restauration;
+ALTER DATABASE alarm_db_restore RENAME TO alarm_db;
+SQL
+# Redemarrer les 7 backends : ceux des replicas gardent sinon leurs connexions vers l'ancienne base ;
+# au demarrage, le backend applique ses migrations (sauvegarde d'une version plus ancienne). Depuis NODE3
+# (cle SSH de l'orchestrateur) ; depuis alarm-1 : `docker restart nodeN-backend-1` sur chaque noeud.
+for p in 3:1 1:2 2:3 4:4 5:5 6:6 7:7; do ssh -o BatchMode=yes alarm@10.99.0.${p#*:} "docker restart node${p%:*}-backend-1"; done
+```
+Retour arrière : même échange de noms dans l'autre sens (`ALTER DATABASE alarm_db_avant_restauration WITH ALLOW_CONNECTIONS true`, puis les deux `RENAME`), puis redémarrer les backends. Une fois la restauration validée : `DROP DATABASE alarm_db_avant_restauration`.
+
+**Diagnostic** :
+```bash
+sudo journalctl -u alarm-db-backup -n 50 --no-pager     # derniere sauvegarde : source, taille, copie, retention
+sudo journalctl -u alarm-db-restore-test -n 20 --no-pager # dernier test de restauration
+sudo ls -l /var/lib/alarm/db-backup/                     # NODE3 ; sur alarm-1 : meme chemin
+sudo -u alarm alarm-db-backup --restore-test             # test de restauration a la demande
+systemctl list-timers 'alarm-db-*'
+```
+Désactivation : `sudo systemctl disable --now alarm-db-backup.timer alarm-db-restore-test.timer` (le contrôle `sauvegarde_base` d'alarm-1 passe alors KO le lendemain). Couverture : `tests/unit/test_db_backup.py`, `tests/unit/test_node_check.py`.
 
 ---
 
@@ -1007,4 +1082,5 @@ Dans ce flux, on a remplacé 8 h de service KO + nuit blanche pour l'humain par 
 - **2026-10-30** — **Panne contrôlée** (§9ter, INV-176..179) : `scripts/alarm-chaos.sh` + `alarm-chaos.{service,timer}` sur NODE3 (manuel, désactivé), API `/api/chaos` + `/internal/chaos/*`, carte « Panne contrôlée » dans l'onglet Tests. Verrou de l'orchestrateur déplacé de `/run/alarm-cd-orchestrate/lock` vers `/var/lib/alarm/cd/orchestrate.lock` pour être partagé avec le runner.
 - **2026-10-30 (suite)** — **Coupure réseau** (§9ter, INV-177/178 étendus) : mode `netcut` du runner, helper root `scripts/alarm-chaos-net.sh` → `/usr/local/bin/alarm-chaos-net` (timer systemd de restauration armé sur la cible avant la coupure), alias sudoers `ALARM_CHAOS`. `infra/onsite/install.sh` pose désormais la sudoers `alarm-cd` (après `visudo -c -q -f`) et le helper : plus de pose à la main (§3.3 de PROVISIONING_ONSITE). Coupure d'OVH refusée en V1.
 - **2026-11-06** — **Configuration dynamique Patroni** (§9quater, INV-188) : valeurs attendues, lecture et modification (`show-config`, `edit-config`, reload ou redémarrage) ; incident `archive_timeout '10'` sans archivage (~6 Go/h de WAL), corrigé à chaud ; contrôle quotidien `patroni_archive` dans `alarm-node-check`.
+- **2026-11-09** — **Sauvegardes de la base** (§9quinquies, INV-191, décision du propriétaire) : `scripts/alarm-db-backup.sh` + `alarm-db-backup.{service,timer}` (chaque nuit : `pg_dump -Fc` depuis un replica sain, sinon le leader, vérifié, 14 jours sur NODE3, copie sur alarm-1) et `alarm-db-restore-test.{service,timer}` (chaque mois : restauration dans un conteneur jetable) sur NODE3, posés à la main ; échec → email (`send-alert-email.py`) ; contrôle `sauvegarde_base` sur alarm-1 (INV-186) ; procédure de restauration à côté puis échange de noms. Pas de chiffrement (justifié §9quinquies). pgBackRest reste un projet ultérieur.
 - **2026-11-09** — **Version annoncée ~10 min après le merge au lieu d'~1 h** (choix du propriétaire : l'app attend toujours que le serveur annonce la version, INV-ANDROID-705 ; c'est le pipeline qui accélère). Mesure release 1.9.5 : merge PR #321 14:37:03Z, CD Build fini 14:37:32Z, puis ~35 min de CI master avant `:stable`, pull 5 min, tick orchestrateur 15 min ± 2. (1) **Promotion immédiate** d'un commit au même arbre que sa PR verte (§2, INV-190, `.github/scripts/promote_decision.py`), garde anti-retour-arrière de `:stable` ; (2) **tick orchestrateur 2 min** (gigue 30 s), no-op sans verrou ni réseau ni log (§4, INV-167) ; pull gardé à 5 min (§3). **Réinstaller à la main `alarm-cd-orchestrate.{sh,service,timer}` sur NODE3** (§9bis).

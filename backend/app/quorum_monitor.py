@@ -67,6 +67,9 @@ from .sites import node_locations
 from sqlalchemy import or_  # INV-185
 from .logic.site_modem import decide_site_modem  # INV-185
 from .sites import known_sites  # INV-185
+from .logic.node_down import decide_node_down  # INV-189
+from .logic.resilience import group_of  # INV-189 : libellé du lieu (« OVH »)
+from .sites import node_machines  # INV-189
 
 
 logger = logging.getLogger(__name__)
@@ -466,6 +469,12 @@ async def quorum_monitor_loop() -> None:
         except Exception:
             logger.exception("INV-185 : erreur dans le contrôle des modems par site (continue)")
 
+        # INV-189 : horloge réelle (comme INV-185) — `advance-clock` des tests E2E ne doit pas l'émettre.
+        try:
+            await asyncio.to_thread(_run_node_down_check, datetime.now(timezone.utc).replace(tzinfo=None))
+        except Exception:
+            logger.exception("INV-189 : erreur dans le contrôle des nœuds (continue)")
+
         # INV-168 : horloge réelle, pas clock_now() — `advance-clock` des tests E2E ne doit
         # pas pouvoir re-cloner un replica.
         try:
@@ -572,5 +581,66 @@ def _run_site_modem_check(now: datetime) -> None:
                 f"  - journalctl -u alarm-sms-gateway -n 50 (« En attente du modem » : modem non vu)\n"
                 f"  - GATEWAY_SITE dans /etc/alarm-gateway.env (le modem prend le site de sa machine)\n\n"
                 f"Un nouvel email partira si un modem revient puis se tait de nouveau."))
+    finally:
+        db.close()
+
+
+# INV-189 : noeud absent de /cluster, arrete ou qui ne suit plus le leader depuis plus de 10 min -> un
+# email + un audit par episode, puis « retabli » a son retour. Episodes dans SystemConfig, partages par
+# les leaders successifs : une bascule ne renvoie rien et ne remet pas le compteur a zero.
+_NODE_DOWN_KEY = "node_down_alert"
+
+
+def _run_node_down_check(now: datetime) -> None:
+    """INV-189 : un tick (bloquant, via `asyncio.to_thread`, leader seul), horloge reelle naive UTC."""
+    try:
+        cluster = _patroni_cluster()
+    except Exception as e:
+        logger.warning("INV-189 : Patroni injoignable, contrôle des nœuds sauté (%s)", e)
+        return
+    db = SessionLocal()
+    try:
+        locations, machines = node_locations(db), node_machines(db)
+        row = db.query(SystemConfig).filter(SystemConfig.key == _NODE_DOWN_KEY).first()
+        state = {name: {"since": datetime.fromisoformat(e["since"]), "emailed": e["emailed"]}
+                 for name, e in (json.loads(row.value) if row else {}).items()}
+        down, recovered, new_state = decide_node_down(cluster, list(locations), state, now)
+        if new_state != state:
+            if row is None:
+                row = SystemConfig(key=_NODE_DOWN_KEY, value="{}")
+                db.add(row)
+            row.value = json.dumps({name: {"since": e["since"].isoformat(), "emailed": e["emailed"]}
+                                    for name, e in new_state.items()})
+            db.commit()
+        if not down and not recovered:
+            return
+        alert_email = _get_alert_email(db)
+
+        def label(name):  # « alarm-2 · node5 (Beaufort) », comme l'onglet Cluster (INV-161)
+            return f"{machines.get(name, name)} · {name} ({group_of(locations.get(name), False)})"
+        leader = label(next(m["name"] for m in cluster["members"] if m.get("role") == "leader"))
+        for name, since, problem in down:
+            minutes = int((now - since).total_seconds() // 60)
+            log_event("node_down", node=name, machine=machines.get(name, name), location=locations.get(name),
+                      problem=problem, since=since.isoformat(), minutes=minutes)
+            logger.error("INV-189 : nœud %s pas sain depuis %s min (%s)", name, minutes, problem)
+            _alert(alert_email, f"[Alarme Murgat] Nœud injoignable : {label(name)}", (
+                f"Le nœud {label(name)} ne suit plus le leader depuis {since.isoformat()} UTC ({minutes} min).\n"
+                f"État vu par le leader : {problem}.\n\n"
+                f"Le reste du cluster a toujours un leader ({leader}) : les alarmes sont créées, escaladées et "
+                f"acquittées normalement, mais le cluster a un nœud de moins pour encaisser une autre panne.\n\n"
+                f"À vérifier sur {machines.get(name, name)} :\n"
+                f"  - alimentation, câble réseau et box du site\n"
+                f"  - tunnel WireGuard (sudo wg show : dernière poignée de main récente)\n"
+                f"  - conteneurs Patroni et backend (docker ps), puis patronictl list\n\n"
+                f"Un email « rétabli » partira quand il suivra de nouveau le leader."))
+        for name, since in recovered:
+            minutes = int((now - since).total_seconds() // 60)
+            log_event("node_recovered", node=name, machine=machines.get(name, name),
+                      location=locations.get(name), since=since.isoformat(), minutes=minutes)
+            logger.warning("INV-189 : nœud %s rétabli après %s min", name, minutes)
+            _alert(alert_email, f"[Alarme Murgat] Nœud rétabli : {label(name)}", (
+                f"Le nœud {label(name)} suit de nouveau le leader ({leader}). Il ne le suivait plus depuis "
+                f"{since.isoformat()} UTC ({minutes} min)."))
     finally:
         db.close()

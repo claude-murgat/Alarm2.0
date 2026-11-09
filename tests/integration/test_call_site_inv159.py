@@ -11,6 +11,8 @@ import time
 
 import pytest
 
+from _timing import wait_next_escalation_tick
+
 pytestmark = pytest.mark.integration
 
 GW_KEY = "test-gateway-key-INV-159"
@@ -78,6 +80,7 @@ def test_pending_calls_carry_the_alarm_site(setup):
     ids[_oncall_alarm(uid1)] = None
 
     client.post("/api/test/advance-clock", params={"seconds": 150, "peer": "false"})
+    wait_next_escalation_tick()  # le passage du tick a 1 s n'agit qu'apres l'attente en cours (<= 10 s)
     deadline = time.time() + 20
     while len(_pending_calls(client)) < 3 and time.time() < deadline:
         time.sleep(0.3)
