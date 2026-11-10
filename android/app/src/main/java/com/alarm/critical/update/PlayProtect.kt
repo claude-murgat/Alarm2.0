@@ -23,6 +23,12 @@ object PlayProtect {
         Intent(Settings.ACTION_SECURITY_SETTINGS),
     )
 
+    /** Lanceur d'une app, null si elle est absente. Remplace dans les tests : les AVD n'ont pas le Play Store. */
+    internal var launcher: (android.content.Context, String) -> Intent? =
+        { c, pkg -> c.packageManager.getLaunchIntentForPackage(pkg) }
+    /** Repli sans Play Store. Remplace dans les tests. */
+    internal var fallback = Intent(Settings.ACTION_SECURITY_SETTINGS)
+
     /** Ouvre le premier reglage disponible avec le toast ; false si aucun ne s'ouvre. */
     fun open(activity: Activity): Boolean {
         for (intent in targets) {
