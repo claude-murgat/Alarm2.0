@@ -74,10 +74,11 @@ Quand le polling détecte une alarme active (`currentAlarm != null`, ID différe
 - **Effet de bord persistant** : `setStreamVolume` écrit la valeur dans le réglage système (pas juste le lecteur). Si l'utilisateur ajuste manuellement, la prochaine sonnerie rebascule à 50%. `stopAlarmSound()` ne restaure pas l'ancienne valeur (inchangé vs version max).
 - **Manque** : aucun test ne vérifie le volume du stream après déclenchement (manque préexistant, indépendant du changement de cible).
 
-### INV-ANDROID-004 [C] ⚠️ Back button désactivé dans AlarmActivity
-`onBackPressed()` overridé vide → le bouton retour ne ferme pas l'activité. L'utilisateur doit acquitter (ou utiliser "Retour au dashboard" qui ne ferme que l'activité, pas l'alarme sous-jacente).
+### INV-ANDROID-004 [C] ✅ Back button désactivé dans AlarmActivity (amendé le 2026-11-10)
+Le retour (bouton ou geste) ne ferme pas l'activité et ne coupe pas la sonnerie. L'utilisateur doit acquitter (ou utiliser "Retour au dashboard" qui ne ferme que l'activité, pas l'alarme sous-jacente).
 - **Pourquoi** : éviter qu'un geste réflexe fasse manquer une alarme.
-- **Manque** : test qui tente `pressBack()` et vérifie que AlarmActivity reste au premier plan.
+- **Amendement du 2026-11-10 (targetSdk 36, INV-ANDROID-708)** : avec le retour prédictif d'Android 16, `onBackPressed()` n'est plus appelé ; le retour est bloqué par un rappel `OnBackPressedDispatcher` toujours actif.
+- **Couverture** : Espresso `SystemBarsTest.retour_ne_ferme_pas_l_ecran_d_alarme_qui_sonne_toujours` (retour du système par UiAutomator). RED sur l'AVD Android 16 avec targetSdk 36 et l'ancien `onBackPressed()` : l'écran se fermait et la sonnerie s'arrêtait.
 
 ### INV-ANDROID-005 [H] ⚠️ Pulsation rouge animée pendant alarme active
 AlarmActivity anime le background entre `#B71C1C` et `#D32F2F` (1s, reverse infinite) et l'icône scale 1.0 → 1.2 (600ms, reverse infinite).
@@ -688,6 +689,7 @@ Manifest : `android:screenOrientation="portrait"` + `android:configChanges="orie
 - **Pourquoi** : layout optimisé portrait. Landscape casse la hero card et le timeline historique.
 - **Caveat** : AlarmActivity N'a PAS cette restriction (pas de `screenOrientation` dans son manifest). Comportement voulu ? Voir questions ouvertes.
 - **Couverture** : test13 force rotation landscape, vérifie `requestedOrientation == SCREEN_ORIENTATION_PORTRAIT` et que l'état UI est préservé (titre d'alarme visible après tentative rotation).
+- **Grands écrans (2026-11-10, targetSdk 36, INV-ANDROID-708)** : Android 16 ignore le verrouillage d'orientation d'une app ciblant 36 sur un écran de largeur minimale ≥ 600 dp (tablette, pliable déplié). Sur téléphone, rien ne change. L'app garde le portrait partout par la dérogation `android.window.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY` (manifest, `<application>`), valable jusqu'à targetSdk 36 ; elle ne joue plus à partir de targetSdk 37. Non testé (pas d'AVD grand écran).
 
 ### INV-ANDROID-701 [C] ⚠️ Foreground service requis pour le polling (Android 8+ compatible)
 `AlarmPollingService` démarre via `startForegroundService()` + `startForeground(NOTIFICATION_ID, notification)` avec `IMPORTANCE_LOW` (notification discrète). `foregroundServiceType="specialUse"` dans manifest.
@@ -765,6 +767,21 @@ Demande du propriétaire du 2026-11-10.
 - **Pourquoi** : sans ce réglage, chaque mise à jour intégrée s'arrête sur la fenêtre Play Protect, à laquelle il faut répondre à la main sur chaque téléphone.
 - **Couverture** : Espresso `PlayProtectTest` (écrans de réglages stubbés par Espresso-Intents, build release simulé par `UpdateProvider.override`, toast vérifié par son événement d'accessibilité) : `premiere_ouverture_ouvre_le_reglage_play_protect_avec_le_toast`, `ouvertures_suivantes_plus_rien`, `alarme_en_cours_rien_puis_au_premier_retour_sans_alarme`, `ecran_play_protect_introuvable_repli_sur_les_reglages_securite_puis_rien_sans_plantage`, `bouton_reglage_play_protect_de_l_ecran_mise_a_jour`, `build_debug_rien`, `une_seule_demande_par_retour_au_premier_plan_batterie_puis_play_protect` (vraie boîte « batterie » d'Android, fermée par retour). RED 6/7 (`build_debug_rien` passait déjà), puis verts 7/7 sur émulateur (AVD alarm_repro, Android 11, 2026-11-10) ; suite complète 110/110. `PlayProtectTest` 7/7 aussi sur l'AVD alarm_api36 (Android 16).
 - **Non testé** : le réglage lui-même (écran de Google) ; l'écran de Google Play services d'un vrai téléphone récent.
+
+### INV-ANDROID-708 [H] 🐛 Cible Android 16 (targetSdk 36), écrans hors des barres système (2026-11-10)
+Demande du propriétaire du 2026-11-10.
+- **Cible** : `compileSdk = 36` et `targetSdk = 36` (Android 16) ; `minSdk = 26` inchangé.
+- **Pourquoi** : Play Protect affiche « Android App Compatibility Too Low » quand le targetSdk a plus de deux versions de retard sur Android. Android 17 (API 37) est sorti : 34 déclenche l'avertissement, 36 l'évite jusqu'à Android 18.
+- **Écrans hors des barres système** : depuis Android 15, une app qui cible 35 ou plus est dessinée sous la barre d'état et la barre de navigation (« edge-to-edge »), sans dérogation possible quand elle cible 36. Aucun élément clé d'un écran ne se trouve sous ces barres : tableau de bord et menu latéral, écran d'alarme plein écran, écrans du menu (dont « Mise à jour »), connexion. Le fond de l'écran passe sous les barres. Sur Android 14 et avant, rien ne change.
+- **Retour prédictif** : avec Android 16, `onBackPressed()` n'est plus appelé. L'écran d'alarme bloque toujours le retour (INV-ANDROID-004). Menu latéral ouvert : le retour le ferme sans quitter le tableau de bord.
+- **Grands écrans** : orientation, cf INV-ANDROID-700.
+- **Vérifié sans changement** :
+  - **Service de premier plan `specialUse`** (INV-ANDROID-701) : les règles d'Android 15 ne le concernent pas. Le délai de 6 h vise `dataSync` et `mediaProcessing`, et l'interdiction de démarrer depuis `BOOT_COMPLETED` vise `dataSync`, `camera`, `mediaPlayback`, `phoneCall`, `mediaProjection` et `microphone`. `BootReceiver` (`BOOT_COMPLETED`, `MY_PACKAGE_REPLACED`) relance toujours la surveillance (INV-ANDROID-704).
+  - **Écran d'alarme sur écran verrouillé** (INV-ANDROID-702) : les règles de l'autorisation `USE_FULL_SCREEN_INTENT` viennent d'Android 14, déjà ciblé. Rien de nouveau en 15 ni en 16.
+  - **Notifications** : `POST_NOTIFICATIONS` (INV-ANDROID-703), inchangée.
+  - **Focus audio** : Android 15 le réserve à l'app au premier plan ou à un service de premier plan. La sonnerie ne le demande pas.
+- **Couverture** : Espresso `SystemBarsTest` (haut et bas des vues clés comparés aux encarts des barres système de la fenêtre).
+
 ---
 
 ## 9. Tests et isolation
