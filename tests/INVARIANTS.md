@@ -601,7 +601,7 @@ Après connexion, le web lit `user.is_admin` dans la réponse de `/api/auth/logi
 - **Onglets visibles** : Tableau de bord, Escalade (lecture seule : schéma d'escalade en cours, INV-136), Alarmes, Statistiques.
 - **Onglets masqués** : Utilisateurs, Tests, Log, Disponibilité, Cluster.
 - **Actions masquées** : configuration de l'escalade (chaîne, délai, email d'alerte), « Résoudre », « Envoyer une alarme », et tout ce que portent les onglets masqués (« Supprimer », « Réinitialiser », actions de l'onglet Tests).
-- **Aucun GET réservé aux admins** n'est appelé pour lui (`/api/config/system`, `/api/audit/`, `/api/stats/connectivity`), ni surveillé par le WebSocket live (INV-135) : pas de `403` dans la console. Il reste connecté après le chargement initial.
+- **Aucun GET réservé aux admins** n'est appelé pour lui (`/api/config/system`, `/api/audit/`, `/api/stats/connectivity`, `/api/chaos`), ni surveillé par le WebSocket live (INV-135), ni relancé par la resynchro de sécurité de 60 s (constat du 2026-11-10 : `GET /api/chaos` partait toutes les 60 s, `403`) : pas de `403` dans la console. Il reste connecté après le chargement initial.
 - **`401` seul déconnecte** (jeton expiré ou invalide). Un `403` (droit manquant) ne déconnecte pas : l'action échoue avec « Réservé aux administrateurs » (snackbar rouge pour une écriture, INV-139).
 - Un **admin** voit tout, comme avant. Si la session précédente avait laissé un onglet admin ouvert, un non-admin revient au tableau de bord.
 - **Masquer n'est pas une sécurité** : chaque route admin refuse elle-même un non-admin (`403`) côté serveur (`/api/alarms/{id}/resolve`, `GET /api/config/system`, etc., PR backend #274 du même plan).

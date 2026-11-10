@@ -1384,6 +1384,32 @@ class TestRoleBasedUI:
         assert ws_frames and "/api/system/gateways" not in ws_frames[0], ws_frames
         assert refused == []
 
+    def test_non_admin_resync_requests_no_admin_only_get(self, page: Page, primary_url, viewer):
+        """INV-165 : la resynchro de sécurité (toutes les 60 s, INV-135) relance tous les chargeurs du direct ; pour un
+        non-admin, ni /api/chaos ni aucun 401/403. Vrai minuteur, avancé par l'horloge de Playwright. WebSocket simulé :
+        après la connexion, seule la resynchro peut déclencher un chargement."""
+        urls, refused = [], []
+        page.clock.install()
+        page.route_web_socket("**/api/ws", lambda ws: None)
+        page.route("**/api/cluster", lambda route: route.fulfill(json=TestClusterTab.PROD))
+        page.on("request", lambda r: urls.append(r.url))
+        page.on("response", lambda r: refused.append(f"{r.status} {r.url}") if r.status in (401, 403) else None)
+        _login(page, primary_url, self.NAME, self.PASSWORD)
+        page.wait_for_function("liveWs && liveWs.readyState === WebSocket.OPEN", timeout=10000)
+        page.wait_for_timeout(1000)  # fin du chargement initial
+        urls.clear()
+
+        page.clock.fast_forward(61000)
+        for _ in range(60):  # la resynchro relance les chargeurs : on attend qu'elle ait tourné
+            if any("/api/alarms/active/escalation" in u for u in urls):
+                break
+            page.wait_for_timeout(50)
+        page.wait_for_timeout(1000)
+
+        assert any("/api/alarms/active/escalation" in u for u in urls), urls  # la resynchro a bien tourné
+        assert not [u for u in urls if "/api/chaos" in u], urls
+        assert refused == []
+
     def test_403_shows_error_without_logging_out(self, page: Page, primary_url, viewer):
         """403 = droit manquant (routes admin de #274), pas session expiree : message, pas de deconnexion.
         Lecture refusee (stats) puis ecriture refusee (resolve, appelee comme le ferait le bouton)."""

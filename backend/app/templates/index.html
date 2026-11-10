@@ -1451,6 +1451,7 @@
 
         let chaosSeen = null;  // evenements deja vus ; null au premier chargement (l'historique n'est pas recopie dans le journal)
         async function loadChaos() {
+            if (!isAdmin()) return;  // INV-165 : la resynchro de 60 s relance ce chargeur pour tous
             let rows;
             try { rows = await api('/api/chaos'); } catch (e) { return; }
             const ev = (r, kind) => r.events.find(e => e.kind === kind);
