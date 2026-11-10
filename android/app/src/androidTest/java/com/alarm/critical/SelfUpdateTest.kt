@@ -13,14 +13,13 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.espresso.Espresso.onView
 import androidx.test.espresso.action.ViewActions.click
 import androidx.test.espresso.action.ViewActions.scrollTo
-import androidx.test.espresso.assertion.ViewAssertions.doesNotExist
 import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.intent.Intents
 import androidx.test.espresso.intent.matcher.IntentMatchers.hasAction
 import androidx.test.espresso.intent.matcher.IntentMatchers.hasData
 import androidx.test.espresso.matcher.RootMatchers.isDialog
 import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
-import androidx.test.espresso.matcher.ViewMatchers.withSubstring
+import androidx.test.espresso.matcher.ViewMatchers.withId
 import androidx.test.espresso.matcher.ViewMatchers.withText
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -34,6 +33,7 @@ import com.alarm.critical.update.UpdateBackend
 import com.alarm.critical.update.UpdateProvider
 import com.alarm.critical.util.AppLogger
 import org.hamcrest.Matchers.allOf
+import org.hamcrest.Matchers.not
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -151,7 +151,7 @@ class SelfUpdateTest {
     /** Rien n'est propose : ni telechargement, ni bandeau, ni installation. */
     private fun nothingOffered(case: String) {
         assertFalse("$case : rien ne doit etre telecharge", waitFor(3000) { fakeUpdate.downloads.isNotEmpty() })
-        onView(withSubstring("Mise à jour")).check(doesNotExist())
+        onView(withId(R.id.updateBanner)).check(matches(not(isDisplayed())))  // pas de bandeau (INV-ANDROID-705)
         assertTrue("$case : rien ne doit etre installe", fakeUpdate.installs.isEmpty())
     }
 
@@ -218,7 +218,7 @@ class SelfUpdateTest {
         assertTrue("echec trace dans les logs exportes",
             waitFor { AppLogger.exportLogs("user1", "test").contains("SHA-256 invalide") })
         assertTrue("APK supprime du cache", context.cacheDir.walk().none { it.name.endsWith(".apk") })
-        onView(withSubstring("Mise à jour")).check(doesNotExist())
+        onView(withId(R.id.updateBanner)).check(matches(not(isDisplayed())))  // pas de bandeau (INV-ANDROID-705)
         assertTrue("rien n'est installe", fakeUpdate.installs.isEmpty())
     }
 

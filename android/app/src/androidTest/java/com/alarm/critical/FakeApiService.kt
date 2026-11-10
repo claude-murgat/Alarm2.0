@@ -50,8 +50,8 @@ class FakeApiService : ApiService {
     var loginCalled = false
     var heartbeatCallCount = 0
 
-    // INV-ANDROID-508 : jetons expires. getMe, l'historique et l'acquittement
-    // repondent alors 401 « Invalid token », comme le backend.
+    // INV-ANDROID-508 : jetons expires. getMe, l'historique, l'acquittement et
+    // l'enregistrement FCM repondent alors 401 « Invalid token », comme le backend.
     val expiredTokens = mutableSetOf<String>()
 
     private fun <T> rejected(auth: String): Response<T>? =
@@ -140,8 +140,12 @@ class FakeApiService : ApiService {
     // FCM token management
     var fcmTokenRegistered: FcmTokenRequest? = null
     var fcmTokenDeleted: FcmTokenDeleteRequest? = null
+    /** En-tete Authorization de l'enregistrement reussi (INV-ANDROID-508). */
+    var fcmTokenRegisteredWith: String? = null
 
     override suspend fun registerFcmToken(auth: String, request: FcmTokenRequest): Response<Map<String, String>> {
+        rejected<Map<String, String>>(auth)?.let { return it }
+        fcmTokenRegisteredWith = auth
         fcmTokenRegistered = request
         return Response.success(mapOf("status" to "ok"))
     }
