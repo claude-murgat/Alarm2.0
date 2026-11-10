@@ -711,6 +711,21 @@ DashboardActivity `onCreate` : si `SDK >= TIRAMISU` et non grantée, `requestPer
 - **Pourquoi** : bug terrain 2026-10-14. Il fallait se déconnecter puis se reconnecter pour réapparaître en ligne.
 - **Couverture** : Espresso `AlarmResilienceTest` (`demarrage_du_telephone_*`, `relance_par_android_sans_intent_*`). Le RED a été prouvé : échec, puis plantage de l'app avec le code d'origine.
 
+### INV-ANDROID-708 [H] 🐛 Cible Android 16 (targetSdk 36), écrans hors des barres système (2026-11-10)
+Demande du propriétaire du 2026-11-10.
+- **Cible** : `compileSdk = 36` et `targetSdk = 36` (Android 16) ; `minSdk = 26` inchangé.
+- **Pourquoi** : Play Protect affiche « Android App Compatibility Too Low » quand le targetSdk a plus de deux versions de retard sur Android. Android 17 (API 37) est sorti : 34 déclenche l'avertissement, 36 l'évite jusqu'à Android 18.
+- **Écrans hors des barres système** : depuis Android 15, une app qui cible 35 ou plus est dessinée sous la barre d'état et la barre de navigation (« edge-to-edge »), sans dérogation possible quand elle cible 36. Aucun élément clé d'un écran ne se trouve sous ces barres : tableau de bord et menu latéral, écran d'alarme plein écran, écrans du menu (dont « Mise à jour »), connexion. Le fond sombre de l'écran passe sous les barres, pour que les icônes blanches de la barre d'état restent lisibles. Sur Android 14 et avant, rien ne change.
+- **Retour prédictif** : avec Android 16, `onBackPressed()` n'est plus appelé. L'écran d'alarme bloque toujours le retour (INV-ANDROID-004). Menu latéral ouvert : le retour le ferme sans quitter le tableau de bord.
+- **Grands écrans** : orientation, cf INV-ANDROID-700.
+- **Vérifié sans changement** :
+  - **Service de premier plan `specialUse`** (INV-ANDROID-701) : les règles d'Android 15 ne le concernent pas. Le délai de 6 h vise `dataSync` et `mediaProcessing`, et l'interdiction de démarrer depuis `BOOT_COMPLETED` vise `dataSync`, `camera`, `mediaPlayback`, `phoneCall`, `mediaProjection` et `microphone`. `BootReceiver` (`BOOT_COMPLETED`, `MY_PACKAGE_REPLACED`) relance toujours la surveillance (INV-ANDROID-704).
+  - **Écran d'alarme sur écran verrouillé** (INV-ANDROID-702) : les règles de l'autorisation `USE_FULL_SCREEN_INTENT` viennent d'Android 14, déjà ciblé. Rien de nouveau en 15 ni en 16.
+  - **Notifications** : `POST_NOTIFICATIONS` (INV-ANDROID-703), inchangée.
+  - **Focus audio** : Android 15 le réserve à l'app au premier plan ou à un service de premier plan. La sonnerie ne le demande pas.
+- **Avant de passer à targetSdk 37** : l'autorisation `ACCESS_LOCAL_NETWORK` sera obligatoire pour joindre les nœuds sur LAN ; un service de premier plan démarré en arrière-plan (redémarrage, push) ne pourra plus faire sonner sans l'autorisation d'alarme exacte ; la dérogation d'orientation disparaît.
+- **Couverture** : Espresso `SystemBarsTest` (haut et bas des vues clés comparés aux encarts des barres système de la fenêtre).
+
 ### INV-ANDROID-705 [H] ✅ Mise à jour intégrée : l'app s'installe elle-même quand une release plus récente existe (2026-11-05)
 Décision du propriétaire du 2026-11-05.
 - **Release uniquement** : un APK `debug` ne se met jamais à jour.

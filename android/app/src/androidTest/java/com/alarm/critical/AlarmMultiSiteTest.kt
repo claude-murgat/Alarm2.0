@@ -222,6 +222,8 @@ class AlarmMultiSiteTest {
             ?.let { "${it.getCharSequence(Notification.EXTRA_TITLE)} ${it.getCharSequence(Notification.EXTRA_TEXT)}" }
             .orEmpty()
         for (id in listOf(AlarmPollingService.ALARM_NOTIFICATION_ID, AlarmPollingService.NOTIFICATION_ID)) {
+            // Android 12+ peut retarder jusqu'a 10 s la notification d'un service de premier plan
+            waitFor(15_000) { text(id).contains("2 alarmes") }
             val shown = text(id)
             assertTrue("notification $id : '$shown'",
                 shown.contains("2 alarmes") && shown.contains("Izeron") && shown.contains("Beaufort"))

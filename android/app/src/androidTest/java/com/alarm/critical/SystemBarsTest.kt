@@ -2,6 +2,7 @@ package com.alarm.critical
 
 import android.content.Context
 import android.content.Intent
+import android.graphics.Color
 import android.os.Build
 import android.os.SystemClock
 import androidx.core.view.GravityCompat
@@ -97,7 +98,6 @@ class SystemBarsTest {
     private fun loggedIn() = prefs().edit()
         .putString("token", "fake-token")
         .putString("user_name", "user1")
-        .putInt("user_id", 1)
         .putBoolean("is_oncall", false)
         .putBoolean("is_admin", true)
         .putBoolean("battery_optimization_asked", true)
@@ -131,6 +131,15 @@ class SystemBarsTest {
         val dashboard = launchDashboard()
         clearOfSystemBars(R.id.menuButton, "bouton du menu")
         clearOfSystemBars(R.id.helpFab, "bouton d'aide (logs)")
+
+        // Les icones de la barre d'etat sont blanches : le fond dessous doit etre sombre pour qu'on les voie
+        var statusBar = 0
+        onView(withId(R.id.menuButton)).check { v, _ ->
+            statusBar = ViewCompat.getRootWindowInsets(v)!!.getInsets(WindowInsetsCompat.Type.statusBars()).top
+        }
+        val screen = InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
+        val under = screen.getPixel(screen.width * 2 / 5, statusBar / 2)  // entre l'heure et l'encoche
+        assertTrue("fond sous la barre d'etat sombre : #${Integer.toHexString(under)}", Color.luminance(under) < 0.3f)
 
         dashboard.onActivity { it.findViewById<DrawerLayout>(R.id.drawerLayout).openDrawer(GravityCompat.START, false) }
         clearOfSystemBars(R.id.drawerInitial, "haut du menu lateral")

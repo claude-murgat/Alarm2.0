@@ -18,11 +18,13 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.alarm.critical.api.Auth
 import com.alarm.critical.model.AlarmResponse
 import com.alarm.critical.service.AlarmSoundManager
+import com.alarm.critical.util.padForSystemBars
 import com.alarm.critical.view.ArcTimerView
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -66,6 +68,12 @@ class AlarmActivity : AppCompatActivity() {
         )
 
         setContentView(R.layout.activity_alarm)
+        findViewById<View>(R.id.alarmRoot).padForSystemBars()  // INV-ANDROID-708
+
+        // INV-ANDROID-004 : il faut acquitter. Pas onBackPressed(), qu'Android 16 n'appelle plus (retour predictif).
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() = Unit
+        })
 
         alarmId = intent.getIntExtra("alarm_id", 0)
         shown = java.lang.ref.WeakReference(this)
@@ -303,10 +311,5 @@ class AlarmActivity : AppCompatActivity() {
         stopPulseAnimations()
         soundManager.stopAlarmSound()
         super.onDestroy()
-    }
-
-    override fun onBackPressed() {
-        // Prevent dismissing alarm with back button
-        // User must acknowledge
     }
 }

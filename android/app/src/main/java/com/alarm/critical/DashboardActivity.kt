@@ -41,6 +41,7 @@ import com.alarm.critical.update.UpdateProvider
 import com.alarm.critical.update.UpdateState
 import com.alarm.critical.update.showDownload
 import com.alarm.critical.util.AppLogger
+import com.alarm.critical.util.padForSystemBars
 import com.alarm.critical.view.ArcTimerView
 import com.alarm.critical.view.SignalBarsView
 import com.google.firebase.messaging.FirebaseMessaging
@@ -71,6 +72,8 @@ class DashboardActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_dashboard)
+        // INV-ANDROID-708 : le contenu, car DrawerLayout ignore sa propre marge ; le menu lateral a fitsSystemWindows
+        findViewById<DrawerLayout>(R.id.drawerLayout).getChildAt(0).padForSystemBars()
 
         // Permission notification Android 13+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
