@@ -213,9 +213,10 @@ class AlarmMultiSiteTest {
             Intent(context, DashboardActivity::class.java).putExtra("token", "fake-token")
         )
 
-        onView(withId(R.id.currentAlarmLine)).check(matches(allOf(
-            withSubstring("2 alarmes"), withSubstring("Izeron"), withSubstring("Beaufort")
-        )))
+        // La ligne du tableau de bord se rafraichit chaque seconde, pas a chaque poll
+        val line = allOf(withSubstring("2 alarmes"), withSubstring("Izeron"), withSubstring("Beaufort"))
+        waitFor { runCatching { onView(withId(R.id.currentAlarmLine)).check(matches(line)) }.isSuccess }
+        onView(withId(R.id.currentAlarmLine)).check(matches(line))
 
         val manager = context.getSystemService(NotificationManager::class.java)
         fun text(id: Int) = manager.activeNotifications.firstOrNull { it.id == id }?.notification?.extras

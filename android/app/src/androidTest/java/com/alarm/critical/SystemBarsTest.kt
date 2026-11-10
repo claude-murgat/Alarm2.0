@@ -12,6 +12,7 @@ import androidx.drawerlayout.widget.DrawerLayout
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.espresso.Espresso.onView
+import androidx.test.espresso.action.ViewActions.click
 import androidx.test.espresso.matcher.ViewMatchers.withId
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -160,6 +161,39 @@ class SystemBarsTest {
         clearOfSystemBars(R.id.nameInput, "nom")
         clearOfSystemBars(R.id.loginButton, "bouton de connexion")
         clearOfSystemBars(R.id.shareLogsButton, "« Envoyer les logs »")
+    }
+
+    /** Le champ en cours de saisie reste au-dessus du clavier (Android 15+ : plus rien n'ajuste la fenetre a sa place). */
+    @Test
+    fun connexion_clavier_ouvert_le_champ_saisi_reste_au_dessus() {
+        val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
+        device.executeShellCommand("settings put secure show_ime_with_hard_keyboard 1")  // AVD a clavier materiel
+        // Plus petit telephone courant (360 x 640 dp) : c'est la que les champs centres sont le plus pres du clavier
+        device.executeShellCommand("wm size 720x1280")
+        device.executeShellCommand("wm density 320")
+        try {
+            scenarios += ActivityScenario.launch(MainActivity::class.java)
+            for (id in listOf(R.id.nameInput, R.id.passwordInput)) {
+                onView(withId(id)).perform(click())
+                var detail = ""
+                val ok = waitFor {
+                    var visible = false
+                    onView(withId(id)).check { v, _ ->
+                        val insets = ViewCompat.getRootWindowInsets(v)!!
+                        val imeTop = v.rootView.height - insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+                        val bottom = IntArray(2).also { v.getLocationInWindow(it) }[1] + v.height
+                        detail = "bas du champ $bottom px, haut du clavier $imeTop px"
+                        visible = insets.isVisible(WindowInsetsCompat.Type.ime()) && bottom <= imeTop
+                    }
+                    visible
+                }
+                assertTrue("clavier ouvert, champ au-dessus : $detail", ok)
+            }
+        } finally {
+            device.executeShellCommand("wm size reset")
+            device.executeShellCommand("wm density reset")
+            device.executeShellCommand("settings put secure show_ime_with_hard_keyboard 0")
+        }
     }
 
     @Test
