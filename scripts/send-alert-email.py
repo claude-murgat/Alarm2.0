@@ -31,7 +31,8 @@ def load_env(paths):
 # Glob (et non un chemin code en dur node2) : marche sur n'importe quel noeud,
 # onsite comme node3 cloud. Tri => .env.prod.secrets (suffixe alpha apres nodeN)
 # est charge en dernier et a donc priorite sur les fichiers par-noeud.
-_env = load_env(sorted(glob.glob('/opt/alarm/.env.prod.*')))
+# Jamais les modeles du depot (.env.prod.secrets.example trie apres .secrets : identifiants factices).
+_env = load_env(sorted(p for p in glob.glob('/opt/alarm/.env.prod.*') if not p.endswith('.example')))
 
 
 def cfg(k, d=None):
