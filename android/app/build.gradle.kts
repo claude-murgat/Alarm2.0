@@ -45,7 +45,7 @@ val computedVersionName = gitOutput("describe", "--tags", "--match", "v*", "--di
 
 android {
     namespace = "com.alarm.critical"
-    compileSdk = 34
+    compileSdk = 36
 
     buildFeatures {
         buildConfig = true
@@ -54,7 +54,7 @@ android {
     defaultConfig {
         applicationId = "com.alarm.critical"
         minSdk = 26
-        targetSdk = 34
+        targetSdk = 36
         versionCode = gitCommitCount
         versionName = computedVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

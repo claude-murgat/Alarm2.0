@@ -20,6 +20,8 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
+import androidx.core.view.GravityCompat
 import androidx.drawerlayout.widget.DrawerLayout
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -41,6 +43,7 @@ import com.alarm.critical.update.UpdateProvider
 import com.alarm.critical.update.UpdateState
 import com.alarm.critical.update.showDownload
 import com.alarm.critical.util.AppLogger
+import com.alarm.critical.util.padForSystemBars
 import com.alarm.critical.view.ArcTimerView
 import com.alarm.critical.view.SignalBarsView
 import com.google.firebase.messaging.FirebaseMessaging
@@ -71,6 +74,8 @@ class DashboardActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_dashboard)
+        // INV-ANDROID-708 : le contenu, car DrawerLayout ignore sa propre marge ; le menu lateral a fitsSystemWindows
+        findViewById<DrawerLayout>(R.id.drawerLayout).getChildAt(0).padForSystemBars()
 
         // Permission notification Android 13+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -108,6 +113,15 @@ class DashboardActivity : AppCompatActivity() {
 
         // Navigation Drawer
         val drawerLayout = findViewById<DrawerLayout>(R.id.drawerLayout)
+        // INV-ANDROID-708 : le retour ferme le menu ouvert, pas le tableau de bord (DrawerLayout ne le fait pas sans focus)
+        val closeDrawerOnBack = object : OnBackPressedCallback(false) {
+            override fun handleOnBackPressed() = drawerLayout.closeDrawer(GravityCompat.START)
+        }
+        onBackPressedDispatcher.addCallback(this, closeDrawerOnBack)
+        drawerLayout.addDrawerListener(object : DrawerLayout.SimpleDrawerListener() {
+            override fun onDrawerOpened(drawerView: View) { closeDrawerOnBack.isEnabled = true }
+            override fun onDrawerClosed(drawerView: View) { closeDrawerOnBack.isEnabled = false }
+        })
         findViewById<TextView>(R.id.drawerInitial).text = userName.take(1).uppercase()
         findViewById<TextView>(R.id.drawerUserName).text = userName
         updateDrawerGuardStatus()
