@@ -74,7 +74,7 @@ object UpdateProvider {
     }
 }
 
-/** INV-ANDROID-706 : etat de la mise a jour, le meme pour le bandeau du tableau de bord et l'ecran « Mises à jour ». */
+/** INV-ANDROID-706 : etat de la mise a jour, le meme pour le bandeau du tableau de bord et l'ecran « Mise à jour ». */
 data class UpdateState(
     val phase: Phase = Phase.NOT_CHECKED,
     val server: String? = null,       // version annoncee par /health a la derniere verification, null : inconnue
@@ -89,7 +89,7 @@ data class UpdateState(
 
     val percentText: String get() = percent?.let { " $it\u00A0%" }.orEmpty()
 
-    /** L'etat en une phrase (ecran « Mises à jour »). */
+    /** L'etat en une phrase (ecran « Mise à jour »). */
     val sentence: String get() = when (phase) {
         Phase.NOT_CHECKED -> "Vérification en cours…"
         Phase.DEV -> "Version de développement : pas de mise à jour"

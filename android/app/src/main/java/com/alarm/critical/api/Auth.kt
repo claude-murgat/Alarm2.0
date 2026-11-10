@@ -1,6 +1,7 @@
 package com.alarm.critical.api
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import com.alarm.critical.model.RefreshRequest
 import com.alarm.critical.util.AppLogger
@@ -15,6 +16,19 @@ import retrofit2.Response
 object Auth {
     private const val TAG = "Auth"
     private val mutex = Mutex()
+
+    // Derniere cause d'echec ecrite dans AppLogger (lue et ecrite sous [mutex])
+    private var lastFailure: String? = null
+    private var lastFailureLoggedAt = 0L
+
+    /** Une meme cause d'echec au plus une fois par 5 min : l'historique du dashboard echoue toutes les 10 s. */
+    private fun logFailure(message: String) {
+        val now = SystemClock.elapsedRealtime()
+        if (message == lastFailure && now - lastFailureLoggedAt < 5 * 60_000L) return
+        lastFailure = message
+        lastFailureLoggedAt = now
+        AppLogger.log("Auth", message)
+    }
 
     private fun prefs(context: Context) = context.getSharedPreferences("alarm_prefs", Context.MODE_PRIVATE)
 
@@ -38,7 +52,7 @@ object Auth {
         val refresh = prefs.getString("refresh_token", null)
         if (refresh.isNullOrEmpty()) {
             Log.w(TAG, "Refresh impossible : aucun refresh_token stocke (login pre-INV-079 ?)")
-            AppLogger.log("Auth", "Refresh impossible : refresh_token absent en SharedPreferences (INV-079)")
+            logFailure("Refresh impossible : refresh_token absent en SharedPreferences (INV-079)")
             return null
         }
         try {
@@ -49,21 +63,21 @@ object Auth {
                     prefs.edit().putString("token", newToken).apply()
                     Log.i(TAG, "Token renouvelé avec succès")
                     AppLogger.log("Auth", "Refresh OK (INV-079) : nouveau access token stocke")
+                    lastFailure = null  // le prochain echec sera ecrit
                 } else {
-                    AppLogger.log("Auth", "Refresh 2xx mais body sans access_token (incoherence backend)")
+                    logFailure("Refresh 2xx mais body sans access_token (incoherence backend)")
                 }
                 newToken
             } else {
                 Log.w(TAG, "Refresh token échoué: ${response.code()}")
-                AppLogger.log(
-                    "Auth",
+                logFailure(
                     "Refresh KO HTTP ${response.code()} : refresh_token rejeté par /auth/refresh (revoque, expire, ou backend pre-INV-079)"
                 )
                 null
             }
         } catch (e: Exception) {
             Log.e(TAG, "Refresh token erreur: ${e.message}")
-            AppLogger.log("Auth", "Refresh erreur reseau : ${e.message}")
+            logFailure("Refresh erreur reseau : ${e.message}")
             null
         }
     }

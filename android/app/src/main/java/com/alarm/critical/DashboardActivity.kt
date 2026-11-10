@@ -570,7 +570,6 @@ class DashboardActivity : AppCompatActivity() {
             // INV-ANDROID-009 : site(s) et nombre d'alarmes en cours, ex. "2 alarmes : Izeron, Beaufort"
             val sites = AlarmPollingService.alarms.sitesLabel()
             val alarmCard = findViewById<LinearLayout>(R.id.alarmCard)
-            val alarmDot = findViewById<View>(R.id.alarmDot)
             val alarmLine = findViewById<TextView>(R.id.currentAlarmLine)
             val titleView = findViewById<TextView>(R.id.alarmTitle)
             val messageView = findViewById<TextView>(R.id.alarmMessage)
@@ -602,7 +601,7 @@ class DashboardActivity : AppCompatActivity() {
 
             if (alarm != null && alarm.status == "acknowledged" && !isAcknowledged) {
                 // Alarme acquittee par quelqu'un d'autre
-                setCardState(alarmCard, alarmDot, "acked")
+                setCardState(alarmCard, "acked")
                 currentAlarm = alarm
                 val ackerName = alarm.acknowledged_by_name ?: "?"
                 alarmLine.text = "Alarme active \u00b7 $sites"
@@ -629,7 +628,7 @@ class DashboardActivity : AppCompatActivity() {
 
             } else if (alarm != null && !isAcknowledged) {
                 // Alarme active non acquittee
-                setCardState(alarmCard, alarmDot, "active")
+                setCardState(alarmCard, "active")
                 currentAlarm = alarm
                 alarmLine.text = "\ud83d\udd34 Alarme active \u00b7 $sites"  // INV-ANDROID-100
                 alarmLine.setTextColor(Color.parseColor("#ef4444"))
@@ -654,7 +653,7 @@ class DashboardActivity : AppCompatActivity() {
 
             } else if (alarm != null && isAcknowledged) {
                 // Alarme acquittee par nous
-                setCardState(alarmCard, alarmDot, "acked")
+                setCardState(alarmCard, "acked")
                 currentAlarm = alarm
                 alarmLine.text = "\ud83d\udfe2 Acquitt\u00e9e \u00b7 $sites"  // INV-ANDROID-100
                 alarmLine.setTextColor(Color.parseColor("#22c55e"))
@@ -676,7 +675,7 @@ class DashboardActivity : AppCompatActivity() {
 
             } else if (alarm == null && isAcknowledged) {
                 // Alarme disparue pendant ack
-                setCardState(alarmCard, alarmDot, "calm")
+                setCardState(alarmCard, "calm")
                 alarmGoneDuringAck = true
                 alarmLine.text = "⚪ Tout est calme"  // INV-ANDROID-100
                 alarmLine.setTextColor(Color.parseColor("#94a3b8"))
@@ -690,7 +689,7 @@ class DashboardActivity : AppCompatActivity() {
 
             } else {
                 // Pas d'alarme
-                setCardState(alarmCard, alarmDot, "calm")
+                setCardState(alarmCard, "calm")
                 currentAlarm = null
                 isAcknowledged = false
                 alarmLine.text = "⚪ Tout est calme"  // INV-ANDROID-100
@@ -722,7 +721,7 @@ class DashboardActivity : AppCompatActivity() {
         }
     }
 
-    private fun setCardState(card: LinearLayout, dot: View, state: String) {
+    private fun setCardState(card: LinearLayout, state: String) {
         if (state == lastCardState) return
         lastCardState = state
 
@@ -730,13 +729,9 @@ class DashboardActivity : AppCompatActivity() {
         pulseAnimator = null
 
         when (state) {
-            "calm" -> {
-                card.setBackgroundResource(R.drawable.card_calm)
-                dot.setBackgroundResource(R.drawable.dot_green)
-            }
+            "calm" -> card.setBackgroundResource(R.drawable.card_calm)
             "active" -> {
                 card.setBackgroundResource(R.drawable.card_alarm_active)
-                dot.setBackgroundResource(R.drawable.dot_red)
                 pulseAnimator = ObjectAnimator.ofFloat(card, "alpha", 1f, 0.85f).apply {
                     duration = 800
                     repeatMode = ValueAnimator.REVERSE
@@ -745,10 +740,7 @@ class DashboardActivity : AppCompatActivity() {
                     start()
                 }
             }
-            "acked" -> {
-                card.setBackgroundResource(R.drawable.card_alarm_acked)
-                dot.setBackgroundResource(R.drawable.dot_green)
-            }
+            "acked" -> card.setBackgroundResource(R.drawable.card_alarm_acked)
         }
     }
 
