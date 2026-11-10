@@ -8,4 +8,6 @@
     <item name="updateLastCheck" type="id" />
     <item name="updateCheckButton" type="id" />
     <item name="updateInstallButton" type="id" />
+    <!-- INV-ANDROID-707 -->
+    <item name="updatePlayProtectButton" type="id" />
 </resources>
