@@ -1296,17 +1296,24 @@ class TestResiliencePanel:
              "why": "2/3 voteurs etcd joignables", "writable_from": {"izeron": True, "ovh": False, "beaufort": False},
              "escalation_running": True, "alarms_created": {"izeron": True, "beaufort": False},
              "sms_calls": {"izeron": True, "beaufort": False}, "app_4g_reachable": False, "app_izeron_lan": True,
-             "alerted_by": [], "sentence": "Leader : oui (2/3 voteurs etcd joignables). Beaufort : aveugle."},
+             "alerted_by": ["email INV-170 « aucun leader » par node4 + node5 après 3 min",
+                            "email INV-172 « passerelle muette » alarm-1 par le leader après 10 min",
+                            "email INV-185 « site sans modem » Beaufort par le leader après 10 min",
+                            "email INV-189 « nœud injoignable » node3 + node4 + node5 par le leader après 10 min",
+                            "email INV-144 « escalade sans appel » par le leader pendant une alarme"],
+             "sentence": "Leader : oui (2/3 voteurs etcd joignables). Beaufort : aveugle."},
             {"scenario": "izeron_both", "label": "Izeron entier (node1 + node2)", "untestable": True, "leader_possible": False,
              "why": "1/3 voteurs etcd joignables", "writable_from": {"izeron": False, "ovh": False, "beaufort": False},
              "escalation_running": False, "alarms_created": {"izeron": False, "beaufort": False},
              "sms_calls": {"izeron": False, "beaufort": False}, "app_4g_reachable": False, "app_izeron_lan": False,
-             "alerted_by": ["email INV-170 (après PR 1)"], "sentence": "Leader : non (1/3 voteurs etcd joignables)."},
+             "alerted_by": ["email INV-170 « aucun leader » par node3 + node4 + node5 après 3 min"],
+             "sentence": "Leader : non (1/3 voteurs etcd joignables). Pas d'email du leader (INV-053, INV-144, INV-172, INV-185, INV-189) : aucun leader."},
             {"scenario": "legacy_unplugged", "label": "Legacy débranché (node1 + node2) : ce que corrige le jour du déménagement",
              "untestable": True, "leader_possible": False, "why": "1/3 voteurs etcd joignables",
              "writable_from": {"izeron": False, "ovh": False, "beaufort": False}, "escalation_running": False,
              "alarms_created": {"izeron": False, "beaufort": False}, "sms_calls": {"izeron": False, "beaufort": False},
-             "app_4g_reachable": False, "app_izeron_lan": False, "alerted_by": ["email INV-170 (après PR 1)"],
+             "app_4g_reachable": False, "app_izeron_lan": False,
+             "alerted_by": ["email INV-170 « aucun leader » par node3 + node4 + node5 + node6 + node7 après 3 min"],
              "sentence": "Leader : non (1/3 voteurs etcd joignables)."},
         ],
     }
@@ -1355,12 +1362,16 @@ class TestResiliencePanel:
         expect(ovh).to_contain_text("OVH (node3)")
         expect(ovh.locator("td.ok")).to_have_count(4)   # leader, écriture Izeron, alarmes Izeron, LAN Izeron
         expect(ovh.locator("td.ko")).to_have_count(4)   # écriture OVH, écriture Beaufort, alarmes Beaufort, app 4G
-        expect(ovh).to_contain_text("personne")
+        # INV-175 « Prévenu » (2026-11-10) : qui envoie quoi, après combien de temps
+        expect(ovh.locator("td[data-label='Prévenu par']")).to_contain_text(
+            "email INV-189 « nœud injoignable » node3 + node4 + node5 par le leader après 10 min")
         expect(card.locator("#resilienceWhatif")).to_contain_text("Leader : oui (2/3 voteurs etcd joignables). Beaufort : aveugle.")
         both = card.locator("#resilienceWhatif tr[data-scenario='izeron_both']")
         expect(both).to_contain_text("non testable : arrêt total")
         expect(both).to_contain_text("2ᵉ voteur cloud à prévoir")
-        expect(both).to_contain_text("email INV-170 (après PR 1)")
+        expect(both.locator("td[data-label='Prévenu par']")).to_have_text(
+            "email INV-170 « aucun leader » par node3 + node4 + node5 après 3 min")
+        expect(card.locator("#resilienceWhatif")).to_contain_text("Pas d'email du leader (INV-053, INV-144, INV-172, INV-185, INV-189) : aucun leader.")
         expect(both.locator("td.ok")).to_have_count(0)
         expect(ovh).not_to_contain_text("non testable")
         # INV-175 (2026-11-05) : « Legacy débranché » sans leader aujourd'hui, corrigé le jour du déménagement
