@@ -11,6 +11,7 @@ Usage :
   python -m pytest tests/test_frontend.py -v             # headless (CI)
 """
 
+import json
 import os
 import re
 import time
@@ -797,13 +798,18 @@ class TestClusterTab:
                    {"name": "node8", "machine": "<b>pc</b>", "retiring": False, "location": "beaufort", "group": "Beaufort", "role": "replica", "state": "streaming"},
                ]}
 
-    def _open(self, page: Page, data=None, versions=None):
-        """`versions` : réponse de /api/resilience (défaut : 1.9.1 partout) ou un handler de route."""
+    def _open(self, page: Page, data=None, versions=None, gateways=None):
+        """`versions` : réponse de /api/resilience (défaut : 1.9.1 partout) ou un handler de route.
+        `gateways` : réponse de /api/system/gateways (INV-192, défaut : aucune passerelle) ou un handler de route."""
         data = data or self.CLUSTER
         if not callable(versions):
             body = versions or {"live": {"nodes": [{"name": m["name"], "reachable": True, "version": "1.9.1"} for m in data["members"]]}}
             versions = lambda route: route.fulfill(json=body)
+        if not callable(gateways):
+            gw_body = gateways or []
+            gateways = lambda route: route.fulfill(json=gw_body)
         page.route("**/api/resilience", versions)
+        page.route("**/api/system/gateways", gateways)
         page.route("**/api/cluster", lambda route: route.fulfill(json=data))
         page.locator(".tab:text('Cluster')").click()
         page.evaluate("loadCluster()")  # charge une fois au login (loadAll), puis sur changement en direct
@@ -942,6 +948,172 @@ class TestClusterTab:
             dashboard.wait_for_timeout(50)
         pending[-1].fulfill(json={"live": {"nodes": [{"name": "node5", "reachable": True, "version": "1.9.1"}]}})
         expect(cell).to_have_text("1.9.1")
+
+    # INV-192 : modem 4G et contact sec de la passerelle de chaque machine (gateway_id = nom de la machine).
+    # alarm-4 : modem et Arduino sans nouvelles (dates UTC : 13:32 et 13:20 = 14:32 et 14:20 à Paris en novembre).
+    GATEWAYS = [
+        {"gateway_id": "onsite-1", "modem": {"state": "ok", "bars": 2, "tech": None, "rsrp": None, "updated_at": "2026-11-10T13:31:00"},
+         "dry_contact": None},  # ni techno ni RSRP (pas de ligne +CPSI) : les barres seules
+        {"gateway_id": "onsite-2", "modem": {"state": "ok", "bars": 3, "tech": "LTE", "rsrp": -95, "updated_at": "2026-11-10T13:31:00"},
+         "dry_contact": {"state": "closed", "last_seen": None}},
+        {"gateway_id": "alarm-1", "modem": None, "dry_contact": {"state": "open", "last_seen": None}},
+        {"gateway_id": "ALARM-2", "modem": {"state": "ok", "bars": 2, "tech": "<u>WCDMA</u>", "rsrp": None, "updated_at": "2026-11-10T13:31:00"},
+         "dry_contact": {"state": "closed", "last_seen": None}},  # 3G : pas de RSRP ; `tech` est un texte libre du modem
+        {"gateway_id": "alarm-3", "modem": {"state": "no_network", "bars": 0, "tech": None, "rsrp": None, "updated_at": "2026-11-10T13:31:00"},
+         "dry_contact": None},
+        {"gateway_id": "alarm-4", "modem": {"state": "unknown", "bars": 0, "tech": None, "rsrp": None, "updated_at": "2026-11-10T13:32:00"},
+         "dry_contact": {"state": "silent", "last_seen": "2026-11-10T13:20:05"}},
+        {"gateway_id": "e2e-izeron", "modem": {"state": "ok", "bars": 4, "tech": "LTE", "rsrp": -80, "updated_at": "2026-11-10T13:31:00"},
+         "dry_contact": {"state": "open", "last_seen": None}},  # aucune machine de ce nom : n'apparaît nulle part
+    ]
+    COLUMNS = ["Nœud", "Role", "Etat", "Version", "Modem 4G", "Contact sec", "Timeline", "Lag", "Host"]
+
+    @staticmethod
+    def _hw(row, name):
+        return row(name).locator("td[data-label='Modem 4G']"), row(name).locator("td[data-label='Contact sec']")
+
+    def test_each_node_shows_its_modem_and_dry_contact(self, dashboard: Page):
+        """Casse ignorée dans les deux sens : passerelle « ALARM-2 » et machine « Alarm-3 » (node_machines saisi à la main)."""
+        prod = {**self.PROD, "members": [{**m, "machine": "Alarm-3"} if m["name"] == "node6" else m for m in self.PROD["members"]]}
+        row = self._open(dashboard, prod, gateways=self.GATEWAYS)
+        assert self._card(dashboard, "Beaufort").locator("thead th").all_text_contents() == self.COLUMNS
+        assert [td.get_attribute("data-label") for td in row("node4").locator("td").all()] == self.COLUMNS
+
+        modem, contact = self._hw(row, "node2")  # onsite-2 : LTE, 3 barres sur 4, Arduino au repos
+        expect(modem).to_have_attribute("data-state", "ok")
+        expect(modem.locator(".modem-signal")).to_have_attribute("data-bars", "3")
+        expect(modem.locator(".modem-signal i")).to_have_count(4)
+        expect(modem.locator(".modem-signal i.on")).to_have_count(3)
+        expect(modem).to_have_text("LTE -95 dBm")
+        expect(contact).to_have_attribute("data-state", "closed")
+        expect(contact.locator(".badge.online")).to_have_text("fermé")
+
+        modem, contact = self._hw(row, "node4")  # alarm-1 : Arduino seul, contact ouvert
+        expect(modem).to_have_attribute("data-state", "none")
+        expect(modem).to_have_text("-")
+        expect(contact).to_have_attribute("data-state", "open")
+        expect(contact.locator(".badge.offline")).to_have_text("ouvert")
+
+        modem, contact = self._hw(row, "node5")  # « ALARM-2 » : 3G sans RSRP, techno seule, échappée
+        expect(modem).to_have_attribute("data-state", "ok")
+        expect(modem).to_have_text("<u>WCDMA</u>")
+        expect(modem.locator("u")).to_have_count(0)
+        expect(contact).to_have_attribute("data-state", "closed")
+
+        modem, contact = self._hw(row, "node1")  # onsite-1 : ni techno ni RSRP, pas d'Arduino
+        expect(modem).to_have_attribute("data-state", "ok")
+        expect(modem.locator(".modem-signal i.on")).to_have_count(2)
+        expect(modem).to_have_text("")
+        expect(contact).to_have_attribute("data-state", "none")
+        expect(contact).to_have_text("-")
+
+        modem, contact = self._hw(row, "node6")  # machine « Alarm-3 » : modem sans réseau, pas d'Arduino
+        expect(modem).to_have_attribute("data-state", "no_network")
+        expect(modem.locator(".modem-signal")).to_have_attribute("data-state", "no_network")
+        expect(modem).to_have_text("sans réseau")
+        expect(contact).to_have_attribute("data-state", "none")
+        expect(contact).to_have_text("-")
+
+        modem, contact = self._hw(row, "node7")  # alarm-4 : modem et Arduino sans nouvelles
+        expect(modem).to_have_attribute("data-state", "unknown")
+        expect(modem).to_contain_text("sans nouvelles depuis")
+        expect(contact).to_have_attribute("data-state", "silent")
+        expect(contact.locator(".badge.waiting")).to_have_text("muet")
+        expect(contact).to_contain_text("depuis")
+
+        for cell in self._hw(row, "node3"):  # OVH : aucune passerelle
+            expect(cell).to_have_attribute("data-state", "none")
+            expect(cell).to_have_text("-")
+        expect(dashboard.locator("#clusterMembers td[data-label='Modem 4G'] .modem-signal[data-bars='4']")).to_have_count(0)  # e2e-izeron
+
+    def test_silence_dates_in_local_time(self, browser, primary_url):
+        """INV-130 : `updated_at` et `last_seen` sont de l'UTC sans fuseau ; un navigateur à Paris lit l'heure de Paris.
+        L'année est affichée : sans purge, une date peut être ancienne."""
+        ctx = browser.new_context(timezone_id="Europe/Paris", locale="fr-FR")
+        page = ctx.new_page()
+        try:
+            _login(page, primary_url)
+            modem, contact = self._hw(self._open(page, self.PROD, gateways=self.GATEWAYS), "node7")
+            expect(modem).to_have_text("sans nouvelles depuis 10/11/2026 14:32")
+            expect(contact).to_have_text("muet depuis 10/11/2026 14:20")
+        finally:
+            ctx.close()
+
+    def test_hardware_cells_do_not_block_the_cards_and_show_unknown_on_error(self, page: Page, primary_url):
+        """Réponses retenues dès avant la connexion (aucun chargement antérieur ne remplit les cellules) : cartes
+        affichées avec « … » ; puis toutes les réponses en erreur → « ? »."""
+        held, hold = [], [True]
+        fail = lambda route: route.fulfill(status=503, json={"detail": "Service indisponible"})
+        handler = lambda route: held.append(route) if hold[0] else fail(route)
+        page.route("**/api/system/gateways", handler)
+        _login(page, primary_url)
+        cells = self._hw(self._open(page, self.PROD, gateways=handler), "node2")
+        for cell in cells:
+            expect(cell).to_have_text("…")
+        expect(page.locator("#clusterMembers .site-card")).to_have_count(4)
+        hold[0] = False
+        for route in held:
+            fail(route)
+        for cell in cells:
+            expect(cell).to_have_text("?")
+            expect(cell).not_to_have_attribute("data-state", re.compile(r"."))
+        hold[0] = True  # nouveau dessin après l'erreur : « … » est réservé à l'attente de la première réponse
+        page.evaluate("loadCluster()")
+        for cell in cells:
+            expect(cell).to_have_text("?")
+
+    def test_redraw_reuses_the_last_answer(self, dashboard: Page):
+        """En prod, /api/cluster change toutes les quelques secondes (`lsn` des replicas, Patroni 4) : un nouveau
+        dessin des cartes reprend la dernière réponse, sans « … », même si la suivante tarde."""
+        hold = [False]
+        handler = lambda route: None if hold[0] else route.fulfill(json=self.GATEWAYS)
+        modem, contact = self._hw(self._open(dashboard, self.PROD, gateways=handler), "node2")
+        expect(contact).to_have_attribute("data-state", "closed")
+        hold[0] = True  # les réponses suivantes ne viennent jamais
+        dashboard.evaluate("loadCluster()")
+        expect(modem).to_have_text("LTE -95 dBm")
+        expect(contact).to_have_attribute("data-state", "closed")
+        expect(contact).to_have_text("fermé")
+
+    def test_live_change_updates_the_cells_without_redrawing_the_cards(self, page: Page, primary_url):
+        """INV-135 : /api/system/gateways est parmi les chemins surveillés ; sa notification ne met à jour que les deux
+        cellules (même carte dans le DOM, sonde des versions /api/resilience non relancée). WebSocket simulé : aucune
+        notification du serveur (dont /api/cluster) ne peut s'intercaler."""
+        live, hello = [], []
+
+        def ws_handler(ws):
+            live.append(ws)
+            ws.on_message(lambda message: hello.append(json.loads(message)))
+        page.route_web_socket("**/api/ws", ws_handler)
+        _login(page, primary_url)
+        page.wait_for_function("liveWs && liveWs.readyState === WebSocket.OPEN", timeout=10000)
+        probes, body = [], {"gateways": self.GATEWAYS}
+        row = self._open(page, self.PROD,
+                         versions=lambda route: (probes.append(route.request.url), route.fulfill(json={"live": {"nodes": []}})),
+                         gateways=lambda route: route.fulfill(json=body["gateways"]))
+        assert hello and "/api/system/gateways" in hello[0]["paths"], [h.get("paths") for h in hello]  # pas le jeton
+        contact = self._hw(row, "node2")[1]
+        expect(contact).to_have_attribute("data-state", "closed")
+        page.evaluate("document.querySelector('#clusterMembers .site-card').dataset.mark = 'avant'")
+        before = len(probes)
+        body["gateways"] = [{**g, "dry_contact": {"state": "open", "last_seen": None}} if g["gateway_id"] == "onsite-2" else g
+                            for g in self.GATEWAYS]
+        live[0].send(json.dumps({"changed": "/api/system/gateways"}))
+        expect(contact).to_have_attribute("data-state", "open")
+        expect(contact.locator(".badge.offline")).to_have_text("ouvert")
+        expect(page.locator("#clusterMembers .site-card[data-mark='avant']")).to_have_count(1)  # pas redessinée
+        assert len(probes) == before, "la sonde des versions ne doit pas être relancée"
+
+    def test_hardware_cells_fit_a_phone(self, dashboard: Page):
+        dashboard.set_viewport_size({"width": 375, "height": 800})
+        row = self._open(dashboard, self.PROD, gateways=self.GATEWAYS)
+        for name, states in {"node2": ("ok", "closed"), "node7": ("unknown", "silent")}.items():  # textes les plus longs
+            for cell, state in zip(self._hw(row, name), states):
+                expect(cell).to_have_attribute("data-state", state)
+        assert dashboard.evaluate("document.documentElement.scrollWidth") <= 375
+        scrolling = dashboard.evaluate("""[...document.querySelectorAll('#clusterMembers .site-card, #clusterMembers table')]
+            .filter(e => e.scrollWidth > e.clientWidth).map(e => e.className || e.tagName)""")
+        assert not scrolling, f"Défilement horizontal dans : {scrolling}"
 
 
 # ---------------------------------------------------------------------------
@@ -1193,6 +1365,24 @@ class TestRoleBasedUI:
         assert "/api/config/system" not in ws_frames[0], ws_frames[0]
         assert refused == []
         expect(page.locator("#loginOverlay")).to_be_hidden()
+
+    def test_non_admin_never_requests_cluster_admin_data(self, page: Page, primary_url, viewer):
+        """INV-192 / INV-165 : /api/cluster répond (cartes dessinées en arrière-plan, onglet masqué) ; ni l'état
+        des passerelles (/api/system/gateways) ni la sonde des versions (/api/resilience) ne sont demandés pour un
+        non-admin, même par le chargeur en direct, et /api/system/gateways n'est pas surveillé."""
+        urls, refused, ws_frames = [], [], []
+        page.route("**/api/cluster", lambda route: route.fulfill(json=TestClusterTab.PROD))
+        page.on("request", lambda r: urls.append(r.url))
+        page.on("response", lambda r: refused.append(f"{r.status} {r.url}") if r.status in (401, 403) else None)
+        page.on("websocket", lambda ws: ws.on("framesent", lambda payload: ws_frames.append(payload)))
+        _login(page, primary_url, self.NAME, self.PASSWORD)
+        page.wait_for_function("liveWs && liveWs.readyState === WebSocket.OPEN", timeout=10000)
+        page.evaluate("Promise.all([loadCluster(), ...(LIVE_WATCH['/api/system/gateways'] || []).map(fn => fn())])")
+        page.wait_for_timeout(1000)
+
+        assert not [u for u in urls if "/api/system/gateways" in u or "/api/resilience" in u], urls
+        assert ws_frames and "/api/system/gateways" not in ws_frames[0], ws_frames
+        assert refused == []
 
     def test_403_shows_error_without_logging_out(self, page: Page, primary_url, viewer):
         """403 = droit manquant (routes admin de #274), pas session expiree : message, pas de deconnexion.

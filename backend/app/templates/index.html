@@ -56,7 +56,7 @@
         .site-sum { color: #94a3b8; font-size: 0.85rem; }
         .site-note { color: #f59e0b; font-size: 0.85rem; margin-bottom: 8px; }
         .site-card table { table-layout: fixed; }  /* memes colonnes d'une carte a l'autre */
-        .site-card th:first-child { width: 34%; }
+        .site-card th:first-child { width: 20%; }  /* 9 colonnes (INV-192) : sinon les autres debordent a 1024-1440 px */
         tr.leader { background: #22c55e1a; font-weight: 600; }
         .badge.critical { background: #ef444433; color: #ef4444; }
         .badge.high { background: #f59e0b33; color: #f59e0b; }
@@ -1482,6 +1482,7 @@
         // INV-161 (2026-11-06) : version de chaque nœud, lue dans /api/resilience (sonde /health de chaque nœud, INV-175)
         let clusterGen = 0;
         async function fillClusterVersions(gen) {
+            if (!isAdmin()) return;  // INV-165 : /api/resilience est réservé aux admins (cartes dessinées pour tous)
             let nodes = [];
             try { nodes = (await api('/api/resilience')).live.nodes; } catch (_) {}
             if (gen !== clusterGen) return;  // les cartes ont été redessinées depuis : la réponse la plus récente gagne
@@ -1489,6 +1490,46 @@
             document.querySelectorAll('#clusterMembers tr[data-node] td[data-label="Version"]').forEach(td => {
                 const n = byName[td.parentElement.dataset.node];
                 td.textContent = !n ? '?' : n.reachable ? (n.version || '?') : 'injoignable';
+            });
+        }
+
+        // INV-192 : modem 4G et contact sec de la passerelle de chaque machine (gateway_id = nom de la machine, casse
+        // ignorée). Dernière réponse gardée : en prod, les cartes sont redessinées toutes les quelques secondes.
+        let clusterGateways, gatewaysGen = 0;  // undefined : pas encore de réponse ; null : la dernière était en erreur
+        const sinceDate = s => parseUtc(s).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+        const hwDetail = text => text ? ` <br><small style="color:#94a3b8">${escHtml(text)}</small>` : '';
+        function modemCell(m) {
+            if (!m) return '<td data-label="Modem 4G" data-state="none">-</td>';
+            const text = m.state === 'no_network' ? 'sans réseau' : m.state === 'unknown' ? `sans nouvelles depuis ${sinceDate(m.updated_at)}`
+                : [m.tech, m.rsrp != null ? `${m.rsrp} dBm` : ''].filter(Boolean).join(' ');
+            return `<td data-label="Modem 4G" data-state="${escHtml(m.state)}">${modemBars(m, modemLabel(m))}${hwDetail(text)}</td>`;
+        }
+        function contactCell(c) {
+            if (!c) return '<td data-label="Contact sec" data-state="none">-</td>';
+            const [cls, text] = { closed: ['online', 'fermé'], open: ['offline', 'ouvert'] }[c.state] || ['waiting', 'muet'];
+            return `<td data-label="Contact sec" data-state="${escHtml(c.state)}"><span class="badge ${cls}">${text}</span>`
+                + hwDetail(c.state === 'silent' ? `depuis ${sinceDate(c.last_seen)}` : '') + '</td>';
+        }
+        function hwCells(machine) {
+            if (!clusterGateways) {
+                const t = clusterGateways === null ? '?' : '…';
+                return `<td data-label="Modem 4G">${t}</td><td data-label="Contact sec">${t}</td>`;
+            }
+            const g = clusterGateways.find(x => x.gateway_id.toLowerCase() === (machine || '').toLowerCase()) || {};
+            return modemCell(g.modem) + contactCell(g.dry_contact);
+        }
+        async function fillClusterGateways() {
+            if (!isAdmin()) return;  // INV-165 : GET réservé aux admins
+            const gen = ++gatewaysGen;
+            let list = null;
+            try { list = await api('/api/system/gateways'); } catch (_) {}
+            if (gen !== gatewaysGen) return;  // une demande plus récente est partie : sa réponse gagne
+            clusterGateways = list;  // erreur : « ? » et dernière réponse oubliée
+            document.querySelectorAll('#clusterMembers tr[data-node]').forEach(tr => {
+                const [modem, contact] = tr.querySelectorAll('td[data-label="Modem 4G"], td[data-label="Contact sec"]');
+                modem.insertAdjacentHTML('beforebegin', hwCells(tr.dataset.machine));
+                modem.remove();
+                contact.remove();
             });
         }
 
@@ -1532,16 +1573,17 @@
                         <div class="site-head"><span class="status-dot ${ok ? 'online' : 'offline'}" role="img" aria-label="${dot}" title="${dot}"></span>
                             <span class="site-chip">${escHtml(g)}</span><span class="site-sum">${sum}</span></div>
                         ${g === LEGACY_GROUP ? '<div class="site-note">bientôt obsolète — à débrancher le jour du déménagement</div>' : ''}
-                        <table class="cards"><thead><tr><th>Nœud</th><th>Role</th><th>Etat</th><th>Version</th><th>Timeline</th><th>Lag</th><th>Host</th></tr></thead>
+                        <table class="cards"><thead><tr><th>Nœud</th><th>Role</th><th>Etat</th><th>Version</th><th>Modem 4G</th><th>Contact sec</th><th>Timeline</th><th>Lag</th><th>Host</th></tr></thead>
                         <tbody>${ms.map(m => {
                             const isLeader = m === leader;
                             const isDown = m.state === 'stopped' || m.state === 'unknown';
                             const color = isLeader ? '#22c55e' : isDown ? '#ef4444' : '#94a3b8';
-                            return `<tr data-node="${escHtml(m.name)}"${isLeader ? ' class="leader"' : ''} style="color:${color}">
+                            return `<tr data-node="${escHtml(m.name)}" data-machine="${escHtml(m.machine || '')}"${isLeader ? ' class="leader"' : ''} style="color:${color}">
                                 <td data-label="Nœud"><strong>${escHtml(nodeLabel(m.machine, m.name))}</strong>${retiringBadge(m.retiring)}</td>
                                 <td data-label="Role"><span class="badge" style="background:${isLeader ? '#22c55e33' : '#33415533'};color:${color}">${escHtml(m.role || '-')}</span></td>
                                 <td data-label="Etat">${escHtml(m.state || '-')}</td>
                                 <td data-label="Version">…</td>
+                                ${hwCells(m.machine)}
                                 <td data-label="Timeline">${escHtml(m.timeline || '-')}</td>
                                 <td data-label="Lag">${escHtml(m.lag ?? '-')}</td>
                                 <td data-label="Host">${escHtml(m.host || '-')}</td>
@@ -1549,6 +1591,7 @@
                         }).join('')}</tbody></table></section>`;
                 }).join('');
                 fillClusterVersions(++clusterGen);  // sans attendre : la sonde des nœuds prend jusqu'à quelques s
+                fillClusterGateways();
             } catch (e) {
                 document.getElementById('quorumBanner').textContent = 'Erreur: ' + e.message;
                 document.getElementById('quorumBanner').style.background = '#ef444433';
@@ -1701,21 +1744,21 @@
             loadModemSignal();
         }
 
-        // INV-129 : barres de signal du modem gateway (canal SMS/appel de secours)
+        // INV-129 : barres de signal du modem gateway (canal SMS/appel de secours) ; memes barres dans l'onglet Cluster (INV-192)
         // INV-158 : un indicateur par passerelle, nomme par son site ; aucune -> un seul « inconnu »
+        const modemLabel = g => g.state === 'no_network' ? 'Modem sans réseau : SMS et appels de secours impossibles'
+            : g.state === 'unknown' ? 'Signal du modem inconnu (passerelle sans nouvelles)'
+            : `Signal ${g.tech || ''} du modem : ${g.bars}/4` + (g.rsrp != null ? ` (${g.rsrp} dBm)` : '');
+        const modemBars = (g, label, attrs = '', inner = '') => `<span class="modem-signal"${attrs}`
+            + ` data-state="${escHtml(g.state)}" data-bars="${g.bars}" role="img" title="${escHtml(label)}" aria-label="${escHtml(label)}">`
+            + inner + [0, 1, 2, 3].map(i => `<i${i < g.bars ? ' class="on"' : ''}></i>`).join('') + '</span>';
         async function loadModemSignal() {
             try {
                 const m = await api('/api/system/modem-status');
-                document.getElementById('modemSignal').innerHTML = (m.gateways?.length ? m.gateways : [m]).map(g => {
-                    const label = (g.site ? `${siteName(g.site)} (${g.gateway_id}) : ` : '')
-                        + (g.state === 'no_network' ? 'Modem sans réseau : SMS et appels de secours impossibles'
-                        : g.state === 'unknown' ? 'Signal du modem inconnu (passerelle sans nouvelles)'
-                        : `Signal ${g.tech || ''} du modem : ${g.bars}/4` + (g.rsrp != null ? ` (${g.rsrp} dBm)` : ''));
-                    return `<span class="modem-signal" data-site="${escHtml(g.site || '')}" data-gateway="${escHtml(g.gateway_id || '')}"`
-                        + ` data-state="${escHtml(g.state)}" data-bars="${g.bars}" role="img" title="${escHtml(label)}" aria-label="${escHtml(label)}">`
-                        + (g.site ? `<b>${escHtml(siteName(g.site))}</b>` : '')
-                        + [0, 1, 2, 3].map(i => `<i${i < g.bars ? ' class="on"' : ''}></i>`).join('') + '</span>';
-                }).join('');
+                document.getElementById('modemSignal').innerHTML = (m.gateways?.length ? m.gateways : [m]).map(g =>
+                    modemBars(g, (g.site ? `${siteName(g.site)} (${g.gateway_id}) : ` : '') + modemLabel(g),
+                        ` data-site="${escHtml(g.site || '')}" data-gateway="${escHtml(g.gateway_id || '')}"`,
+                        g.site ? `<b>${escHtml(siteName(g.site))}</b>` : '')).join('');
             } catch (e) {}
         }
 
@@ -1852,8 +1895,9 @@
             '/api/cluster': [loadCluster],
             '/api/system/modem-status': [loadModemSignal],
             '/api/chaos': [loadChaos],  // INV-179
+            '/api/system/gateways': [fillClusterGateways],  // INV-192 : ne met a jour que ses deux cellules
         };
-        const ADMIN_ONLY_GETS = ['/api/config/system', '/api/chaos'];  // INV-165 : 403 pour un non-admin
+        const ADMIN_ONLY_GETS = ['/api/config/system', '/api/chaos', '/api/system/gateways'];  // INV-165 : 403 pour un non-admin
         let liveWs = null, liveRetry = 0, livePending = new Set(), liveFlush = null;
 
         function connectLive() {
