@@ -106,14 +106,19 @@ class PlayProtectTest {
     /** Toast [text] affiche pendant [action] (evenement d'accessibilite : depuis Android 11, le systeme dessine le toast). */
     private fun toastDuring(text: String, action: () -> Unit): Boolean = try {
         InstrumentationRegistry.getInstrumentation().uiAutomation.executeAndWaitForEvent({ action() }, { e ->
-            e.eventType == AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED && e.text.joinToString("") == text
+            // Texte exact du toast ; Android 16 ajoute le nom de l'app en second element
+            e.eventType == AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED && e.text.any { it.toString() == text }
         }, 10_000)
         true
     } catch (e: TimeoutException) {
         false
     }
 
-    /** La boite de l'app, avec les etapes exactes et ses deux boutons. */
+    /**
+     * La boite de l'app, avec les etapes exactes et ses deux boutons. A verifier des qu'elle apparait, avant tout
+     * autre appel Espresso (dont intended) : sinon Espresso peut choisir le tableau de bord, encore sans focus, et
+     * l'attendre en vain (RootViewWithoutFocusException).
+     */
     private fun boiteAffichee() {
         onView(withText(TITRE)).inRoot(isDialog()).check(matches(isDisplayed()))
         onView(withId(android.R.id.message)).inRoot(isDialog()).check(matches(withText(MESSAGE)))
@@ -196,12 +201,12 @@ class PlayProtectTest {
     fun premiere_ouverture_boite_reglage_play_protect_jamais_l_ecran_interne_de_google_play_services() {
         launchDashboard()
 
+        boiteAffichee()
+        assertEquals("boîte tracée dans les logs", 1, boitesAffichees())
         // Rien ne s'ouvre de lui-meme, surtout pas l'ecran interne de Google Play services
         jamaisGooglePlayServices()
         intended(hasPackage(PLAY_STORE), times(0))
         intended(hasAction(Settings.ACTION_SECURITY_SETTINGS), times(0))
-        boiteAffichee()
-        assertEquals("boîte tracée dans les logs", 1, boitesAffichees())
     }
 
     @Test
@@ -257,9 +262,9 @@ class PlayProtectTest {
         // Fin de l'alarme : le tableau de bord coupe la sonnerie a la seconde suivante
         assertTrue("plus de sonnerie", waitFor { !AlarmSoundManager(context).isPlaying() })
         dashboard.backToForeground()
-        jamaisGooglePlayServices()
         boiteAffichee()
         assertEquals(1, boitesAffichees())
+        jamaisGooglePlayServices()
     }
 
     @Test
@@ -293,9 +298,9 @@ class PlayProtectTest {
         assertEquals("pas de boîte à l'ouverture de l'écran", 0, boitesAffichees())
 
         onView(withId(R.id.updatePlayProtectButton)).check(matches(withText(TITRE))).perform(scrollTo(), click())
+        boiteAffichee()
         jamaisGooglePlayServices()
         intended(hasPackage(PLAY_STORE), times(0))  // rien ne s'ouvre avant la reponse
-        boiteAffichee()
 
         assertTrue("toast « $TOAST » attendu", toastDuring(TOAST) { ouvrirLePlayStore() })
         intended(hasPackage(PLAY_STORE), times(1))
@@ -330,9 +335,9 @@ class PlayProtectTest {
 
         UiDevice.getInstance(InstrumentationRegistry.getInstrumentation()).pressBack()  // boite fermee
         assertTrue("retour au tableau de bord", waitFor { dashboard.state == Lifecycle.State.RESUMED })
-        jamaisGooglePlayServices()
         boiteAffichee()
         assertEquals(1, boitesAffichees())
+        jamaisGooglePlayServices()
         intended(hasAction(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS), times(1))
     }
 }

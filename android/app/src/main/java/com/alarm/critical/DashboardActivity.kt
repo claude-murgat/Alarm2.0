@@ -379,16 +379,20 @@ class DashboardActivity : AppCompatActivity() {
         }
     }
 
-    /** INV-ANDROID-707 : release, une fois par installation (`install_prefs` survit a la deconnexion), jamais pendant une alarme. */
+    /**
+     * INV-ANDROID-707 : boite « Réglage Play Protect », release, une fois par installation quelle que soit la reponse
+     * (`install_prefs` survit a la deconnexion), jamais pendant une alarme.
+     */
     private fun askPlayProtectOnce(): Boolean {
         val prefs = getSharedPreferences("install_prefs", MODE_PRIVATE)
         if (UpdateProvider.installedVersion == null || prefs.getBoolean("play_protect_asked", false)) return false
         if (AppUpdate.alarmInProgress(this)) {
-            AppLogger.log("PlayProtect", "ouverture du réglage Play Protect repoussée : alarme en cours")
+            AppLogger.log("PlayProtect", "boîte « Réglage Play Protect » repoussée : alarme en cours")
             return false
         }
         prefs.edit().putBoolean("play_protect_asked", true).apply()
-        return PlayProtect.open(this)
+        PlayProtect.showDialog(this)
+        return true
     }
 
     /**

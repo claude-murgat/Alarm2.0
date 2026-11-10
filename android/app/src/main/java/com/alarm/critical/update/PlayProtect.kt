@@ -1,49 +1,66 @@
 package com.alarm.critical.update
 
 import android.app.Activity
-import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.provider.Settings
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import com.alarm.critical.util.AppLogger
 
 /**
- * INV-ANDROID-707 : ouvre le reglage Play Protect, ou « Améliorer la détection des applis malveillantes »
- * supprime la fenetre Play Protect des mises a jour integrees. L'app ne peut pas lire ce reglage.
+ * INV-ANDROID-707 : « Améliorer la détection des applis malveillantes » supprime la fenetre Play Protect des mises a
+ * jour integrees. Aucun intent documente n'ouvre ce reglage : une boite donne le chemin dans le Play Store, puis
+ * l'ouvre. Jamais l'ecran interne de Google Play services (VerifyAppsSettingsActivity) : sur un vrai telephone il
+ * demarre sans erreur puis charge sans fin. L'app ne peut pas lire ce reglage.
  */
 object PlayProtect {
     private const val TAG = "PlayProtect"
-    const val TOAST = "Activez « Améliorer la détection des applis malveillantes » : " +
-        "les mises à jour s'installeront sans fenêtre Play Protect"
-
-    /** Essayes dans l'ordre. Pas de page Play Protect du Play Store : aucun intent documente. Remplaces dans les tests. */
-    internal var targets = listOf(
-        Intent().setComponent(ComponentName("com.google.android.gms",
-            "com.google.android.gms.security.settings.VerifyAppsSettingsActivity")),
-        Intent(Settings.ACTION_SECURITY_SETTINGS),
-    )
+    const val PLAY_STORE = "com.android.vending"  // declare dans <queries> du manifest (visibilite, Android 11+)
+    const val TITLE = "Réglage Play Protect"
+    const val MESSAGE = "Une fois ce réglage activé, les mises à jour s'installent sans la fenêtre Play Protect.\n\n" +
+        "1. « Ouvrir le Play Store » ;\n" +
+        "2. touchez votre photo de profil (en haut à droite) ;\n" +
+        "3. « Play Protect » ;\n" +
+        "4. la roue ⚙ en haut à droite ;\n" +
+        "5. activez « Améliorer la détection des applis malveillantes »."
+    // Courts : depuis Android 12, un toast est coupe apres deux lignes
+    const val TOAST = "Activez « Améliorer la détection des applis malveillantes »"
+    const val TOAST_NOTHING = "Ouvrez le Play Store à la main"
 
     /** Lanceur d'une app, null si elle est absente. Remplace dans les tests : les AVD n'ont pas le Play Store. */
-    internal var launcher: (android.content.Context, String) -> Intent? =
-        { c, pkg -> c.packageManager.getLaunchIntentForPackage(pkg) }
-    /** Repli sans Play Store. Remplace dans les tests. */
+    internal var launcher: (Context, String) -> Intent? = { c, pkg -> c.packageManager.getLaunchIntentForPackage(pkg) }
+    /** Repli sans Play Store : reglages « Sécurité » d'Android, qui menent a Google Play Protect. Remplace dans les tests. */
     internal var fallback = Intent(Settings.ACTION_SECURITY_SETTINGS)
 
-    /** Ouvre le premier reglage disponible avec le toast ; false si aucun ne s'ouvre. */
-    fun open(activity: Activity): Boolean {
-        for (intent in targets) {
-            val name = intent.component?.className ?: intent.action
+    /** Boite « Réglage Play Protect » : n'ouvre rien tant que l'utilisateur n'a pas repondu. */
+    fun showDialog(activity: Activity) {
+        AppLogger.log(TAG, "boîte « $TITLE » affichée")
+        AlertDialog.Builder(activity)
+            .setTitle(TITLE)
+            .setMessage(MESSAGE)
+            .setPositiveButton("Ouvrir le Play Store") { _, _ -> openPlayStore(activity) }
+            .setNegativeButton("Plus tard") { _, _ -> AppLogger.log(TAG, "boîte « $TITLE » : plus tard") }
+            .show()
+    }
+
+    /** Play Store, sinon reglages « Sécurité », sinon toast ; jamais de plantage. */
+    private fun openPlayStore(activity: Activity) {
+        val store = launcher(activity, PLAY_STORE)
+        if (store == null) AppLogger.log(TAG, "Play Store absent : repli sur les réglages Sécurité")
+        for (intent in listOfNotNull(store, fallback)) {
+            val name = if (intent === store) "Play Store" else "écran des réglages Sécurité"
             try {
                 activity.startActivity(intent)
-            } catch (e: Exception) {  // introuvable (ActivityNotFoundException) ou non exporte (SecurityException)
-                AppLogger.log(TAG, "réglage Play Protect $name indisponible (${e.javaClass.simpleName})")
+            } catch (e: Exception) {  // introuvable (ActivityNotFoundException) ou refuse (SecurityException)
+                AppLogger.log(TAG, "$name indisponible (${e.javaClass.simpleName})")
                 continue
             }
-            AppLogger.log(TAG, "réglage Play Protect ouvert : $name")
+            AppLogger.log(TAG, "$name ouvert pour le réglage Play Protect")
             Toast.makeText(activity, TOAST, Toast.LENGTH_LONG).show()
-            return true
+            return
         }
         AppLogger.log(TAG, "aucun réglage Play Protect sur ce téléphone : rien n'est ouvert")
-        return false
+        Toast.makeText(activity, TOAST_NOTHING, Toast.LENGTH_LONG).show()
     }
 }
