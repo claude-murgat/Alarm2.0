@@ -3016,6 +3016,21 @@ class TestAuditTrail:
         assert "alarm_acknowledged" in types
         assert "alarm_resolved" in types
 
+    def test_gateway_alarm_audits_created_and_resolved(self):
+        """INV-100 (2026-11-10) : alarme du contact sec → un alarm_created puis un alarm_resolved.
+        Prod : 0 sur 46 avant le correctif (cle etrangere vers l'alarme pas encore committee)."""
+        admin_h = _admin_headers()
+        report = f"{BASE_URL}/internal/alarms/report-state"
+        r = requests.post(report, headers=GATEWAY_HEADERS, json={"gateway_id": "inv100-e2e", "state": "open"})
+        assert r.status_code == 200, r.text
+        alarm_id = requests.get(f"{API}/alarms/active", headers=admin_h).json()[0]["id"]
+        r = requests.post(report, headers=GATEWAY_HEADERS, json={"gateway_id": "inv100-e2e", "state": "closed"})
+        assert r.status_code == 200, r.text
+
+        events = requests.get(f"{API}/audit/", params={"alarm_id": alarm_id}, headers=admin_h).json()
+        types = sorted(e["event_type"] for e in events)
+        assert types == ["alarm_created", "alarm_resolved"], types
+
     def test_escalation_generates_audit_event(self):
         """L'escalade d'une alarme doit créer un événement alarm_escalated."""
         admin_h = _admin_headers()
