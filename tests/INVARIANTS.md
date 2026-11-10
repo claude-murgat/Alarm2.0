@@ -1283,6 +1283,9 @@ Décision du propriétaire du 2026-11-09. `scripts/alarm-db-backup.sh` (`/usr/lo
 
 ### INV-100 [M] ⚠️ Chaque action critique → AuditEvent
 Création, escalade, ack, résolution, modification config, login → entrée dans `audit_events`.
+- **Alarmes, toutes sources** (amendé le 2026-11-10) : **chaque** création d'alarme a **exactement un** audit `alarm_created` et chaque résolution un audit `alarm_resolved`, avec son `alarm_id`, **y compris les alarmes des passerelles** (contact sec, `source="gateway_dry_contact"`, INV-120) : `alarm_created` (`source="gateway_dry_contact"`, `assigned_to`) à l'ouverture du contact, `alarm_resolved` (`source="gateway_dry_contact_auto_resolve"`) à la résolution automatique. L'audit est écrit **après le commit** qui rend l'alarme (ou son nouvel état) visible : il passe par sa propre session (`log_event`), et `audit_events.alarm_id` est une clé étrangère vers `alarms.id`. Le `report-state` d'une passerelle ne s'en trouve pas ralenti (moins de 2 s en tier 2).
+- **Pourquoi** : requête en lecture sur la prod le 2026-11-10 : **0 des 46** alarmes `source='gateway_dry_contact'` (2026-05-18 → 2026-11-03) avaient leur audit `alarm_created` (46 sur 46 avaient `alarm_resolved`), contre 62 sur 62 pour `source='api'`. L'audit de création était écrit avant le commit de la requête : en PostgreSQL la session d'audit ne voit pas l'alarme pas encore committée, la clé étrangère échoue et `log_event` avale l'erreur. En SQLite (tier 2), l'insert attendait 5 s le verrou d'écriture tenu par la requête (`gateway_states` déjà écrit), puis échouait de même. Même cause et même correctif que l'audit `alarm_escalated` de la boucle (PR #326, 2026-11-09).
+- **Couverture** : Integration `test_gateway_audit_inv100.py` : contact ouvert → un `alarm_created` (source, assigné) en moins de 2 s ; contact refermé → un `alarm_resolved` en moins de 2 s. RED avant le correctif (aucun audit, `report-state` à ~5 s). E2E `TestAuditTrail::test_gateway_alarm_audits_created_and_resolved` (PostgreSQL : la clé étrangère de la prod).
 
 ### INV-101 [M] ⚠️ correlation_id propagé
 Chaque requête a un `X-Correlation-ID` (header), tracé dans les logs et AuditEvent.
@@ -1349,13 +1352,13 @@ Réponse : `{"alarm_active": bool, "dissensus": bool}` (debug gateway).
    - `should_be_active=True` ET pas d'alarme `source="gateway_dry_contact"` active
      ET pas d'autre alarme active **du même site** (INV-001, INV-155) → **CREATE** alarme `source="gateway_dry_contact"`,
      effet identique à `POST /api/alarms/send` : assignation pos 1 chaîne via
-     `evaluate_alarm_creation_plan`, INV-080 chaîne vide, FCM, audit log,
+     `evaluate_alarm_creation_plan`, INV-080 chaîne vide, FCM, audit `alarm_created` après le commit (INV-100),
      `original_created_at = clock_now()` (INV-018).
    - `should_be_active=True` ET autre alarme active du même site (`source != "gateway_dry_contact"`,
      ex: `"api"` ou `"oncall"`) → **no-op** (INV-001 : 1 alarme suffit, le user est
      déjà notifié, on n'écrase pas l'autre source).
    - `should_be_active=False` ET alarme `source="gateway_dry_contact"` active →
-     **RESOLVE** (`status="resolved"`, `updated_at=clock_now()`, audit log).
+     **RESOLVE** (`status="resolved"`, `updated_at=clock_now()`, audit `alarm_resolved` après le commit, INV-100).
    - `should_be_active=False` ET autre alarme active → **no-op** (ne résout PAS
      une alarme manuelle ou oncall).
    - Sinon (`alive_gateways` vide, aucun report récent) → **no-op** (conservateur :

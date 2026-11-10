@@ -97,7 +97,7 @@ def _alert_email(db: Session) -> str:
 def _create_gateway_alarm(db: Session, site: str) -> Alarm:
     """Crée une alarme `source="gateway_dry_contact"`. Logique alignée sur
     POST /api/alarms/send (assignation pos 1 chaîne, INV-080 chaîne vide,
-    FCM, audit log, INV-018, INV-066)."""
+    FCM, INV-018, INV-066). Audit `alarm_created` : par report_state, après le commit."""
     chain_orm = db.query(EscalationConfig).order_by(EscalationConfig.position).all()
     chain_snapshot = [
         EscalationChainEntry(position=ec.position, user_id=ec.user_id)
@@ -159,15 +159,6 @@ def _create_gateway_alarm(db: Session, site: str) -> Alarm:
             )
         )
 
-    log_event(
-        "alarm_created",
-        db=db,
-        alarm_id=alarm.id,
-        user_id=None,
-        source="gateway_dry_contact",
-        assigned_to=alarm.assigned_user_id,
-    )
-
     if plan.assigned_user_id is not None:
         try:
             from ..fcm_service import alarm_data, send_fcm_to_user
@@ -187,17 +178,10 @@ def _create_gateway_alarm(db: Session, site: str) -> Alarm:
 
 def _resolve_gateway_alarm(db: Session, alarm: Alarm) -> None:
     """RESOLVE auto d'une alarme `source="gateway_dry_contact"` quand toutes
-    les gateways alive reportent 'closed'."""
+    les gateways alive reportent 'closed'. Audit `alarm_resolved` : par report_state, après le commit."""
     _now = clock_now()
     alarm.status = "resolved"
     alarm.updated_at = _now
-    log_event(
-        "alarm_resolved",
-        db=db,
-        alarm_id=alarm.id,
-        user_id=None,
-        source="gateway_dry_contact_auto_resolve",
-    )
 
 
 def _send_dissensus_email(
@@ -296,11 +280,11 @@ def report_state(
     if any_active_alarm is not None and any_active_alarm.source == "gateway_dry_contact":
         gateway_alarm = any_active_alarm
 
-    resolved_alarm = None
+    created_alarm = resolved_alarm = None
     if should_be_active:
         if any_active_alarm is None:
             # Pas d'alarme active → CREATE
-            gateway_alarm = _create_gateway_alarm(db, site)
+            gateway_alarm = created_alarm = _create_gateway_alarm(db, site)
         # Sinon : no-op (idempotence boucle si gateway_alarm, ou INV-001 si autre source)
     else:
         if gateway_alarm is not None:
@@ -356,7 +340,14 @@ def report_state(
                 gateway_alarm.sensor_dissensus_email_sent_at = None
 
     db.commit()
+    # INV-100 : audits après le commit (session dédiée). Avant, la FK audit_events.alarm_id
+    # visait une alarme encore invisible en PostgreSQL (audit perdu) ; SQLite : verrou, 5 s puis perdu.
+    if created_alarm is not None:
+        log_event("alarm_created", db=db, alarm_id=created_alarm.id, user_id=None,
+                  source="gateway_dry_contact", assigned_to=created_alarm.assigned_user_id)
     if resolved_alarm is not None:
+        log_event("alarm_resolved", db=db, alarm_id=resolved_alarm.id, user_id=None,
+                  source="gateway_dry_contact_auto_resolve")
         from ..fcm_service import push_alarm_resolved
         push_alarm_resolved(db, resolved_alarm)  # INV-147
 
