@@ -8,6 +8,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
 import androidx.lifecycle.Lifecycle
@@ -26,6 +27,7 @@ import androidx.test.espresso.matcher.ViewMatchers.withId
 import androidx.test.espresso.matcher.ViewMatchers.withText
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.uiautomator.UiDevice
 import com.alarm.critical.api.ApiProvider
 import com.alarm.critical.model.AlarmResponse
 import com.alarm.critical.model.HealthResponse
@@ -69,6 +71,15 @@ class PlayProtectTest {
     private fun prefs() = context.getSharedPreferences("alarm_prefs", Context.MODE_PRIVATE)
     private fun installPrefs() = context.getSharedPreferences("install_prefs", Context.MODE_PRIVATE)
     private fun logs() = AppLogger.exportLogs("user1", "test")
+
+    private fun waitFor(timeoutMs: Long = 10_000, cond: () -> Boolean): Boolean {
+        val end = SystemClock.uptimeMillis() + timeoutMs
+        while (SystemClock.uptimeMillis() < end) {
+            if (cond()) return true
+            SystemClock.sleep(100)
+        }
+        return cond()
+    }
 
     private fun shell(cmd: String) = ParcelFileDescriptor.AutoCloseInputStream(
         InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand(cmd)).use { String(it.readBytes()) }
@@ -116,7 +127,6 @@ class PlayProtectTest {
         val ok = Instrumentation.ActivityResult(Activity.RESULT_OK, null)
         intending(hasComponent(PLAY_PROTECT)).respondWith(ok)
         intending(hasAction(Settings.ACTION_SECURITY_SETTINGS)).respondWith(ok)
-        intending(hasAction(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)).respondWith(ok)
     }
 
     @After
@@ -176,6 +186,8 @@ class PlayProtectTest {
         intended(hasComponent(PLAY_PROTECT), times(0))
 
         AlarmPollingService.alarms = emptyList()
+        // Fin de l'alarme : le tableau de bord coupe la sonnerie a la seconde suivante
+        assertTrue("plus de sonnerie", waitFor { !AlarmSoundManager(context).isPlaying() })
         dashboard.backToForeground()
         intended(hasComponent(PLAY_PROTECT), times(1))
     }
@@ -230,11 +242,15 @@ class PlayProtectTest {
             context.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(context.packageName))
         prefs().edit().putBoolean("battery_optimization_asked", false).commit()
 
+        // Vraie boite de dialogue d'Android (pas de stub : son resultat immediat relancerait le tableau de bord)
         val dashboard = launchDashboard()
+        assertTrue("boite « batterie » ouverte : tableau de bord en pause",
+            waitFor { dashboard.state == Lifecycle.State.STARTED })
         intended(hasAction(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS), times(1))
         intended(hasComponent(PLAY_PROTECT), times(0))  // jamais deux ecrans de reglages a la fois
 
-        dashboard.backToForeground()
+        UiDevice.getInstance(InstrumentationRegistry.getInstrumentation()).pressBack()  // boite fermee
+        assertTrue("retour au tableau de bord", waitFor { dashboard.state == Lifecycle.State.RESUMED })
         intended(hasComponent(PLAY_PROTECT), times(1))
         intended(hasAction(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS), times(1))
     }

@@ -6,6 +6,7 @@ import android.view.View
 import android.widget.Button
 import android.widget.ProgressBar
 import com.alarm.critical.update.AppUpdate
+import com.alarm.critical.update.PlayProtect
 import com.alarm.critical.update.UpdateProvider
 import com.alarm.critical.update.UpdateState
 import com.alarm.critical.update.showDownload
@@ -15,7 +16,8 @@ import java.util.Locale
 
 /**
  * INV-ANDROID-706 : versions installee et annoncee par le serveur, etat en une phrase, derniere verification,
- * « Vérifier maintenant » et « Installer ». Meme etat que le bandeau du tableau de bord (AppUpdate.state).
+ * « Vérifier maintenant », « Installer » et « Réglage Play Protect » (INV-ANDROID-707). Meme etat que le bandeau
+ * du tableau de bord (AppUpdate.state).
  */
 class UpdateActivity : MenuScreenActivity("Mise à jour") {
 
@@ -53,6 +55,11 @@ class UpdateActivity : MenuScreenActivity("Mise à jour") {
             contentDescription = "Installer la mise à jour"
             setOnClickListener { AppUpdate.install(this@UpdateActivity) }
             content.addView(this)
+        }
+        // INV-ANDROID-707 : rouvre le reglage Play Protect a tout moment
+        button("Réglage Play Protect") { PlayProtect.open(this) }.apply {
+            id = R.id.updatePlayProtectButton
+            contentDescription = "Ouvrir le réglage Play Protect, pour des mises à jour sans fenêtre Play Protect"
         }
 
         AppUpdate.check(this)

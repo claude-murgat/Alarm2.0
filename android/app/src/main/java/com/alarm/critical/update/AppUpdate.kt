@@ -204,8 +204,8 @@ object AppUpdate {
     private fun sha256(f: File) =
         MessageDigest.getInstance("SHA-256").digest(f.readBytes()).joinToString("") { "%02x".format(it) }
 
-    /** Alarme en cours (acquittee ou non) ou sonnerie : jamais d'installation (telephone d'astreinte). */
-    private fun alarmInProgress(context: Context) =
+    /** Alarme en cours (acquittee ou non) ou sonnerie : jamais d'installation (telephone d'astreinte), ni de reglage Play Protect (INV-ANDROID-707). */
+    fun alarmInProgress(context: Context) =
         AlarmPollingService.alarms.isNotEmpty() || AlarmSoundManager(context).isPlaying()
 
     /**

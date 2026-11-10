@@ -36,6 +36,8 @@ import com.alarm.critical.model.sitesLabel
 import com.alarm.critical.service.AlarmPollingService
 import com.alarm.critical.service.AlarmSoundManager
 import com.alarm.critical.update.AppUpdate
+import com.alarm.critical.update.PlayProtect
+import com.alarm.critical.update.UpdateProvider
 import com.alarm.critical.update.UpdateState
 import com.alarm.critical.update.showDownload
 import com.alarm.critical.util.AppLogger
@@ -342,23 +344,37 @@ class DashboardActivity : AppCompatActivity() {
         super.onResume()
         nextUpdateCheck = 0L  // INV-ANDROID-705 : app rouverte, les serveurs ont pu etre mis a jour entre-temps
         syncOncallFromChain()
-        askBatteryOptimizationExemptionOnce()
-        askFullScreenIntentPermissionOnce()
+        // INV-ANDROID-707 : une demande « une fois » par retour au premier plan, jamais deux ecrans de reglages a la fois
+        askBatteryOptimizationExemptionOnce() || askFullScreenIntentPermissionOnce() || askPlayProtectOnce()
     }
 
     /** Android 14+ : sans cette autorisation, l'ecran d'alarme n'apparait pas sur l'ecran verrouille (simple notif). */
-    private fun askFullScreenIntentPermissionOnce() {
-        if (android.os.Build.VERSION.SDK_INT < 34) return
+    private fun askFullScreenIntentPermissionOnce(): Boolean {
+        if (android.os.Build.VERSION.SDK_INT < 34) return false
         val prefs = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
         val nm = getSystemService(android.app.NotificationManager::class.java)
-        if (prefs.getBoolean("fsi_permission_asked", false) || nm.canUseFullScreenIntent()) return
+        if (prefs.getBoolean("fsi_permission_asked", false) || nm.canUseFullScreenIntent()) return false
         prefs.edit().putBoolean("fsi_permission_asked", true).apply()
-        try {
+        return try {
             startActivity(Intent(android.provider.Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
                 android.net.Uri.parse("package:$packageName")))
+            true
         } catch (e: Exception) {
             Log.w("Dashboard", "Reglage plein ecran indisponible : ${e.message}")
+            false
         }
+    }
+
+    /** INV-ANDROID-707 : release, une fois par installation (`install_prefs` survit a la deconnexion), jamais pendant une alarme. */
+    private fun askPlayProtectOnce(): Boolean {
+        val prefs = getSharedPreferences("install_prefs", MODE_PRIVATE)
+        if (UpdateProvider.installedVersion == null || prefs.getBoolean("play_protect_asked", false)) return false
+        if (AppUpdate.alarmInProgress(this)) {
+            AppLogger.log("PlayProtect", "ouverture du réglage Play Protect repoussée : alarme en cours")
+            return false
+        }
+        prefs.edit().putBoolean("play_protect_asked", true).apply()
+        return PlayProtect.open(this)
     }
 
     /**
@@ -383,16 +399,18 @@ class DashboardActivity : AppCompatActivity() {
     }
 
     /** INV-ANDROID-309 : sans exemption, Doze coupe le reseau malgre le service. Demande une fois. */
-    private fun askBatteryOptimizationExemptionOnce() {
+    private fun askBatteryOptimizationExemptionOnce(): Boolean {
         val prefs = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
         val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
-        if (prefs.getBoolean("battery_optimization_asked", false) || pm.isIgnoringBatteryOptimizations(packageName)) return
+        if (prefs.getBoolean("battery_optimization_asked", false) || pm.isIgnoringBatteryOptimizations(packageName)) return false
         prefs.edit().putBoolean("battery_optimization_asked", true).apply()
-        try {
+        return try {
             startActivity(Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
                 android.net.Uri.parse("package:$packageName")))
+            true
         } catch (e: Exception) {
             Log.w("Dashboard", "Dialogue batterie indisponible : ${e.message}")
+            false
         }
     }
 
