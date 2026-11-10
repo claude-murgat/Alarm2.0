@@ -19,12 +19,13 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_user
+from ..auth import get_current_admin, get_current_user
 from ..clock import now as clock_now
 from ..database import get_db
 from ..logic.modem_signal import modem_signal
-from ..models import SystemConfig, User
+from ..models import GatewayState, SystemConfig, User
 from ..sites import default_site
+from .alarms_internal import _liveness_window_seconds
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/system", tags=["system"])
@@ -144,3 +145,23 @@ def modem_status(
     worst = min(gateways, key=lambda g: g["bars"],
                 default={"gateway_id": None, "site": None, **modem_signal(None, now)})
     return {**worst, "gateways": gateways}
+
+
+@router.get("/gateways")
+def gateways_hardware(
+    _admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """INV-192 : modem 4G (regles d'INV-129) et contact sec de chaque passerelle, pour l'onglet Cluster.
+    Contact vivant = meme fenetre que l'agregation (INV-122). `last_seen` seulement quand il est muet :
+    la reponse ne change pas tant que rien ne change (direct, INV-135)."""
+    now, window = clock_now(), _liveness_window_seconds()
+    found = {}
+    for row in db.query(SystemConfig).filter(SystemConfig.key.like("modem_status:%")):
+        found.setdefault(row.key.split(":", 1)[1], {})["modem"] = modem_signal(json.loads(row.value), now)
+    for gs in db.query(GatewayState):
+        silent = (now - gs.last_seen).total_seconds() >= window
+        found.setdefault(gs.gateway_id, {})["dry_contact"] = {
+            "state": "silent" if silent else gs.state, "last_seen": gs.last_seen.isoformat() if silent else None}
+    return [{"gateway_id": g, "modem": found[g].get("modem"), "dry_contact": found[g].get("dry_contact")}
+            for g in sorted(found)]
