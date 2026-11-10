@@ -5,8 +5,9 @@ Topologie de prod : node1/node2 Izeron (« Legacy », bientot retires), node3 OV
 Beaufort, node6/node7 Izeron ; voteurs etcd node1-3 (node3, node6, node7 apres le demenagement) ;
 node3 seul relais entre les sites et facade publique de l'app ; passerelles onsite-2 (sur node2) et
 alarm-1 (sur node4). Tout vient de SystemConfig (sites.py), rien n'est fige ici.
-`alerted_by` encode les alertes d'aujourd'hui : sans leader, aucun email ne part (INV-085 est
-leader-gated) ; INV-170 (PR 1) ajoutera l'email « aucun leader » depuis chaque noeud.
+`alerted_by` (« Prevenu », 2026-11-10) : les emails que le code envoie aujourd'hui, qui les envoie et
+apres combien de temps. Sans leader, seul INV-170 part (de chaque noeud debout) ; le relais SMTP (Gmail,
+joint par l'acces Internet de chaque noeud) n'est coupe par aucun scenario.
 """
 from dataclasses import dataclass, replace
 
@@ -91,16 +92,22 @@ def evaluate(topo: Topology, scenario: Scenario) -> Outcome:
               for g in topo.gateways}
     app_4g = any(p in up and writable[site[p]] for p in topo.public_nodes)
     lan = any(site[n] == topo.default_site for n in up) and writable[topo.default_site]
-    alerted = []
-    if leader:
-        if not all(gw_up.values()):
-            alerted.append("email INV-144")
+    # « Prevenu » (2026-11-10) : les emails qui partent vraiment. Debout et relie au leader = sain dans /cluster ;
+    # debout mais isole (ou sans leader) = aucun leader vu d'ici (INV-170) ; arrete ou isole = absent (INV-189).
+    blind = [n for n in site if n in up and not writable[site[n]]]
+    alerted = [f"email INV-170 « aucun leader » par {' + '.join(blind)} après 3 min"] if blind else []
+    if leader:  # INV-172/185/189/053/144 : controles du leader seul
+        silent = [g.gateway_id for g in topo.gateways if not (gw_up[g] and writable[g.site])]
+        mute = [_place(s) for s, ok in alarms.items() if not ok]
+        lost = [n for n in site if n not in up or n in blind]
+        for what, items in (("INV-172 « passerelle muette »", silent), ("INV-185 « site sans modem »", mute),
+                            ("INV-189 « nœud injoignable »", lost)):
+            if items:
+                alerted.append(f"email {what} {' + '.join(items)} par le leader après 10 min")
         if not app_4g and not lan:
-            alerted.append("email INV-053")
-        if 2 * len(up) <= len(site):
-            alerted.append("email INV-085")
-    else:
-        alerted.append("email INV-170 (après PR 1)")
+            alerted.append("email INV-053 « personne en ligne » par le leader après 15 min")
+        if mute:
+            alerted.append("email INV-144 « escalade sans appel » par le leader pendant une alarme")
 
     def status(s):
         if s not in alarms:
@@ -113,7 +120,8 @@ def evaluate(topo: Topology, scenario: Scenario) -> Outcome:
                 + " ; ".join(f"{_place(s)} : {status(s)}" for s in sites) + ". "
                 + f"App 4G : {'OK' if app_4g else 'aucun backend'}. "
                 + f"App LAN {_place(topo.default_site)} : {'OK' if lan else 'KO'}. "
-                + f"Prévenu : {', '.join(alerted) or 'personne'}.")
+                + f"Prévenu : {', '.join(alerted) or 'personne'}."
+                + ("" if leader else " Pas d'email du leader (INV-053, INV-144, INV-172, INV-185, INV-189) : aucun leader."))
     return Outcome(leader_possible=leader, why=why, writable_from=writable, escalation_running=leader,
                    alarms_created=alarms, sms_calls=dict(alarms), app_4g_reachable=app_4g,
                    app_izeron_lan=lan, alerted_by=tuple(alerted), sentence=sentence)
