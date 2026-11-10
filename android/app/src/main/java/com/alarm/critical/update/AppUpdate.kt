@@ -280,7 +280,7 @@ object GitHubUpdateBackend : UpdateBackend {
     override fun install(context: Context, apk: File) {
         val installer = context.packageManager.packageInstaller
         val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
-        // Android 12+ : l'app qui se met a jour elle-meme peut le faire sans confirmation
+        // Android 12+ : l'app qui se met a jour elle-meme le fait sans confirmation, si elle declare UPDATE_PACKAGES_WITHOUT_USER_ACTION
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             params.setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED)
         }

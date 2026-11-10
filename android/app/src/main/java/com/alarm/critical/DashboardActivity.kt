@@ -20,6 +20,8 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
+import androidx.core.view.GravityCompat
 import androidx.drawerlayout.widget.DrawerLayout
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -111,6 +113,15 @@ class DashboardActivity : AppCompatActivity() {
 
         // Navigation Drawer
         val drawerLayout = findViewById<DrawerLayout>(R.id.drawerLayout)
+        // INV-ANDROID-708 : le retour ferme le menu ouvert, pas le tableau de bord (DrawerLayout ne le fait pas sans focus)
+        val closeDrawerOnBack = object : OnBackPressedCallback(false) {
+            override fun handleOnBackPressed() = drawerLayout.closeDrawer(GravityCompat.START)
+        }
+        onBackPressedDispatcher.addCallback(this, closeDrawerOnBack)
+        drawerLayout.addDrawerListener(object : DrawerLayout.SimpleDrawerListener() {
+            override fun onDrawerOpened(drawerView: View) { closeDrawerOnBack.isEnabled = true }
+            override fun onDrawerClosed(drawerView: View) { closeDrawerOnBack.isEnabled = false }
+        })
         findViewById<TextView>(R.id.drawerInitial).text = userName.take(1).uppercase()
         findViewById<TextView>(R.id.drawerUserName).text = userName
         updateDrawerGuardStatus()
