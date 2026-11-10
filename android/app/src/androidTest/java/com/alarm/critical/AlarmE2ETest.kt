@@ -1466,4 +1466,53 @@ class AlarmE2ETest {
         assertEquals("retour à 0 après la dernière URL", 0, com.alarm.critical.api.ApiClient.currentUrlIndex)
         assertEquals(urls.first(), com.alarm.critical.api.ApiClient.currentBaseUrl())
     }
+
+    // ── 35. INV-ANDROID-100 (2026-11-10) : un seul indicateur d'etat, la pastille du texte ──
+
+    /** Rien d'autre que le texte sur la ligne d'etat de la carte (« ● ⚪ Tout est calme » avant). */
+    private fun assertSingleIndicatorOnStatusLine() {
+        onView(withId(R.id.currentAlarmLine)).check { line, e ->
+            if (line == null) throw e
+            val top = IntArray(2).also { line.getLocationOnScreen(it) }[1]
+            val bottom = top + line.height
+            val others = mutableListOf<View>()
+            fun walk(v: View) {
+                if (!v.isShown || v.width == 0 || v.height == 0 || v === line) return
+                if (v is android.view.ViewGroup) {
+                    for (i in 0 until v.childCount) walk(v.getChildAt(i))
+                    return
+                }
+                val y = IntArray(2).also { v.getLocationOnScreen(it) }[1]
+                if (y < bottom && y + v.height > top) others += v
+            }
+            walk(line.rootView.findViewById(R.id.alarmCard))
+            assertTrue("un seul indicateur, la pastille du texte ; aussi sur la ligne : $others", others.isEmpty())
+        }
+    }
+
+    @Test
+    fun test35_singleStatusIndicatorCalmThenActive() {
+        fakeApi.myAlarmsResponses = mutableListOf(Response.success(emptyList()))
+        waitForPolls(2)
+
+        val scenario = launchDashboard()
+
+        onView(withId(R.id.currentAlarmLine)).check(matches(withText("⚪ Tout est calme")))
+        assertSingleIndicatorOnStatusLine()
+
+        unregisterAll()
+        fakeApi.myAlarmsResponses = mutableListOf(Response.success(listOf(fakeAlarm)))
+
+        eventually {
+            onView(withId(R.id.currentAlarmLine)).check(matches(withSubstring("🔴 Alarme active")))
+        }
+        assertSingleIndicatorOnStatusLine()
+        // La couleur reste portee par le texte (et la carte, qui pulse) : rouge pour une alarme active
+        onView(withId(R.id.currentAlarmLine)).check { v, e ->
+            assertEquals("texte rouge", android.graphics.Color.parseColor("#ef4444"),
+                (v as? android.widget.TextView ?: throw e).currentTextColor)
+        }
+
+        scenario.close()
+    }
 }

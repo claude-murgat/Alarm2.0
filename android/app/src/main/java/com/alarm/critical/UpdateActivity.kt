@@ -3,6 +3,7 @@ package com.alarm.critical
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.view.View
+import android.widget.Button
 import android.widget.ProgressBar
 import com.alarm.critical.update.AppUpdate
 import com.alarm.critical.update.UpdateProvider
@@ -16,7 +17,7 @@ import java.util.Locale
  * INV-ANDROID-706 : versions installee et annoncee par le serveur, etat en une phrase, derniere verification,
  * « Vérifier maintenant » et « Installer ». Meme etat que le bandeau du tableau de bord (AppUpdate.state).
  */
-class UpdateActivity : MenuScreenActivity("Mises à jour") {
+class UpdateActivity : MenuScreenActivity("Mise à jour") {
 
     private fun line(id: Int, sizeSp: Float, color: String = "#FFFFFF", bold: Boolean = false) =
         label("", sizeSp, color, bold).apply {
@@ -45,9 +46,13 @@ class UpdateActivity : MenuScreenActivity("Mises à jour") {
             id = R.id.updateCheckButton
             contentDescription = "Vérifier maintenant s'il existe une mise à jour"
         }
-        val install = button("Installer") { AppUpdate.install(this) }.apply {
+        // Bleu, du style de « Mettre à jour » du bandeau (style UpdateButton)
+        val install = (layoutInflater.inflate(R.layout.button_update, content, false) as Button).apply {
             id = R.id.updateInstallButton
+            text = "Installer"
             contentDescription = "Installer la mise à jour"
+            setOnClickListener { AppUpdate.install(this@UpdateActivity) }
+            content.addView(this)
         }
 
         AppUpdate.check(this)

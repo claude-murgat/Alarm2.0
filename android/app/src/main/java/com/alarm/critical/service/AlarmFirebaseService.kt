@@ -8,8 +8,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.alarm.critical.MainActivity
 import com.alarm.critical.R
-import com.alarm.critical.api.ApiClient
-import com.alarm.critical.api.ApiProvider
+import com.alarm.critical.api.Auth
 import com.alarm.critical.model.FcmTokenRequest
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
@@ -98,15 +97,15 @@ class AlarmFirebaseService : FirebaseMessagingService() {
 
         // Envoyer le nouveau token au backend
         val prefs = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
-        val authToken = prefs.getString("token", null) ?: return
+        if (prefs.getString("token", null) == null) return  // pas connecte
         val deviceId = prefs.getString("device_token", null) ?: return
 
         scope.launch {
             try {
-                ApiProvider.service.registerFcmToken(
-                    "Bearer $authToken",
-                    FcmTokenRequest(token = token, device_id = deviceId)
-                )
+                // INV-ANDROID-508 : token courant des prefs, renouvele sur 401
+                Auth.call(this@AlarmFirebaseService) {
+                    registerFcmToken(it, FcmTokenRequest(token = token, device_id = deviceId))
+                }
                 Log.d(TAG, "FCM token registered on backend")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to register FCM token: ${e.message}")

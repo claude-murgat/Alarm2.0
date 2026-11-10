@@ -2,8 +2,11 @@ package com.alarm.critical
 
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.os.Build
 import android.os.SystemClock
+import android.widget.Button
 import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.core.view.GravityCompat
@@ -47,7 +50,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
- * INV-ANDROID-706 : ecran « Mises à jour » (versions installee et annoncee, etat en une phrase,
+ * INV-ANDROID-706 : ecran « Mise à jour » (versions installee et annoncee, etat en une phrase,
  * derniere verification, « Vérifier maintenant », « Installer ») et progression du telechargement
  * sur le bandeau. Un seul etat pour l'ecran et le bandeau d'INV-ANDROID-705.
  */
@@ -186,16 +189,30 @@ class UpdateScreenTest {
         scenarios += ActivityScenario.launch(UpdateActivity::class.java)
     }
 
-    /** Menu lateral ouvert sans animation, puis entree « Mises à jour ». */
+    /** Menu lateral ouvert sans animation, puis entree « Mise à jour » (au singulier, 2026-11-10). */
     private fun ActivityScenario<DashboardActivity>.openUpdateScreen() {
         onActivity { it.findViewById<DrawerLayout>(R.id.drawerLayout).openDrawer(GravityCompat.START, false) }
-        onView(withId(R.id.drawerUpdate)).check(matches(withText("Mises à jour"))).perform(click())
+        onView(withId(R.id.drawerUpdate)).check(matches(withText("Mise à jour"))).perform(click())
+    }
+
+    /** Ce qu'on voit d'un bouton : couleur du fond (a gauche, hors du texte), couleur du texte, texte gras. */
+    private fun lookOf(id: Int): List<Any> {
+        var look = emptyList<Any>()
+        onView(withId(id)).check { v, e ->
+            val b = v as? Button ?: throw e
+            val bmp = Bitmap.createBitmap(b.width, b.height, Bitmap.Config.ARGB_8888)
+            b.draw(Canvas(bmp))
+            look = listOf(Integer.toHexString(bmp.getPixel(b.width / 20, b.height / 2)),
+                Integer.toHexString(b.currentTextColor), b.typeface?.isBold == true)
+        }
+        return look
     }
 
     @Test
     fun menu_ouvre_l_ecran_versions_installee_et_annoncee_a_jour() {
         launchDashboard(server = "1.8.0").openUpdateScreen()
 
+        onView(withId(R.id.screenTitle)).check(matches(withText("Mise à jour")))
         assertTrue("version installee", shows(R.id.updateInstalled, "Version installée : 1.8.0"))
         assertTrue("version du serveur", shows(R.id.updateServer, "Dernière version annoncée par le serveur : 1.8.0"))
         assertTrue("etat", shows(R.id.updateState, "À jour"))
@@ -263,6 +280,21 @@ class UpdateScreenTest {
 
         assertTrue("installation lancee", waitFor { fakeUpdate.installs.size == 1 })
         assertArrayEquals("l'APK verifie est installe", fakeUpdate.apk, fakeUpdate.installs.single().readBytes())
+    }
+
+    /** 2026-11-10, demande du proprietaire : « Installer » en bleu, comme « Mettre à jour » du bandeau. */
+    @Test
+    fun bouton_installer_du_meme_style_que_mettre_a_jour_du_bandeau() {
+        launchDashboard(server = "1.9.0")
+        assertTrue(shows(R.id.updateBannerText, "Mise à jour disponible : 1.9.0"))
+        val banner = lookOf(R.id.updateButton)
+        assertEquals("bouton du bandeau : fond bleu, texte blanc gras", listOf("ff00a2e5", "ffffffff", true), banner)
+
+        scenarios += ActivityScenario.launch(UpdateActivity::class.java)
+        assertTrue(shows(R.id.updateState, READY))
+        visible(R.id.updateInstallButton)
+
+        assertEquals("« Installer » du meme style que « Mettre à jour »", banner, lookOf(R.id.updateInstallButton))
     }
 
     @Test

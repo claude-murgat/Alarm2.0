@@ -56,7 +56,7 @@
             android:screenOrientation="portrait" android:configChanges="orientation|screenSize" />
         <activity android:name=".SupervisionActivity" android:exported="false"
             android:screenOrientation="portrait" android:configChanges="orientation|screenSize" />
-        <!-- INV-ANDROID-706 : ecran « Mises à jour » (pour tous) -->
+        <!-- INV-ANDROID-706 : ecran « Mise à jour » (pour tous) -->
         <activity android:name=".UpdateActivity" android:exported="false"
             android:screenOrientation="portrait" android:configChanges="orientation|screenSize" />
 

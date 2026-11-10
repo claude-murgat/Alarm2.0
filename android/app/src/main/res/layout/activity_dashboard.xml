@@ -250,14 +250,11 @@
 
                 <Button
                     android:id="@+id/updateButton"
+                    style="@style/UpdateButton"
                     android:layout_width="match_parent"
                     android:layout_height="42dp"
                     android:text="Mettre à jour"
                     android:contentDescription="Mettre à jour l'application"
-                    android:backgroundTint="#00A2E5"
-                    android:textColor="#FFFFFF"
-                    android:textSize="14sp"
-                    android:textStyle="bold"
                     android:layout_marginTop="10dp" />
             </LinearLayout>
 
@@ -280,29 +277,15 @@
                     android:textStyle="bold"
                     android:layout_marginBottom="10dp" />
 
-                <!-- Indicateur etat alarme -->
-                <LinearLayout
-                    android:layout_width="match_parent"
+                <!-- Indicateur etat alarme : la pastille du texte, seule (INV-ANDROID-100) -->
+                <TextView
+                    android:id="@+id/currentAlarmLine"
+                    android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical"
-                    android:layout_marginBottom="12dp">
-
-                    <View
-                        android:id="@+id/alarmDot"
-                        android:layout_width="10dp"
-                        android:layout_height="10dp"
-                        android:background="@drawable/dot_green"
-                        android:layout_marginEnd="10dp" />
-
-                    <TextView
-                        android:id="@+id/currentAlarmLine"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Tout est calme"
-                        android:textSize="15sp"
-                        android:textColor="#94a3b8" />
-                </LinearLayout>
+                    android:text="Tout est calme"
+                    android:textSize="15sp"
+                    android:textColor="#94a3b8"
+                    android:layout_marginBottom="12dp" />
 
                 <!-- Titre alarme -->
                 <TextView
@@ -541,7 +524,7 @@
                 <TextView android:id="@+id/drawerModems" style="@style/DrawerItem"
                     android:text="Sites et modems" android:drawableStart="@android:drawable/ic_menu_mapmode" />
                 <TextView android:id="@+id/drawerUpdate" style="@style/DrawerItem"
-                    android:text="Mises à jour" android:drawableStart="@android:drawable/ic_menu_rotate" />
+                    android:text="Mise à jour" android:drawableStart="@android:drawable/ic_menu_rotate" />
 
                 <!-- Entrees admin : GONE pour les autres (le serveur reste le vrai garde, 403) -->
                 <LinearLayout

@@ -1,6 +1,7 @@
 package com.alarm.critical
 
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.os.Build
 import android.os.SystemClock
@@ -19,11 +20,15 @@ import androidx.test.espresso.matcher.ViewMatchers.withText
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.alarm.critical.api.ApiProvider
+import com.alarm.critical.api.Auth
 import com.alarm.critical.model.AlarmResponse
 import com.alarm.critical.model.EscalationEntry
 import com.alarm.critical.model.UserResponse
+import com.alarm.critical.service.AlarmFirebaseService
 import com.alarm.critical.service.AlarmPollingService
 import com.alarm.critical.service.AlarmSoundManager
+import com.alarm.critical.util.AppLogger
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -212,5 +217,56 @@ class TokenRefreshTest {
         eventually { assertTrue("role relu par /me rejoue", prefs().getBoolean("is_admin", false)) }
         assertEquals("un seul refresh pour deux 401", 1, fakeApi.refreshCallCount)
         assertEquals("fake-refreshed-token", prefs().getString("token", null))
+    }
+
+    /** 2026-11-10 : Firebase donne un nouveau token FCM alors que l'access token a expire. */
+    @Test
+    fun nouveau_token_fcm_avec_token_expire_renouvelle_puis_enregistre() {
+        fakeApi.expiredTokens += "fake-token"
+        prefs().edit().putString("device_token", "telephone-timo").commit()
+        // Service cree hors de Firebase, avec le contexte que lui donnerait Android
+        val service = AlarmFirebaseService()
+        ContextWrapper::class.java.getDeclaredMethod("attachBaseContext", Context::class.java)
+            .apply { isAccessible = true }.invoke(service, context)
+
+        service.onNewToken("nouveau-token-fcm")
+
+        assertTrue("nouveau token FCM enregistre", waitFor { fakeApi.fcmTokenRegistered?.token == "nouveau-token-fcm" })
+        assertEquals("enregistre avec le token renouvele", "Bearer fake-refreshed-token", fakeApi.fcmTokenRegisteredWith)
+        assertEquals("telephone-timo", fakeApi.fcmTokenRegistered?.device_id)
+        assertEquals("un seul refresh", 1, fakeApi.refreshCallCount)
+        service.onDestroy()
+    }
+
+    /**
+     * 2026-11-10 : refresh impossible, l'historique du dashboard echoue toutes les 10 s et chaque echec
+     * ajoutait une ligne (500 lignes en ~80 min). Une ligne par cause, puis a chaque changement de cause.
+     */
+    @Test
+    fun refresh_impossible_une_ligne_de_log_par_cause() {
+        fun screenCall() = runBlocking { Auth.call(context) { getAlarmHistory(it) } }  // le chemin de tous les ecrans
+        fun lines(cause: String) = AppLogger.exportLogs("user1", "test").lines().count { cause in it }
+        val rejected = "Refresh KO HTTP 401"
+        val noRefreshToken = "Refresh impossible : refresh_token absent"
+
+        fakeApi.expiredTokens += "fake-token"
+        assertEquals("refresh reussi : le prochain echec sera ecrit", 200, screenCall().code())
+        AppLogger.clear()
+        fakeApi.expiredTokens += "fake-refreshed-token"  // expire a son tour, et le serveur refuse le refresh
+        fakeApi.refreshTokenResponse = Response.error(
+            401, okhttp3.ResponseBody.create(null, """{"detail":"Invalid refresh token"}""")
+        )
+
+        repeat(5) { assertEquals("erreur d'origine", 401, screenCall().code()) }
+        assertEquals("5 echecs pour la meme cause : une ligne", 1, lines(rejected))
+
+        prefs().edit().remove("refresh_token").commit()
+        repeat(3) { screenCall() }
+        assertEquals("nouvelle cause : une ligne", 1, lines(noRefreshToken))
+
+        prefs().edit().putString("refresh_token", "refresh-uuid-du-login").commit()
+        repeat(2) { screenCall() }
+        assertEquals("retour a la premiere cause : ecrite de nouveau", 2, lines(rejected))
+        assertEquals("chaque appel tente toujours son refresh", 1 + 5 + 2, fakeApi.refreshCallCount)
     }
 }
