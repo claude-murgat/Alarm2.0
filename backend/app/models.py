@@ -124,6 +124,8 @@ class SmsQueue(Base):
     error = Column(String, nullable=True)
     retries = Column(Integer, default=0)
     site = Column(String, nullable=True)  # INV-156 : modem (passerelle) qui l'envoie
+    claimed_by = Column(String, nullable=True)  # INV-193 : passerelle qui l'a reserve
+    claimed_until = Column(DateTime, nullable=True)  # INV-193 : fin du bail
 
 
 class CallQueue(Base):
@@ -138,6 +140,8 @@ class CallQueue(Base):
     result = Column(String, nullable=True)  # ack_dtmf|ack_sms|no_answer|busy|error|escalate
     retries = Column(Integer, default=0)
     site = Column(String, nullable=True)  # INV-156 : modem (passerelle) qui l'appelle
+    claimed_by = Column(String, nullable=True)  # INV-193 : passerelle qui l'a reserve
+    claimed_until = Column(DateTime, nullable=True)  # INV-193 : fin du bail
 
     alarm = relationship("Alarm")
     user = relationship("User")
