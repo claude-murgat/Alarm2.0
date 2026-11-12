@@ -148,9 +148,6 @@ class UpdateScreenTest {
             .putBoolean("battery_optimization_asked", true)
             .putBoolean("fsi_permission_asked", true)
             .commit()
-        // Release simulee : reglage Play Protect deja ouvert, sinon il passerait devant le tableau de bord (INV-ANDROID-707)
-        context.getSharedPreferences("install_prefs", Context.MODE_PRIVATE).edit()
-            .putBoolean("play_protect_asked", true).commit()
         AlarmPollingService.alarms = emptyList()
         context.cacheDir.listFiles()?.forEach { it.deleteRecursively() }
         AppLogger.clear()
