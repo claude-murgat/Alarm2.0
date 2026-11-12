@@ -70,6 +70,7 @@ class DashboardActivity : AppCompatActivity() {
 
     // INV-ANDROID-705 : mise a jour integree
     private var nextUpdateCheck = Long.MAX_VALUE  // INV-ANDROID-705 : premiere verification a onResume
+    private var fsiBannerShown = false  // INV-ANDROID-709 : log au changement seulement
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -204,6 +205,7 @@ class DashboardActivity : AppCompatActivity() {
             acknowledgeCurrentAlarm()
         }
 
+        findViewById<Button>(R.id.fsiBannerButton).setOnClickListener { openFullScreenIntentSettings() }  // INV-ANDROID-709
         findViewById<Button>(R.id.updateButton).setOnClickListener { AppUpdate.install(this) }
         lifecycleScope.launch { AppUpdate.state.collect { showUpdate(it) } }
 
@@ -358,25 +360,41 @@ class DashboardActivity : AppCompatActivity() {
         super.onResume()
         nextUpdateCheck = 0L  // INV-ANDROID-705 : app rouverte, les serveurs ont pu etre mis a jour entre-temps
         syncOncallFromChain()
+        showFullScreenIntentBanner()
         // INV-ANDROID-707 : une demande « une fois » par retour au premier plan, jamais deux ecrans de reglages a la fois
         askBatteryOptimizationExemptionOnce() || askFullScreenIntentPermissionOnce() || askPlayProtectOnce()
     }
 
     /** Android 14+ : sans cette autorisation, l'ecran d'alarme n'apparait pas sur l'ecran verrouille (simple notif). */
+    private fun canUseFullScreenIntent() = Build.VERSION.SDK_INT < 34 ||
+        getSystemService(android.app.NotificationManager::class.java).canUseFullScreenIntent()
+
+    /** INV-ANDROID-709 : a chaque retour au premier plan (l'autorisation peut etre retiree a tout moment) ; log au changement. */
+    private fun showFullScreenIntentBanner() {
+        val missing = !canUseFullScreenIntent()
+        findViewById<View>(R.id.fsiBanner).visibility = if (missing) View.VISIBLE else View.GONE
+        if (missing != fsiBannerShown) AppLogger.log("PleinEcran",
+            if (missing) "bandeau « Alarme plein écran désactivée » affiché : Android refuse l'écran d'alarme plein écran"
+            else "autorisation plein écran accordée : bandeau retiré")
+        fsiBannerShown = missing
+    }
+
     private fun askFullScreenIntentPermissionOnce(): Boolean {
-        if (android.os.Build.VERSION.SDK_INT < 34) return false
         val prefs = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
-        val nm = getSystemService(android.app.NotificationManager::class.java)
-        if (prefs.getBoolean("fsi_permission_asked", false) || nm.canUseFullScreenIntent()) return false
+        if (prefs.getBoolean("fsi_permission_asked", false) || canUseFullScreenIntent()) return false
         prefs.edit().putBoolean("fsi_permission_asked", true).apply()
-        return try {
-            startActivity(Intent(android.provider.Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
-                android.net.Uri.parse("package:$packageName")))
-            true
-        } catch (e: Exception) {
-            Log.w("Dashboard", "Reglage plein ecran indisponible : ${e.message}")
-            false
-        }
+        return openFullScreenIntentSettings()
+    }
+
+    /** Reglage d'Android « plein écran » de l'app ; false s'il est introuvable. */
+    private fun openFullScreenIntentSettings(): Boolean = try {
+        startActivity(Intent(android.provider.Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
+            android.net.Uri.parse("package:$packageName")))
+        AppLogger.log("PleinEcran", "réglage « plein écran » ouvert")
+        true
+    } catch (e: Exception) {
+        AppLogger.log("PleinEcran", "réglage « plein écran » indisponible (${e.javaClass.simpleName})")
+        false
     }
 
     /**
