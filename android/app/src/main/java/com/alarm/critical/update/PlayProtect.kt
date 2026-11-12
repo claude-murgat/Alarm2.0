@@ -9,16 +9,19 @@ import androidx.appcompat.app.AlertDialog
 import com.alarm.critical.util.AppLogger
 
 /**
- * INV-ANDROID-707 : « Améliorer la détection des applis malveillantes » supprime la fenetre Play Protect des mises a
- * jour integrees. Aucun intent documente n'ouvre ce reglage : une boite donne le chemin dans le Play Store, puis
- * l'ouvre. Jamais l'ecran interne de Google Play services (VerifyAppsSettingsActivity) : sur un vrai telephone il
- * demarre sans erreur puis charge sans fin. L'app ne peut pas lire ce reglage.
+ * INV-ANDROID-707 : « Améliorer la détection des applis malveillantes » peut reduire la fenetre Play Protect des mises
+ * a jour integrees, sans garantie (elle revient sur le telephone du proprietaire, 2026-11-12). Boite ouverte seulement
+ * par le bouton de l'ecran « Mise à jour ». Aucun intent documente n'ouvre ce reglage : la boite donne le chemin dans
+ * le Play Store, puis l'ouvre. Jamais l'ecran interne de Google Play services (VerifyAppsSettingsActivity) : sur un
+ * vrai telephone il demarre sans erreur puis charge sans fin. L'app ne peut pas lire ce reglage.
  */
 object PlayProtect {
     private const val TAG = "PlayProtect"
     const val PLAY_STORE = "com.android.vending"  // declare dans <queries> du manifest (visibilite, Android 11+)
     const val TITLE = "Réglage Play Protect"
-    const val MESSAGE = "Une fois ce réglage activé, les mises à jour s'installent sans la fenêtre Play Protect.\n\n" +
+    const val MESSAGE = "Ce réglage peut réduire la fenêtre d'analyse Play Protect lors des mises à jour, sans " +
+        "garantie : sur certains téléphones, Android la montre quand même. Il suffit alors d'appuyer sur " +
+        "« Installer » ou « Analyser ».\n\n" +
         "1. « Ouvrir le Play Store » ;\n" +
         "2. touchez votre photo de profil (en haut à droite) ;\n" +
         "3. « Play Protect » ;\n" +

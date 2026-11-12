@@ -38,8 +38,6 @@ import com.alarm.critical.model.sitesLabel
 import com.alarm.critical.service.AlarmPollingService
 import com.alarm.critical.service.AlarmSoundManager
 import com.alarm.critical.update.AppUpdate
-import com.alarm.critical.update.PlayProtect
-import com.alarm.critical.update.UpdateProvider
 import com.alarm.critical.update.UpdateState
 import com.alarm.critical.update.showDownload
 import com.alarm.critical.util.AppLogger
@@ -362,7 +360,7 @@ class DashboardActivity : AppCompatActivity() {
         syncOncallFromChain()
         showFullScreenIntentBanner()
         // INV-ANDROID-707 : une demande « une fois » par retour au premier plan, jamais deux ecrans de reglages a la fois
-        askBatteryOptimizationExemptionOnce() || askFullScreenIntentPermissionOnce() || askPlayProtectOnce()
+        askBatteryOptimizationExemptionOnce() || askFullScreenIntentPermissionOnce()
     }
 
     /** Android 14+ : sans cette autorisation, l'ecran d'alarme n'apparait pas sur l'ecran verrouille (simple notif). */
@@ -395,22 +393,6 @@ class DashboardActivity : AppCompatActivity() {
     } catch (e: Exception) {
         AppLogger.log("PleinEcran", "réglage « plein écran » indisponible (${e.javaClass.simpleName})")
         false
-    }
-
-    /**
-     * INV-ANDROID-707 : boite « Réglage Play Protect », release, une fois par installation quelle que soit la reponse
-     * (`install_prefs` survit a la deconnexion), jamais pendant une alarme.
-     */
-    private fun askPlayProtectOnce(): Boolean {
-        val prefs = getSharedPreferences("install_prefs", MODE_PRIVATE)
-        if (UpdateProvider.installedVersion == null || prefs.getBoolean("play_protect_asked", false)) return false
-        if (AppUpdate.alarmInProgress(this)) {
-            AppLogger.log("PlayProtect", "boîte « Réglage Play Protect » repoussée : alarme en cours")
-            return false
-        }
-        prefs.edit().putBoolean("play_protect_asked", true).apply()
-        PlayProtect.showDialog(this)
-        return true
     }
 
     /**

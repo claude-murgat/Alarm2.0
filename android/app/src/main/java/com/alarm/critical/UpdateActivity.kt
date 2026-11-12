@@ -59,7 +59,7 @@ class UpdateActivity : MenuScreenActivity("Mise à jour") {
         // INV-ANDROID-707 : la boite qui explique le reglage Play Protect, a tout moment
         button("Réglage Play Protect") { PlayProtect.showDialog(this) }.apply {
             id = R.id.updatePlayProtectButton
-            contentDescription = "Comment activer le réglage Play Protect, pour des mises à jour sans fenêtre Play Protect"
+            contentDescription = "Comment activer le réglage Play Protect, qui peut réduire la fenêtre Play Protect des mises à jour"
         }
 
         AppUpdate.check(this)
