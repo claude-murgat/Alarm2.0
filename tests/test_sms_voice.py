@@ -12,7 +12,10 @@ Prerequis : backend actif sur http://localhost:8000 (cluster 3 noeuds)
 """
 
 import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+
 import requests
 import pytest
 from _timing import wait_escalation_ticks
@@ -531,6 +534,45 @@ class TestCallQueueEndpoints:
         assert alarm is not None
         assert alarm["assigned_user_id"] == user2_id, \
             f"Alarme devrait etre escaladee vers user2 ({user2_id}), got {alarm['assigned_user_id']}"
+
+
+class TestQueueClaimConcurrency:
+    """INV-193 sur le PostgreSQL du cluster : 8 passerelles reservent le meme appel ou SMS au meme
+    instant (UPDATE conditionnel concurrent) ; une seule gagne, toutes voient la meme gagnante."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        _reset_clock_all_nodes()
+        requests.post(f"{API}/test/reset", params={"peer": "false"})
+        yield
+        requests.post(f"{API}/test/reset", params={"peer": "false"})
+
+    @pytest.mark.parametrize("kind", ["calls", "sms"])
+    def test_simultaneous_claims_only_one_wins(self, kind):
+        if kind == "calls":
+            user1_id = _get_user_id(USER1_NAME)
+            r = requests.post(f"{API}/test/insert-call", json={
+                "to_number": "+33600000193", "alarm_id": _send_alarm("Claim race", user1_id),
+                "user_id": user1_id, "tts_message": "Alarme critique."})
+        else:
+            r = requests.post(f"{API}/test/insert-sms", json={"to_number": "+33600000193", "body": "ALARME"})
+        assert r.status_code == 200, r.text
+        item = r.json()["id"]
+        start = threading.Barrier(8)
+
+        def claim(n):
+            start.wait()
+            return requests.post(f"{BASE_URL}/internal/{kind}/{item}/claim", headers=GATEWAY_HEADERS,
+                                 json={"gateway_id": f"gw-{n}"}, timeout=10)
+
+        with ThreadPoolExecutor(8) as pool:
+            answers = list(pool.map(claim, range(8)))
+        assert [a.status_code for a in answers] == [200] * 8, [a.text for a in answers]
+        winners = [a.json()["claimed_by"] for a in answers if a.json()["claimed"]]
+        assert len(winners) == 1, winners
+        assert {a.json()["claimed_by"] for a in answers} == set(winners)
+        pending = _get_pending_calls() if kind == "calls" else _get_pending_sms()
+        assert item not in [p["id"] for p in pending]
 
 
 # =============================================================================
