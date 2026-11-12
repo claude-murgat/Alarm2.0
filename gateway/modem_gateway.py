@@ -152,6 +152,17 @@ def _post_to_backend(path: str, json_data: dict = None) -> dict | None:
         return None
 
 
+def _claim(kind: str, item_id: int) -> bool:
+    """INV-193 : reserve l'appel / le SMS sur le serveur (port AT deja tenu). Seul un refus explicite
+    le fait sauter : serveur d'avant INV-193 (404) ou injoignable -> on agit quand meme, jamais un
+    SMS ou un appel d'alarme bloque par la reservation."""
+    r = _post_to_backend(f"/internal/{kind}/{item_id}/claim", {"gateway_id": GATEWAY_ID})
+    if r is not None and not r.get("claimed"):
+        logger.debug(f"{kind} {item_id} reserve par {r.get('claimed_by')} : ignore (INV-193)")
+        return False
+    return True
+
+
 # ── SMS Sender Thread ────────────────────────────────────────────────────────
 
 class SmsSenderThread(threading.Thread):
@@ -171,13 +182,16 @@ class SmsSenderThread(threading.Thread):
                     logger.warning(f"{len(pending)} SMS en attente : modem hors reseau, pas d'essai (INV-145)")
                 elif pending:
                     for sms in pending:
-                        success, error = self._send_sms(sms["to_number"], sms["body"])
+                        with at_lock:  # INV-193 : le bail ne court pas pendant l'attente du port
+                            if not _claim("sms", sms["id"]):
+                                continue
+                            success, error = self._send_sms(sms["to_number"], sms["body"])
                         if success:
-                            _post_to_backend(f"/internal/sms/{sms['id']}/sent")
+                            _post_to_backend(f"/internal/sms/{sms['id']}/sent", {"gateway_id": GATEWAY_ID})
                             logger.info(f"SMS {sms['id']} envoye → {sms['to_number']}")
                         else:
                             _post_to_backend(f"/internal/sms/{sms['id']}/error",
-                                           {"error": error})
+                                           {"error": error, "gateway_id": GATEWAY_ID})
                             logger.warning(f"SMS {sms['id']} echec : {error}")
             except Exception as e:
                 logger.error(f"SmsSender erreur : {e}")
@@ -350,14 +364,17 @@ class CallSenderThread(threading.Thread):
                         if call_deferred_for_sms(call["to_number"], sms_pending):
                             logger.info(f"Call {call['id']} differe : SMS en attente pour {call['to_number']}")
                             continue
-                        result = self._make_call(
-                            call["to_number"],
-                            call["tts_message"],
-                            call.get("site"),  # INV-159 ; absent (backend d'avant) -> alarme.wav
-                        )
+                        with at_lock:  # INV-193 : le bail ne court pas pendant l'attente du port
+                            if not _claim("calls", call["id"]):
+                                continue
+                            result = self._make_call(
+                                call["to_number"],
+                                call["tts_message"],
+                                call.get("site"),  # INV-159 ; absent (backend d'avant) -> alarme.wav
+                            )
                         _post_to_backend(
                             f"/internal/calls/{call['id']}/result",
-                            {"result": result},
+                            {"result": result, "gateway_id": GATEWAY_ID},
                         )
                         logger.info(f"Call {call['id']} → {call['to_number']} : {result}")
             except Exception as e:
