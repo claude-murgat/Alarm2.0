@@ -68,6 +68,9 @@ echo "$*" >> "$H/ssh.log"
 [ -f "$H/ssh_down" ] && { echo "ssh: connect to host 10.99.0.4 port 22: Connection timed out" >&2; exit 255; }
 # disque plein sur alarm-1 : SSH repond, l'ecriture echoue
 [[ -f "$H/disk_full" && "${@: -1}" == *"cat >"* ]] && { echo "cat: write error: No space left on device" >&2; exit 1; }
+# liste illisible sur alarm-1 ; coupure pendant la copie d'une sauvegarde precise
+[[ -f "$H/ls_fail" && "${@: -1}" == "ls "* ]] && { echo "ls: cannot open directory: Permission denied" >&2; exit 2; }
+[[ -f "$H/copy_fail" && "${@: -1}" == *"cat >"*"$(cat "$H/copy_fail")"* ]] && { echo "client_loop: send disconnect: Broken pipe" >&2; exit 255; }
 exec bash -c "${@: -1}"
 '''
 MAILER = '#!/usr/bin/env bash\n{ echo "SUJET $1"; cat; } >> "$H/mail"\n'
@@ -252,6 +255,97 @@ def test_copy_failure_keeps_the_local_dump_and_alerts(h, failure):
     assert dumps(h / "alarm1") == []
     mail = read(h, "mail")
     assert "SUJET [ALARME-MURGAT] Sauvegarde" in mail and "alarm-1" in mail
+
+
+def copies(h):
+    """Sauvegardes envoyees sur alarm-1, dans l'ordre des copies."""
+    return re.findall(r"cat > '[^']*/\.(alarm_db-[^']+\.dump)\.tmp'", read(h, "ssh.log"))
+
+
+def put(h, d, *names):
+    for name in names:
+        (h / d / name).write_text(f"PGDMP {name}\n")
+
+
+def new_dump(h, *old):
+    [name] = set(dumps(h / "backup")) - set(old)
+    return name
+
+
+def test_catch_up_copies_every_dump_alarm1_misses_oldest_first(h):
+    # incident du 2026-11-12 : alarm-1 eteint 2 jours, copies des 2 nuits precedentes en echec
+    kept, missed = stamp(3), sorted([stamp(2), stamp(1)])
+    put(h, "backup", kept, *missed)
+    put(h, "alarm1", kept)
+    rc, err = run(h)
+    assert rc == 0, err
+    new = new_dump(h, kept, *missed)
+    assert copies(h) == [*missed, new]  # la plus ancienne d'abord, celle deja la-bas pas renvoyee
+    assert dumps(h / "alarm1") == dumps(h / "backup")
+    for name in (*missed, new):
+        assert (h / "alarm1" / name).read_bytes() == (h / "backup" / name).read_bytes()
+        assert mode(h / "alarm1" / name) == 0o600
+    assert leftovers(h / "alarm1") == []
+    assert len(re.findall(r" ls -1 ", read(h, "ssh.log"))) == 1  # une seule liste d'alarm-1
+    assert "2 sauvegardes rattrapées sur alarm-1" in err
+    assert read(h, "mail") == ""
+
+
+def test_alarm1_up_to_date_gets_only_the_new_dump(h):
+    old = sorted([stamp(2), stamp(1)])
+    put(h, "backup", *old)
+    put(h, "alarm1", *old)
+    rc, err = run(h)
+    assert rc == 0, err
+    assert copies(h) == [new_dump(h, *old)]
+    assert dumps(h / "alarm1") == dumps(h / "backup")
+
+
+def test_unreadable_alarm1_listing_is_a_copy_failure(h):
+    missed = sorted([stamp(2), stamp(1)])
+    put(h, "backup", *missed)
+    (h / "ls_fail").write_text("")
+    rc, err = run(h)
+    assert rc == 1, err
+    new = new_dump(h, *missed)
+    assert dumps(h / "backup") == sorted([*missed, new])
+    assert dumps(h / "alarm1") == []
+    mail = read(h, "mail")
+    assert "SUJET [ALARME-MURGAT] Sauvegarde" in mail and f"copie de {new} sur alarm-1" in mail, mail
+
+
+def test_copy_failing_midway_names_what_was_not_copied_and_keeps_the_rest(h):
+    first, failing = sorted([stamp(2), stamp(1)])
+    put(h, "backup", first, failing)
+    (h / "copy_fail").write_text(failing)
+    rc, err = run(h)
+    assert rc == 1, err
+    new = new_dump(h, first, failing)
+    assert dumps(h / "backup") == sorted([first, failing, new])
+    assert dumps(h / "alarm1") == [first]
+    assert leftovers(h / "alarm1") == []
+    mail = read(h, "mail")
+    assert "SUJET [ALARME-MURGAT] Sauvegarde" in mail and failing in mail and new in mail, mail
+    assert first not in mail
+
+
+def test_dump_older_than_local_retention_is_never_sent(h):
+    too_old, missed = stamp(20), stamp(1)
+    put(h, "backup", too_old, missed)
+    rc, err = run(h)
+    assert rc == 0, err
+    assert too_old not in read(h, "ssh.log")
+    assert copies(h) == [missed, new_dump(h, missed)]
+    assert "1 sauvegarde rattrapée sur alarm-1" in err
+
+
+def test_alarm1_retention_still_applied_after_catch_up(h):
+    both, missed = stamp(13), sorted([stamp(2), stamp(1)])
+    put(h, "backup", both, *missed)
+    put(h, "alarm1", stamp(15), stamp(40), both)
+    rc, err = run(h)
+    assert rc == 0, err
+    assert dumps(h / "alarm1") == dumps(h / "backup") == sorted([both, *missed, new_dump(h, both, *missed)])
 
 
 def test_skips_while_another_backup_holds_the_lock(h):
