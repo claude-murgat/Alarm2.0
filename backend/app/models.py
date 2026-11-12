@@ -164,7 +164,7 @@ class GatewayState(Base):
     """
     __tablename__ = "gateway_states"
     gateway_id = Column(String, primary_key=True)
-    state = Column(String, nullable=False)  # "open" | "closed"
+    state = Column(String, nullable=False)  # "open" | "closed" | "no_sensor" (INV-194)
     last_seen = Column(DateTime, nullable=False)
     site = Column(String, nullable=True)  # INV-157 : agregation par site (vide -> default_site)
 

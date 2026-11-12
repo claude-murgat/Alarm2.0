@@ -815,11 +815,11 @@ class HostDryContactMonitorThread(threading.Thread):
     au moniteur modem via `raw_to_state` : `raw == normal_value` → 'closed'.
 
     Cadence : POST /internal/alarms/report-state toutes les `poll_seconds` avec
-    le dernier état connu, **tant qu'il est frais** (< `liveness_seconds`). Si le
-    µC se tait (débranché/HS) au-delà, on cesse de reporter → le backend voit le
-    silence (INV-122) au lieu d'un état périmé. Reconnexion auto si le port tombe.
-    INV-183 : Arduino absent ou débranché -> un seul avertissement par absence, nouvelle
-    recherche toutes les 5 s, reprise seule au rebranchement.
+    le dernier état connu, **tant qu'il est frais** (< `liveness_seconds`). Reconnexion
+    auto si le port tombe. INV-183 : Arduino absent ou débranché -> un seul avertissement
+    par absence, nouvelle recherche toutes les 5 s, reprise seule au rebranchement.
+    INV-194 : sans état lisible (µC absent, débranché ou muet), `no_sensor` à la même
+    cadence : la passerelle reste vivante (INV-172) sans peser sur le contact sec du site.
     """
 
     def __init__(
@@ -873,6 +873,7 @@ class HostDryContactMonitorThread(threading.Thread):
                     logger.warning(f"HostDryContact : {e} — nouvelle recherche toutes les 5 s, "
                                    f"sans autre message jusqu'au retour du µC")
                     self._absent_logged = True
+                _report_dry_contact_state(self.gateway_id, "no_sensor")  # INV-194 : vivante sans Arduino
                 time.sleep(5.0)
 
     def _serve(self, port: str):
@@ -902,10 +903,11 @@ class HostDryContactMonitorThread(threading.Thread):
                     if not silent_warned:
                         logger.warning(
                             f"HostDryContact ({self.gateway_id}) : µC muet >{self.liveness:.0f}s "
-                            f"— arret du report (le backend voit le silence)"
+                            f"— rapporte no_sensor (INV-194)"
                         )
                         silent_warned = True
                         self._last_logged_state = None  # recovery sera reloguee
+                    _report_dry_contact_state(self.gateway_id, "no_sensor")
                     continue
                 silent_warned = False
 

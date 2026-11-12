@@ -182,9 +182,61 @@ def test_arduino_absent_plugged_then_unplugged_warns_once_per_absence(gw, monkey
     monkeypatch.setattr(t, "_resolve_port", lambda: next(resolved, None))
     with pytest.raises(_Stop):
         t.run()
-    assert reports == ["closed"]  # Arduino branche a chaud : lu sans redemarrer la passerelle
+    # Arduino branche a chaud : lu sans redemarrer la passerelle ; sans lui, `no_sensor` a chaque recherche (INV-194)
+    assert reports == ["no_sensor"] * 3 + ["closed"] + ["no_sensor"] * 6
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING and "HostDryContact" in r.message]
     assert len(warnings) == 2, [r.message for r in warnings]  # absent au depart, puis debranche
+
+
+# --- INV-194 : passerelle vivante sans Arduino ---
+
+def test_no_arduino_reports_no_sensor_every_5_s(gw, monkeypatch):
+    """Aucun port µC : un rapport `no_sensor` par recherche, avant chaque attente de 5 s (des le depart)."""
+    events = []
+    monkeypatch.setattr(mg, "_report_dry_contact_state", lambda gid, state: events.append((gid, state)))
+    gw.on_sleep = lambda n: events.append("sleep")
+    gw.sleep_limit = 4
+    t = HostDryContact(port="", baud=115200, gateway_id="alarm-4", normal_value=0,
+                       poll_seconds=5, liveness_seconds=5)
+    monkeypatch.setattr(t, "_resolve_port", lambda: None)
+    with pytest.raises(_Stop):
+        t.run()
+    assert events == [("alarm-4", "no_sensor"), "sleep"] * 4 + [("alarm-4", "no_sensor")]
+    assert gw.sleeps == [5.0] * 4
+
+
+def test_mute_arduino_reports_no_sensor_every_poll(gw, monkeypatch, caplog):
+    """Port ouvert mais aucune ligne `DC:` (Arduino non programme, fige) : `no_sensor` a chaque poll (5 s),
+    un seul avertissement."""
+    reads, reports = [], []
+    clock = iter(range(1000, 2000))  # readline : timeout de 1 s
+
+    class MuteArduino:
+        def __init__(self, port, baud, timeout=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def readline(self):
+            reads.append(1)
+            if len(reads) > 11:
+                raise _Stop
+            return b""
+
+    monkeypatch.setattr(mg.serial, "Serial", MuteArduino)
+    monkeypatch.setattr(mg, "time", types.SimpleNamespace(sleep=mg.time.sleep, monotonic=lambda: next(clock)))
+    monkeypatch.setattr(mg, "_report_dry_contact_state", lambda gid, state: reports.append(state))
+    t = HostDryContact(port="/dev/ttyACM0", baud=115200, gateway_id="alarm-2", normal_value=0,
+                       poll_seconds=5, liveness_seconds=5)
+    with pytest.raises(_Stop):
+        t.run()
+    assert reports == ["no_sensor"] * 3  # lectures a t = 1000, 1005, 1010 sur 11 secondes
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING and "HostDryContact" in r.message]
+    assert len(warnings) == 1, [r.message for r in warnings]
 
 
 # --- Revue PR #296 ---

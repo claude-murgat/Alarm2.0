@@ -33,6 +33,13 @@ def test_10_min_is_silent_and_alerted(silent_for):
     assert decide_silence([gw], NONE, NOW) == ((gw,), frozenset({"onsite-2"}))
 
 
+def test_gateway_alive_without_sensor_is_judged_on_last_seen_only():
+    """INV-194 : un rapport `no_sensor` pose last_seen comme les autres ; seule compte l'absence de rapport."""
+    alive = {**_gw("alarm-4", timedelta(seconds=5)), "state": "no_sensor"}
+    silent = {**_gw("alarm-3", timedelta(minutes=10)), "state": "no_sensor"}
+    assert decide_silence([alive, silent], NONE, NOW) == ((silent,), frozenset({"alarm-3"}))
+
+
 def test_already_emailed_is_not_alerted_again():
     gw = _gw("onsite-2", timedelta(minutes=30))
     assert decide_silence([gw], frozenset({"onsite-2"}), NOW) == ((), frozenset({"onsite-2"}))
