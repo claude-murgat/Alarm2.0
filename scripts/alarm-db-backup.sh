@@ -6,7 +6,8 @@
 #      node3 d'abord), sinon le leader ; dump du replica en echec -> une tentative sur le leader ;
 #   2. pg_dump -Fc dans le conteneur local node3-patroni-1 (PostgreSQL 16) vers un temporaire,
 #      verifie par pg_restore --list, puis renomme alarm_db-<UTC>-<noeud>.dump ;
-#   3. retention 14 jours (jamais la plus recente), copie sur alarm-1 par SSH (WireGuard), meme retention.
+#   3. retention 14 jours (jamais la plus recente), copie sur alarm-1 par SSH (WireGuard) de chaque sauvegarde
+#      qu'alarm-1 n'a pas (rattrapage apres une panne), meme retention.
 # --restore-test (alarm-db-restore-test.timer, chaque mois) : restaure la plus recente dans un
 # conteneur PostgreSQL 16 jetable, sans reseau, verifie que les tables cles ont des lignes, le supprime.
 #
@@ -158,15 +159,27 @@ for f in $(ls -1 "$BACKUP_DIR" | to_delete); do
   log "Supprimee (plus de $KEEP_DAYS jours) : $f"
 done
 
-# Copie sur alarm-1 : temporaire puis renommage, meme retention la-bas.
+# Copie sur alarm-1 : chaque sauvegarde locale qu'alarm-1 n'a pas (rattrapage apres une panne), la plus
+# ancienne d'abord, temporaire puis renommage ; meme retention la-bas. Retention locale deja faite : toutes
+# les sauvegardes locales sont dans la fenetre. Meme nom = meme sauvegarde (horodatage UTC + noeud, renommage atomique).
 remote() { ssh "${SSH_OPTS[@]}" "alarm@$COPY_IP" "$@"; }
-remote "umask 077 && rm -f '$COPY_DIR'/.alarm_db-*.tmp && cat > '$COPY_DIR/.$NAME.tmp' && mv '$COPY_DIR/.$NAME.tmp' '$COPY_DIR/$NAME'" \
-  < "$BACKUP_DIR/$NAME" \
-  || fail "copie de $NAME sur alarm-1 ($COPY_IP:$COPY_DIR) en echec ; la sauvegarde locale $BACKUP_DIR/$NAME est gardee"
-OLD=$(remote "ls -1 '$COPY_DIR'" | to_delete) || fail "liste des copies sur alarm-1 ($COPY_IP:$COPY_DIR) illisible"
+REMOTE=$(remote "ls -1 '$COPY_DIR'") \
+  || fail "copie de $NAME sur alarm-1 ($COPY_IP:$COPY_DIR) en echec (liste des copies illisible) ; sauvegardes locales gardees dans $BACKUP_DIR"
+mapfile -t TODO < <(comm -23 <(ls -1 "$BACKUP_DIR" | grep -E "$NAME_RE" | sort) <(grep -E "$NAME_RE" <<< "$REMOTE" | sort))
+CAUGHT_UP=0
+for i in "${!TODO[@]}"; do
+  f=${TODO[i]}
+  remote "umask 077 && rm -f '$COPY_DIR'/.alarm_db-*.tmp && cat > '$COPY_DIR/.$f.tmp' && mv '$COPY_DIR/.$f.tmp' '$COPY_DIR/$f'" \
+    < "$BACKUP_DIR/$f" \
+    || fail "copie de ${TODO[*]:i} sur alarm-1 ($COPY_IP:$COPY_DIR) en echec ; sauvegardes locales gardees dans $BACKUP_DIR"
+  log "Copie OK sur alarm-1 : $COPY_IP:$COPY_DIR/$f"
+  [[ "$f" == "$NAME" ]] || CAUGHT_UP=$((CAUGHT_UP + 1))
+done
+s=""; (( CAUGHT_UP > 1 )) && s=s
+(( CAUGHT_UP == 0 )) || log "$CAUGHT_UP sauvegarde$s rattrapée$s sur alarm-1"
+OLD=$(to_delete <<< "$REMOTE")
 if [[ -n "$OLD" ]]; then
   # Noms filtres par NAME_RE (to_delete) : rien a echapper.
   remote "cd '$COPY_DIR' && rm -f -- ${OLD//$'\n'/ }" || fail "retention des copies sur alarm-1 ($COPY_IP:$COPY_DIR) en echec"
   log "Supprimees sur alarm-1 (plus de $KEEP_DAYS jours) : ${OLD//$'\n'/ }"
 fi
-log "Copie OK sur alarm-1 : $COPY_IP:$COPY_DIR/$NAME"
