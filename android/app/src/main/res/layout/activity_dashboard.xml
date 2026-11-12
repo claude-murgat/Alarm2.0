@@ -151,6 +151,47 @@
                 </LinearLayout>
             </LinearLayout>
 
+            <!-- ============ AUTORISATION PLEIN ECRAN REFUSEE (INV-ANDROID-709) ============ -->
+            <LinearLayout
+                android:id="@+id/fsiBanner"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:background="@drawable/card_alert"
+                android:padding="16dp"
+                android:visibility="gone"
+                android:layout_marginBottom="12dp">
+
+                <TextView
+                    android:id="@+id/fsiBannerTitle"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Alarme plein écran désactivée"
+                    android:textSize="16sp"
+                    android:textColor="#fca5a5"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="Téléphone verrouillé, l'alarme ne s'affichera pas : vous n'aurez qu'une notification."
+                    android:textSize="13sp"
+                    android:textColor="#fca5a5" />
+
+                <Button
+                    android:id="@+id/fsiBannerButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="42dp"
+                    android:text="Autoriser le plein écran"
+                    android:contentDescription="Autoriser le plein écran : ouvre le réglage d'Android"
+                    android:backgroundTint="#ef4444"
+                    android:textColor="#FFFFFF"
+                    android:textSize="14sp"
+                    android:textStyle="bold"
+                    android:layout_marginTop="10dp" />
+            </LinearLayout>
+
             <!-- ==================== ALERTE CONNEXION / AUTH ==================== -->
             <LinearLayout
                 android:id="@+id/connectionLostContainer"
