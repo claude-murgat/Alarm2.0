@@ -180,13 +180,13 @@ def _enqueue_sms_for_user(db: Session, user: User, alarm: Alarm):
     if not user.phone_number:
         return
     # INV-124 : instruire l'acquittement par reponse SMS "1" + lien supervision.
-    # Sans accent dans la partie statique → reste en GSM-7 (evite UCS-2 / 70 car.).
     # La gateway (SmsReceiverThread) acquitte sur reception d'un SMS "1"/"ok"/"oui"/"ack".
-    # INV-155 : le SMS commence par le site ; tiret long -> "-" pour rester en GSM-7.
+    # La gateway envoie en alphabet GSM 7 bits (gsm7.py, 160 car.) : é en fait partie, le tiret
+    # long du titre y devient "-". INV-155 : le SMS commence par le site.
     prefix = f"ALARME {alarm.site.capitalize()}:" if alarm.site else "ALARME:"
     body = (
-        f"{prefix} {alarm.title.replace('—', '-')}\n"
-        f"Repondez 1 pour acquitter ou https://supervision.charlesmurgat.com"
+        f"{prefix} {alarm.title}\n"
+        f"Répondez 1 pour acquitter ou https://supervision.charlesmurgat.com"
     )
     existing = (
         db.query(SmsQueue)

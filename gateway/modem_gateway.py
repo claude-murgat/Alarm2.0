@@ -40,6 +40,7 @@ from modem_health import LOG_REPEAT_SECONDS, repeat_log_due  # INV-183 (revue F5
 from config import PRIMARY_PROBE_TIMEOUT_SECONDS  # INV-174
 from locks import at_lock  # RLock reentrant partage du port AT (cf locks.py)
 from dry_contact import parse_dc_line, raw_to_state, decide_report  # logique pure (cf dry_contact.py)
+from gsm7 import to_gsm7  # INV-124 : texte du SMS en alphabet GSM (logique pure, cf gsm7.py)
 from modem_health import (  # logique pure (cf modem_health.py)
     MAX_AT_FAILURES, MODEM_REBOOT_WAIT_S, at_failures_after, backends_down, call_was_dialed,
     parse_network, pcm_reboot_allowed, reregister_due, sends_allowed, sms_alert_step,
@@ -190,6 +191,10 @@ class SmsSenderThread(threading.Thread):
                 r = send_at_command(self.ser, "AT+CMGF=1", timeout=3)
                 if "OK" not in r:
                     return False, "CMGF_FAILED"
+                # INV-124 : texte en alphabet GSM (é etc.), pas en UTF-8 (2026-11-12)
+                r = send_at_command(self.ser, 'AT+CSCS="GSM"', timeout=3)
+                if "OK" not in r:
+                    return False, "CSCS_FAILED"
 
                 # Lancer la commande d'envoi
                 self.ser.reset_input_buffer()
@@ -211,7 +216,7 @@ class SmsSenderThread(threading.Thread):
                     return False, "NO_PROMPT"
 
                 # Envoyer le corps + Ctrl+Z
-                self.ser.write(body.encode() + b'\x1A')
+                self.ser.write(to_gsm7(body) + b'\x1A')
 
                 # Attendre la reponse (timeout 30s)
                 response = b""
@@ -657,10 +662,11 @@ class HealthMonitorThread(threading.Thread):
             try:
                 with at_lock:
                     send_at_command(self.ser, "AT+CMGF=1", timeout=3)
+                    send_at_command(self.ser, 'AT+CSCS="GSM"', timeout=3)  # INV-124
                     self.ser.reset_input_buffer()
                     self.ser.write(f'AT+CMGS="{recipient}"\r'.encode())
                     time.sleep(1)
-                    self.ser.write(message.encode() + b'\x1A')
+                    self.ser.write(to_gsm7(message) + b'\x1A')
                     time.sleep(10)
                     # Lire la reponse
                     response = self.ser.read(self.ser.in_waiting or 1).decode(errors="replace")

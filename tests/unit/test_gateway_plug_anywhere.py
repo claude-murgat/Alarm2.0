@@ -21,7 +21,7 @@ import pytest
 pytestmark = [pytest.mark.unit, pytest.mark.no_mutation]
 
 GW = pathlib.Path(__file__).resolve().parents[2] / "gateway"
-_LOCAL = ("config", "locks", "modem_detect", "modem_health", "dry_contact", "voice_call")
+_LOCAL = ("config", "locks", "modem_detect", "modem_health", "dry_contact", "voice_call", "gsm7")
 
 
 def _load():

@@ -9,6 +9,7 @@ Tier 2 integration : multi-site Izeron / Beaufort.
 - INV-156 : SMS et appels portent le site de l'alarme (`default_site` si vide) ;
   `/internal/{sms,calls}/pending?site=X` ne renvoie que le site X (defaut : default_site,
   liste separee par des virgules admise).
+- INV-124 (amende le 2026-11-12) : texte exact du SMS d'alarme (« Répondez »), 160 caracteres au plus.
 
 Vraie boucle d'escalade (tick 1 s) + horloge avancee pour la creation des SMS/appels.
 """
@@ -146,6 +147,19 @@ def test_dry_contact_without_site_uses_default_site(setup):
     assert [(x["site"], x["title"]) for x in active] == [("izeron", "Déclenchement contact sec — Izeron")]
 
 
+def test_dry_contact_sms_body_fits_one_gsm_sms(setup):
+    """INV-124 (amendé le 2026-11-12) : texte exact du SMS d'alarme contact sec du site au nom le plus
+    long (Beaufort). La passerelle l'envoie en GSM 7 bits, un caractère par septet : 160 au plus."""
+    client, _, _ = setup
+    _report(client, "alarm-3", "open", site="beaufort")
+    client.post("/api/test/advance-clock", params={"seconds": 150, "peer": "false"})
+    assert _wait_for(lambda: len(_queue_rows()[0]) == 1), _queue_rows()
+    body = _queue_rows()[0][0][1]
+    assert body == ("ALARME Beaufort: Déclenchement contact sec — Beaufort\n"
+                    "Répondez 1 pour acquitter ou https://supervision.charlesmurgat.com")
+    assert len(body) <= 160
+
+
 # ── INV-156 : SMS / appels par site ────────────────────────────────────────
 
 def test_sms_and_calls_carry_site_and_pending_filters_by_site(setup):
@@ -157,9 +171,9 @@ def test_sms_and_calls_carry_site_and_pending_filters_by_site(setup):
     assert _wait_for(lambda: len(_queue_rows()[0]) == 2 and len(_queue_rows()[1]) == 2), _queue_rows()
 
     sms, calls = _queue_rows()
-    assert sorted(sms) == [("beaufort", "ALARME Beaufort: Pompe\nRepondez 1 pour acquitter ou "
+    assert sorted(sms) == [("beaufort", "ALARME Beaufort: Pompe\nRépondez 1 pour acquitter ou "
                                         "https://supervision.charlesmurgat.com"),
-                           ("izeron", "ALARME Izeron: Pompe\nRepondez 1 pour acquitter ou "
+                           ("izeron", "ALARME Izeron: Pompe\nRépondez 1 pour acquitter ou "
                                       "https://supervision.charlesmurgat.com")]
     assert sorted(calls) == sorted([("izeron", iz.json()["id"]), ("beaufort", bf.json()["id"])])
 

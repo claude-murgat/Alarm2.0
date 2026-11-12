@@ -622,10 +622,48 @@ l'opérateur d'acquitter en **répondant `1`** au SMS, et (b) contenir le **lien
   sortant ne le disait pas → l'opérateur qui ne connaît pas le système ne sait pas qu'il peut
   acquitter par réponse SMS, et n'a aucun lien pour rejoindre la supervision. Décision propriétaire
   2026-06-17. Ne concerne **pas** les SMS de ping isolation (INV-067, body `[ALARME-MURGAT-PING]`).
-- **Contrainte encodage** : rester en GSM-7 (pas d'accent dans la partie statique) pour ne pas
-  basculer en UCS-2 (160→70 car.) — préfixe `ALARME` et instruction `Repondez 1 pour acquitter`
-  sans accent. Dédoublonnage INV-062 intact (body déterministe par `severity`+`title`).
+- **Texte (amendé le 2026-11-12, demande du propriétaire)** : `ALARME <Site>: <titre>` (INV-155 ;
+  `ALARME:` sans site), retour à la ligne, `Répondez 1 pour acquitter ou https://supervision.charlesmurgat.com`.
+  « Répondez » reprend son accent. Le titre est repris tel quel (« Déclenchement contact sec — Beaufort ») :
+  la passerelle ramène le texte à l'alphabet GSM (ci-dessous, le tiret long devient « - »).
+  Dédoublonnage INV-062 intact (body déterministe par le titre et le site).
+- **Contrainte encodage (amendée le 2026-11-12, demande du propriétaire)** : le SMS reste en
+  alphabet GSM 7 bits, 160 caractères (pas UCS-2, 70 caractères). Le SMS d'alarme contact sec du site
+  au nom le plus long (Beaufort) fait 120 caractères : un seul SMS ; un nom de site tient jusqu'à 28
+  caractères. Chaque SMS envoyé par la passerelle modem (`gateway/modem_gateway.py` : file
+  `/internal/sms/pending`, donc alarme, ping INV-067 et test ; SMS d'alerte backends INV-171) suit la
+  séquence `AT+CMGF=1`, `AT+CSCS="GSM"`, `AT+CMGS="<numéro>"`, puis le texte en codes GSM 03.38, **un
+  octet par caractère**, puis Ctrl-Z (0x1A).
+  - **Table de base GSM 03.38** : chacun de ses caractères part avec son code (é 0x05, è 0x04, ù 0x06,
+    ì 0x07, ò 0x08, à 0x7F, É 0x1F, Ç 0x09, @ 0x00, £ 0x01, $ 0x02, ¤ 0x24, ¡ 0x40, ¿ 0x60, Ä 0x5B,
+    ü 0x7E, retour à la ligne 0x0A…). Lettres sans accent, chiffres, ponctuation courante : inchangés.
+  - **Tout autre caractère** est remplacé par le plus proche de la table de base : accent retiré
+    (ê→e, â→a, î→i, ô→o, û→u, ë→e, ï→i, À→A, Ê→E…), ç→Ç (0x09), œ→oe, Œ→OE, tirets — et –→-,
+    apostrophes ’ ‘→', guillemets « » “ ”→", espaces insécables→espace, …→..., tabulation→espace ;
+    sans équivalent (emoji, caractère de contrôle…)→`?`.
+  - **Table d'extension non utilisée** (`€ [ ] { } \ ^ ~ |`, normalement ESC 0x1B + code) : en mode
+    texte, ESC annule la saisie du SMS (3GPP TS 27.005 §3.5.1), le SMS ne partirait pas. Remplacés :
+    €→EUR, [ et {→(, ] et }→), \ et |→/, ^→', ~→-.
+  - **Jamais** d'octet 0x1A (Ctrl-Z, fin du SMS) ni 0x1B (ESC) dans le texte : Ξ (0x1A dans la table)
+    et un Ctrl-Z ou un ESC présent dans le titre deviennent `?`.
+  - `@` part en 0x00 (table de base) : le port série l'écrit tel quel.
+  - `AT+CSCS="GSM"` sans `OK` → échec `CSCS_FAILED` (comme `CMGF_FAILED`, essai compté INV-064), aucun
+    `AT+CMGS`. SMS d'alerte backends : réponses non contrôlées, comme avant.
+  - **Pourquoi** : SMS d'alarme reçu le 2026-11-12 sur le téléphone du propriétaire :
+    « … DC(clenchement contact sec … » au lieu de « Déclenchement ». La passerelle écrivait le texte en
+    UTF-8 (é = C3 A9) sans `AT+CSCS` ; le modem attend l'alphabet GSM. L'ancienne règle (« pas d'accent
+    dans la partie statique ») ne protégeait pas le titre.
+  - **Validé sur le vrai SIM7600 le 2026-11-12** : `AT+CMGF=1`, `AT+CSCS="GSM"`, `AT+CMGS`, texte en
+    codes GSM (é=0x05…), Ctrl-Z → le téléphone du propriétaire affiche « Déclenchement … Répondez … à è ù é É ».
+    Non essayés sur le modem : `@` (0x00), les lettres grecques.
 - **Couverture** : E2E `TestSmsCallTimer::test_sms_body_has_ack_instruction_and_supervision_link`.
+  Integration `test_multisite_inv155_156.py::test_sms_and_calls_carry_site_and_pending_filters_by_site`
+  (« Répondez ») et `test_dry_contact_sms_body_fits_one_gsm_sms` (texte exact du contact sec de
+  Beaufort, 160 caractères au plus). Unit `test_gateway_sms_gsm7.py` : table de base complète,
+  remplacements, ni 0x1A ni 0x1B émis, textes d'alarme ; octets écrits sur un faux port série par
+  `SmsSenderThread._send_sms` et `HealthMonitorThread._send_alert_sms` (séquence `CMGF`, `CSCS="GSM"`,
+  `CMGS`, texte GSM + Ctrl-Z ; `CSCS_FAILED`). RED avant le correctif : texte écrit en UTF-8, pas de
+  `AT+CSCS`.
 
 ### INV-065 [C] ⚠️ Gateway key obligatoire
 `/internal/sms/*` et `/internal/calls/*` nécessitent header `X-Gateway-Key` valide.
