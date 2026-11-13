@@ -8,6 +8,7 @@ Pattern identique a email_service.py.
 import logging
 import os
 import json
+import threading
 import urllib.request
 from typing import Optional
 from sqlalchemy.orm import Session
@@ -16,6 +17,9 @@ logger = logging.getLogger("fcm_service")
 
 # Module-level storage for test inspection
 _last_fcm_list: list = []
+
+# Threads des push envoyes hors requete (INV-081), attendus par les helpers de test ci-dessous
+PUSH_THREAD_NAME = "fcm-push"
 
 # Chemin vers le fichier service account JSON (optionnel)
 FCM_SERVICE_ACCOUNT_PATH = os.getenv("FCM_SERVICE_ACCOUNT_JSON", "")
@@ -160,11 +164,20 @@ def _send_fcm_http(token: str, title: str, body: str, data: dict):
         logger.error(f"FCM send failed: {e}")
 
 
+def _wait_background_pushes(timeout: float = 30):
+    """Tests : attend la fin des push lances hors requete (INV-081), pour lire ou vider une liste stable."""
+    for t in threading.enumerate():
+        if t.name == PUSH_THREAD_NAME:
+            t.join(timeout)
+
+
 def get_last_fcm_list() -> list:
     """Retourne la liste de tous les FCM envoyes (pour tests)."""
+    _wait_background_pushes()
     return list(_last_fcm_list)
 
 
 def reset_last_fcm():
     """Reset la liste FCM (pour tests)."""
+    _wait_background_pushes()
     _last_fcm_list.clear()

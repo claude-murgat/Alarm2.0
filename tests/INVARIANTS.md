@@ -908,9 +908,13 @@ POST /alarms/send avec chaîne vide → email direction technique, alarme persis
   - Unit : `test_alarm_creation.py::TestInv080ChainEmpty` (3 tests : fallback 1er user, pas d'user, override explicite + email)
   - E2E : `TestEmptyEscalationChainAlert::test_alarm_with_empty_chain_sends_email` + `TestEmailViaMailhog::test_empty_chain_sends_real_email`
 
-### INV-081 [M] ⚠️ /config/escalation/bulk remplace + notifie
-POST /config/escalation/bulk → DELETE + INSERT de la chaîne + FCM push à tous les users affectés.
-- **Couverture** : E2E `TestEscalationChainBulk::test_save_escalation_chain_replaces_all`.
+### INV-081 [M] ✅ /config/escalation/bulk remplace la chaîne, répond sans attendre les push (amendé 2026-11-13)
+`POST /api/config/escalation/bulk` → DELETE + INSERT de la chaîne (une transaction, INV-082), puis un push FCM `escalation_update` à chaque utilisateur de la nouvelle chaîne : « Vous etes de garde » en position 1, « Chaine d'escalade modifiee » aux suivants (`escalation_position`, `is_oncall`).
+- **La réponse n'attend pas les push** : `200` avec la nouvelle chaîne dès qu'elle est enregistrée. Les push partent ensuite, hors de la requête, avec leur propre session DB. Un envoi lent ou bloqué (Google injoignable) ne retarde pas la réponse. Un échec des push est journalisé, jamais perdu en silence, et ne touche jamais la chaîne enregistrée.
+- **Tests** : `/api/test/last-fcm`, `/api/test/reset-fcm` et `/api/test/reset` attendent la fin des push en cours avant de lire ou de vider la liste des push.
+- **Pourquoi** : prod 2026-11-13 (node3) : enregistrer la chaîne depuis l'app affichait « Serveur injoignable » alors que la chaîne était enregistrée. Le handler envoyait les push avant de répondre : oauth2.googleapis.com injoignable ~15 s (jeton OAuth), puis ~10 envois à des jetons morts (404 NotRegistered). L'app (OkHttp, lecture 5 s) avait coupé la connexion bien avant. `POST /api/config/escalation-delay`, sans push, répondait en 5 ms.
+- **Fix** : `save_escalation_chain_bulk` (`backend/app/api/config.py`) lance les push dans un thread `fcm-push` (session `SessionLocal` à lui) après le commit ; les helpers de test de `fcm_service` attendent ces threads.
+- **Couverture** : E2E `TestEscalationChainBulk::test_save_escalation_chain_replaces_all` ; Integration `test_escalation_chain_push_inv081.py` (envoi FCM bloqué 3 s par jeton : réponse < 1 s, chaîne enregistrée, push envoyés ensuite aux mêmes utilisateurs avec les mêmes titres ; push en échec : `200`, chaîne gardée, échec dans les logs). RED avant le correctif : réponse après 9,0 s (3 jetons × 3 s) ; push en échec remonté par la requête (500).
 
 ### INV-082 [H] ✅ /config/escalation/bulk est atomique (transaction unique)
 `POST /api/config/escalation/bulk` modifie la chaîne en supprimant TOUTES les règles existantes puis en insérant les nouvelles. Si cette opération n'était pas dans une seule transaction, il existerait une **fenêtre de temps (~ms)** pendant laquelle la chaîne serait VIDE en base.

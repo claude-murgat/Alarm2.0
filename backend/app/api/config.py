@@ -1,12 +1,14 @@
+import logging
+import threading
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
-from ..database import get_db
+from ..database import get_db, SessionLocal
 from ..models import EscalationConfig, SystemConfig, User
 from ..schemas import EscalationConfigCreate, EscalationConfigResponse, SystemConfigUpdate
 from ..auth import get_current_user, get_current_admin
 from ..events import log_event
-from ..fcm_service import send_fcm_to_user
+from ..fcm_service import send_fcm_to_user, PUSH_THREAD_NAME
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 
@@ -166,8 +168,10 @@ def save_escalation_chain_bulk(
     db.commit()
     log_event("config_changed", db=db, user_id=current_user.id, key="escalation_chain", value=str(user_ids))
 
-    # Notifier tous les utilisateurs de la chaine par push FCM
-    _notify_escalation_change(db, user_ids)
+    # INV-081 : push hors requete. Google injoignable gelait la reponse au-dela des 5 s de l'app
+    # (« Serveur injoignable » alors que la chaine etait enregistree, prod 2026-11-13).
+    threading.Thread(target=_notify_escalation_change_bg, args=(user_ids,),
+                     name=PUSH_THREAD_NAME, daemon=True).start()
 
     return db.query(EscalationConfig).order_by(EscalationConfig.position).all()
 
@@ -204,6 +208,17 @@ def set_system_config(
     db.commit()
     log_event("config_changed", db=db, user_id=current_user.id, key=config.key, value=config.value)
     return {"status": "ok"}
+
+
+def _notify_escalation_change_bg(user_ids: list[int]):
+    """Thread : sa propre session (celle de la requete est fermee une fois la reponse envoyee)."""
+    db = SessionLocal()
+    try:
+        _notify_escalation_change(db, user_ids)
+    except Exception:
+        logging.getLogger("config").exception(f"Escalation push failed for chain {user_ids}")
+    finally:
+        db.close()
 
 
 def _notify_escalation_change(db: Session, user_ids: list[int]):
