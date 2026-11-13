@@ -14,6 +14,8 @@ Type=simple
 User=alarm-gateway
 WorkingDirectory=/opt/alarm-gateway
 EnvironmentFile=/etc/alarm-gateway.env
+# INV-198 : /var/lib/alarm-gateway (Arduinos armes), a alarm-gateway ; pas /var/lib/alarm/cd (INV-141)
+StateDirectory=alarm-gateway
 ExecStart=python3 /opt/alarm-gateway/modem_gateway.py
 Restart=always
 RestartSec=10

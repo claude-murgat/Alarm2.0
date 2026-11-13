@@ -108,6 +108,10 @@ else
   # Messages vocaux des appels d'alarme (INV-132/133)
   install -d -o alarm-gateway -g alarm-gateway -m755 /opt/alarm-gateway/voice
   install -o alarm-gateway -g alarm-gateway -m644 "$REPO"/gateway/voice/*.wav /opt/alarm-gateway/voice/
+  # Firmware de l'Arduino du contact sec, programme par la passerelle (INV-198)
+  install -d -o alarm-gateway -g alarm-gateway -m755 /opt/alarm-gateway/firmware /opt/alarm-gateway/firmware/dry_contact_r4
+  install -o alarm-gateway -g alarm-gateway -m644 "$REPO"/gateway/firmware/dry_contact_r4/dry_contact_r4.ino.bin \
+    /opt/alarm-gateway/firmware/dry_contact_r4/
   say "code gateway -> /opt/alarm-gateway/"
 fi
 gw_deps(){ python3 -c 'import serial, requests' 2>/dev/null; }
@@ -134,6 +138,27 @@ if [ "$GW_FROM_REPO" = 1 ]; then
     say "ATTENTION : pip install -r gateway/requirements.txt en echec (alarm-gateway-sync le retentera)"
   fi
 fi
+# Arduino du contact sec programme par la passerelle (INV-198) : dfu-util d'ARDUINO, pas le paquet Debian (avec
+# 0.11-3, l'UNO R4 reste en DFU apres la programmation ; -R a bloque son bootloader, alarm-4 le 2026-11-13).
+# Archive epinglee, empreinte verifiee AVANT extraction ; rien a faire si cette empreinte est deja installee.
+# En echec : la passerelle ne programme rien (prerequis absent), le reste de l'installation continue.
+DFU_URL=https://downloads.arduino.cc/tools/dfu-util-0.11-arduino5-linux_amd64.tar.gz
+DFU_SHA=96c64c278561af806b585c123c85748926ad02b1aedc07e5578ca9bee2be0d2a
+DFU_UTIL=/usr/local/lib/alarm-gateway/dfu-util
+if [ ! -x "$DFU_UTIL" ] || [ "$(cat "$DFU_UTIL.sha256" 2>/dev/null)" != "$DFU_SHA" ]; then
+  T=$(mktemp -d)
+  if curl -fsSL --max-time 120 -o "$T/dfu.tar.gz" "$DFU_URL" && echo "$DFU_SHA  $T/dfu.tar.gz" | sha256sum -c --status \
+     && tar -xzf "$T/dfu.tar.gz" -C "$T" && B=$(find "$T" -type f -name dfu-util -print -quit) && [ -n "$B" ] \
+     && install -D -m755 "$B" "$DFU_UTIL" && echo "$DFU_SHA" > "$DFU_UTIL.sha256"; then
+    say "dfu-util Arduino 0.11-arduino5 -> $DFU_UTIL (INV-198)"
+  else
+    say "ATTENTION : dfu-util Arduino non installe (telechargement, empreinte SHA-256 ou archive invalide) : pas de programmation auto de l'Arduino (INV-198)"
+  fi
+  rm -rf "$T"
+fi
+# Bootloader DFU de l'Arduino ouvrable par alarm-gateway (groupe dialout, INV-198)
+inst "$REPO/infra/onsite/udev/99-alarm-arduino-dfu.rules" /etc/udev/rules.d/99-alarm-arduino-dfu.rules 644
+udevadm control --reload-rules >/dev/null 2>&1 || true
 # Un modem branche a chaud ne doit pas etre pris par ModemManager (PROVISIONING_ONSITE §2.3, F6).
 if [ "$(systemctl is-enabled ModemManager 2>/dev/null)" != masked ]; then
   systemctl mask --now ModemManager >/dev/null 2>&1 || true; say "ModemManager masque"

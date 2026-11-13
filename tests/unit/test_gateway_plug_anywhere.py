@@ -7,10 +7,15 @@ demarre qu'APRES la detection du modem : un Arduino sur une machine sans modem n
 
 Le vrai `main()` de `gateway/modem_gateway.py` tourne ici ; seuls le port serie (pyserial absent du
 tier 1 : faux module minimal), les threads, le backend et les attentes sont remplaces.
+
+INV-194 (passerelle sans Arduino : `no_sensor`) et INV-198 (Arduino programme s'il est muet, arme apres un
+contact lu ferme) : vrai `HostDryContactMonitorThread` face a un faux Arduino.
 """
+import base64
 import importlib.util
 import logging
 import pathlib
+import shutil
 import sys
 import threading
 import types
@@ -291,3 +296,234 @@ def test_repeated_http_errors_are_logged_once_per_10_min(monkeypatch, caplog):
     clock[0] += 600
     mg._post_to_backend("/internal/alarms/report-state", {"state": "closed"})
     assert len(http_warnings()) == 3
+
+
+# --- INV-198 : Arduino pret a brancher (programmation automatique, armement) ---
+
+SERIAL_NO = "33092A0C393131399E1D33354B57336D"  # numero de l'Arduino d'alarm-4 (by-id), 2026-11-13
+FIRMWARE_BIN = GW / "firmware" / "dry_contact_r4" / "dry_contact_r4.ino.bin"
+
+
+@pytest.fixture
+def r4(gw, monkeypatch, tmp_path):
+    """Faux Arduino UNO R4 Minima sur l'USB : port serie (pyserial), `list_ports`, `/sys/bus/usb/devices`
+    et `dfu-util`. Horloge : 1 s par lecture du port, et la duree de chaque attente."""
+    b = types.SimpleNamespace(
+        usb=(0x2341, 0x0069), serial_no=SERIAL_NO, mode="app",  # "app" (port serie) ou "dfu" (bootloader seul)
+        line=None,  # ligne envoyee chaque seconde par l'application (None : muet, Arduino neuf)
+        at={},  # {instant: ligne} : ce que lit l'Arduino a partir de cet instant
+        dfu_rc=0, t=[1000.0], limit=4000.0, until=lambda: False,
+        opened=[], touches=[], flashes=[], reports=[],
+        dfu_util=str(tmp_path / "dfu-util"), firmware=str(tmp_path / "dry_contact_r4.ino.bin"))
+    pathlib.Path(b.dfu_util).write_text("#!/bin/sh\n")
+    pathlib.Path(b.dfu_util).chmod(0o755)
+    pathlib.Path(b.firmware).write_bytes(b"\x00" * 64)
+    sysfs = tmp_path / "sys-bus-usb-devices"
+    sysfs.mkdir()
+
+    def set_mode(mode):
+        b.mode = mode
+        dev = sysfs / "1-2"
+        if mode == "dfu":
+            dev.mkdir(exist_ok=True)
+            (dev / "idVendor").write_text("2341\n")
+            (dev / "idProduct").write_text("0369\n")
+        else:
+            shutil.rmtree(dev, ignore_errors=True)
+
+    def tick(seconds):
+        b.t[0] += seconds
+        if b.t[0] > b.limit:
+            raise _Stop
+
+    def current_line():
+        line = b.line
+        for since, scripted in sorted(b.at.items()):
+            if b.t[0] >= since:
+                line = scripted
+        return line
+
+    class Serial:
+        def __init__(self, port, baud, timeout=None):
+            assert port == "/dev/ttyACM0"
+            if b.mode != "app":
+                raise OSError(f"could not open port {port}: No such file or directory")
+            if baud == 1200:  # l'UNO R4 redemarre sur son bootloader DFU
+                b.touches.append(b.t[0])
+                set_mode("dfu")
+            else:
+                b.opened.append(b.t[0])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def close(self):
+            pass
+
+        def readline(self):
+            tick(1)
+            if b.mode != "app":
+                raise OSError("device reports readiness to read but returned no data (device disconnected?)")
+            line = current_line()
+            return f"{line}\r\n".encode() if line else b""
+
+    def comports():
+        if b.mode != "app":
+            return []
+        return [types.SimpleNamespace(device="/dev/ttyACM0", vid=b.usb[0], pid=b.usb[1], serial_number=b.serial_no)]
+
+    def run(cmd, **kw):
+        b.flashes.append((b.t[0], cmd, kw))
+        assert b.mode == "dfu", "dfu-util sans bootloader DFU"
+        if b.dfu_rc:
+            return types.SimpleNamespace(returncode=b.dfu_rc, stdout="", stderr="dfu-util: Error during download\n")
+        set_mode("app")  # programme : l'application demarre et lit le contact (ferme)
+        b.line = "DC:0"
+        return types.SimpleNamespace(returncode=0, stdout="Download done.\nDone!\n", stderr="")
+
+    def report(gateway_id, state):
+        b.reports.append((b.t[0], state))
+        if b.until():
+            raise _Stop
+
+    def thread():
+        t = HostDryContact(port="", baud=115200, gateway_id="alarm-2", normal_value=0,
+                           poll_seconds=5, liveness_seconds=5)
+        t._resolve_port = lambda: "/dev/ttyACM0" if b.mode == "app" else None
+        return t
+
+    monkeypatch.setattr(mg.serial, "Serial", Serial)
+    monkeypatch.setattr(mg, "list_ports", types.SimpleNamespace(comports=comports), raising=False)
+    monkeypatch.setattr(mg, "subprocess", types.SimpleNamespace(run=run), raising=False)
+    monkeypatch.setattr(mg, "time", types.SimpleNamespace(sleep=tick, monotonic=lambda: b.t[0]))
+    monkeypatch.setattr(mg, "_report_dry_contact_state", report)
+    monkeypatch.setattr(mg, "USB_DEVICES", str(sysfs), raising=False)
+    monkeypatch.setattr(mg, "DFU_UTIL", b.dfu_util, raising=False)
+    monkeypatch.setattr(mg, "FIRMWARE_BIN", b.firmware, raising=False)
+    monkeypatch.setattr(mg, "DRY_CONTACT_ARMED_FILE", str(tmp_path / "armed-arduinos"), raising=False)
+    b.set_mode, b.thread = set_mode, thread
+    b.states = lambda: [s for _, s in b.reports]
+    return b
+
+
+def test_silent_arduino_is_programmed_then_read(r4, caplog):
+    """Arduino neuf (muet) : programme 15 s apres l'ouverture du port, `no_sensor` jusque-la, puis lu."""
+    r4.until = lambda: "closed" in r4.states()
+    with pytest.raises(_Stop):
+        r4.thread().run()
+    states = r4.states()
+    assert states[-1] == "closed" and set(states[:-1]) == {"no_sensor"}, states
+    times = [t for t, _ in r4.reports]
+    assert max(b - a for a, b in zip(times, times[1:])) <= 5  # vivante tout du long (fenetre de 15 s)
+    assert len(r4.touches) == 1 and 15 <= r4.touches[0] - r4.opened[0] <= 20
+    (_, cmd, kw), = r4.flashes
+    assert cmd[0] == r4.dfu_util and "0x2341:0x0369" in " ".join(cmd)
+    assert cmd[cmd.index("-D") + 1] == r4.firmware
+    assert 0 < kw["timeout"] <= 90
+    assert SERIAL_NO in caplog.text
+
+
+def test_arduino_stuck_in_its_bootloader_is_programmed_directly(r4):
+    """Application absente ou corrompue : bootloader DFU seul, sans port serie -> programme sans 1200 bauds."""
+    r4.set_mode("dfu")
+    r4.until = lambda: "closed" in r4.states()
+    with pytest.raises(_Stop):
+        r4.thread().run()
+    assert r4.touches == [] and len(r4.flashes) == 1
+    assert r4.states()[-1] == "closed" and set(r4.states()[:-1]) == {"no_sensor"}
+
+
+@pytest.mark.parametrize("usb,line", [((0x1A86, 0x7523), None), ((0x2341, 0x0069), "DC:0")],
+                         ids=["autre-peripherique-muet", "arduino-qui-parle"])
+def test_only_a_silent_arduino_r4_is_ever_programmed(r4, usb, line):
+    r4.usb, r4.line, r4.limit = usb, line, 1000 + 120
+    with pytest.raises(_Stop):
+        r4.thread().run()
+    assert r4.touches == [] and r4.flashes == []
+
+
+def test_failed_programming_is_never_retried_within_30_min(r4, caplog):
+    """dfu-util en echec, Arduino reste dans son bootloader : aucun second dfu-util (ni remise a zero) avant
+    30 min, puis un seul essai. Constat du 2026-11-13 : les essais enchaines ont bloque le bootloader."""
+    r4.dfu_rc, r4.limit = 74, 1000 + 31 * 60 + 30
+    with pytest.raises(_Stop):
+        r4.thread().run()
+    assert len(r4.touches) == 1
+    (_, _, _), (second, _, _) = r4.flashes
+    assert 30 * 60 <= second - r4.touches[0] <= 30 * 60 + 10
+    errors = [r.message for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 2 and "74" in errors[0], errors
+    assert set(r4.states()) == {"no_sensor"}
+
+
+def test_without_arduino_dfu_util_the_arduino_is_left_alone(r4, monkeypatch, caplog):
+    """Prerequis absent (partie hote pas encore deployee) : pas de bascule en DFU qui laisserait l'Arduino
+    sans port serie ; une ERROR."""
+    monkeypatch.setattr(mg, "DFU_UTIL", str(pathlib.Path(r4.dfu_util).with_name("absent")), raising=False)
+    r4.limit = 1000 + 60
+    with pytest.raises(_Stop):
+        r4.thread().run()
+    assert r4.touches == [] and r4.flashes == []
+    errors = [r.message for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1 and "dfu-util" in errors[0], errors
+
+
+def test_arduino_alarms_only_after_reading_the_contact_closed_once(r4, caplog):
+    """Branche avant le cablage de son contact (lu ouvert) : `no_sensor`, un avertissement ; une fois lu ferme,
+    l'Arduino est arme et un contact ouvert alarme."""
+    r4.line, r4.at, r4.limit = "DC:1", {1030: "DC:0", 1040: "DC:1"}, 1050
+    with pytest.raises(_Stop):
+        r4.thread().run()
+    states = r4.states()
+    first_closed = states.index("closed")
+    assert first_closed >= 5 and states[:first_closed] == ["no_sensor"] * first_closed, states
+    assert states[-1] == "open"
+    warnings = [r.message for r in caplog.records if "pas encore armé" in r.message]
+    assert len(warnings) == 1 and SERIAL_NO in warnings[0], warnings
+
+
+def test_armed_arduino_alarms_at_once_after_a_restart(r4):
+    r4.line = "DC:0"
+    r4.until = lambda: "closed" in r4.states()
+    with pytest.raises(_Stop):
+        r4.thread().run()  # arme
+    r4.line, r4.reports[:] = "DC:1", []
+    r4.until = lambda: True
+    with pytest.raises(_Stop):
+        r4.thread().run()  # passerelle relancee (ou Arduino rebranche) : nouvelle instance
+    assert r4.states() == ["open"]
+
+
+def test_arduino_without_serial_number_alarms_as_before(r4):
+    """Rien a retenir d'une relance a l'autre : pas d'armement, fail-to-alarm comme avant INV-198."""
+    r4.serial_no, r4.line = None, "DC:1"
+    r4.until = lambda: True
+    with pytest.raises(_Stop):
+        r4.thread().run()
+    assert r4.states() == ["open"]
+
+
+def test_firmware_bin_is_shipped_with_the_gateway_code():
+    """Firmware versionne en base64 (texte : GitHub ne fusionnait pas le binaire, #352/#353), decode en .bin au chemin
+    que lit la passerelle : par l'image alarm-gateway (copie ensuite par alarm-gateway-sync) et par install.sh."""
+    assert pathlib.Path(mg.FIRMWARE_BIN) == FIRMWARE_BIN
+    b64 = FIRMWARE_BIN.with_name(FIRMWARE_BIN.name + ".b64")
+    assert b64.is_file(), f"{b64} absent : base64 -w0 du .bin compile (cf test_dry_contact_host.py)"
+    fw = base64.b64decode("".join(b64.read_text().split()), validate=True)
+    assert len(fw) > 4096, "firmware decode trop court"
+    dockerfile = (GW / "Dockerfile").read_text()
+    assert ("base64 -d /tmp/dry_contact_r4.ino.bin.b64 > /gateway/firmware/dry_contact_r4/dry_contact_r4.ino.bin"
+            in dockerfile)
+    install = (GW.parent / "infra" / "onsite" / "install.sh").read_text()
+    assert 'base64 -d "$REPO"/gateway/firmware/dry_contact_r4/dry_contact_r4.ino.bin.b64' in install
+    assert "gateway/firmware/**/*.bin" in (GW.parent / ".gitignore").read_text().splitlines()
+
+
+def test_dfu_util_and_armed_arduinos_are_where_the_machine_provides_them():
+    assert mg.DFU_UTIL == "/usr/local/lib/alarm-gateway/dfu-util"  # fork d'Arduino pose par install.sh
+    assert mg.DRY_CONTACT_ARMED_FILE == "/var/lib/alarm-gateway/armed-arduinos"
+    unit = (GW.parent / "infra" / "onsite" / "systemd" / "alarm-sms-gateway.service").read_text().splitlines()
+    assert "StateDirectory=alarm-gateway" in unit
