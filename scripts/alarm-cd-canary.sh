@@ -6,7 +6,10 @@
 #   2. Si different et la cible est le leader Patroni : bascule planifiee vers un replica
 #      sain (POST /switchover, kind=switchover) ; pas de bascule terminee -> exit 3 (INV-187).
 #      Puis POST kind=canary_start dans deployment_events.
-#   3. SSH vers la cible et lance `start-prod-node.sh --pull <N>`.
+#   3. Sauve les 300 dernieres lignes du backend sur la cible, puis SSH vers la cible et lance
+#      `start-prod-node.sh --pull <N>`.
+#   3b. Apres une bascule et apres le redemarrage : un backend primary en PRIMARY_TIMEOUT s ; sinon seconde
+#      bascule, email et exit 2 (INV-197). Avant de redemarrer une cible replica, pas de primary -> exit 3.
 #   4. Poll `/health` pendant le soak (default 600s, sample 30s).
 #   5. Si soak vert -> POST kind=canary_promoted, exit 0.
 #   6. Si soak rouge -> POST kind=rollback (PR 6 enrichit avec l'action),
@@ -50,6 +53,10 @@ GATEWAY_KEY="${GATEWAY_KEY:-}"
 PENDING=""                 # noeuds encore a redemarrer dans ce passage (orchestrateur)
 VOTERS="1 2 3"             # votants etcd (INV-090), passes par l'orchestrateur
 SWITCHOVER_TIMEOUT="${SWITCHOVER_TIMEOUT:-60}"  # bascule Patroni (INV-187), env pour les tests
+# Backend primary apres une bascule ou un redemarrage (INV-197) : ~7 s attendus (boucle de 5 s du backend).
+PRIMARY_TIMEOUT="${PRIMARY_TIMEOUT:-60}"
+MAILER="${MAILER:-/opt/alarm/send-alert-email.py}"  # SMTP de NODE3, marche sans base inscriptible (INV-197)
+LOG_DIR="${CD_LOG_DIR:-/var/lib/alarm/cd/logs}"      # logs du backend, sur la machine du noeud (INV-197)
 
 # --- Args ---
 while [[ $# -gt 0 ]]; do
@@ -99,15 +106,11 @@ fi
 #   node5 -> alarm-2 -> 10.99.0.5 (non votant)
 #   node6 -> alarm-3 -> 10.99.0.6 (non votant, futur Izeron)
 #   node7 -> alarm-4 -> 10.99.0.7 (non votant, futur Izeron)
-case "$NODE" in
-  1) WG_IP="10.99.0.2"; NODE_NAME="node1" ;;
-  2) WG_IP="10.99.0.3"; NODE_NAME="node2" ;;
-  3) WG_IP="10.99.0.1"; NODE_NAME="node3" ;;
-  4) WG_IP="10.99.0.4"; NODE_NAME="node4" ;;
-  5) WG_IP="10.99.0.5"; NODE_NAME="node5" ;;
-  6) WG_IP="10.99.0.6"; NODE_NAME="node6" ;;
-  7) WG_IP="10.99.0.7"; NODE_NAME="node7" ;;
-esac
+node_ip() {
+  case "$1" in node1) echo 10.99.0.2 ;; node2) echo 10.99.0.3 ;; node3) echo 10.99.0.1 ;; *) echo "10.99.0.${1#node}" ;; esac
+}
+NODE_NAME="node$NODE"
+WG_IP=$(node_ip "$NODE_NAME")
 
 TARGET_HEALTH="http://${WG_IP}:8000/health"
 
@@ -124,25 +127,25 @@ run() {
   fi
 }
 
-ssh_target() {
+ssh_to() {
   ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
-      "${SSH_USER}@${WG_IP}" "$@"
+      "${SSH_USER}@$1" "${@:2}"
 }
+ssh_target() { ssh_to "$WG_IP" "$@"; }
 
-# Decouvre le leader Patroni via GET /health role=primary sur les 7 IPs WG.
-# POST /api/deployments/events requiert le leader (replicas -> 503 'replica').
+# IP du backend primary via GET /health des 7 IPs WG : role=primary et cluster_writable, et un seul
+# (deux primary = aucun, INV-197). POST /api/deployments/events requiert le leader (replicas -> 503 'replica').
 discover_leader() {
-  local ip role
+  local ip found=""
   for ip in 10.99.0.1 10.99.0.2 10.99.0.3 10.99.0.4 10.99.0.5 10.99.0.6 10.99.0.7; do
-    role=$(curl -fsS --max-time 3 "http://${ip}:8000/health" 2>/dev/null \
-      | python3 -c "import sys,json;print(json.load(sys.stdin).get('role',''))" 2>/dev/null \
-      || echo "")
-    if [[ "$role" == "primary" ]]; then
-      echo "$ip"
-      return 0
+    if curl -fsS --max-time 3 "http://${ip}:8000/health" 2>/dev/null | python3 -c \
+        "import sys,json;h=json.load(sys.stdin);sys.exit(not(h.get('role')=='primary' and h.get('cluster_writable') is True))" \
+        2>/dev/null; then
+      [[ -z "$found" ]] || return 1
+      found=$ip
     fi
   done
-  return 1
+  [[ -n "$found" ]] && echo "$found"
 }
 
 # Resolution API_BASE : (1) --api-base CLI, (2) env $API_BASE, (3) discover_leader,
@@ -324,6 +327,69 @@ switched() {
   read -r PG_LEADER role _ <<< "$(cluster_view)"
   [[ "$PG_LEADER" != "-" && "$role" =~ ^(replica|sync_standby|quorum_standby)$ ]]
 }
+# Demandee a l'API Patroni du leader ; reponse journalisee, seul l'etat du cluster fait foi.
+switchover() {  # <leader> <candidat>
+  RESP=$(curl -sS --max-time "$SWITCHOVER_TIMEOUT" -X POST "http://$(node_ip "$1"):8008/switchover" \
+    -H "Content-Type: application/json" \
+    -d "{\"leader\": \"$1\", \"candidate\": \"$2\"}" 2>&1 || true)
+  log "Patroni /switchover : $RESP"
+}
+
+# --- Backend primary (INV-197) ---
+# Le backend du nouveau leader se dit primary a son tour suivant (boucle de 5 s, leader_election.py) ; celui de
+# l'ancien leader peut encore le dire jusque-la : apres une bascule, son IP ne compte pas.
+wait_primary() {  # [<IP de l'ancien leader>]
+  local ip deadline=$(( $(date +%s) + PRIMARY_TIMEOUT ))
+  until ip=$(discover_leader) && [[ "$ip" != "${1:-}" ]]; do
+    if (( $(date +%s) >= deadline )); then return 1; fi
+    sleep 2
+  done
+  API_BASE="http://${ip}:8000"  # les events suivent le primary
+  log "Backend primary : $API_BASE"
+}
+# 300 dernieres lignes du backend d'un noeud, sauvees sur sa machine (perdues a la recreation) ; 10 gardees.
+snapshot_logs() {  # <ip> <nodeN>
+  local f="$LOG_DIR/$2-$(date -u +%Y%m%dT%H%M%SZ).log"
+  if ssh_to "$1" "mkdir -p $LOG_DIR && docker logs --timestamps --tail 300 $2-backend-1 > $f 2>&1 \
+      && { ls -1t $LOG_DIR/*.log | tail -n +11 | xargs -r rm -f --; }" 2>/dev/null; then
+    log "Logs du backend $2 sauves : $1:$f"
+  else
+    log "WARN : logs du backend $2 non sauves ($1:$f)"
+  fi
+}
+# Aucun backend primary : une seule seconde bascule, nouvelle attente, puis arret du passage et email quoi
+# qu'il arrive (le backend ne peut pas stocker d'event sans primary). Plus aucun redemarrage.
+no_primary() {  # <ce qui vient d'etre fait>
+  local leader cand retry="aucune" found=0
+  log "ERREUR : aucun backend primary ${PRIMARY_TIMEOUT}s apres $1"
+  read -r leader _ cand <<< "$(cluster_view || echo "- - -")"
+  if [[ "$leader" != "-" ]]; then snapshot_logs "$(node_ip "$leader")" "$leader"; fi
+  if [[ "$leader" != "-" && "$cand" != "-" ]]; then
+    log "Seconde bascule : $leader -> $cand"
+    switchover "$leader" "$cand"
+    retry="$leader -> $cand (Patroni : $RESP)"
+    wait_primary "$(node_ip "$leader")" && found=1
+  fi
+  local result="TOUJOURS AUCUN backend primary : intervention requise"
+  if (( found )); then result="backend primary retrouve : $API_BASE"; fi
+  printf '%s\n' \
+    "Deploiement CD arrete par alarm-cd-canary ($NODE_NAME, image $REMOTE_DIGEST_BACKEND)." "" \
+    "Aucun backend n'a annonce role=primary sur /health ${PRIMARY_TIMEOUT}s apres $1 : le cluster ne pouvait plus ecrire." \
+    "Leader Patroni : $leader. Logs de son backend : $LOG_DIR/ sur sa machine." \
+    "Seconde bascule : $retry" \
+    "Resultat : $result" "" \
+    "Passage arrete : aucun autre noeud redemarre (repris apres le cooldown de 1 h, ou a la prochaine image)." \
+    "A regarder : journalctl -u alarm-cd-orchestrate -n 200 sur NODE3, /health des 7 backends, docker logs ${leader}-backend-1." \
+    "Cf INV-197 (tests/INVARIANTS.md), docs/CD_DESIGN.md §4." \
+    | "$MAILER" "[ALARME-MURGAT] CD arrete : aucun backend primary apres $1" >&2 \
+    || log "WARN : email d'alerte NON envoye ($MAILER)"
+  if (( found )); then
+    post_event "switchover" "failure" \
+      "{\"reason\": \"no_primary\", \"after\": \"$1\", \"leader\": \"$leader\", \"candidate\": \"$cand\"}"
+  fi
+  log "Canary halt : $result. Les noeuds suivants ne sont PAS updates. Exit 2."
+  exit 2
+}
 
 if ! VIEW=$(cluster_view); then
   log "ERREUR : etat Patroni (GET :8008/cluster) illisible : $NODE_NAME est peut-etre le leader, pas redemarre. Exit 3."
@@ -341,10 +407,7 @@ if [[ "$PG_LEADER" == "$NODE_NAME" ]]; then
     echo "DRY-RUN > POST http://${WG_IP}:8008/switchover leader=$NODE_NAME candidate=$CANDIDATE"
   else
     DEADLINE=$(( $(date +%s) + SWITCHOVER_TIMEOUT ))
-    RESP=$(curl -sS --max-time "$SWITCHOVER_TIMEOUT" -X POST "http://${WG_IP}:8008/switchover" \
-      -H "Content-Type: application/json" \
-      -d "{\"leader\": \"$NODE_NAME\", \"candidate\": \"$CANDIDATE\"}" 2>&1 || true)
-    log "Patroni /switchover : $RESP"
+    switchover "$NODE_NAME" "$CANDIDATE"
     until switched; do
       if (( $(date +%s) >= DEADLINE )); then
         log "ERREUR : bascule vers $CANDIDATE non terminee en ${SWITCHOVER_TIMEOUT}s : $NODE_NAME pas redemarre. Exit 3."
@@ -354,19 +417,31 @@ if [[ "$PG_LEADER" == "$NODE_NAME" ]]; then
       sleep 2
     done
     log "Bascule faite : leader $PG_LEADER, $NODE_NAME replica"
+    if ! wait_primary "$WG_IP"; then
+      PENDING+=" $NODE"  # pas redemarre : encore sur l'ancienne image
+      no_primary "la bascule de $NODE_NAME vers $PG_LEADER"
+    fi
     post_event "switchover" "success" "{\"from\": \"$NODE_NAME\", \"to\": \"$PG_LEADER\"}"
   fi
+elif ! wait_primary; then
+  # Jamais de redemarrage tant qu'aucun backend n'ecrit (INV-197) : rien n'est touche, reporte.
+  log "ERREUR : aucun backend primary en ${PRIMARY_TIMEOUT}s : $NODE_NAME pas redemarre. Exit 3."
+  exit 3
 fi
 
 log "POST kind=canary_start"
 post_event "canary_start" "in_progress" "{\"soak_seconds\": $SOAK_SECONDS}"
 
 # --- 3. Trigger restart sur la cible ---
+run "snapshot_logs $WG_IP $NODE_NAME"
 log "SSH vers la cible, lance start-prod-node.sh --pull $NODE"
 if ! run "ssh_target \"cd $REMOTE_REPO && ./scripts/start-prod-node.sh --pull $NODE\""; then
   log "ERREUR : start-prod-node.sh a echoue. Halt canary."
   post_event "abort" "failure" "{\"phase\": \"start-prod-node\"}"
   exit 2
+fi
+if (( ! DRY_RUN )) && ! wait_primary; then
+  no_primary "le redemarrage de $NODE_NAME"
 fi
 
 # --- 4. Soak ---

@@ -76,7 +76,7 @@ SOAK="${SOAK:-120}"
 # node4 alarm-1 (un echec n'entame pas le quorum) -> onsite-2 (Celeron, maillon
 # faible) -> onsite-1 (i5, le plus puissant et souvent primary). node1 reste le
 # dernier (son canary_promoted = fin de chaine, cf backend/app/api/deployments.py).
-# Cf §4 doc — justification de l'ordre.
+# Cf §4 doc — justification de l'ordre. Le leader Patroni passe avant-dernier (INV-197, plus bas).
 NODES_ORDER=(3 7 6 5 4 2 1)
 # Votants etcd (INV-090) : node1, node2, node3 ; non votants : 4 a 7. Le jour du demenagement,
 # seules NODES_ORDER et VOTERS changent ici (docs/REPLACE_ONSITE_NODE.md).
@@ -185,15 +185,28 @@ if [[ -z "${GATEWAY_KEY:-}" ]]; then
 fi
 export GATEWAY_KEY
 
+# Cherche le leader meme si API_BASE est fixe : il fixe aussi l'ordre du passage (INV-197, ci-dessous).
+LEADER_IP=$(discover_leader || true)
 if [[ -z "$API_BASE" ]]; then
-  if leader_ip=$(discover_leader); then
-    API_BASE="http://${leader_ip}:8000"
+  if [[ -n "$LEADER_IP" ]]; then
+    API_BASE="http://${LEADER_IP}:8000"
     log "Leader Patroni detecte : $API_BASE"
   else
     API_BASE="$API_BASE_DEFAULT"
     log "WARN : aucun leader Patroni joignable, fallback $API_BASE (POST events risque 503)"
   fi
 fi
+
+# Leader Patroni deploye en avant-dernier (INV-197) : a son tour, les autres noeuds tournent deja la nouvelle
+# image et sa bascule (INV-187) va vers l'un d'eux. Le dernier (node1) reste la fin de chaine (canary_promoted
+# = deploiement complet). 2026-11-13 : node3 leader, premier, avait bascule vers node1 encore sur l'ancienne image.
+for i in "${!TODO[@]}"; do
+  if [[ "${NODE_IP[${TODO[i]}]}" == "$LEADER_IP" ]] && (( i < ${#TODO[@]} - 2 )); then
+    log "node${TODO[i]} est le leader Patroni : deploye en avant-dernier"
+    TODO=("${TODO[@]:0:i}" "${TODO[@]:i+1:${#TODO[@]}-i-2}" "${TODO[i]}" "${TODO[-1]}")
+    break
+  fi
+done
 
 # Preflight SSH : les noeuds a deployer, plus TOUS les votants des que l'un d'eux
 # est a deployer. Un noeud injoignable n'arrete plus la chaine : jusqu'au
@@ -266,14 +279,16 @@ for i in "${!TODO[@]}"; do
   #
   # --pending / --voters (INV-187) : si node<N> est le leader Patroni, le canary le fait
   # basculer vers un replica sain, de preference pas un noeud encore a redemarrer dans ce
-  # passage (sinon seconde bascule), puis un votant etcd.
+  # passage (sinon seconde bascule), puis un votant etcd. Les noeuds deja reportes tournent encore
+  # l'ancienne image : comptes aussi (INV-197).
+  OLD_IMAGE=("${PENDING[@]}" "${TODO[@]:i+1}")
   rc=0
   "$CANARY" \
     --node "$NODE" \
     --soak "$SOAK" \
     --api-base "$API_BASE" \
     --gateway-key "$GATEWAY_KEY" \
-    --pending "${TODO[*]:i+1}" \
+    --pending "${OLD_IMAGE[*]}" \
     --voters "${VOTERS[*]}" || rc=$?
   if (( rc == 3 )); then
     # Prerequis du canary KO (SSH, registre/DNS injoignable depuis la cible), rien n'est touche :
