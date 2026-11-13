@@ -103,3 +103,49 @@ def test_cd_state_dir_declared_only_by_alarm_units():
     assert {u: o for u, o in owners.items() if o != "alarm"} == {}
     for script in ("alarm-host-sync.sh", "alarm-gateway-sync.sh"):  # units root : creent le dossier eux-memes
         assert 'mkdir -p "$STATE_DIR"' in (repo / "scripts" / script).read_text(), script
+
+
+# --- INV-141 etendu a NODE3 (2026-11-13) : installeur choisi par HOST_INSTALLER, verrou de l'orchestrateur ---
+
+def run_with(r, **extra):
+    env = {**ENV, "REPO": str(r["work"]), "STATE_DIR": str(r["tmp"] / "state"), "TARGET_SHA": r["target"], **extra}
+    return subprocess.run(["bash", str(r["script"])], env=env, capture_output=True, text=True)
+
+
+def test_host_installer_replaces_the_site_installer(repos):
+    """NODE3 : le drop-in fixe HOST_INSTALLER ; l'installeur du site (pile modem, sudoers) n'est jamais lance."""
+    (repos["work"] / "fake-node3.sh").write_text('echo "NODE3-INSTALLER $1"\n')  # non suivi : garde au checkout
+    p = run_with(repos, HOST_INSTALLER="fake-node3.sh")
+    assert p.returncode == 0, p.stderr
+    assert git(repos["work"], "rev-parse", "HEAD") == repos["target"]
+    assert "NODE3-INSTALLER --auto" in p.stdout.splitlines()
+    assert "INSTALL" not in p.stdout.splitlines()
+
+
+def test_orchestrator_lock_held_touches_nothing(repos):
+    """Passage CD en cours (verrou pris) : ni checkout ni installeur, exit 1, nouvel essai au tick suivant."""
+    import fcntl
+    state = repos["tmp"] / "state"
+    state.mkdir()
+    lock = state / "orchestrate.lock"
+    lock.write_text("")
+    with open(lock) as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        p = run_with(repos, LOCK_WAIT="1")
+    assert p.returncode == 1
+    assert "passage CD en cours" in p.stderr
+    assert git(repos["work"], "rev-parse", "HEAD") == repos["base"]
+    assert "INSTALL" not in p.stdout.splitlines()
+
+
+def test_free_orchestrator_lock_is_used_but_never_rewritten(repos):
+    """Verrou libre : deploye ; le fichier du verrou (a alarm) n'est ni tronque ni recree par root."""
+    state = repos["tmp"] / "state"
+    state.mkdir()
+    lock = state / "orchestrate.lock"
+    lock.write_text("x")
+    ino = lock.stat().st_ino
+    p = run_with(repos, LOCK_WAIT="1")
+    assert p.returncode == 0, p.stderr
+    assert git(repos["work"], "rev-parse", "HEAD") == repos["target"]
+    assert lock.read_text() == "x" and lock.stat().st_ino == ino
