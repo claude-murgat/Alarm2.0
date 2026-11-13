@@ -1,4 +1,4 @@
-"""INV-196 : apres chaque bascule planifiee et chaque redemarrage, le canary attend un backend primary.
+"""INV-197 : apres chaque bascule planifiee et chaque redemarrage, le canary attend un backend primary.
 
 Incident 2026-11-13 : node3 (leader) bascule vers node1, qui tournait encore l'ancienne image (dernier du
 passage) ; aucun backend ne s'est dit primary pendant 18 min, et le passage a continue. Decision du

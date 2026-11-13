@@ -76,7 +76,7 @@ SOAK="${SOAK:-120}"
 # node4 alarm-1 (un echec n'entame pas le quorum) -> onsite-2 (Celeron, maillon
 # faible) -> onsite-1 (i5, le plus puissant et souvent primary). node1 reste le
 # dernier (son canary_promoted = fin de chaine, cf backend/app/api/deployments.py).
-# Cf §4 doc — justification de l'ordre. Le leader Patroni passe avant-dernier (INV-196, plus bas).
+# Cf §4 doc — justification de l'ordre. Le leader Patroni passe avant-dernier (INV-197, plus bas).
 NODES_ORDER=(3 7 6 5 4 2 1)
 # Votants etcd (INV-090) : node1, node2, node3 ; non votants : 4 a 7. Le jour du demenagement,
 # seules NODES_ORDER et VOTERS changent ici (docs/REPLACE_ONSITE_NODE.md).
@@ -185,7 +185,7 @@ if [[ -z "${GATEWAY_KEY:-}" ]]; then
 fi
 export GATEWAY_KEY
 
-# Cherche le leader meme si API_BASE est fixe : il fixe aussi l'ordre du passage (INV-196, ci-dessous).
+# Cherche le leader meme si API_BASE est fixe : il fixe aussi l'ordre du passage (INV-197, ci-dessous).
 LEADER_IP=$(discover_leader || true)
 if [[ -z "$API_BASE" ]]; then
   if [[ -n "$LEADER_IP" ]]; then
@@ -197,7 +197,7 @@ if [[ -z "$API_BASE" ]]; then
   fi
 fi
 
-# Leader Patroni deploye en avant-dernier (INV-196) : a son tour, les autres noeuds tournent deja la nouvelle
+# Leader Patroni deploye en avant-dernier (INV-197) : a son tour, les autres noeuds tournent deja la nouvelle
 # image et sa bascule (INV-187) va vers l'un d'eux. Le dernier (node1) reste la fin de chaine (canary_promoted
 # = deploiement complet). 2026-11-13 : node3 leader, premier, avait bascule vers node1 encore sur l'ancienne image.
 for i in "${!TODO[@]}"; do
@@ -280,7 +280,7 @@ for i in "${!TODO[@]}"; do
   # --pending / --voters (INV-187) : si node<N> est le leader Patroni, le canary le fait
   # basculer vers un replica sain, de preference pas un noeud encore a redemarrer dans ce
   # passage (sinon seconde bascule), puis un votant etcd. Les noeuds deja reportes tournent encore
-  # l'ancienne image : comptes aussi (INV-196).
+  # l'ancienne image : comptes aussi (INV-197).
   OLD_IMAGE=("${PENDING[@]}" "${TODO[@]:i+1}")
   rc=0
   "$CANARY" \

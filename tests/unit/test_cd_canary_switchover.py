@@ -9,7 +9,7 @@ vers un replica sain d'abord ; pas de bascule terminee -> le noeud n'est pas red
 Le vrai script tourne contre de faux `ssh` et `curl` (PATH) qui journalisent leurs appels dans le
 meme fichier (ordre). Le faux Patroni sert `cluster.json`, puis `after.json` une fois la bascule
 demandee (sans `after.json`, la bascule ne se termine jamais). Le backend du leader Patroni se dit
-primary sur /health (attendu apres chaque bascule et chaque redemarrage, INV-196).
+primary sur /health (attendu apres chaque bascule et chaque redemarrage, INV-197).
 """
 import json
 import os
@@ -37,7 +37,7 @@ echo "curl $url ${body//$'\n'/ }" >> "$H/calls.log"
 case "$url" in
   *:8008/cluster) if [[ -f "$H/switched" ]]; then cat "$H/after.json"; else cat "$H/cluster.json"; fi ;;
   *:8008/switchover) [[ -f "$H/after.json" ]] && touch "$H/switched"; echo 'Successfully switched over' ;;
-  # Backend primary (INV-196) = celui du leader Patroni du moment.
+  # Backend primary (INV-197) = celui du leader Patroni du moment.
   *:8000/health) f=$H/cluster.json; [[ -f "$H/switched" ]] && f=$H/after.json
     python3 -c 'import json, sys
 l = next(m["name"] for m in json.load(open(sys.argv[1]))["members"] if m["role"] == "leader")

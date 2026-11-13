@@ -288,7 +288,7 @@ def pending_of(h, node):
 
 @pytest.mark.parametrize("primary, order", [(3, [7, 6, 5, 4, 2, 3, 1]), (2, ORDER), (1, ORDER), (None, ORDER)])
 def test_patroni_leader_deployed_next_to_last(cd, primary, order):
-    """INV-196 : 2026-11-13, node3 leader et premier du passage -> sa bascule (INV-187) ne pouvait aller que
+    """INV-197 : 2026-11-13, node3 leader et premier du passage -> sa bascule (INV-187) ne pouvait aller que
     vers un noeud encore sur l'ancienne image (node1), dont le backend n'est jamais devenu primary. Le leader
     passe avant-dernier : node1 reste la fin de chaine, sa bascule va vers un noeud deja a jour."""
     rc, deployed, err = run(cd, primary=primary)
@@ -298,7 +298,7 @@ def test_patroni_leader_deployed_next_to_last(cd, primary, order):
 
 
 def test_deferred_node_still_counts_as_old_image_for_the_next_canaries(cd):
-    """INV-196 : un noeud reporte (pas pret, injoignable) tourne encore l'ancienne image : pas un candidat prefere."""
+    """INV-197 : un noeud reporte (pas pret, injoignable) tourne encore l'ancienne image : pas un candidat prefere."""
     rc, deployed, err = run(cd, unready=(7,))
     assert rc == 0, err
     assert pending_of(cd, 6) == "7 5 4 2 1"

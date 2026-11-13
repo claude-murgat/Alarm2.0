@@ -9,7 +9,7 @@
 #   3. Sauve les 300 dernieres lignes du backend sur la cible, puis SSH vers la cible et lance
 #      `start-prod-node.sh --pull <N>`.
 #   3b. Apres une bascule et apres le redemarrage : un backend primary en PRIMARY_TIMEOUT s ; sinon seconde
-#      bascule, email et exit 2 (INV-196). Avant de redemarrer une cible replica, pas de primary -> exit 3.
+#      bascule, email et exit 2 (INV-197). Avant de redemarrer une cible replica, pas de primary -> exit 3.
 #   4. Poll `/health` pendant le soak (default 600s, sample 30s).
 #   5. Si soak vert -> POST kind=canary_promoted, exit 0.
 #   6. Si soak rouge -> POST kind=rollback (PR 6 enrichit avec l'action),
@@ -53,10 +53,10 @@ GATEWAY_KEY="${GATEWAY_KEY:-}"
 PENDING=""                 # noeuds encore a redemarrer dans ce passage (orchestrateur)
 VOTERS="1 2 3"             # votants etcd (INV-090), passes par l'orchestrateur
 SWITCHOVER_TIMEOUT="${SWITCHOVER_TIMEOUT:-60}"  # bascule Patroni (INV-187), env pour les tests
-# Backend primary apres une bascule ou un redemarrage (INV-196) : ~7 s attendus (boucle de 5 s du backend).
+# Backend primary apres une bascule ou un redemarrage (INV-197) : ~7 s attendus (boucle de 5 s du backend).
 PRIMARY_TIMEOUT="${PRIMARY_TIMEOUT:-60}"
-MAILER="${MAILER:-/opt/alarm/send-alert-email.py}"  # SMTP de NODE3, marche sans base inscriptible (INV-196)
-LOG_DIR="${CD_LOG_DIR:-/var/lib/alarm/cd/logs}"      # logs du backend, sur la machine du noeud (INV-196)
+MAILER="${MAILER:-/opt/alarm/send-alert-email.py}"  # SMTP de NODE3, marche sans base inscriptible (INV-197)
+LOG_DIR="${CD_LOG_DIR:-/var/lib/alarm/cd/logs}"      # logs du backend, sur la machine du noeud (INV-197)
 
 # --- Args ---
 while [[ $# -gt 0 ]]; do
@@ -134,7 +134,7 @@ ssh_to() {
 ssh_target() { ssh_to "$WG_IP" "$@"; }
 
 # IP du backend primary via GET /health des 7 IPs WG : role=primary et cluster_writable, et un seul
-# (deux primary = aucun, INV-196). POST /api/deployments/events requiert le leader (replicas -> 503 'replica').
+# (deux primary = aucun, INV-197). POST /api/deployments/events requiert le leader (replicas -> 503 'replica').
 discover_leader() {
   local ip found=""
   for ip in 10.99.0.1 10.99.0.2 10.99.0.3 10.99.0.4 10.99.0.5 10.99.0.6 10.99.0.7; do
@@ -335,7 +335,7 @@ switchover() {  # <leader> <candidat>
   log "Patroni /switchover : $RESP"
 }
 
-# --- Backend primary (INV-196) ---
+# --- Backend primary (INV-197) ---
 # Le backend du nouveau leader se dit primary a son tour suivant (boucle de 5 s, leader_election.py) ; celui de
 # l'ancien leader peut encore le dire jusque-la : apres une bascule, son IP ne compte pas.
 wait_primary() {  # [<IP de l'ancien leader>]
@@ -380,7 +380,7 @@ no_primary() {  # <ce qui vient d'etre fait>
     "Resultat : $result" "" \
     "Passage arrete : aucun autre noeud redemarre (repris apres le cooldown de 1 h, ou a la prochaine image)." \
     "A regarder : journalctl -u alarm-cd-orchestrate -n 200 sur NODE3, /health des 7 backends, docker logs ${leader}-backend-1." \
-    "Cf INV-196 (tests/INVARIANTS.md), docs/CD_DESIGN.md §4." \
+    "Cf INV-197 (tests/INVARIANTS.md), docs/CD_DESIGN.md §4." \
     | "$MAILER" "[ALARME-MURGAT] CD arrete : aucun backend primary apres $1" >&2 \
     || log "WARN : email d'alerte NON envoye ($MAILER)"
   if (( found )); then
@@ -424,7 +424,7 @@ if [[ "$PG_LEADER" == "$NODE_NAME" ]]; then
     post_event "switchover" "success" "{\"from\": \"$NODE_NAME\", \"to\": \"$PG_LEADER\"}"
   fi
 elif ! wait_primary; then
-  # Jamais de redemarrage tant qu'aucun backend n'ecrit (INV-196) : rien n'est touche, reporte.
+  # Jamais de redemarrage tant qu'aucun backend n'ecrit (INV-197) : rien n'est touche, reporte.
   log "ERREUR : aucun backend primary en ${PRIMARY_TIMEOUT}s : $NODE_NAME pas redemarre. Exit 3."
   exit 3
 fi
