@@ -8,7 +8,8 @@ passage et email, quoi qu'il arrive.
 Le vrai canary tourne contre de faux `ssh`, `curl`, `docker` et mailer (PATH, MAILER). Le faux Patroni tient
 l'etat du cluster dans `cluster.json` et applique les bascules demandees. Le backend du leader Patroni se dit
 primary sur /health un tour de sondes apres sa promotion (boucle de 5 s du backend), sauf s'il est dans
-`stuck` (backend qui ne devient jamais primary). Le faux `ssh` journalise `ssh <ip> <commande>` et execute la
+`stuck` (backend qui ne devient jamais primary) ; pendant ce premier tour, celui de l'ancien leader se dit
+encore primary (meme boucle de 5 s). Le faux `ssh` journalise `ssh <ip> <commande>` et execute la
 sauvegarde des logs (`docker logs`, faux) dans un dossier temporaire.
 """
 import json
@@ -61,13 +62,14 @@ elif url.endswith(":8008/switchover"):
             m.update(role="replica", state="streaming", lag=0)
         if m["name"] == req["candidate"]:
             m.update(role="leader", state="running")
-    state["rounds"] = 0
+    state.update(rounds=0, stale=req["leader"])
     json.dump(state, open(H + "/cluster.json", "w"))
     print('Successfully switched over to "%s"' % req["candidate"])
 elif url.endswith(":8000/health"):
     name = NAMES[url.split("//")[1].split(":")[0]]
     stuck = open(H + "/stuck").read().split() if os.path.exists(H + "/stuck") else []
-    primary = name == leader and name not in stuck and state.get("rounds", 1) >= 1
+    rounds = state.get("rounds", 1)
+    primary = name not in stuck and (name == leader and rounds >= 1 or name == state.get("stale") and rounds == 0)
     if name == leader:
         state["rounds"] = state.get("rounds", 1) + 1
         json.dump(state, open(H + "/cluster.json", "w"))
