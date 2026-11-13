@@ -6,6 +6,7 @@ raw→état métier, partagés par les moniteurs modem et hôte de la gateway.
 Test pur : charge uniquement `gateway/dry_contact.py` (stdlib only) par chemin,
 donc aucune dépendance lourde (pyserial/numpy) tirée dans le tier 1.
 """
+import hashlib
 import importlib.util
 import pathlib
 
@@ -117,3 +118,75 @@ class TestDecideReport:
             latest_raw=0, latest_ts=self.NOW - self.LIVENESS,
             now=self.NOW, liveness=self.LIVENESS, normal_value=self.NORMAL,
         ) == "closed"
+
+
+# --- INV-198 : Arduino pret a brancher (programmation automatique, armement) ---
+
+R4_APP, R4_DFU = (0x2341, 0x0069), (0x2341, 0x0369)
+
+
+class TestFlashDue:
+    """Programmer l'Arduino avec le firmware du depot ? Seulement un UNO R4 muet (ou son bootloader seul),
+    au plus un essai par 30 min et par passerelle."""
+
+    NOW = 10_000.0
+
+    def due(self, usb_id=R4_APP, seen_dc=False, open_for=15.0, last_attempt=None):
+        return _dc.flash_due(usb_id, seen_dc, open_for, last_attempt, self.NOW)
+
+    def test_silent_uno_r4_is_flashed_after_15_s_not_before(self):
+        assert self.due(open_for=15.0)
+        assert not self.due(open_for=14.9)
+
+    @pytest.mark.parametrize("usb_id", [(0x1A86, 0x7523), (0x2341, 0x0043), (0x2341, 0x006D), None],
+                             ids=["ch340", "uno-r3", "autre-pid-arduino", "sans-identifiant-usb"])
+    def test_any_other_serial_device_is_never_flashed(self, usb_id):
+        assert not self.due(usb_id=usb_id, open_for=3600.0)
+
+    def test_board_that_sent_a_dc_line_is_never_flashed(self):
+        # pas de mise a jour automatique du firmware : un Arduino qui parle n'est jamais reprogramme
+        assert not self.due(seen_dc=True, open_for=3600.0)
+
+    def test_bootloader_alone_is_flashed_directly(self):
+        # application absente ou corrompue : pas de port serie, rien a attendre
+        assert self.due(usb_id=R4_DFU, open_for=0.0)
+
+    @pytest.mark.parametrize("usb_id", [R4_APP, R4_DFU])
+    def test_at_most_one_attempt_per_30_min(self, usb_id):
+        assert not self.due(usb_id=usb_id, open_for=3600.0, last_attempt=self.NOW - 1799.0)
+        assert self.due(usb_id=usb_id, open_for=3600.0, last_attempt=self.NOW - 1800.0)
+
+
+class TestArmedState:
+    """(etat a rapporter, armer maintenant ?) : un Arduino n'alarme qu'apres avoir lu le contact ferme une fois."""
+
+    def test_first_closed_reading_arms(self):
+        assert _dc.armed_state("closed", "S1", set()) == ("closed", True)
+
+    def test_open_before_ever_closed_is_no_sensor(self):
+        assert _dc.armed_state("open", "S1", set()) == ("no_sensor", False)
+
+    def test_armed_arduino_reports_what_it_reads(self):
+        assert _dc.armed_state("open", "S1", {"S1"}) == ("open", False)
+        assert _dc.armed_state("closed", "S1", {"S1"}) == ("closed", False)
+
+    def test_arming_is_per_serial_number(self):
+        assert _dc.armed_state("open", "S2", {"S1"}) == ("no_sensor", False)
+
+    @pytest.mark.parametrize("state", ["open", "closed"])
+    def test_unknown_serial_number_is_reported_as_before(self, state):
+        # rien a retenir entre deux relances : fail-to-alarm, comme avant INV-198
+        assert _dc.armed_state(state, None, set()) == (state, False)
+
+
+FIRMWARE = _PATH.parent / "firmware" / "dry_contact_r4"
+
+
+def test_firmware_bin_is_built_from_the_committed_ino():
+    """Le .bin programme par la passerelle vient du .ino versionne. Apres toute modification du .ino :
+    arduino-cli compile --fqbn arduino:renesas_uno:minima --output-dir <dossier> gateway/firmware/dry_contact_r4
+    puis copier <dossier>/dry_contact_r4.ino.bin ici et : sha256sum dry_contact_r4.ino > dry_contact_r4.ino.sha256"""
+    recorded = (FIRMWARE / "dry_contact_r4.ino.sha256").read_text().split()
+    assert recorded[1:] == ["dry_contact_r4.ino"]
+    assert hashlib.sha256((FIRMWARE / "dry_contact_r4.ino").read_bytes()).hexdigest() == recorded[0], \
+        "dry_contact_r4.ino modifie sans recompiler dry_contact_r4.ino.bin (cf docstring)"

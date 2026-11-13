@@ -1436,6 +1436,64 @@ Demande du propriétaire du 2026-11-13 (incident du jour, cf. « Pourquoi »). L
 - **Limites** : la cause dans le backend de node1 n'est pas prouvée (logs du conteneur perdus à la recréation, `logging_collector` éteint) ; hypothèse : à la promotion, migrations INV-152 ou empilement de verrous, ou `/health` bloqué. La seconde bascule ne répare pas un cluster dont tous les backends sont bloqués : elle borne la coupure due au CD, l'email appelle un humain. Le retour arrière (`alarm-cd-rollback.sh`) et les redémarrages manuels ne sont pas couverts. Orchestrateur et canary sont posés **à la main** sur NODE3 : réinstaller (`docs/CD_DESIGN.md` §9bis). **Non vérifié sur un vrai Patroni.**
 - **Couverture** : Unit `tests/unit/test_cd_canary_primary.py` (vrai canary ; faux Patroni qui applique les bascules, backend du leader primary un tour de sondes après sa promotion sauf s'il est bloqué, celui de l'ancien leader encore primary pendant ce tour ; faux `ssh` / `docker` / mailer) : bascule puis primary au tour suivant → étape inchangée, events vers le nouveau primary, aucun email ; nouveau leader jamais primary → ses logs sauvés sur sa machine, seconde bascule vers un nœud déjà à jour (ni l'ancien leader ni un nœud encore à redémarrer), primary retrouvé, exit 2, email puis event `switchover/failure`, jamais `start-prod-node` ; toujours aucun primary → deux bascules seulement, exit 2, email, aucun event ; primary perdu au redémarrage d'un replica → seconde bascule, exit 2, pas de `canary_promoted` ; aucun primary avant de redémarrer un replica → exit 3, rien touché ; logs sauvés avant `start-prod-node.sh`, 10 gardés. `tests/unit/test_cd_orchestrate.py` : leader node3 → `7 6 5 4 2 3 1` (`--pending "1"` pour node3), leader node2, node1 ou inconnu → ordre inchangé ; nœud reporté compté dans le `--pending` des canaries suivants. `tests/unit/test_cd_canary_switchover.py` : faux backend primary = celui du leader Patroni (attentes INV-187 inchangées). RED sur les scripts d'origine : les 8 nouveaux tests en échec (le canary redémarrait sans attendre de primary, exit 0 ; ordre et `--pending` inchangés) ; puis 3 de nouveau en échec quand le faux a gardé l'ancien leader primary un tour (attente satisfaite par cette lecture périmée), d'où l'exclusion de l'ancien leader.
 
+### INV-198 [C] ✅ Arduino du contact sec prêt à brancher : programmé automatiquement s'il est muet, n'alarme qu'après avoir lu le contact fermé une fois (2026-11-13)
+Décisions du propriétaire du 2026-11-13. But : brancher un Arduino UNO R4 Minima, neuf ou déjà programmé, sur n'importe quelle machine sur site (INV-182), sans aucun geste, et sans fausse alarme si son contact n'est pas encore câblé. Passerelle `HostDryContactMonitorThread` (`DRY_CONTACT_SOURCE=host`, INV-183, INV-194) ; logique pure `gateway/dry_contact.py` (`flash_due`, `armed_state`).
+- **Identité de l'Arduino** : VID:PID et numéro de série USB du port, lus par `serial.tools.list_ports` sur le chemin réel du port trouvé par la recherche d'INV-183 (`/dev/ttyACM*`). Ce numéro est celui de `/dev/serial/by-id/usb-Arduino_<produit>_<NUMÉRO>-if00` (ex. `33092A0C393131399E1D33354B57336D`) et ne change pas à la programmation (« Santiago » neuf, « UNO R4 Minima » programmé).
+- **Programmation automatique** : elle demande que les trois conditions ci-dessous soient remplies.
+  - **Quel appareil** : un UNO R4 en mode application, USB `2341:0069`. Ou bien, quand aucun port série n'est trouvé, un bootloader DFU `2341:0369` présent sur l'USB (application absente ou corrompue, programmation interrompue) : il est programmé directement. Un autre périphérique série n'est **jamais** programmé (`ttyACM` inconnu, autre Arduino, port sans identifiant USB).
+  - **Muet** : **aucune** ligne `DC:` valide depuis l'ouverture du port, pendant `FLASH_AFTER_SECONDS` = **15 s** (plus que la fenêtre de vivacité de 5 s, INV-194). Un Arduino qui envoie des lignes `DC:` n'est **jamais** reprogrammé, même si son firmware diffère de celui du dépôt : **pas de mise à jour automatique du firmware** (hors périmètre). Un Arduino figé après avoir parlé n'est reprogrammé qu'après une réouverture du port (débranchement, relance de la passerelle).
+  - **Fréquence** : **au plus un essai par 30 min** et par passerelle (`FLASH_RETRY_SECONDS`, en mémoire : une relance de la passerelle autorise un nouvel essai). Après un échec, **jamais** de second `dfu-util`, ni de `-R`, ni de remise à zéro avant 30 min : c'est ce qui a bloqué le bootloader d'un Arduino le 2026-11-13. La limite vaut par passerelle, pas par numéro de série, car en DFU l'Arduino n'a plus de port série, donc plus le même identifiant (une machine = un Arduino).
+- **Étapes** :
+  1. le port est fermé, puis rouvert à **1200 bauds** et refermé : l'UNO R4 redémarre sur son bootloader DFU `2341:0369`, attendu au plus 10 s dans `/sys/bus/usb/devices` ;
+  2. `dfu-util --device ,0x2341:0x0369 -D <firmware> -a0 -Q`, limité à **90 s** (une seule fonction de `modem_gateway.py`, `_dfu_command`) ;
+  3. la recherche reprend comme d'habitude : port cherché toutes les 5 s (INV-183), et l'Arduino reprogrammé est lu à son retour sur l'USB (~6 s).
+- **Prérequis** : sans le `dfu-util` d'Arduino ou sans le firmware sur la machine, l'Arduino n'est **pas touché** : pas de bascule en DFU qui le laisserait sans port série. Le journal le signale en ERROR, et un nouvel essai a lieu 30 min plus tard.
+- **Rapports** : `no_sensor` (INV-194) avant le passage à 1200 bauds, une fois le bootloader trouvé, puis après `dfu-util` ; jamais `open` ni `closed` pendant la programmation.
+- **Journal** : un avertissement au début (numéro de série, firmware). Puis le résultat : succès, ou ERROR avec la cause (bootloader absent, prérequis manquant, code et fin de sortie de `dfu-util`, délai dépassé) et « pas d'autre essai avant 30 min ».
+- **`dfu-util` d'Arduino, pas celui de Debian** : `infra/onsite/install.sh` (donc `alarm-host-sync`, INV-141) installe le fork d'Arduino `dfu-util-0.11-arduino5-linux_amd64.tar.gz` (`downloads.arduino.cc`) en `/usr/local/lib/alarm-gateway/dfu-util`.
+  - **Vérification** : l'archive est épinglée par son SHA-256, vérifiée **avant** extraction et refusée si l'empreinte diffère.
+  - **Idempotence** : l'empreinte installée est notée dans `/usr/local/lib/alarm-gateway/dfu-util.sha256`. Si c'est déjà la bonne, rien n'est retéléchargé.
+  - **Échec** : une ligne « ATTENTION », l'installation continue, et la passerelle ne programme rien (prérequis manquant).
+  - **Pourquoi pas le paquet Debian** : avec `dfu-util` 0.11-3 (essai sur alarm-4 le 2026-11-13), la programmation se termine (« Download done », code 0) mais l'Arduino reste en DFU. Avec `-R`, `dfu-util` s'est bloqué, puis le bootloader aussi, et il a fallu débrancher l'Arduino.
+- **Droits** : la règle udev `infra/onsite/udev/99-alarm-arduino-dfu.rules` (`2341:0369` → groupe `dialout`, `0660`) laisse le user `alarm-gateway` (groupe `dialout`) ouvrir le bootloader DFU. `install.sh` la pose, puis lance `udevadm control --reload-rules`.
+- **Firmware** : `gateway/firmware/dry_contact_r4/dry_contact_r4.ino.bin`, compilé hors des machines et versionné à côté du `.ino`. Commande : `arduino-cli compile --fqbn arduino:renesas_uno:minima --output-dir <dossier> gateway/firmware/dry_contact_r4`, cœur `arduino:renesas_uno` 1.6.0.
+  - **Empreinte** : `dry_contact_r4.ino.sha256` (format `sha256sum`) est l'empreinte du `.ino` dont il est issu. Un test unitaire échoue si le `.ino` change sans recompilation.
+  - **Livraison** : il part avec le code gateway, par l'image `alarm-gateway` (`/gateway/firmware/dry_contact_r4/`), par `alarm-gateway-sync` (copie, sauvegarde et restauration comme `voice/`) et par `install.sh` au premier passage. Sur la machine, il est en `/opt/alarm-gateway/firmware/dry_contact_r4/dry_contact_r4.ino.bin`, au même chemin relatif que dans le dépôt.
+- **Armement** : un Arduino (identifié par son numéro de série USB) n'alarme qu'**après avoir lu le contact fermé au moins une fois**.
+  - **Non armé** : une lecture `open` est rapportée **`no_sensor`** (« pas de contact lisible », INV-194). INV-195 envoie alors son email si le site n'a pas d'autre contact lisible. Le journal porte **un** avertissement par épisode : « Arduino <numéro> pas encore armé : contact lu ouvert, jamais vu fermé ». L'épisode dure jusqu'à la première lecture fermée ou jusqu'à la perte du port.
+  - **Armement** : à la première lecture `closed`, l'Arduino est armé (une ligne INFO) et rapporte `closed`. Armé, il rapporte `open` tel quel, et l'alarme part (INV-120).
+  - **Persistance** : `/var/lib/alarm-gateway/armed-arduinos`, un numéro par ligne, écrit de façon atomique (fichier temporaire puis renommage). Le dossier vient de `StateDirectory=alarm-gateway` dans l'unit `alarm-sms-gateway`, propriétaire `alarm-gateway` (pas `/var/lib/alarm/cd`, cf. INV-141). Un Arduino armé le reste après une relance de la passerelle, un redémarrage ou un débranchement : un contact ouvert alarme **aussitôt**.
+  - **Désarmement** : jamais automatique. Pour désarmer un Arduino : retirer sa ligne du fichier, puis relancer la passerelle.
+  - **Écriture impossible** : une ERROR dans le journal ; l'Arduino reste armé en mémoire jusqu'à la relance.
+  - **Numéro de série inconnu** (port imposé par `DRY_CONTACT_HOST_PORT` absent de `list_ports`, adaptateur sans numéro) : comportement d'avant cet invariant, sans armement. `open` est rapporté tel quel (fail-to-alarm, INV-122), et la ligne d'ouverture du port signale le numéro inconnu. Pourquoi : sans numéro, rien ne peut être retenu d'une relance à l'autre. Rapporter `no_sensor` rendrait ce contact aveugle après chaque redémarrage, alors que l'UNO R4 a toujours un numéro.
+- **Déploiement** : le 2026-11-13, les deux Arduinos en service (alarm-1, alarm-4) lisent fermé ; ils s'arment donc à leur première lecture. Un Arduino qui lirait ouvert au déploiement n'alarmerait qu'après une première lecture fermée.
+- **Limites** :
+  - un contact ouvert ou un fil coupé **avant** la toute première lecture fermée n'alarme pas (choix du propriétaire) ;
+  - un bootloader qui ne répond plus du tout (erreur USB) demande un débranchement : la passerelle le retente au plus toutes les 30 min, 90 s au plus à chaque fois ;
+  - deux Arduinos sur une même machine ne sont pas prévus (un seul port lu, INV-183).
+- **Pourquoi** :
+  - le 2026-11-12, un Arduino neuf branché sur alarm-2 ne donnait que `no_sensor` (INV-194) : il fallait le programmer à la main sur la machine avec `arduino-cli` ;
+  - un Arduino branché avant le câblage de son contact lit « ouvert », c'est-à-dire une alarme réelle, avec appels.
+- **Couverture** :
+  - **Unit `tests/unit/test_dry_contact_host.py`** :
+    - `flash_due` : déclenché à 15 s, pas à 14,9 s ; seulement `2341:0069`, ou le bootloader `2341:0369` ; jamais un Arduino qui a parlé ; 30 min entre deux essais, bootloader compris ;
+    - `armed_state` : fermé → armé ; ouvert non armé → `no_sensor` ; armé → `open` ; armement par numéro ; numéro inconnu → comme avant ;
+    - `.ino` identique à son empreinte notée.
+  - **Unit `tests/unit/test_gateway_plug_anywhere.py`** (vrai `HostDryContactMonitorThread`, avec un faux Arduino : port série, `list_ports`, `/sys/bus/usb/devices`, `dfu-util`) :
+    - Arduino neuf muet → passage à 1200 bauds 15 s après l'ouverture, `dfu-util` avec le firmware et un `timeout` ≤ 90 s, `no_sensor` sans trou de plus de 5 s, puis `closed` ;
+    - bootloader seul → programmé sans passage à 1200 bauds ;
+    - autre périphérique muet, ou Arduino qui parle → jamais touché ;
+    - `dfu-util` en échec et Arduino resté en DFU → une ERROR avec le code, aucun second `dfu-util` avant 30 min, puis un seul ;
+    - sans `dfu-util` → Arduino pas touché, une ERROR ;
+    - ouvert avant d'être fermé → `no_sensor` et un seul avertissement, puis `closed`, puis `open` ;
+    - après une relance → `open` dès la première lecture ;
+    - sans numéro de série → `open`, comme avant ;
+    - le firmware est là où la passerelle le lit, et le fichier d'armement est sous le `StateDirectory` de l'unit.
+  - **Smoke CI `cd-install-smoke.yml`** :
+    - `install.sh` sur un vrai runner : `dfu-util` d'Arduino téléchargé, empreinte vérifiée, exécutable, rien de retéléchargé au 2e passage ; règle udev posée et validée par `udevadm verify` ; firmware dans `/opt/alarm-gateway` ; `/var/lib/alarm-gateway` appartient à `alarm-gateway` ;
+    - `alarm-gateway-sync` : firmware déployé depuis l'image.
+  - **Non vérifié par les tests sur un vrai Arduino** : seule la commande `dfu-util` a été validée à la main (alarm-4, 2026-11-13).
+
 ---
 
 ## 10. Observabilité et audit
@@ -1572,6 +1630,7 @@ diffère.
   fonctionnel même quand le modem drop du bus USB (récurrent). Détection de vie : µC
   muet > `DRY_CONTACT_LIVENESS_SECONDS` (5 s) → `no_sensor` (INV-194 ; avant le 2026-11-12 : arrêt du report).
   Lu même sans modem, Arduino branchable à chaud sur n'importe quelle machine sur site (INV-182, INV-183).
+  Arduino neuf (muet) programmé par la passerelle ; alarme seulement après un contact lu fermé une fois (INV-198).
   Validé bout-en-bout 2026-06-18 (Modbus PLC bit 101 → contact → Arduino → gateway →
   alarme créée + auto-résolution).
 
