@@ -5,7 +5,9 @@ Tier 2 integration : multi-site Izeron / Beaufort, suite d'INV-155/156.
   sec site par site. Beaufort ouvert + Izeron ferme n'est pas un desaccord ; la
   fermeture d'un site ne resout que l'alarme de ce site.
 - INV-158 : etat du modem par passerelle (`gateway_id`, site), regles d'INV-129 pour
-  chaque passerelle ; passerelle sans `gateway_id` -> `legacy`.
+  chaque passerelle ; passerelle sans `gateway_id` -> `legacy`. Amende 2026-11-13 : `sites`,
+  un resume par site pour l'en-tete web (meilleur modem + compteur ok/total, modem
+  debranche au-dela de 24 h sans rapport).
 - INV-160 : la reponse « 1 » par SMS acquitte l'alarme du site du dernier SMS envoye a
   ce numero ; l'autre site continue. Repli : premiere alarme en cours notifiee.
 - INV-155 (reste) : le push d'alarme porte le site (`data["site"]`).
@@ -187,7 +189,7 @@ def test_gateway_without_gateway_id_is_legacy(setup):
     client, _, user1_h, _ = setup
     assert _modem_status(client, user1_h) == {
         "gateway_id": None, "site": None, "state": "unknown", "bars": 0, "tech": None,
-        "rsrp": None, "updated_at": None, "gateways": []}
+        "rsrp": None, "updated_at": None, "gateways": [], "sites": []}
 
     _modem(client, **LTE)  # passerelle d'avant INV-155 : ni gateway_id ni site
     gws = _modem_status(client, user1_h)["gateways"]
@@ -201,6 +203,46 @@ def test_gateway_without_gateway_id_is_legacy(setup):
     _advance(client, 181)
     body = _modem_status(client, user1_h)
     assert (body["gateways"], body["state"]) == ([], "unknown"), body
+
+
+def _sites(body):
+    return [(s["site"], s["state"], s["bars"], s["ok"], s["total"], [g["gateway_id"] for g in s["gateways"]])
+            for s in body["sites"]]
+
+
+def test_header_sites_best_modem_and_counter(setup):
+    """Cas du 2026-11-13 : alarm-2 et alarm-4 (modems de test) muets depuis plus de 24 h ;
+    alarm-1 (Beaufort), alarm-3 et onsite-2 (Izeron) rapportent."""
+    client, _, user1_h, _ = setup
+    _modem(client, gateway_id="alarm-2", site="beaufort", **LTE)
+    _modem(client, gateway_id="alarm-4", site="izeron", **LTE)
+    _advance(client, 24 * 3600 + 1)
+    _modem(client, gateway_id="onsite-2", site="izeron", **LTE)
+    _advance(client, 200)  # onsite-2 muet depuis 200 s : inconnu, toujours compte
+    _modem(client, gateway_id="alarm-1", site="beaufort", **NO_NET)
+    _modem(client, gateway_id="alarm-3", site="izeron", registered=True, tech="LTE", rsrp=-110.0, csq=12)
+
+    body = _modem_status(client, user1_h)
+    assert _sites(body) == [("beaufort", "no_network", 0, 0, 1, ["alarm-1"]),
+                            ("izeron", "ok", 2, 1, 2, ["alarm-3", "onsite-2"])], body["sites"]
+    izeron = body["sites"][1]
+    assert (izeron["tech"], izeron["rsrp"]) == ("LTE", -110.0)
+    assert izeron["gateways"] == [g for g in body["gateways"] if g["gateway_id"] in ("alarm-3", "onsite-2")]
+    # Inchanges (app Android) : toutes les passerelles, premier niveau = la plus mal en point
+    assert [g["gateway_id"] for g in body["gateways"]] == ["alarm-1", "alarm-2", "alarm-3", "alarm-4", "onsite-2"]
+    assert (body["gateway_id"], body["state"]) == ("alarm-1", "no_network")
+
+
+def test_silent_modem_counted_until_unplugged_after_24h(setup):
+    client, _, user1_h, _ = setup
+    _modem(client, gateway_id="alarm-2", site="beaufort", **LTE)
+    _advance(client, 24 * 3600 - 60)  # horloge reelle + decalage : 24 h pile, voir le test unitaire
+    assert _sites(_modem_status(client, user1_h)) == [("beaufort", "unknown", 0, 0, 1, ["alarm-2"])]
+
+    _advance(client, 61)  # plus de 24 h : debranche
+    body = _modem_status(client, user1_h)
+    assert body["sites"] == [], body["sites"]
+    assert [(g["gateway_id"], g["state"]) for g in body["gateways"]] == [("alarm-2", "unknown")]
 
 
 # ── INV-160 : reponse SMS « 1 » -> alarme du dernier SMS recu ──────────────

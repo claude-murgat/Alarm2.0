@@ -154,10 +154,11 @@
         .esc-ctrl button:hover { color: #e2e8f0; }
         .esc-ctrl .esc-remove { color: #ef4444; font-size: 1.2em; }
         .no-phone-badge, .test-badge { white-space: nowrap; }
-        /* INV-129 : signal 4G du modem gateway (4 barres, animees) ; INV-158 : un par passerelle */
+        /* INV-129 : signal 4G du modem gateway (4 barres, animees) ; INV-158 : un par site */
         .modem-signals { display: inline-flex; align-items: flex-end; gap: 10px; }
         .modem-signal { display: inline-flex; align-items: flex-end; gap: 2px; height: 20px; cursor: help; }
         .modem-signal b { font-size: 0.7rem; font-weight: normal; color: #94a3b8; margin-right: 2px; align-self: center; }
+        .modem-signal i + b { margin: 0 0 0 4px; }  /* compteur ok/total apres les barres */
         .modem-signal i { width: 5px; border-radius: 1px; background: #475569; transition: background 0.4s; }
         .modem-signal i:nth-of-type(1) { height: 25%; } .modem-signal i:nth-of-type(2) { height: 50%; }
         .modem-signal i:nth-of-type(3) { height: 75%; } .modem-signal i:nth-of-type(4) { height: 100%; }
@@ -1746,20 +1747,26 @@
         }
 
         // INV-129 : barres de signal du modem gateway (canal SMS/appel de secours) ; memes barres dans l'onglet Cluster (INV-192)
-        // INV-158 : un indicateur par passerelle, nomme par son site ; aucune -> un seul « inconnu »
+        // INV-158 : un indicateur par site (barres du meilleur modem, compteur ok/total, detail par machine au survol) ;
+        // aucun site -> un seul « inconnu »
         const modemLabel = g => g.state === 'no_network' ? 'Modem sans réseau : SMS et appels de secours impossibles'
             : g.state === 'unknown' ? 'Signal du modem inconnu (passerelle sans nouvelles)'
             : `Signal ${g.tech || ''} du modem : ${g.bars}/4` + (g.rsrp != null ? ` (${g.rsrp} dBm)` : '');
-        const modemBars = (g, label, attrs = '', inner = '') => `<span class="modem-signal"${attrs}`
+        const modemDetail = g => g.state === 'no_network' ? 'sans réseau'
+            : g.state === 'unknown' ? `inconnu depuis ${hhmm(parseUtc(g.updated_at))}`
+            : [g.tech, g.rsrp != null ? `${g.rsrp} dBm` : ''].filter(Boolean).join(' ') || `signal ${g.bars}/4`;
+        const modemBars = (g, label, attrs = '', inner = '', after = '') => `<span class="modem-signal"${attrs}`
             + ` data-state="${escHtml(g.state)}" data-bars="${g.bars}" role="img" title="${escHtml(label)}" aria-label="${escHtml(label)}">`
-            + inner + [0, 1, 2, 3].map(i => `<i${i < g.bars ? ' class="on"' : ''}></i>`).join('') + '</span>';
+            + inner + [0, 1, 2, 3].map(i => `<i${i < g.bars ? ' class="on"' : ''}></i>`).join('') + after + '</span>';
         async function loadModemSignal() {
             try {
                 const m = await api('/api/system/modem-status');
-                document.getElementById('modemSignal').innerHTML = (m.gateways?.length ? m.gateways : [m]).map(g =>
-                    modemBars(g, (g.site ? `${siteName(g.site)} (${g.gateway_id}) : ` : '') + modemLabel(g),
-                        ` data-site="${escHtml(g.site || '')}" data-gateway="${escHtml(g.gateway_id || '')}"`,
-                        g.site ? `<b>${escHtml(siteName(g.site))}</b>` : '')).join('');
+                document.getElementById('modemSignal').innerHTML = m.sites?.length ? m.sites.map(s => {
+                    const count = `${s.ok}/${s.total}`;
+                    return modemBars(s, `${siteName(s.site)} ${count} : ` + s.gateways.map(g => `${g.gateway_id} : ${modemDetail(g)}`).join(' ; '),
+                        ` data-site="${escHtml(s.site)}" data-ok="${s.ok}" data-total="${s.total}"`,
+                        `<b>${escHtml(siteName(s.site))}</b>`, `<b>${count}</b>`);
+                }).join('') : modemBars(m, modemLabel(m));
             } catch (e) {}
         }
 

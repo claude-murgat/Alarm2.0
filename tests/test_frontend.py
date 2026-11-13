@@ -1180,34 +1180,86 @@ class TestConnectivityTab:
 
 # ---------------------------------------------------------------------------
 # INV-129 : indicateur de signal 4G du modem gateway (en-tete)
-# INV-158 : un indicateur par passerelle, nomme par son site
+# INV-158 (amende 2026-11-13) : un indicateur par site, meilleur modem + compteur ok/total
 # ---------------------------------------------------------------------------
 
+def _modem_gw(gateway_id, site, state, bars, tech=None, rsrp=None, updated_at="2026-11-13T14:44:00"):
+    return {"gateway_id": gateway_id, "site": site, "state": state, "bars": bars, "tech": tech, "rsrp": rsrp,
+            "updated_at": updated_at}
+
+
 class TestModemSignalIndicator:
+    """/api/system/modem-status simule (page.route) pour les cas de site ; navigateur a Paris (INV-130).
+    Le dernier test passe par un vrai rapport de passerelle."""
 
     GATEWAY_HEADERS = {"X-Gateway-Key": os.getenv("GATEWAY_KEY", "changeme-in-prod")}
+    BEAUFORT = [_modem_gw("alarm-1", "beaufort", "ok", 4, "LTE", -85.0), _modem_gw("alarm-2", "beaufort", "ok", 3, "LTE", -95.0)]
+    IZERON = [_modem_gw("alarm-3", "izeron", "ok", 2, "LTE", -110.0), _modem_gw("onsite-2", "izeron", "unknown", 0)]
+    STALE = _modem_gw("alarm-4", "izeron", "unknown", 0, updated_at="2026-11-12T15:38:00")
+    BODY = {**IZERON[1], "gateways": BEAUFORT + IZERON[:1] + [STALE] + IZERON[1:], "sites": [
+        {"site": "beaufort", "state": "ok", "bars": 4, "tech": "LTE", "rsrp": -85.0, "ok": 2, "total": 2, "gateways": BEAUFORT},
+        {"site": "izeron", "state": "ok", "bars": 2, "tech": "LTE", "rsrp": -110.0, "ok": 1, "total": 2, "gateways": IZERON}]}
 
-    def _report(self, primary_url, **status):
-        r = requests.post(f"{primary_url}/internal/alarms/modem-status",
-                          json=status, headers=self.GATEWAY_HEADERS, timeout=5)
+    def _open(self, browser, primary_url, body):
+        ctx = browser.new_context(timezone_id="Europe/Paris", locale="fr-FR")
+        page = ctx.new_page()
+        page.route("**/api/system/modem-status", lambda route: route.fulfill(json=body))
+        _login(page, primary_url)
+        return ctx, page.locator("#modemSignal .modem-signal")
+
+    def test_one_indicator_per_site_best_modem_and_counter(self, browser, primary_url):
+        ctx, icons = self._open(browser, primary_url, self.BODY)
+        try:
+            expect(icons).to_have_count(2, timeout=8000)
+            beaufort, izeron = icons.nth(0), icons.nth(1)
+            for icon, site, bars, ok in ((beaufort, "beaufort", 4, 2), (izeron, "izeron", 2, 1)):
+                expect(icon).to_have_attribute("data-site", site)
+                expect(icon).to_have_attribute("data-state", "ok")
+                expect(icon).to_have_attribute("data-bars", str(bars))
+                expect(icon).to_have_attribute("data-ok", str(ok))
+                expect(icon).to_have_attribute("data-total", "2")
+                expect(icon.locator("i.on")).to_have_count(bars)
+            expect(beaufort.locator("b")).to_have_text(["Beaufort", "2/2"])
+            expect(izeron.locator("b")).to_have_text(["Izeron", "1/2"])
+            detail = "Izeron 1/2 : alarm-3 : LTE -110 dBm ; onsite-2 : inconnu depuis 15:44"
+            expect(izeron).to_have_attribute("title", detail)
+            expect(izeron).to_have_attribute("aria-label", detail)
+            expect(beaufort).to_have_attribute("title", "Beaufort 2/2 : alarm-1 : LTE -85 dBm ; alarm-2 : LTE -95 dBm")
+        finally:
+            ctx.close()
+
+    def test_no_network_site_and_detail_without_rsrp(self, browser, primary_url):
+        gws = [_modem_gw("alarm-1", "beaufort", "no_network", 0), _modem_gw("alarm-2", "beaufort", "ok", 1, "WCDMA")]
+        nets = [_modem_gw("alarm-3", "izeron", "ok", 3)]
+        body = {**gws[0], "gateways": gws + nets, "sites": [
+            {"site": "beaufort", "state": "ok", "bars": 1, "tech": "WCDMA", "rsrp": None, "ok": 1, "total": 2, "gateways": gws},
+            {"site": "izeron", "state": "ok", "bars": 3, "tech": None, "rsrp": None, "ok": 1, "total": 1, "gateways": nets}]}
+        ctx, icons = self._open(browser, primary_url, body)
+        try:
+            expect(icons.nth(0)).to_have_attribute("title", "Beaufort 1/2 : alarm-1 : sans réseau ; alarm-2 : WCDMA", timeout=8000)
+            expect(icons.nth(1)).to_have_attribute("title", "Izeron 1/1 : alarm-3 : signal 3/4")
+        finally:
+            ctx.close()
+
+    def test_no_site_counted_shows_a_single_unknown(self, browser, primary_url):
+        body = {**self.STALE, "gateways": [self.STALE], "sites": []}
+        ctx, icons = self._open(browser, primary_url, body)
+        try:
+            expect(icons).to_have_count(1, timeout=8000)
+            expect(icons).to_have_attribute("data-state", "unknown")
+            expect(icons).to_have_attribute("data-bars", "0")
+            expect(icons.locator("b")).to_have_count(0)  # ni site ni compteur
+        finally:
+            ctx.close()
+
+    def test_real_gateway_report_shows_in_its_site(self, dashboard: Page, primary_url):
+        r = requests.post(f"{primary_url}/internal/alarms/modem-status", headers=self.GATEWAY_HEADERS, timeout=5,
+                          json={"gateway_id": "e2e-izeron", "site": "izeron", "registered": True, "tech": "LTE",
+                                "rsrp": -115.7, "csq": 15})
         assert r.status_code == 200, r.text
-
-    def test_shows_bars_from_gateway_report(self, dashboard: Page, primary_url):
-        self._report(primary_url, gateway_id="e2e-izeron", site="izeron",
-                     registered=True, tech="LTE", rsrp=-115.7, csq=15)
-        icon = dashboard.locator('#modemSignal .modem-signal[data-gateway="e2e-izeron"]')
-        expect(icon).to_have_attribute("data-state", "ok", timeout=8000)
-        expect(icon).to_have_attribute("data-bars", "1")
-        expect(icon).to_have_attribute("data-site", "izeron")
-        expect(icon).to_have_attribute("title", re.compile(r"Izeron.*-115\.7 dBm"))
-
-    def test_no_network_is_flagged(self, dashboard: Page, primary_url):
-        self._report(primary_url, gateway_id="e2e-beaufort", site="beaufort",
-                     registered=False, tech=None, rsrp=None, csq=0)
-        icon = dashboard.locator('#modemSignal .modem-signal[data-gateway="e2e-beaufort"]')
-        expect(icon).to_have_attribute("data-state", "no_network", timeout=8000)
-        expect(icon).to_have_attribute("data-bars", "0")
-        expect(icon).to_contain_text("Beaufort")
+        icon = dashboard.locator('#modemSignal .modem-signal[data-site="izeron"]')
+        expect(icon).to_have_attribute("title", re.compile(r"^Izeron \d+/\d+ : .*e2e-izeron : LTE -115\.7 dBm"), timeout=8000)
+        expect(icon).to_have_attribute("data-state", "ok")
 
 
 # ---------------------------------------------------------------------------
