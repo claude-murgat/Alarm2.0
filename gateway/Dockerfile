@@ -6,4 +6,6 @@ FROM busybox:1.36.1
 COPY *.py requirements.txt /gateway/
 # Messages vocaux des appels d'alarme (INV-132/133), generes par scripts/generate-gateway-voice.py
 COPY voice/*.wav /gateway/voice/
+# Firmware de l'Arduino du contact sec, programme par la passerelle (INV-198)
+COPY firmware/dry_contact_r4/dry_contact_r4.ino.bin /gateway/firmware/dry_contact_r4/
 CMD ["true"]

@@ -70,3 +70,39 @@ def decide_report(
     if now - latest_ts > liveness:
         return None
     return raw_to_state(latest_raw, normal_value)
+
+
+# INV-198 : Arduino UNO R4 Minima, application et bootloader DFU (USB VID, PID)
+R4_APP_USB_ID = (0x2341, 0x0069)
+R4_DFU_USB_ID = (0x2341, 0x0369)
+FLASH_AFTER_SECONDS = 15.0  # muet depuis l'ouverture du port (> DRY_CONTACT_LIVENESS_SECONDS)
+FLASH_RETRY_SECONDS = 30 * 60.0
+
+
+def flash_due(usb_id, seen_dc: bool, open_for: float, last_attempt: float | None, now: float) -> bool:
+    """INV-198 : programmer l'Arduino avec le firmware du dépôt ?
+
+    - au plus un essai par `FLASH_RETRY_SECONDS` et par passerelle : jamais de second dfu-util sur un
+      bootloader qui vient d'échouer (le 2026-11-13, les essais enchaînés l'ont bloqué) ;
+    - bootloader DFU seul, sans port série (application absente ou corrompue) : oui ;
+    - sinon seulement un UNO R4 (`usb_id` = (VID, PID) du port) resté sans ligne `DC:` valide pendant
+      `FLASH_AFTER_SECONDS` après l'ouverture du port : un Arduino qui parle n'est jamais reprogrammé.
+    """
+    if last_attempt is not None and now - last_attempt < FLASH_RETRY_SECONDS:
+        return False
+    if usb_id == R4_DFU_USB_ID:
+        return True
+    return usb_id == R4_APP_USB_ID and not seen_dc and open_for >= FLASH_AFTER_SECONDS
+
+
+def armed_state(state: str, serial: str | None, armed: set) -> tuple[str, bool]:
+    """INV-198 : (état à rapporter, armer l'Arduino maintenant ?) pour un état lu `closed` | `open`.
+
+    Un Arduino (numéro de série USB) n'alarme qu'après avoir lu le contact fermé une fois : branché avant le
+    câblage de son contact, il lit « ouvert » et rapporte `no_sensor` (pas de contact lisible, INV-194).
+    Numéro inconnu : rien à retenir d'une relance à l'autre, état rapporté tel quel (fail-to-alarm)."""
+    if serial is None or serial in armed:
+        return state, False
+    if state == "open":
+        return "no_sensor", False
+    return state, True

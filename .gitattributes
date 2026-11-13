@@ -41,4 +41,5 @@ docker-compose*   text eol=lf
 *.gz    binary
 *.apk   binary
 *.aab   binary
+*.bin   binary
 *.pem   binary

@@ -16,6 +16,7 @@ import argparse
 import glob
 import logging
 import os
+import subprocess
 import threading
 import time
 import wave
@@ -31,7 +32,7 @@ from config import (
     DRY_CONTACT_ENABLED, DRY_CONTACT_GPIO_PIN,
     DRY_CONTACT_NORMAL_VALUE, DRY_CONTACT_POLL_SECONDS,
     DRY_CONTACT_SOURCE, DRY_CONTACT_HOST_PORT, DRY_CONTACT_HOST_BAUD,
-    DRY_CONTACT_LIVENESS_SECONDS,
+    DRY_CONTACT_LIVENESS_SECONDS, DRY_CONTACT_ARMED_FILE,
 )
 from modem_detect import KNOWN_VIDS, detect_modem_port, send_at_command
 from modem_health import probe_order, probe_timeout  # INV-174
@@ -40,6 +41,7 @@ from modem_health import LOG_REPEAT_SECONDS, repeat_log_due  # INV-183 (revue F5
 from config import PRIMARY_PROBE_TIMEOUT_SECONDS  # INV-174
 from locks import at_lock  # RLock reentrant partage du port AT (cf locks.py)
 from dry_contact import parse_dc_line, raw_to_state, decide_report  # logique pure (cf dry_contact.py)
+from dry_contact import FLASH_RETRY_SECONDS, R4_DFU_USB_ID, armed_state, flash_due  # INV-198
 from gsm7 import to_gsm7  # INV-124 : texte du SMS en alphabet GSM (logique pure, cf gsm7.py)
 from modem_health import (  # logique pure (cf modem_health.py)
     MAX_AT_FAILURES, MODEM_REBOOT_WAIT_S, at_failures_after, backends_down, call_was_dialed,
@@ -822,6 +824,64 @@ class DryContactMonitorThread(threading.Thread):
         _report_dry_contact_state(self.gateway_id, state)
 
 
+# INV-198 : programmation de l'Arduino par son bootloader DFU avec le dfu-util d'ARDUINO (0.11-arduino5, pose par
+# infra/onsite/install.sh) : avec celui de Debian, l'UNO R4 reste en DFU apres la programmation (alarm-4, 2026-11-13).
+DFU_UTIL = "/usr/local/lib/alarm-gateway/dfu-util"
+FIRMWARE_BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "firmware", "dry_contact_r4", "dry_contact_r4.ino.bin")
+USB_DEVICES = "/sys/bus/usb/devices"
+
+
+def _dfu_command() -> list[str]:
+    """INV-198 : la seule commande de programmation (validee sur alarm-4 le 2026-11-13). Jamais de -R."""
+    return [DFU_UTIL, "--device", ",0x2341:0x0369", "-D", FIRMWARE_BIN, "-a0", "-Q"]
+
+
+def _usb_present(usb_id: tuple[int, int]) -> bool:
+    """INV-198 : peripherique USB (VID, PID) branche ? Par sysfs : le bootloader DFU n'a pas de port serie."""
+    want = [f"{n:04x}" for n in usb_id]
+    for dev in glob.glob(os.path.join(USB_DEVICES, "*")):
+        try:
+            with open(os.path.join(dev, "idVendor")) as v, open(os.path.join(dev, "idProduct")) as p:
+                if [v.read().strip(), p.read().strip()] == want:
+                    return True
+        except OSError:
+            continue  # interface USB (sans idVendor) ou peripherique parti entre-temps
+    return False
+
+
+def _usb_info(port: str):
+    """INV-198 : ((VID, PID), numero de serie) du port par list_ports ; (None, None) s'il n'y figure pas."""
+    real = os.path.realpath(port)
+    for p in list_ports.comports():
+        if os.path.realpath(p.device) == real:
+            return (p.vid, p.pid), p.serial_number
+    return None, None
+
+
+def _load_armed(path: str) -> set[str]:
+    """INV-198 : numeros de serie des Arduinos armes (un par ligne)."""
+    try:
+        with open(path) as f:
+            return {line.strip() for line in f if line.strip()}
+    except FileNotFoundError:
+        return set()
+    except OSError as e:  # sans lui, un Arduino arme rapporterait no_sensor sur contact ouvert : le dire
+        logger.error(f"HostDryContact : {path} illisible ({e}) : Arduinos armes oublies jusqu'a leur "
+                     f"prochaine lecture fermee (INV-198)")
+        return set()
+
+
+def _save_armed(path: str, armed: set[str]):
+    """INV-198 : ecriture atomique (fichier temporaire puis renommage)."""
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as f:
+        f.write("".join(f"{s}\n" for s in sorted(armed)))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 class HostDryContactMonitorThread(threading.Thread):
     """INV-120 V2 — contact sec lu sur un microcontrôleur USB (Arduino), PAS le
     modem. Découple le contact-sec du SIM7600 : il marche même modem HS (le
@@ -837,6 +897,8 @@ class HostDryContactMonitorThread(threading.Thread):
     par absence, nouvelle recherche toutes les 5 s, reprise seule au rebranchement.
     INV-194 : sans état lisible (µC absent, débranché ou muet), `no_sensor` à la même
     cadence : la passerelle reste vivante (INV-172) sans peser sur le contact sec du site.
+    INV-198 : un UNO R4 muet (ou son bootloader seul) est programmé avec le firmware du dépôt ;
+    un Arduino n'alarme qu'après avoir lu le contact fermé une fois (armement persistant).
     """
 
     def __init__(
@@ -858,6 +920,9 @@ class HostDryContactMonitorThread(threading.Thread):
         self.running = True
         self._last_logged_state: str | None = None
         self._absent_logged = False  # INV-183 : un avertissement par absence du µC
+        self._armed_file = DRY_CONTACT_ARMED_FILE  # INV-198
+        self._armed = _load_armed(self._armed_file)
+        self._last_flash: float | None = None  # INV-198 : au plus un essai par 30 min, par passerelle
 
     def _resolve_port(self) -> str | None:
         """Port explicite, sinon auto-détect (by-id Arduino puis ttyACM*)."""
@@ -883,6 +948,11 @@ class HostDryContactMonitorThread(threading.Thread):
             port = self._resolve_port()
             try:
                 if not port:
+                    # INV-198 : bootloader DFU seul (application absente ou corrompue) -> programme directement
+                    if _usb_present(R4_DFU_USB_ID) and flash_due(
+                            R4_DFU_USB_ID, False, 0.0, self._last_flash, time.monotonic()):
+                        self._flash(None, None)
+                        continue
                     raise OSError("aucun port µC USB trouve (Arduino debranche ?)")
                 self._serve(port)
             except Exception as e:
@@ -894,12 +964,15 @@ class HostDryContactMonitorThread(threading.Thread):
                 time.sleep(5.0)
 
     def _serve(self, port: str):
+        usb_id, serial_no = _usb_info(port)  # INV-198
         latest_raw: int | None = None
         latest_ts = 0.0
         last_post = 0.0
-        silent_warned = False
+        silent_warned = unarmed_warned = flash = False
+        opened = time.monotonic()
         with serial.Serial(port, self.baud, timeout=1.0) as ser:
-            logger.info(f"HostDryContact : {port} ouvert @{self.baud}")
+            who = f"Arduino {serial_no}" if serial_no else "numero de serie USB inconnu : pas d'armement (INV-198)"
+            logger.info(f"HostDryContact : {port} ouvert @{self.baud} ({who})")
             self._absent_logged = False
             while self.running:
                 raw_line = ser.readline().decode(errors="replace")
@@ -925,8 +998,23 @@ class HostDryContactMonitorThread(threading.Thread):
                         silent_warned = True
                         self._last_logged_state = None  # recovery sera reloguee
                     _report_dry_contact_state(self.gateway_id, "no_sensor")
+                    if flash_due(usb_id, latest_raw is not None, now - opened, self._last_flash, now):
+                        flash = True  # INV-198 : UNO R4 muet depuis l'ouverture du port
+                        break
                     continue
                 silent_warned = False
+
+                state, arm = armed_state(state, serial_no, self._armed)  # INV-198
+                if arm:
+                    self._arm(serial_no)
+                if state == "no_sensor":  # ouvert, jamais vu ferme
+                    if not unarmed_warned:
+                        logger.warning(f"HostDryContact ({self.gateway_id}) : Arduino {serial_no} pas encore armé : "
+                                       f"contact lu ouvert, jamais vu fermé — rapporte no_sensor (INV-198)")
+                        unarmed_warned = True
+                        self._last_logged_state = None
+                    _report_dry_contact_state(self.gateway_id, "no_sensor")
+                    continue
 
                 if state != self._last_logged_state:
                     if self._last_logged_state is None:
@@ -940,6 +1028,48 @@ class HostDryContactMonitorThread(threading.Thread):
                         )
                     self._last_logged_state = state
                 _report_dry_contact_state(self.gateway_id, state)
+        if flash:  # port ferme d'abord
+            self._flash(port, serial_no)
+
+    def _arm(self, serial_no: str):
+        """INV-198 : contact lu ferme une fois -> l'Arduino alarmera sur contact ouvert, y compris apres relance."""
+        self._armed.add(serial_no)
+        try:
+            _save_armed(self._armed_file, self._armed)
+            logger.info(f"HostDryContact : Arduino {serial_no} arme (contact lu ferme) : "
+                        f"un contact ouvert declenchera l'alarme (INV-198)")
+        except OSError as e:
+            logger.error(f"HostDryContact : Arduino {serial_no} arme en memoire seulement, {self._armed_file} "
+                         f"non ecrit ({e}) : apres relance, contact ouvert = no_sensor jusqu'a une lecture fermee")
+
+    def _flash(self, port: str | None, serial_no: str | None):
+        """INV-198 : programme l'UNO R4 avec le firmware du depot par son bootloader DFU. `port` : port serie de
+        l'application muette, basculee en DFU a 1200 bauds ; None : deja en DFU, sans port serie.
+        Un seul dfu-util par essai, sans -R ni remise a zero : le suivant attend FLASH_RETRY_SECONDS."""
+        self._last_flash = time.monotonic()
+        who = f"Arduino {serial_no} ({port})" if port else "Arduino en DFU sans port serie"
+        logger.warning(f"HostDryContact : {who} muet : programmation avec {FIRMWARE_BIN} (INV-198)")
+        try:
+            if not (os.path.isfile(FIRMWARE_BIN) and os.access(DFU_UTIL, os.X_OK)):
+                raise OSError(f"{DFU_UTIL} (dfu-util d'Arduino, pose par install.sh) ou {FIRMWARE_BIN} absent : "
+                              f"Arduino non touche")
+            if port:
+                serial.Serial(port, 1200).close()  # 1200 bauds : l'UNO R4 redemarre sur son bootloader DFU
+                for _ in range(10):
+                    time.sleep(1.0)
+                    if _usb_present(R4_DFU_USB_ID):
+                        break
+                else:
+                    raise OSError("bootloader DFU 2341:0369 absent 10 s apres le passage a 1200 bauds")
+                _report_dry_contact_state(self.gateway_id, "no_sensor")
+            r = subprocess.run(_dfu_command(), capture_output=True, text=True, timeout=90)
+            if r.returncode != 0:
+                raise OSError(f"dfu-util code {r.returncode} : {(r.stdout + r.stderr).strip()[-300:]}")
+            logger.warning(f"HostDryContact : {who} programme ; lu des son retour sur l'USB (~6 s)")
+        except Exception as e:
+            logger.error(f"HostDryContact : programmation ({who}) en echec : {e} ; pas d'autre essai avant "
+                         f"{FLASH_RETRY_SECONDS / 60:.0f} min (INV-198)")
+        _report_dry_contact_state(self.gateway_id, "no_sensor")
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
