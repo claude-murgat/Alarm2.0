@@ -42,6 +42,7 @@ on:
       - 'infra/onsite/systemd/alarm-chaos.*'
       - 'infra/onsite/sudoers/alarm-cd'
       - 'infra/onsite/install.sh'
+      - 'infra/onsite/udev/**'
       - 'scripts/alarm-gateway-sync.sh'
       - 'infra/onsite/systemd/alarm-gateway-sync.*'
       - 'infra/onsite/systemd/alarm-sms-gateway.service'
@@ -64,6 +65,7 @@ on:
       - 'infra/onsite/systemd/alarm-chaos.*'
       - 'infra/onsite/sudoers/alarm-cd'
       - 'infra/onsite/install.sh'
+      - 'infra/onsite/udev/**'
       - 'scripts/alarm-gateway-sync.sh'
       - 'infra/onsite/systemd/alarm-gateway-sync.*'
       - 'infra/onsite/systemd/alarm-sms-gateway.service'
@@ -518,6 +520,8 @@ jobs:
           sudo systemctl start alarm-gateway-sync.service
           for f in gateway/*.py; do sudo cmp "$f" "/opt/alarm-gateway/$(basename "$f")"; done
           for f in gateway/voice/*.wav; do sudo cmp "$f" "/opt/alarm-gateway/voice/$(basename "$f")"; done
+          # INV-198 : firmware de l'Arduino livre avec le code, au meme chemin relatif que dans le depot
+          base64 -d gateway/firmware/dry_contact_r4/dry_contact_r4.ino.bin.b64 | sudo cmp - /opt/alarm-gateway/firmware/dry_contact_r4/dry_contact_r4.ino.bin
           test "$(sudo stat -c %U /opt/alarm-gateway/modem_gateway.py)" = alarm-gateway
           test "$(sudo stat -c %U /opt/alarm-gateway/voice/alarme.wav)" = alarm-gateway
           test "$(sudo cat /var/lib/alarm/cd/gateway-image-id)" = "$(docker image inspect "$IMG" -f '{{.Id}}')"
@@ -578,6 +582,12 @@ jobs:
           test "$(systemctl is-enabled ModemManager || true)" = masked  # revue F6
           sudo python3 -m pip --version  # revue F3 : alarm-gateway-sync en a besoin
           sudo cmp gateway/requirements.txt /var/lib/alarm/cd/gateway-requirements.txt
+          # INV-198 : dfu-util d'Arduino (archive epinglee, empreinte verifiee), regle udev du bootloader DFU, firmware
+          grep -q "dfu-util Arduino" /tmp/install1.log
+          /usr/local/lib/alarm-gateway/dfu-util -V
+          sudo cmp infra/onsite/udev/99-alarm-arduino-dfu.rules /etc/udev/rules.d/99-alarm-arduino-dfu.rules
+          sudo udevadm verify /etc/udev/rules.d/99-alarm-arduino-dfu.rules
+          base64 -d gateway/firmware/dry_contact_r4/dry_contact_r4.ino.bin.b64 | sudo cmp - /opt/alarm-gateway/firmware/dry_contact_r4/dry_contact_r4.ino.bin
 
       - name: Conformite au standard (INV-186) - units valides, timer actif, runner hors plan -> code 0
         run: |
@@ -601,6 +611,7 @@ jobs:
           test "$(grep -c "En attente du modem" /tmp/gw.log)" = 1
           test "$(grep -c "HostDryContact : aucun port" /tmp/gw.log)" = 1  # 12 recherches, 1 message
           if grep -q "Traceback\|Abandon" /tmp/gw.log; then echo "::error::sortie ou exception"; exit 1; fi
+          test "$(stat -c %U /var/lib/alarm-gateway)" = alarm-gateway  # INV-198 : Arduinos armes (StateDirectory)
           sudo journalctl -u alarm-modem-watchdog --no-pager | grep -q "aucun modem vu"
           sudo journalctl -u alarm-4g-standby --no-pager | grep -q "en attente"
 
@@ -613,6 +624,7 @@ jobs:
           sudo bash infra/onsite/install.sh --auto | tee /tmp/install2.log
           test "$PID" = "$(systemctl show alarm-sms-gateway -p ExecMainPID --value)"
           if grep -q "GATEWAY_SITE manquant" /tmp/install2.log; then exit 1; fi
+          if grep -q "dfu-util" /tmp/install2.log; then echo "::error::dfu-util retelecharge"; exit 1; fi  # INV-198
           sudo grep -qx GATEWAY_SITE=izeron /etc/alarm-gateway.env
           sudo grep -qx GATEWAY_ID=alarm-9 /etc/alarm-gateway.env
           if sudo grep -q '^DRY_CONTACT_SOURCE=\|^DRY_CONTACT_NORMAL_VALUE=' /etc/alarm-gateway.env; then

@@ -126,6 +126,10 @@ DRY_CONTACT_LIVENESS_SECONDS = float(os.getenv("DRY_CONTACT_LIVENESS_SECONDS", "
 # GND → fermé=LOW=0, ouvert/coupé=HIGH=1. Donc en mode host, mettre
 # DRY_CONTACT_NORMAL_VALUE=0 (l'inverse du mode modem).
 
+# INV-198 : numéros de série des Arduinos armés (contact déjà lu fermé), un par ligne.
+# Dossier créé par StateDirectory=alarm-gateway (unit alarm-sms-gateway).
+DRY_CONTACT_ARMED_FILE = "/var/lib/alarm-gateway/armed-arduinos"
+
 
 # Legacy (deprecated)
 GAMMU_CONFIG = os.getenv("GAMMU_CONFIG", "/etc/gammurc")
