@@ -521,7 +521,7 @@ jobs:
           for f in gateway/*.py; do sudo cmp "$f" "/opt/alarm-gateway/$(basename "$f")"; done
           for f in gateway/voice/*.wav; do sudo cmp "$f" "/opt/alarm-gateway/voice/$(basename "$f")"; done
           # INV-198 : firmware de l'Arduino livre avec le code, au meme chemin relatif que dans le depot
-          sudo cmp gateway/firmware/dry_contact_r4/dry_contact_r4.ino.bin /opt/alarm-gateway/firmware/dry_contact_r4/dry_contact_r4.ino.bin
+          base64 -d gateway/firmware/dry_contact_r4/dry_contact_r4.ino.bin.b64 | sudo cmp - /opt/alarm-gateway/firmware/dry_contact_r4/dry_contact_r4.ino.bin
           test "$(sudo stat -c %U /opt/alarm-gateway/modem_gateway.py)" = alarm-gateway
           test "$(sudo stat -c %U /opt/alarm-gateway/voice/alarme.wav)" = alarm-gateway
           test "$(sudo cat /var/lib/alarm/cd/gateway-image-id)" = "$(docker image inspect "$IMG" -f '{{.Id}}')"
@@ -587,7 +587,7 @@ jobs:
           /usr/local/lib/alarm-gateway/dfu-util -V
           sudo cmp infra/onsite/udev/99-alarm-arduino-dfu.rules /etc/udev/rules.d/99-alarm-arduino-dfu.rules
           sudo udevadm verify /etc/udev/rules.d/99-alarm-arduino-dfu.rules
-          sudo cmp gateway/firmware/dry_contact_r4/dry_contact_r4.ino.bin /opt/alarm-gateway/firmware/dry_contact_r4/dry_contact_r4.ino.bin
+          base64 -d gateway/firmware/dry_contact_r4/dry_contact_r4.ino.bin.b64 | sudo cmp - /opt/alarm-gateway/firmware/dry_contact_r4/dry_contact_r4.ino.bin
 
       - name: Conformite au standard (INV-186) - units valides, timer actif, runner hors plan -> code 0
         run: |

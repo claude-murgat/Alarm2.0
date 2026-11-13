@@ -672,7 +672,8 @@ scripts/smoketest-4g.sh`. Runbook complet : [`FAILOVER_4G.md`](FAILOVER_4G.md).
 **Arduino du contact sec : prêt à brancher (INV-198, 2026-11-13).** Un Arduino UNO R4 Minima se branche
 tel quel, neuf ou déjà programmé, sur n'importe quelle machine.
 - **Programmation** : muet 15 s (non programmé), ou présent seulement comme bootloader DFU, il est programmé
-  par la passerelle avec `gateway/firmware/dry_contact_r4/dry_contact_r4.ino.bin`. L'outil est le `dfu-util`
+  par la passerelle avec le firmware du dépôt (`gateway/firmware/dry_contact_r4/dry_contact_r4.ino.bin.b64`, décodé
+  en `/opt/alarm-gateway/firmware/dry_contact_r4/dry_contact_r4.ino.bin`). L'outil est le `dfu-util`
   d'Arduino, posé par `install.sh` en `/usr/local/lib/alarm-gateway/dfu-util` (**pas** le paquet Debian).
   Au plus un essai par 30 min ; un Arduino qui envoie déjà des lignes `DC:` n'est jamais reprogrammé.
   Journal : `journalctl -u alarm-sms-gateway | grep -i programm`.
@@ -683,8 +684,9 @@ tel quel, neuf ou déjà programmé, sur n'importe quelle machine.
   désarmer un : retirer sa ligne, puis `sudo systemctl restart alarm-sms-gateway`.
 - **Modifier le firmware** : modifier le `.ino`, puis recompiler hors des machines
   (`arduino-cli compile --fqbn arduino:renesas_uno:minima --output-dir <dossier> gateway/firmware/dry_contact_r4`).
-  Copier `<dossier>/dry_contact_r4.ino.bin` à côté du `.ino`, puis lancer
-  `sha256sum dry_contact_r4.ino > dry_contact_r4.ino.sha256` dans ce dossier. Un test unitaire le vérifie.
+  Dans le dossier du `.ino`, lancer `base64 -w0 <dossier>/dry_contact_r4.ino.bin > dry_contact_r4.ino.bin.b64`
+  puis `sha256sum dry_contact_r4.ino > dry_contact_r4.ino.sha256`. **Ne jamais versionner le `.bin`** (ignoré par
+  git) : GitHub n'a pas pu fusionner les PR qui l'ajoutaient (#352, #353). Un test unitaire le vérifie.
   Un Arduino déjà en service n'est pas mis à jour automatiquement.
 
 **Alertes** : un site dont aucun modem n'a donné de nouvelles depuis 10 min reçoit l'email

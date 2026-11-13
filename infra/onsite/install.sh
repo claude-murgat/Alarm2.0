@@ -108,10 +108,12 @@ else
   # Messages vocaux des appels d'alarme (INV-132/133)
   install -d -o alarm-gateway -g alarm-gateway -m755 /opt/alarm-gateway/voice
   install -o alarm-gateway -g alarm-gateway -m644 "$REPO"/gateway/voice/*.wav /opt/alarm-gateway/voice/
-  # Firmware de l'Arduino du contact sec, programme par la passerelle (INV-198)
+  # Firmware de l'Arduino du contact sec, programme par la passerelle (INV-198) ; versionne en base64, decode ici
   install -d -o alarm-gateway -g alarm-gateway -m755 /opt/alarm-gateway/firmware /opt/alarm-gateway/firmware/dry_contact_r4
-  install -o alarm-gateway -g alarm-gateway -m644 "$REPO"/gateway/firmware/dry_contact_r4/dry_contact_r4.ino.bin \
-    /opt/alarm-gateway/firmware/dry_contact_r4/
+  FW=$(mktemp)
+  base64 -d "$REPO"/gateway/firmware/dry_contact_r4/dry_contact_r4.ino.bin.b64 > "$FW"
+  install -o alarm-gateway -g alarm-gateway -m644 "$FW" /opt/alarm-gateway/firmware/dry_contact_r4/dry_contact_r4.ino.bin
+  rm -f "$FW"
   say "code gateway -> /opt/alarm-gateway/"
 fi
 gw_deps(){ python3 -c 'import serial, requests' 2>/dev/null; }

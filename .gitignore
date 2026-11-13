@@ -73,3 +73,5 @@ reports/
 # *.py.bak      : backup files que mutmut peut laisser sur interruption.
 .mutmut-cache
 *.py.bak
+# INV-198 : firmware Arduino versionne en base64 (.bin.b64) ; GitHub ne fusionnait pas le binaire (#352/#353)
+gateway/firmware/**/*.bin
