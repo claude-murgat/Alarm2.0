@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from ..auth import get_current_admin, get_current_user
 from ..clock import now as clock_now
 from ..database import get_db
-from ..logic.modem_signal import modem_signal
+from ..logic.modem_signal import modem_signal, site_signals
 from ..models import GatewayState, SystemConfig, User
 from ..sites import default_site
 from .alarms_internal import _liveness_window_seconds
@@ -129,7 +129,7 @@ def modem_status(
 ):
     """INV-129/158 : barres de signal 4G du modem de chaque passerelle (app + web).
     `gateways` : une entree par passerelle. Premier niveau : la plus mal en point
-    (app d'avant INV-158, qui lit un seul objet)."""
+    (app d'avant INV-158, qui lit un seul objet). `sites` : un resume par site (en-tete web)."""
     now = clock_now()
     rows = db.query(SystemConfig).filter(
         or_(SystemConfig.key == "modem_status", SystemConfig.key.like("modem_status:%"))).all()
@@ -144,7 +144,7 @@ def modem_status(
     gateways.sort(key=lambda g: (g["site"], g["gateway_id"]))
     worst = min(gateways, key=lambda g: g["bars"],
                 default={"gateway_id": None, "site": None, **modem_signal(None, now)})
-    return {**worst, "gateways": gateways}
+    return {**worst, "gateways": gateways, "sites": site_signals(gateways, now)}
 
 
 @router.get("/gateways")
