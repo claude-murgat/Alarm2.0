@@ -1507,7 +1507,7 @@
         }
         function contactCell(c) {
             if (!c) return '<td data-label="Contact sec" data-state="none">-</td>';
-            const [cls, text] = { closed: ['online', 'fermé'], open: ['offline', 'ouvert'] }[c.state] || ['waiting', 'muet'];
+            const [cls, text] = { closed: ['online', 'fermé'], open: ['offline', 'ouvert'], no_sensor: ['', 'sans Arduino'] }[c.state] || ['waiting', 'muet'];
             return `<td data-label="Contact sec" data-state="${escHtml(c.state)}"><span class="badge ${cls}">${text}</span>`
                 + hwDetail(c.state === 'silent' ? `depuis ${sinceDate(c.last_seen)}` : '') + '</td>';
         }

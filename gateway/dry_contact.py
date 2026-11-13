@@ -52,12 +52,12 @@ def decide_report(
     """Décide si la gateway doit POSTer un état au backend, et lequel.
 
     Sous-tend INV-122 (agrégation OR fail-to-alarm multi-gateway) côté gateway
-    hôte : une gateway dont le µC s'est tu doit cesser de reporter, pour que
-    le backend la sorte de `alive_gateways` au lieu de propager un état périmé.
+    hôte : une gateway dont le µC s'est tu ne doit pas propager un état périmé ;
+    elle rapporte `no_sensor` (INV-194), hors de l'agrégation côté backend.
 
     Retourne :
-    - `None` si jamais reçu de sample (`latest_raw is None`) → pas de POST
-    - `None` si dernier sample plus vieux que `liveness` (µC muet) → pas de POST
+    - `None` si jamais reçu de sample (`latest_raw is None`) → `no_sensor`
+    - `None` si dernier sample plus vieux que `liveness` (µC muet) → `no_sensor`
     - sinon `raw_to_state(latest_raw, normal_value)` (`'closed'` | `'open'`)
 
     La borne haute de fraîcheur est inclusive (`now - latest_ts <= liveness`) :

@@ -1026,6 +1026,15 @@ class TestClusterTab:
             expect(cell).to_have_text("-")
         expect(dashboard.locator("#clusterMembers td[data-label='Modem 4G'] .modem-signal[data-bars='4']")).to_have_count(0)  # e2e-izeron
 
+    def test_gateway_without_arduino_shows_sans_arduino(self, dashboard: Page):
+        """INV-194 : passerelle vivante sans Arduino lisible (`no_sensor`) → « sans Arduino », ni « muet » ni « - »."""
+        gateways = [{**g, "dry_contact": {"state": "no_sensor", "last_seen": None}} if g["gateway_id"] == "alarm-3" else g
+                    for g in self.GATEWAYS]
+        contact = self._hw(self._open(dashboard, self.PROD, gateways=gateways), "node6")[1]
+        expect(contact).to_have_attribute("data-state", "no_sensor")
+        expect(contact.locator(".badge")).to_have_text("sans Arduino")
+        expect(contact.locator(".badge.waiting")).to_have_count(0)
+
     def test_silence_dates_in_local_time(self, browser, primary_url):
         """INV-130 : `updated_at` et `last_seen` sont de l'UTC sans fuseau ; un navigateur à Paris lit l'heure de Paris.
         L'année est affichée : sans purge, une date peut être ancienne."""

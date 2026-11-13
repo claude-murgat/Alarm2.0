@@ -6,7 +6,8 @@ Source : tests/INVARIANTS.md section 13 (INV-120 V2 + INV-122 + INV-123)
 
 Architecture : level-based reconciliation. Chaque gateway poll son contact
 sec NC à intervalle régulier (5 s par défaut côté gateway) et POST son état
-courant ("open" | "closed"). Le backend :
+courant ("open" | "closed", ou "no_sensor" sans Arduino lisible :
+vivante, hors agregation, INV-194). Le backend :
   1. UPSERT dans gateway_states (état courant par gateway).
   2. Compute should_be_active = any(g.state=="open" for g in alive_gateways)
      où alive = last_seen > now - GATEWAY_LIVENESS_WINDOW_SECONDS (défaut 15s)
@@ -40,6 +41,7 @@ from ..clock import now as clock_now
 from ..database import get_db
 from ..events import log_event
 from ..logic.alarm_creation import evaluate_alarm_creation_plan
+from ..logic.dry_contact import aggregate_dry_contact
 from ..logic.models import EscalationChainEntry, UserSnapshot
 from ..sites import default_site
 from ..models import (
@@ -71,7 +73,8 @@ DISSENSUS_EMAIL_THRESHOLD = timedelta(minutes=5)
 class ReportStateRequest(BaseModel):
     """Body du POST /report-state. La gateway envoie son état courant."""
     gateway_id: str = Field(..., min_length=1, max_length=128)
-    state: Literal["open", "closed"]
+    # INV-194 : "no_sensor" = passerelle vivante sans Arduino lisible (tient last_seen, hors agregation)
+    state: Literal["open", "closed", "no_sensor"]
     # INV-155 : site de la passerelle (GATEWAY_SITE). Absent/vide -> default_site.
     site: Optional[str] = Field(None, max_length=64)
 
@@ -262,8 +265,8 @@ def report_state(
         )
         .all()
     )
-    alive_states = [g.state for g in alive_gateways]
-    should_be_active = any(s == "open" for s in alive_states)
+    # INV-194 : les passerelles "no_sensor" ne comptent ni ouvertes ni fermees
+    should_be_active, should_resolve, divergent = aggregate_dry_contact([g.state for g in alive_gateways])
 
     # 3. Reconcile (touche UNIQUEMENT les alarmes source="gateway_dry_contact").
     # "acknowledged" est inclus avec "active"/"escalated" : tant que l'alarme
@@ -286,9 +289,9 @@ def report_state(
             # Pas d'alarme active → CREATE
             gateway_alarm = created_alarm = _create_gateway_alarm(db, site)
         # Sinon : no-op (idempotence boucle si gateway_alarm, ou INV-001 si autre source)
-    else:
+    elif should_resolve:
         if gateway_alarm is not None:
-            # Toutes alive closed + alarme gateway existante → RESOLVE
+            # Toutes les alive avec capteur closed + alarme gateway existante → RESOLVE
             _resolve_gateway_alarm(db, gateway_alarm)
             resolved_alarm = gateway_alarm
             gateway_alarm = None  # plus en (active, escalated)
@@ -297,11 +300,7 @@ def report_state(
 
     db.flush()
 
-    # 4. INV-123 : détection dissensus (sur l'alarme gateway active si elle existe)
-    divergent = (len(alive_gateways) >= 2) and (
-        set(alive_states) == {"open", "closed"}
-    )
-
+    # 4. INV-123 : détection dissensus (`divergent`, sur l'alarme gateway active si elle existe)
     # Re-fetch l'alarme gateway active après la phase reconcile (peut avoir été
     # créée ou résolue dans le bloc précédent).
     gateway_alarm = (
