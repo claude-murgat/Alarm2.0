@@ -30,8 +30,13 @@ for a in "$@"; do case "$a" in alarm@*) ip=${a#alarm@} ;; esac; done
 echo "$ip" >> "$H/ssh.log"
 case " $(cat "$H/down" 2>/dev/null) " in *" $ip "*) exit 255 ;; esac
 """
-# Decouverte du leader Patroni (GET /health des 7 noeuds) : journalisee, toujours en echec ici.
-CURL = '#!/usr/bin/env bash\necho "$*" >> "$H/curl.log"\nexit 7\n'
+# Decouverte du leader Patroni (GET /health des 7 noeuds) : journalisee ; seule l'IP de `primary` repond.
+CURL = r"""#!/usr/bin/env bash
+echo "$*" >> "$H/curl.log"
+p=$(cat "$H/primary" 2>/dev/null)
+[[ -n "$p" && "$*" == *"//$p:8000/health"* ]] && echo '{"role": "primary", "cluster_writable": true}' && exit 0
+exit 7
+"""
 CANARY = r"""#!/usr/bin/env bash
 echo "$2" >> "$H/canary.log"
 printf '%s\n' "$@" > "$H/args.$2"
@@ -59,8 +64,9 @@ def cd(tmp_path):
     return tmp_path
 
 
-def run(h, down=(), fail=(), default_lock=False, unready=(), promote=(), api_base="http://test"):
+def run(h, down=(), fail=(), default_lock=False, unready=(), promote=(), api_base="http://test", primary=None):
     """Un tick du timer. Retourne (exit code, noeuds passes au canary, stderr)."""
+    (h / "primary").write_text(IP[primary] if primary else "")
     (h / "down").write_text(" ".join(IP[n] for n in down))
     (h / "fail").write_text(" ".join(map(str, fail)))
     (h / "unready").write_text(" ".join(map(str, unready)))
@@ -273,3 +279,27 @@ def test_new_pass_bounded_to_three_per_tick(cd):
     assert rc == 0, err
     assert deployed == ORDER * 3
     assert "3 passages faits, repris au prochain tick" in err
+
+
+def pending_of(h, node):
+    args = (h / f"args.{node}").read_text().split("\n")
+    return args[args.index("--pending") + 1]
+
+
+@pytest.mark.parametrize("primary, order", [(3, [7, 6, 5, 4, 2, 3, 1]), (2, ORDER), (1, ORDER), (None, ORDER)])
+def test_patroni_leader_deployed_next_to_last(cd, primary, order):
+    """INV-197 : 2026-11-13, node3 leader et premier du passage -> sa bascule (INV-187) ne pouvait aller que
+    vers un noeud encore sur l'ancienne image (node1), dont le backend n'est jamais devenu primary. Le leader
+    passe avant-dernier : node1 reste la fin de chaine, sa bascule va vers un noeud deja a jour."""
+    rc, deployed, err = run(cd, primary=primary)
+    assert (rc, deployed) == (0, order), err
+    if primary == 3:
+        assert pending_of(cd, 3) == "1"
+
+
+def test_deferred_node_still_counts_as_old_image_for_the_next_canaries(cd):
+    """INV-197 : un noeud reporte (pas pret, injoignable) tourne encore l'ancienne image : pas un candidat prefere."""
+    rc, deployed, err = run(cd, unready=(7,))
+    assert rc == 0, err
+    assert pending_of(cd, 6) == "7 5 4 2 1"
+    assert pending_of(cd, 1) == "7"

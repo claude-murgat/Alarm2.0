@@ -8,7 +8,8 @@ vers un replica sain d'abord ; pas de bascule terminee -> le noeud n'est pas red
 
 Le vrai script tourne contre de faux `ssh` et `curl` (PATH) qui journalisent leurs appels dans le
 meme fichier (ordre). Le faux Patroni sert `cluster.json`, puis `after.json` une fois la bascule
-demandee (sans `after.json`, la bascule ne se termine jamais).
+demandee (sans `after.json`, la bascule ne se termine jamais). Le backend du leader Patroni se dit
+primary sur /health (attendu apres chaque bascule et chaque redemarrage, INV-197).
 """
 import json
 import os
@@ -36,6 +37,12 @@ echo "curl $url ${body//$'\n'/ }" >> "$H/calls.log"
 case "$url" in
   *:8008/cluster) if [[ -f "$H/switched" ]]; then cat "$H/after.json"; else cat "$H/cluster.json"; fi ;;
   *:8008/switchover) [[ -f "$H/after.json" ]] && touch "$H/switched"; echo 'Successfully switched over' ;;
+  # Backend primary (INV-197) = celui du leader Patroni du moment.
+  *:8000/health) f=$H/cluster.json; [[ -f "$H/switched" ]] && f=$H/after.json
+    python3 -c 'import json, sys
+l = next(m["name"] for m in json.load(open(sys.argv[1]))["members"] if m["role"] == "leader")
+ip = {"node1": "10.99.0.2", "node2": "10.99.0.3", "node3": "10.99.0.1"}.get(l, "10.99.0." + l[4:])
+print(json.dumps({"role": "primary" if "//%s:" % ip in sys.argv[2] else "replica", "cluster_writable": True}))' "$f" "$url" ;;
 esac
 exit 0
 """
@@ -68,7 +75,8 @@ def run(h, node, cluster, after=None, pending=None):
     if after:
         (h / "after.json").write_text(json.dumps({"members": after}))
     env = {k: v for k, v in os.environ.items() if not k.startswith("COV_CORE_")}
-    env.update(H=str(h), PATH=f"{h / 'bin'}:{os.environ['PATH']}", SWITCHOVER_TIMEOUT="2")
+    env.update(H=str(h), PATH=f"{h / 'bin'}:{os.environ['PATH']}", SWITCHOVER_TIMEOUT="2",
+               PRIMARY_TIMEOUT="2")
     args = ["bash", str(SCRIPT), "--node", str(node), "--soak", "0", "--api-base", "http://test",
             "--gateway-key", "k"]
     if pending is not None:
