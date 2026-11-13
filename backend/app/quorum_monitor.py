@@ -72,6 +72,7 @@ from .logic.resilience import group_of  # INV-189 : libellé du lieu (« OVH »)
 from .sites import node_machines  # INV-189
 from .api.alarms_internal import _liveness_window_seconds  # INV-195 : fenetre de l'agregation (INV-122)
 from .logic.site_dry_contact import decide_site_dry_contact  # INV-195
+from .logic.etcd_space import ETCD_DB_SIZE_ALERT_BYTES, decide_etcd_space, etcd_level  # INV-196
 
 
 logger = logging.getLogger(__name__)
@@ -392,6 +393,10 @@ def _run_leader_loss_check(now: datetime) -> None:
     label, explanation = _CAUSES[cause]
     logger.critical("INV-170 : aucun leader vivant vu de %s depuis %s (%s)", node, since, cause)
     log_event("cluster_leader_lost", node=node, since=since, cause=cause)
+    # INV-196 : sous NOSPACE Patroni perd son leader et le controle leader-only ne tourne plus.
+    full = [h for h, s in _etcd_statuses().items() if s and etcd_level(s) == "nospace"]
+    etcd_full = (f"\n\netcd est plein (alarme NOSPACE sur {', '.join(full)}) : il refuse toute écriture, "
+                 f"Patroni ne peut plus tenir de leader. {_ETCD_PROCEDURE}") if full else ""
     send_alert_email(
         subject=f"[Alarme Murgat] Aucun leader vu de {where} — {label}",
         body=(
@@ -402,7 +407,7 @@ def _run_leader_loss_check(now: datetime) -> None:
             f"Chaque nœud qui constate la situation envoie son propre email (au plus un par heure) : "
             f"comparer les nœuds et les causes pour situer la panne.\n\n"
             f"À vérifier : patronictl list, et qu'une majorité des voteurs etcd est joignable "
-            f"(etcdctl endpoint health --cluster ; liste dans SystemConfig etcd_voters)."
+            f"(etcdctl endpoint health --cluster ; liste dans SystemConfig etcd_voters).{etcd_full}"
         ),
         to=alert_email or "direction_technique@charlesmurgat.com",
     )
@@ -482,6 +487,11 @@ async def quorum_monitor_loop() -> None:
             await asyncio.to_thread(_run_node_down_check, datetime.now(timezone.utc).replace(tzinfo=None))
         except Exception:
             logger.exception("INV-189 : erreur dans le contrôle des nœuds (continue)")
+
+        try:
+            await asyncio.to_thread(_run_etcd_space_check)  # INV-196 : pas de délai, pas d'horloge
+        except Exception:
+            logger.exception("INV-196 : erreur dans le contrôle de la base etcd (continue)")
 
         # INV-168 : horloge réelle, pas clock_now() — `advance-clock` des tests E2E ne doit
         # pas pouvoir re-cloner un replica.
@@ -714,3 +724,79 @@ def _run_node_down_check(now: datetime) -> None:
                 f"{since.isoformat()} UTC ({minutes} min)."))
     finally:
         db.close()
+
+
+# INV-196 : base etcd d'un voteur >= 1 Gio (moitie du quota par defaut, 2 Gio : au-dela etcd refuse toute
+# ecriture) ou alarme NOSPACE -> un email + un audit par episode et par niveau. Niveau signale dans SystemConfig.
+_ETCD_SPACE_KEY = "etcd_space_alert"
+_ETCD_PROCEDURE = (
+    "Procédure (docs/CD_DESIGN.md §9sexies) : compaction (etcdctl compaction --physical, long "
+    "--command-timeout), puis défragmentation d'un voteur à la fois, le leader etcd en dernier ; "
+    "après une alarme NOSPACE : etcdctl alarm disarm.")
+
+
+def _etcd_status(endpoint: str) -> Optional[dict]:
+    """POST /v3/maintenance/status d'un voteur (`10.99.0.1:2379`). None : injoignable ou illisible."""
+    try:
+        req = urllib.request.Request(f"http://{endpoint}/v3/maintenance/status", data=b"{}", method="POST")
+        status = json.loads(urllib.request.urlopen(req, timeout=3).read().decode("utf-8"))
+        etcd_level(status)  # reponse illisible -> leve ici : jamais dans l'email INV-170 ni dans le controle
+        return status
+    except Exception as e:
+        logger.warning("INV-196 : etcd %s illisible (%s)", endpoint, e)
+        return None
+
+
+def _etcd_statuses() -> dict:
+    """{voteur: status ou None} pour chaque hôte de ETCD_HOSTS (ceux de Patroni) ; {} si absent."""
+    return {h: _etcd_status(h) for h in os.getenv("ETCD_HOSTS", "").split(",") if h}
+
+
+def _mb(value) -> int:
+    return int(value) // 1048576
+
+
+def _run_etcd_space_check() -> None:
+    """INV-196 : un tick (bloquant, via `asyncio.to_thread`, leader seul)."""
+    statuses = _etcd_statuses()
+    if not statuses:
+        return  # ETCD_HOSTS absent : tier 2, ou backend pas encore recree avec INV-196
+    db = SessionLocal()
+    try:
+        row = db.query(SystemConfig).filter(SystemConfig.key == _ETCD_SPACE_KEY).first()
+        alerted = (row.value if row else None) or None
+        level, new_state = decide_etcd_space(list(statuses.values()), alerted)
+        if new_state != alerted:
+            if row is None:
+                row = SystemConfig(key=_ETCD_SPACE_KEY, value="")
+                db.add(row)
+            row.value = new_state or ""
+            db.commit()
+        if level is None:
+            return
+        alert_email = _get_alert_email(db)
+    finally:
+        db.close()
+    log_event("etcd_space_alert", level=level,
+              db_size={h: int(s["dbSize"]) if s else None for h, s in statuses.items()})
+    voters = "\n".join(
+        f"  - {h} : injoignable" if s is None else
+        f"  - {h} : {_mb(s['dbSize'])} Mo ({_mb(s.get('dbSizeInUse', 0))} Mo utilisés)"
+        + (", alarme NOSPACE" if etcd_level(s) == "nospace" else "")
+        for h, s in statuses.items())
+    if level == "nospace":
+        subject = "[Alarme Murgat] etcd plein (NOSPACE) : écritures refusées"
+        intro = "etcd a l'alarme NOSPACE : il refuse déjà toute écriture."
+    else:
+        biggest = max(_mb(s["dbSize"]) for s in statuses.values() if s)
+        subject = f"[Alarme Murgat] etcd : base à {biggest} Mo sur 2048"
+        intro = (f"La base etcd d'au moins un voteur atteint {_mb(ETCD_DB_SIZE_ALERT_BYTES)} Mo, "
+                 f"la moitié du quota.")
+    logger.error("INV-196 : %s", subject)
+    _alert(alert_email, subject, (
+        f"{intro}\n\nVoteurs etcd :\n{voters}\n\n"
+        f"À 2048 Mo (quota par défaut), etcd refuse toute écriture (alarme NOSPACE) : Patroni ne peut plus "
+        f"tenir de leader et plus aucune alarme ne peut être créée, escaladée ni acquittée, sur aucun nœud.\n\n"
+        f"Si « utilisés » est proche de la taille, la compaction automatique ne tourne pas (vérifier "
+        f"ETCD_AUTO_COMPACTION_* : docker inspect <projet>-etcd-1) ; sinon il reste à défragmenter.\n\n"
+        f"{_ETCD_PROCEDURE}"))
