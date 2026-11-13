@@ -70,6 +70,8 @@ from .sites import known_sites  # INV-185
 from .logic.node_down import decide_node_down  # INV-189
 from .logic.resilience import group_of  # INV-189 : libellé du lieu (« OVH »)
 from .sites import node_machines  # INV-189
+from .api.alarms_internal import _liveness_window_seconds  # INV-195 : fenetre de l'agregation (INV-122)
+from .logic.site_dry_contact import decide_site_dry_contact  # INV-195
 
 
 logger = logging.getLogger(__name__)
@@ -469,6 +471,12 @@ async def quorum_monitor_loop() -> None:
         except Exception:
             logger.exception("INV-185 : erreur dans le contrôle des modems par site (continue)")
 
+        # INV-195 : clock_now(), comme INV-172 — la vivacité se juge sur gateway_states.last_seen (clock_now()).
+        try:
+            await asyncio.to_thread(_run_site_dry_contact_check, clock_now())
+        except Exception:
+            logger.exception("INV-195 : erreur dans le contrôle du contact sec par site (continue)")
+
         # INV-189 : horloge réelle (comme INV-185) — `advance-clock` des tests E2E ne doit pas l'émettre.
         try:
             await asyncio.to_thread(_run_node_down_check, datetime.now(timezone.utc).replace(tzinfo=None))
@@ -581,6 +589,68 @@ def _run_site_modem_check(now: datetime) -> None:
                 f"  - journalctl -u alarm-sms-gateway -n 50 (« En attente du modem » : modem non vu)\n"
                 f"  - GATEWAY_SITE dans /etc/alarm-gateway.env (le modem prend le site de sa machine)\n\n"
                 f"Un nouvel email partira si un modem revient puis se tait de nouveau."))
+    finally:
+        db.close()
+
+
+# INV-195 : site qui a deja eu un contact sec lisible et n'en a plus depuis plus de 10 min (Arduino
+# debranche, fige ou non programme sur chaque machine, ou passerelles muettes) -> un email + un audit par
+# episode, puis « retabli ». Depuis INV-194, `no_sensor` ne declenche plus INV-172. Episodes dans SystemConfig.
+_SITE_DRY_CONTACT_KEY = "site_dry_contact_alert"
+_DRY_CONTACT_LABELS = {"open": "contact ouvert", "closed": "contact fermé", "no_sensor": "sans Arduino (no_sensor)"}
+
+
+def _run_site_dry_contact_check(now: datetime) -> None:
+    """INV-195 : un tick (bloquant, via `asyncio.to_thread`, leader seul), horloge clock_now() comme INV-172."""
+    db = SessionLocal()
+    try:
+        fallback = default_site(db)
+        gateways = [(g.site or fallback, g.gateway_id, g.state, g.last_seen)
+                    for g in db.query(GatewayState).order_by(GatewayState.gateway_id)]
+        row = db.query(SystemConfig).filter(SystemConfig.key == _SITE_DRY_CONTACT_KEY).first()
+        state = {site: {"since": datetime.fromisoformat(e["since"]) if e["since"] else None, "emailed": e["emailed"]}
+                 for site, e in (json.loads(row.value) if row else {}).items()}
+        liveness = timedelta(seconds=_liveness_window_seconds())
+        lost, recovered, new_state = decide_site_dry_contact(
+            known_sites(db), [(site, st, at) for site, _, st, at in gateways], state, now, liveness)
+        if new_state != state:
+            if row is None:
+                row = SystemConfig(key=_SITE_DRY_CONTACT_KEY, value="{}")
+                db.add(row)
+            row.value = json.dumps({site: {"since": e["since"].isoformat() if e["since"] else None,
+                                           "emailed": e["emailed"]} for site, e in new_state.items()})
+            db.commit()
+        if not lost and not recovered:
+            return
+        alert_email = _get_alert_email(db)
+
+        def listing(site):  # comme la colonne « Contact sec » de l'onglet Cluster (INV-192)
+            return "\n".join(
+                f"  - {gid} : " + (f"muette depuis {at.isoformat()} UTC" if now - at >= liveness
+                                   else _DRY_CONTACT_LABELS.get(st, st))
+                for s, gid, st, at in gateways if s == site) or "  - aucune passerelle connue"
+        for site, since in lost:
+            minutes = int((now - since).total_seconds() // 60)
+            name = site.capitalize()
+            log_event("site_dry_contact_lost", site=site, since=since.isoformat(), minutes=minutes)
+            logger.error("INV-195 : site %s sans contact sec lisible depuis %s min", site, minutes)
+            _alert(alert_email, f"[Alarme Murgat] Site {name} sans contact sec", (
+                f"Aucune passerelle du site {name} ne lit de contact sec depuis {since.isoformat()} UTC "
+                f"({minutes} min).\n\nPasserelles du site :\n{listing(site)}\n\n"
+                f"Conséquence : le contact sec de ce site ne peut plus déclencher d'alarme.\n\n"
+                f"À vérifier sur les machines du site :\n"
+                f"  - Arduino branché en USB et programmé (journalctl -u alarm-sms-gateway -n 50)\n"
+                f"  - colonne « Contact sec » de l'onglet Cluster\n"
+                f"  - une passerelle muette : systemctl status alarm-sms-gateway, alimentation, réseau\n\n"
+                f"Un email « rétabli » partira quand un contact sec du site sera de nouveau lu."))
+        for site, since in recovered:
+            minutes = int((now - since).total_seconds() // 60)
+            name = site.capitalize()
+            log_event("site_dry_contact_recovered", site=site, since=since.isoformat(), minutes=minutes)
+            logger.warning("INV-195 : site %s, contact sec rétabli après %s min", site, minutes)
+            _alert(alert_email, f"[Alarme Murgat] Site {name} : contact sec rétabli", (
+                f"Le contact sec du site {name} est de nouveau lu. Il ne l'était plus depuis {since.isoformat()} "
+                f"UTC ({minutes} min).\n\nPasserelles du site :\n{listing(site)}"))
     finally:
         db.close()
 
