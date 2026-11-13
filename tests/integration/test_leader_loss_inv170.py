@@ -142,6 +142,31 @@ def test_each_cause_is_named(patroni, client, setup, cause, label):
     assert client.get("/api/cluster").json()["cluster_writable"] is False  # 503 compris (Patroni injoignable)
 
 
+@pytest.mark.parametrize("errors, full", [(["memberID:1 alarm:NOSPACE "], True), (None, False)])
+def test_email_says_etcd_is_full_when_a_voter_has_the_nospace_alarm(patroni, monkeypatch, errors, full):
+    """INV-196 : sous NOSPACE Patroni perd son leader, le controle leader-only ne tourne plus ; cet email le dit."""
+    monkeypatch.setenv("ETCD_HOSTS", "10.99.0.2:2379,10.99.0.1:2379")
+    inner = urllib.request.urlopen
+
+    def urlopen(req, *a, **kw):
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        if url == "http://10.99.0.2:2379/v3/maintenance/status":
+            status = {"dbSize": "2147483648", "dbSizeInUse": "2147483648"}
+            return io.BytesIO(json.dumps({**status, "errors": errors} if errors else status).encode())
+        if url == "http://10.99.0.1:2379/v3/maintenance/status":
+            raise urllib.error.URLError("timed out")
+        return inner(req, *a, **kw)
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    with patch("backend.app.quorum_monitor.send_alert_email") as mail:
+        _ticks(patroni, 0, 4)
+    assert mail.call_count == 1
+    assert mail.call_args.kwargs["subject"] == \
+        "[Alarme Murgat] Aucun leader vu de node1 (izeron) — leader listé mais hors service"
+    body = mail.call_args.kwargs["body"]
+    assert ("etcd est plein (alarme NOSPACE sur 10.99.0.2:2379)" in body) is full
+    assert ("docs/CD_DESIGN.md §9sexies" in body) is full
+
+
 def test_single_host_dev_cluster_sees_a_leader_on_another_port(patroni, client, monkeypatch):
     """Cluster dev 3 noeuds sur un seul hote : tous les membres ont l'hote host.docker.internal, dont le
     port 8000 est ce replica (node1) ; le leader est derriere le port 8002. Ce n'est pas une perte de leader."""

@@ -19,6 +19,7 @@ AUDITABLE_EVENTS = {
     "site_dry_contact_lost", "site_dry_contact_recovered",  # INV-195
     "cluster_leader_lost",  # INV-170
     "node_down", "node_recovered",  # INV-189
+    "etcd_space_alert",  # INV-196
     "test_go_offline", "test_heartbeat_pause",  # INV-138 (onglet Tests en prod)
 }
 

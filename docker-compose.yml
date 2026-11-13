@@ -50,6 +50,12 @@ services:
       # sans effet une fois /etcd-data initialise.
       ETCD_INITIAL_CLUSTER_STATE: ${ETCD_INITIAL_CLUSTER_STATE:-new}
       ETCD_INITIAL_CLUSTER_TOKEN: alarm-ha-cluster
+      # INV-196 : compacte l'historique toutes les heures (garde 1 h). Sans elle, chaque revision des cles
+      # Patroni restait : 1716 Mo par voteur le 2026-11-13, a 2 Gio (quota) etcd refuse toute ecriture.
+      # Ne defragmente pas : le fichier garde sa taille, les pages liberees sont reutilisees. Litteraux
+      # (aucun .env ne les change) ; lus au demarrage : recreer etcd un voteur a la fois (CD_DESIGN §9sexies).
+      ETCD_AUTO_COMPACTION_MODE: periodic
+      ETCD_AUTO_COMPACTION_RETENTION: "1h"
     volumes:
       - etcd_data:/etcd-data
     healthcheck:
@@ -155,6 +161,8 @@ services:
       - SMTP_PASS=${SMTP_PASS-}
       - SMTP_TIMEOUT=${SMTP_TIMEOUT:-10}
       - PEER_TEST_URLS=${PEER_TEST_URLS}
+      # INV-196 : voteurs etcd (ceux de Patroni) dont le leader lit la taille de base et l'alarme NOSPACE.
+      - ETCD_HOSTS=${ETCD_HOSTS}
       # INV-043 (révisé 2026-06-17) : défaut true → un replica forwarde le
       # heartbeat au leader (via WG) au lieu de 503, sur TOUS les nœuds. Permet
       # à n'importe quel nœud edge externe de servir un téléphone même quand il

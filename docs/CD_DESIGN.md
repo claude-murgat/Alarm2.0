@@ -966,6 +966,89 @@ Désactivation : `sudo systemctl disable --now alarm-db-backup.timer alarm-db-re
 
 ---
 
+## 9sexies. etcd : compaction, défragmentation, taille de la base (INV-196, 2026-11-13)
+
+**Constat du 2026-11-13** : ~1716 Mo par voteur, tout utilisé (`dbSizeInUse` = `dbSize`), 13 clés à la révision 4,69 millions. Aucune compaction n'était configurée : etcd gardait chaque révision des clés de Patroni. À 2 Gio (quota par défaut, `--quota-backend-bytes` non fixé), etcd lève l'alarme `NOSPACE` et refuse toute écriture : Patroni perd sa clé leader, plus aucune écriture dans le cluster.
+
+- **Compaction automatique** : `ETCD_AUTO_COMPACTION_MODE=periodic`, `ETCD_AUTO_COMPACTION_RETENTION=1h` sur le service `etcd` de `docker-compose.yml` (tous les projets qui lancent etcd : node1 à node3, dev, CI, node6/node7 après le déménagement). Compaction toutes les heures, une heure gardée.
+- **Elle ne défragmente pas** : le fichier garde sa taille, les pages libérées sont réutilisées, il cesse donc de grossir. Seule `etcdctl defrag` (ci-dessous) réduit le fichier.
+- **Surveillance** : le backend leader lit `POST /v3/maintenance/status` de chaque voteur de `ETCD_HOSTS` à chaque tick (60 s). `dbSize` d'un voteur à 1024 Mo ou plus → email « etcd : base à N Mo sur 2048 » ; alarme `NOSPACE` → email « etcd plein (NOSPACE) ». Un email par épisode et par niveau ; réarmé quand tous les voteurs sont sains. Sans leader (NOSPACE), l'email INV-170 de chaque nœud le dit.
+
+Variables communes (sur NODE3 ; `nodeN-…-1` sur nodeN) :
+```bash
+E="docker exec node3-etcd-1 etcdctl"
+ALL="--endpoints=http://10.99.0.2:2379,http://10.99.0.3:2379,http://10.99.0.1:2379"   # node1, node2, node3
+P="docker exec node3-patroni-1 patronictl -c /etc/patroni/patroni.yml"
+$E $ALL endpoint status -w table   # DB SIZE, IS LEADER, ERRORS (alarm:NOSPACE)
+$E $ALL endpoint health            # 3 sains
+$E $ALL alarm list                 # vide attendu
+```
+Ne pas répéter `--endpoints` (les valeurs s'ajoutent) : `$E $ALL` ou `$E --endpoints=<un voteur>`, jamais les deux.
+
+### Appliquer la compaction automatique (une fois, après le merge d'INV-196)
+
+etcd ne lit ces variables qu'au démarrage : il faut **recréer** son conteneur sur chaque voteur. **Le CD ne le garantit pas.** Sur un voteur, `start-prod-node.sh --pull` (lancé par le canary) fait `docker compose up -d` de tous les services, ce qui recrée etcd si sa configuration a changé. Mais il ne passe que quand l'image `:stable` change, et il lit le `docker-compose.yml` du checkout `/opt/alarm`, mis à jour à part par `alarm-host-sync` (INV-141) : rien ne garantit que ce checkout est à jour quand le canary passe. D'où la recréation à la main, **un voteur à la fois, jamais deux** (2 sur 3 pendant la recréation, marge 0, INV-090), les deux followers etcd d'abord, le leader etcd en dernier. Seul etcd est recréé (`--no-deps`) : Patroni et le backend ne bougent pas, aucune bascule Patroni (INV-187).
+
+```bash
+# 0. NODE3 : CD et panne contrôlée en pause
+systemctl is-active alarm-chaos.timer                    # noter : à relancer à la fin seulement s'il était actif
+sudo systemctl stop alarm-cd-orchestrate.timer alarm-chaos.timer
+systemctl is-active alarm-cd-orchestrate.service         # « inactive » (sinon attendre la fin du passage)
+$E $ALL endpoint status -w table                         # IS LEADER : ce voteur passe en dernier
+$E $ALL endpoint health && $P list                       # 3 sains, un leader, replicas streaming
+
+# 1. Sur la machine du voteur (onsite-1 = node1, onsite-2 = node2, NODE3 = node3), N = son numéro
+cd /opt/alarm
+grep -c ETCD_AUTO_COMPACTION docker-compose.yml          # 2 ; sinon checkout pas à jour (git log -1) : attendre alarm-host-sync
+docker inspect nodeN-etcd-1 --format '{{range .Config.Env}}{{println .}}{{end}}' | grep AUTO_COMPACTION
+#   déjà les 2 variables : le CD l'a recréé, rien à faire sur ce voteur
+set -a && . ./.env.prod.secrets && set +a                # sinon compose refuse (SECRET_KEY)
+docker compose --env-file .env.prod.nodeN -p nodeN up -d --no-deps etcd
+docker inspect -f '{{.State.Health.Status}}' nodeN-etcd-1   # répéter jusqu'à « healthy »
+docker logs --since 5m nodeN-etcd-1 2>&1 | grep -o '"auto-compaction-[a-z]*":"[^"]*"' | sort -u
+#   "auto-compaction-mode":"periodic", "auto-compaction-retention":"1h0m0s"
+
+# 2. NODE3, avant le voteur suivant
+$E $ALL endpoint health && $P list                       # 3 sains, un leader, replicas streaming
+
+# 3. Après les 3 voteurs (NODE3)
+sudo systemctl start alarm-cd-orchestrate.timer          # + alarm-chaos.timer s'il était actif à l'étape 0
+```
+Vérifier aussi, sur chaque nœud après le déploiement de cette version, que le backend a reçu les voteurs : `docker exec nodeN-backend-1 printenv ETCD_HOSTS` (vide → la surveillance est sautée sur ce nœud jusqu'à sa prochaine recréation ; pour la forcer : `docker compose --env-file .env.prod.nodeN -p nodeN up -d --no-deps backend`, secrets sourcés, Patroni intact). Une heure après, la compaction a tourné : `docker logs nodeN-etcd-1 2>&1 | grep -c "finished scheduled compaction"` ≥ 1.
+
+### Compacter et défragmenter à la main (procédure du 2026-11-13)
+
+À faire quand l'email INV-196 arrive, ou si `endpoint status` montre une base proche de 2048 Mo. Sans alarme active, et jamais pendant un déploiement (orchestrateur en pause, étape 0 ci-dessus).
+
+```bash
+# 1. Compaction de tout l'historique jusqu'à la révision courante : une seule fois, pour tout le cluster
+REV=$($E --endpoints=http://10.99.0.1:2379 endpoint status -w json \
+      | python3 -c 'import sys,json;print(json.load(sys.stdin)[0]["Status"]["header"]["revision"])')
+$E --endpoints=http://10.99.0.1:2379 --command-timeout=30m compaction --physical "$REV"
+#   plusieurs minutes sur ~4,7 M de révisions : le délai par défaut (5 s) ne suffit pas
+$E $ALL endpoint health && $P list
+
+# 2. Défragmentation, UN membre à la fois : les deux followers etcd, puis le leader etcd (IS LEADER)
+$E $ALL endpoint status -w table
+$E --endpoints=http://<follower 1>:2379 --command-timeout=10m defrag
+$E $ALL endpoint health && $P list                       # 3 sains, un leader Patroni, replicas streaming
+$E --endpoints=http://<follower 2>:2379 --command-timeout=10m defrag
+$E $ALL endpoint health && $P list
+$E --endpoints=http://<leader etcd>:2379 --command-timeout=10m defrag
+$E $ALL endpoint health && $P list
+$E $ALL endpoint status -w table                         # DB SIZE réduite sur les 3
+
+# 3. Seulement après une alarme NOSPACE : elle reste après compaction et défragmentation
+$E $ALL alarm list
+$E $ALL alarm disarm
+$E $ALL alarm list                                       # vide ; puis $P list : un leader
+```
+- La compaction n'est pas bloquée par NOSPACE ; la défragmentation non plus.
+- Un membre en défragmentation ne sert plus aucune requête : les deux autres tiennent le quorum. **Jamais** `defrag --cluster` ni deux membres à la fois.
+- Répété sur un etcd 3.5.17 jetable (quota 2 Mo) le 2026-11-13 : compaction, défragmentation (2,7 Mo → 324 ko), alarme NOSPACE présente jusqu'à `alarm disarm`, écritures acceptées ensuite.
+
+---
+
 ## 10. Métriques de réussite Phase 3
 
 Pour considérer Phase 3 « livrée », tous ces points doivent être verts :
@@ -1102,4 +1185,5 @@ Dans ce flux, on a remplacé 8 h de service KO + nuit blanche pour l'humain par 
 - **2026-11-09** — **Sauvegardes de la base** (§9quinquies, INV-191, décision du propriétaire) : `scripts/alarm-db-backup.sh` + `alarm-db-backup.{service,timer}` (chaque nuit : `pg_dump -Fc` depuis un replica sain, sinon le leader, vérifié, 14 jours sur NODE3, copie sur alarm-1) et `alarm-db-restore-test.{service,timer}` (chaque mois : restauration dans un conteneur jetable) sur NODE3, posés à la main ; échec → email (`send-alert-email.py`) ; contrôle `sauvegarde_base` sur alarm-1 (INV-186) ; procédure de restauration à côté puis échange de noms. Pas de chiffrement (justifié §9quinquies). pgBackRest reste un projet ultérieur.
 - **2026-11-09** — **Version annoncée ~10 min après le merge au lieu d'~1 h** (choix du propriétaire : l'app attend toujours que le serveur annonce la version, INV-ANDROID-705 ; c'est le pipeline qui accélère). Mesure release 1.9.5 : merge PR #321 14:37:03Z, CD Build fini 14:37:32Z, puis ~35 min de CI master avant `:stable`, pull 5 min, tick orchestrateur 15 min ± 2. (1) **Promotion immédiate** d'un commit au même arbre que sa PR verte (§2, INV-190, `.github/scripts/promote_decision.py`), garde anti-retour-arrière de `:stable` ; (2) **tick orchestrateur 2 min** (gigue 30 s), no-op sans verrou ni réseau ni log (§4, INV-167) ; pull gardé à 5 min (§3). **Réinstaller à la main `alarm-cd-orchestrate.{sh,service,timer}` sur NODE3** (§9bis).
 - **2026-11-12** — **Rattrapage de la copie des sauvegardes sur alarm-1** (§9quinquies, INV-191, demande du propriétaire) après alarm-1 éteint 2 jours (copies du 11-11 et du 11-12 jamais arrivées, recopiées à la main) : chaque nuit, `alarm-db-backup` copie toutes les sauvegardes locales absentes d'alarm-1, la plus ancienne d'abord. **Réinstaller à la main sur NODE3** : `ssh -p 50922 -i ~/.ssh/alarm_node3 alarm@51.210.105.102 'cd /opt/alarm && git pull --ff-only && sudo install -m 755 scripts/alarm-db-backup.sh /usr/local/bin/alarm-db-backup'`.
+- **2026-11-13** — **etcd : compaction automatique et surveillance de la base** (§9sexies, INV-196, demande du propriétaire) après le constat de ~1716 Mo par voteur (révision 4,69 M, aucune compaction ; quota 2 Gio) : `ETCD_AUTO_COMPACTION_MODE=periodic` / `RETENTION=1h` sur le service `etcd`, email du leader quand une base atteint 1024 Mo ou qu'une alarme NOSPACE est active. **Recréer etcd à la main, un voteur à la fois** (le CD ne le garantit pas) ; procédure de compaction et de défragmentation à la main.
 - **2026-11-13** — **Un backend primary après chaque bascule et chaque redémarrage** (§4, INV-197, demande du propriétaire) après ~18 min sans écriture (bascule de node3 vers node1, encore sur l'ancienne image). Canary : attente 60 s d'un backend primary, sinon seconde bascule, arrêt du passage (exit 2) et email par `send-alert-email.py` ; jamais de redémarrage sans primary ; logs du backend sauvés avant chaque recréation (`/var/lib/alarm/cd/logs`, 10 gardés). Orchestrateur : leader Patroni avant-dernier, nœuds reportés comptés dans `--pending`. Suggestion `logging_collector` (§9quater), non appliquée. **Réinstaller à la main sur NODE3**, hors d'un passage en cours (`systemctl is-active alarm-cd-orchestrate.service` → `inactive`) : `ssh -p 50922 -i ~/.ssh/alarm_node3 alarm@51.210.105.102 'cd /opt/alarm && git pull --ff-only && sudo install -m 755 scripts/alarm-cd-orchestrate.sh /usr/local/bin/alarm-cd-orchestrate && sudo install -m 755 scripts/alarm-cd-canary.sh /usr/local/bin/alarm-cd-canary.sh && test -x /opt/alarm/send-alert-email.py && echo "Test de la voie d alerte du CD" | /opt/alarm/send-alert-email.py "[ALARME-MURGAT] Test alerte CD (NODE3)"'`.
