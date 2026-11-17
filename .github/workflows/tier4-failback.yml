@@ -348,6 +348,17 @@ jobs:
             docker pull "$img" || echo "::warning::pre-pull $img failed (will retry via buildx)"
           done
 
+      - name: Pause de la pile dev (libere les ports du node1)
+        # L'hote du runner (alarme-claude) fait aussi tourner la pile dev mono-noeud (-p dev), qui publie
+        # 2379/2380/5432/8008/8000 = les ports du node1 (run 43845617929 du 2026-11-16 : « Bind for
+        # 0.0.0.0:2379 failed »). Mise en pause (stop, donnees gardees) pendant le run, relancee par
+        # « Teardown cluster », meme en cas d'echec. docker et non compose : sans ses .env, compose ne
+        # sait pas reconstruire le projet dev.
+        run: |
+          ids=$(docker ps -q --filter label=com.docker.compose.project=dev)
+          echo "$ids" > "$RUNNER_TEMP/dev-stack-ids"
+          if [ -n "$ids" ]; then docker stop $ids; else echo "pile dev arretee : rien a mettre en pause"; fi
+
       - name: Boot cluster (3 noeuds Patroni)
         # Stack de prod : 3 projets docker compose (node1/node2/node3), chacun
         # avec son .env.node{1,2,3}, montant etcd + Patroni + backend. Les 3
@@ -524,6 +535,9 @@ jobs:
           for proj in node1 node2 node3; do
             docker compose -p "$proj" down -v --remove-orphans 2>/dev/null || true
           done
+          # Relance la pile dev mise en pause avant le boot (ports du node1 liberes par le down ci-dessus).
+          ids=$(cat "$RUNNER_TEMP/dev-stack-ids" 2>/dev/null || true)
+          if [ -n "$ids" ]; then docker start $ids || echo "::warning::pile dev non relancee : docker start $ids"; fi
           # Pas de docker network a virer : en 3-node-per-project, chaque
           # projet utilise son propre default network (auto-cree, auto-detruit
           # au down). Les projets communiquent via host.docker.internal sur
