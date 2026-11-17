@@ -480,12 +480,16 @@ jobs:
           ALARM_VPS3_URL: http://localhost:8002
           PYTHONUNBUFFERED: "1"
         run: |
+          # pipefail : sans lui, le code de « | tee » (0) masquait l'echec de pytest (run 44089906858 vert
+          # alors que « pytest : commande introuvable »). python -m : le pytest deja present sur ce runner est
+          # dans ~/.local (pip le voit « deja installe »), dont le bin/ n'est pas dans le PATH.
+          set -o pipefail
           mkdir -p reports
           VERBOSE=""
           if [ "${{ github.event.inputs.verbose }}" = "true" ]; then
             VERBOSE="-vv"
           fi
-          pytest tests/test_failback.py -v -s $VERBOSE \
+          python -m pytest tests/test_failback.py -v -s $VERBOSE \
             --junitxml=reports/tier4-failback.xml \
             -p no:randomly \
             2>&1 | tee reports/tier4-pytest.log
