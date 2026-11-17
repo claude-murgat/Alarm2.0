@@ -348,16 +348,23 @@ jobs:
             docker pull "$img" || echo "::warning::pre-pull $img failed (will retry via buildx)"
           done
 
-      - name: Pause de la pile dev (libere les ports du node1)
-        # L'hote du runner (alarme-claude) fait aussi tourner la pile dev mono-noeud (-p dev), qui publie
-        # 2379/2380/5432/8008/8000 = les ports du node1 (run 43845617929 du 2026-11-16 : « Bind for
-        # 0.0.0.0:2379 failed »). Mise en pause (stop, donnees gardees) pendant le run, relancee par
-        # « Teardown cluster », meme en cas d'echec. docker et non compose : sans ses .env, compose ne
-        # sait pas reconstruire le projet dev.
+      - name: Pause des conteneurs qui tiennent les ports du cluster
+        # L'hote du runner (alarme-claude) est une machine de dev partagee : d'autres projets y publient
+        # des ports du cluster de test (2026-11-16/17 : pile dev -p dev sur 2379/2380/5432/8008/8000, base
+        # du projet Chat sur 5433 -> « Bind for 0.0.0.0:<port> failed », runs 43845617929, 44065790762).
+        # Tout conteneur qui publie un port des .env.node{1,2,3} est arrete (docker stop, donnees gardees)
+        # pendant le run et relance par « Teardown cluster », meme en cas d'echec. docker port deplie les
+        # plages (2379-2380). Port 0 = port au hasard, jamais en conflit.
         run: |
-          ids=$(docker ps -q --filter label=com.docker.compose.project=dev)
-          echo "$ids" > "$RUNNER_TEMP/dev-stack-ids"
-          if [ -n "$ids" ]; then docker stop $ids; else echo "pile dev arretee : rien a mettre en pause"; fi
+          ports=$(grep -hoE '^[A-Z_]*PORT=[0-9]+' .env.node1 .env.node2 .env.node3 | cut -d= -f2 | grep -vx 0 | sort -u)
+          ids=""
+          for id in $(docker ps -q); do
+            for hp in $(docker port "$id" | grep -oE ':[0-9]+$' | tr -d :); do
+              if grep -qx "$hp" <<<"$ports"; then ids="$ids $id"; echo "pause : $(docker inspect -f '{{.Name}}' "$id") (port $hp)"; break; fi
+            done
+          done
+          echo "$ids" > "$RUNNER_TEMP/paused-containers"
+          if [ -n "${ids// /}" ]; then docker stop $ids; else echo "aucun conteneur sur les ports du cluster"; fi
 
       - name: Boot cluster (3 noeuds Patroni)
         # Stack de prod : 3 projets docker compose (node1/node2/node3), chacun
@@ -473,12 +480,16 @@ jobs:
           ALARM_VPS3_URL: http://localhost:8002
           PYTHONUNBUFFERED: "1"
         run: |
+          # pipefail : sans lui, le code de « | tee » (0) masquait l'echec de pytest (run 44089906858 vert
+          # alors que « pytest : commande introuvable »). python -m : le pytest deja present sur ce runner est
+          # dans ~/.local (pip le voit « deja installe »), dont le bin/ n'est pas dans le PATH.
+          set -o pipefail
           mkdir -p reports
           VERBOSE=""
           if [ "${{ github.event.inputs.verbose }}" = "true" ]; then
             VERBOSE="-vv"
           fi
-          pytest tests/test_failback.py -v -s $VERBOSE \
+          python -m pytest tests/test_failback.py -v -s $VERBOSE \
             --junitxml=reports/tier4-failback.xml \
             -p no:randomly \
             2>&1 | tee reports/tier4-pytest.log
@@ -535,9 +546,9 @@ jobs:
           for proj in node1 node2 node3; do
             docker compose -p "$proj" down -v --remove-orphans 2>/dev/null || true
           done
-          # Relance la pile dev mise en pause avant le boot (ports du node1 liberes par le down ci-dessus).
-          ids=$(cat "$RUNNER_TEMP/dev-stack-ids" 2>/dev/null || true)
-          if [ -n "$ids" ]; then docker start $ids || echo "::warning::pile dev non relancee : docker start $ids"; fi
+          # Relance les conteneurs mis en pause avant le boot (ports liberes par le down ci-dessus).
+          ids=$(cat "$RUNNER_TEMP/paused-containers" 2>/dev/null || true)
+          if [ -n "${ids// /}" ]; then docker start $ids || echo "::warning::conteneurs non relances : docker start $ids"; fi
           # Pas de docker network a virer : en 3-node-per-project, chaque
           # projet utilise son propre default network (auto-cree, auto-detruit
           # au down). Les projets communiquent via host.docker.internal sur
