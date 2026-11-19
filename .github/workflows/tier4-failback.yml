@@ -506,8 +506,9 @@ jobs:
             # atteint. Resultat: process zombie qui maintient le runner busy
             # apres la fin du job (vu lors du smoke-test #4 attempt 2 : 19h de
             # zombie adb apres un job cancelled).
+            # AlarmWakeUpHandler : arret du heartbeat des apps hors garde (INV-ANDROID-601).
             timeout 10 adb -s "$serial" logcat -d -t 5000 \
-              -s ApiClient:* AlarmPollingService:* AndroidRuntime:E '*:F' \
+              -s ApiClient:* AlarmPollingService:* AlarmWakeUpHandler:* AndroidRuntime:E '*:F' \
               > "reports/logcat-${port}.txt" 2>&1 || true
           done
 

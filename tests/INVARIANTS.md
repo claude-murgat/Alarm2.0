@@ -338,7 +338,7 @@ Un heartbeat envoyé à un noeud replica est **forwardé au leader** via WireGua
 - **Anti-boucle** : le proxy ajoute le header `X-Heartbeat-Proxied: 1`. Un nœud qui reçoit un heartbeat déjà proxifié ne le re-proxifie PAS (il l'exécute s'il est leader, sinon 503). Le nœud d'entrée itère ses peers jusqu'au leader ; pas de récursion replica→replica.
 - **Évolution** : avant 2026-06-16, replica → 503 sec (l'app rotatait sur le LAN, cf INV-ANDROID-304). Étape intermédiaire 2026-06-16 : proxy activé uniquement sur le nœud cloud. Depuis 2026-06-17 : proxy par défaut partout (décision propriétaire — résilience à la chute du cloud + onsite bientôt joignables de l'extérieur).
 - **Kill-switch** : `HEARTBEAT_PROXY_ON_REPLICA=false` restaure le 503 sec (chemin testé). En dev/CI single-node le nœud est leader → proxy jamais déclenché.
-- **Couverture** : `tests/integration/test_heartbeat_proxy_inv043.py` (tier 2, 4 tests) : leader→200, replica+kill-switch→503, replica défaut→proxy 200, replica+déjà-proxifié→503 (anti-boucle). + `test_failback.py` (tier 4) valide la **continuité** des heartbeats à travers un failover (l'app garde le 200 via le nouveau leader, relayé ou direct), plus la "rotation vers le leader exact".
+- **Couverture** : `tests/integration/test_heartbeat_proxy_inv043.py` (tier 2, 4 tests) : leader→200, replica+kill-switch→503, replica défaut→proxy 200, replica+déjà-proxifié→503 (anti-boucle). + `test_failback.py::test_failback_kill_leader` (tier 4) valide la **continuité** du heartbeat de l'app **de garde** à travers un failover : un heartbeat (relayé ou direct) écrit sur le nouveau leader après l'arrêt de l'ancien, en ≤ 120 s. Les apps hors garde ne heartbeatent pas (INV-ANDROID-600, INV-143) : le test ne les attend pas. Clarifié le 2026-11-18 : le test attendait les 3 apps et ne passait que lorsque les heartbeats d'avant la panne étaient encore « frais » à l'élection (run 44286889201).
 - **INV-173 (2026-10-30)** : le relais essaie d'abord le peer dont l'hôte est le leader Patroni local, `httpx.Timeout(3.0, connect=1.5)`.
 
 ### INV-044 [M] ⚠️ Écriture `/api/*` reçue par un replica → proxy au leader (nouveau 2026-06-17)
@@ -1000,6 +1000,8 @@ Aucun scénario (partition réseau, Patroni bug) ne doit produire 2 primaries.
 
 ### INV-094 [M] ⚠️ Persistance après restart
 Docker restart → alarmes et users conservés (volume pgdata).
+- **Relance automatique après crash** (PR #184, issue #186 ; écrit au catalogue le 2026-11-18) : un conteneur `etcd` ou `patroni` dont le processus principal meurt sans arrêt demandé (crash, OOM, SIGKILL) est relancé par Docker (`restart: unless-stopped`). Un arrêt demandé (`docker stop`, `docker kill`, `docker compose stop`) le laisse arrêté : les tests failover s'appuient dessus.
+- **Couverture** : `test_failback.py::test_container_auto_recovery_after_crash[patroni|etcd]` (tier 4) : SIGKILL du processus principal envoyé depuis l'espace PID de l'hôte → `running` et `RestartCount` incrémenté en ≤ 60 s ; pour patroni, `/health` du nœud de nouveau 200. Un `kill -KILL 1` lancé dans le conteneur ne prouve rien : le noyau l'ignore (PID 1 de son propre espace PID). La conservation des données n'est pas testée.
 
 ### INV-095 [H] ❌ Écriture atomique au failover
 Si primary crash pendant `POST /alarms/send` → soit l'alarme est commitée (visible partout), soit pas (pas de demi-alarme). Pas d'état intermédiaire observable.
