@@ -30,7 +30,7 @@ RESTORE_IMAGE="${RESTORE_IMAGE:-postgres:16-alpine}"
 # Remplies au premier demarrage du backend, jamais vides en service.
 RESTORE_TABLES="users escalation_config system_config"
 PGUSER="${PGUSER:-alarm}"
-NODE_IPS="10.99.0.1 10.99.0.2 10.99.0.3 10.99.0.4 10.99.0.5 10.99.0.6 10.99.0.7"
+NODE_IPS="10.99.0.1 10.99.0.4 10.99.0.5 10.99.0.6 10.99.0.7"  # onsite-1/2 (.2/.3) retires le jour du demenagement
 NAME_RE='^alarm_db-[0-9]{8}T[0-9]{6}Z-node[0-9]+\.dump$'
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new)
 
@@ -113,7 +113,7 @@ for ip in $NODE_IPS; do
     | python3 -c "$CANDIDATES_PY" "$NODE" 2>/dev/null) && break
   VIEW=""
 done
-[[ -n "$VIEW" ]] || fail "aucun leader Patroni running dans la vue du cluster (GET :8008/cluster, 7 noeuds essayes)"
+[[ -n "$VIEW" ]] || fail "aucun leader Patroni running dans la vue du cluster (GET :8008/cluster, 5 noeuds essayes)"
 mapfile -t CANDIDATES <<< "$VIEW"
 
 TS=$(date -u +%Y%m%dT%H%M%SZ)

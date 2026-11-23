@@ -1,6 +1,10 @@
 # /etc/wireguard/wg0.conf — Alarme Murgat onsite mesh
 # Cf. docs/PROVISIONING_ONSITE.md §13
 #
+# HISTORIQUE : modele d'onsite-1/onsite-2 (10.99.0.2/.3), retires le jour du demenagement (INV-090).
+# Une machine standard (alarm-1 a alarm-4) a son wg0 genere par scripts/provision/20-wireguard-node.sh
+# (NODE3 seul pair, relais 10.99.0.0/24) ; pair LAN alarm-3 <-> alarm-4 : docs/STANDARD_MACHINE.md §5.2.
+#
 # Adresses internes Wireguard (privées, hardcodées) :
 #   10.99.0.1  = NODE3 cloud (hors-site)
 #   10.99.0.2  = NODE1 onsite-1

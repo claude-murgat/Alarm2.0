@@ -20,7 +20,7 @@
 | Modèle | **Dell OptiPlex 9020M** (format micro) |
 | Parc au 2026-11-06 | alarm-1, alarm-2, alarm-3, alarm-4 (tous à Beaufort) |
 | Carte réseau | intégrée Intel, interface **`eno1`** |
-| USB | modem SIM7600 et Arduino UNO R4 (contact sec) branchables sur **n'importe quelle** machine (INV-182) ; **un seul modem par site** |
+| USB | modem SIM7600 et Arduino UNO R4 (contact sec) branchables sur **n'importe quelle** machine (INV-182) ; plusieurs modems par site (INV-193) |
 | RAM, disque | non relevés à l'inventaire du 2026-11-06 : à noter ici au prochain passage (`free -h`, `lsblk`) |
 
 Hors standard : onsite-1 et onsite-2 (Shuttle NC03U, Core i5-7400T ; en retrait au déménagement,
@@ -121,18 +121,18 @@ NetworkManager) ; noyau 6.12. Pas de LVM : décision du standard, le §10 de `PR
 
 ## 5. Réseau, noms et adresses
 
-### 5.1. Plan (au 2026-11-06)
+### 5.1. Plan (après le jour du déménagement, INV-090)
 
 | Machine | Nœud | IP LAN | Passerelle | IP WireGuard | `GATEWAY_SITE` (site affiché) | Lieu physique | Rôle etcd |
 |---|---|---|---|---|---|---|---|
 | alarm-1 | node4 | 172.16.1.118/16 | 172.16.0.1 | 10.99.0.4 | `beaufort` | Beaufort | non votant |
 | alarm-2 | node5 | 172.16.1.119/16 | 172.16.0.1 | 10.99.0.5 | `beaufort` | Beaufort | non votant |
-| alarm-3 | node6 | 172.16.1.120/16 | 172.16.0.1 | 10.99.0.6 | `izeron` | Beaufort jusqu'au déménagement | non votant (voteur le jour du déménagement, INV-090) |
-| alarm-4 | node7 | 172.16.1.121/16 | 172.16.0.1 | 10.99.0.7 | `izeron` | Beaufort jusqu'au déménagement | non votant (idem) |
+| alarm-3 | node6 | 192.168.1.X/24 (à fixer ; 172.16.1.120/16 à Beaufort avant) | 192.168.1.1 | 10.99.0.6 | `izeron` | Izeron | voteur |
+| alarm-4 | node7 | 192.168.1.Y/24 (à fixer ; 172.16.1.121/16 avant) | 192.168.1.1 | 10.99.0.7 | `izeron` | Izeron | voteur |
 
-Hors standard, pour mémoire : onsite-1 (node1, 192.168.1.50, 10.99.0.2) et onsite-2 (node2,
-192.168.1.51, 10.99.0.3) à Izeron, voteurs ; NODE3 (node3, 51.210.105.102, 10.99.0.1), voteur et
-relais WireGuard. Le plan machine → nœud → IP WireGuard → site est la variable `STD_PLAN` de
+Hors standard, pour mémoire : NODE3 (node3, 51.210.105.102, 10.99.0.1), voteur et relais WireGuard ;
+onsite-1 (node1, 192.168.1.50, 10.99.0.2) et onsite-2 (node2, 192.168.1.51, 10.99.0.3), voteurs à
+Izeron jusqu'au jour du déménagement, retirés depuis. Le plan machine → nœud → IP WireGuard → site est la variable `STD_PLAN` de
 `standard.env` (les scripts de provisioning refusent une machine qui n'y est pas). Les IP LAN
 changent avec le site (déménagement) : elles ne sont qu'ici et dans `/etc/network/interfaces`.
 
@@ -145,8 +145,12 @@ changent avec le site (déménagement) : elles ne sont qu'ici et dans `/etc/netw
 - **WireGuard** `wg0` : `10.99.0.N/24`, port 51820, MTU 1280, clé privée
   `/etc/wireguard/prod-privatekey`, **NODE3 seul pair** (`51.210.105.102:51820`,
   `AllowedIPs = 10.99.0.0/24`, `PersistentKeepalive = 25`) : tout passe par le relais NODE3, rien à
-  retoucher quand la machine change de LAN ou de site. Écart historique toléré : alarm-1 et alarm-2
-  ont en plus un pair LAN direct l'un vers l'autre (piège §9.3). Clés publiques :
+  retoucher quand la machine change de LAN ou de site. Écarts tolérés : alarm-1 et alarm-2 ont en
+  plus un pair LAN direct l'un vers l'autre (historique) ; **alarm-3 et alarm-4 aussi (décision du
+  propriétaire du 2026-11-23)** : ce sont 2 des 3 voteurs etcd, et sans lien direct ils ne se joignent
+  que par NODE3 : OVH en panne = plus de quorum (INV-090). Pair LAN = `AllowedIPs` l'IP WG de l'autre
+  en `/32` (prioritaire sur le `/24` du relais), `Endpoint` son IP LAN ; à repointer à chaque
+  changement d'IP LAN (piège §9.3) ; `20-wireguard-node.sh --force` le supprimerait. Clés publiques :
   [`infra/onsite/peers.md`](../infra/onsite/peers.md).
 - **ufw** actif, entrée refusée par défaut ; ouverts : SSH (22) et backend (8000) depuis le LAN du
   site, SSH depuis `10.99.0.0/24` (orchestrateur CD), WireGuard 51820/udp, tout sur `wg0`.
@@ -241,7 +245,9 @@ en NVRAM. `90-uefi-repair.sh` retire chaque entrée « Windows Boot Manager » d
 `dpkg_audit`).
 
 ### 9.3. Échange d'IP ou de câbles : endpoints WireGuard LAN périmés
-alarm-1 et alarm-2 ont un pair WireGuard LAN direct l'un vers l'autre (`Endpoint = 172.16.1.x:51820`).
+alarm-1 et alarm-2 ont un pair WireGuard LAN direct l'un vers l'autre (`Endpoint = 172.16.1.x:51820`),
+alarm-3 et alarm-4 aussi (§5.2). Un pair `/32` périmé ne retombe **pas** sur le relais : le trafic
+entre ces deux IP WG est perdu tant que l'`Endpoint` n'est pas repointé.
 Après un changement d'adresse (alarm-1 passée de .120 à .118 le 2026-11-04, puis un échange de câbles
 alarm-2 ↔ alarm-3), ce pair visait toujours l'ancienne adresse, désormais celle d'**une autre
 machine** : le lien direct n'est plus fiable (le relais NODE3, lui, suit tout seul par le roaming
@@ -261,7 +267,7 @@ d'arrivée reste « En attente du modem » au-delà de 15 s :
 - `CNMP=2` n'est réappliqué qu'au démarrage : `sudo systemctl restart alarm-modem-rat` ;
 - `MODEM_XHCI` (contrôleur USB, défaut `0000:00:14.0`) : vérifier `readlink -f /sys/bus/usb/devices/usb1`
   (non vérifié sur l'OptiPlex 9020M) ;
-- `GATEWAY_SITE` de la machine d'arrivée, et **un seul modem par site**.
+- `GATEWAY_SITE` de la machine d'arrivée (plusieurs modems par site depuis INV-193 : chaque SMS et appel est réservé par une seule passerelle).
 Sur la machine de départ : **une** récupération USB et **un** email « Modem DOWN », attendus (INV-184).
 
 ### 9.5. Replicas bloqués après le redémarrage d'un site
