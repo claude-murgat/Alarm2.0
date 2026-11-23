@@ -350,11 +350,18 @@ def test_inv018b_kpi_hors_heures_filter_uses_original_created_at(client, admin_h
     wed_dt = (sunday_dt + timedelta(days=3)).replace(
         hour=10, minute=0, second=0, microsecond=0
     )
+    # Mercredi ferie (11/11 en 2026, Tier 2 rouge du 2026-11-23) : recule d'une semaine a la fois,
+    # au plus 3 (reste dans la fenetre weeks=8 : 14 + 21 + 3 jours < 56).
+    from backend.app.api.stats import _est_hors_heures_ouvrees
+    for _ in range(3):
+        if not _est_hors_heures_ouvrees(wed_dt):
+            break
+        sunday_dt -= timedelta(days=7)
+        wed_dt -= timedelta(days=7)
 
     # Sanity de l'echafaudage : sinon le test prouverait n'importe quoi
     # (ex : si sunday_dt tombe par accident un jour ferie un mercredi 10h apres
     # un decalage, _est_hors_heures_ouvrees pourrait inverser le verdict).
-    from backend.app.api.stats import _est_hors_heures_ouvrees
     assert _est_hors_heures_ouvrees(sunday_dt), (
         f"sanity : sunday_dt={sunday_dt} doit etre hors heures ouvrees"
     )
