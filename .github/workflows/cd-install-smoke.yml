@@ -80,7 +80,9 @@ on:
 jobs:
   smoke-install:
     name: alarm-cd-pull install smoke
-    runs-on: ubuntu-latest
+    # shortcut: ubuntu-latest = 26.04 depuis 2026-11 : son visudo (sudo-rs) refuse les jokers d'arguments
+    # (`install -m *`) que le sudo classique de Debian 13 (prod) accepte ; a lever si la sudoers est reecrite.
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Checkout
@@ -350,7 +352,8 @@ jobs:
   smoke-install-chaos:
     # INV-176..179 : runner de panne controlee (NODE3, a la main comme l'orchestrateur).
     name: alarm-chaos install smoke (panne controlee)
-    runs-on: ubuntu-latest
+    # shortcut: 24.04 (sudo classique, comme la prod) : cf smoke-install ; ce job pose aussi la sudoers et teste sudo -n.
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Checkout
