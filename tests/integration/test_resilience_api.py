@@ -5,7 +5,8 @@ passerelles + scenarios de panne calcules ; GET /api/resilience/whatif pour un s
 Patroni et les /health des autres noeuds sont simules par `urlopen` (motif de
 test_cluster_location_inv161.py) : 10.99.0.4 (node4) ne repond pas. 7 noeuds depuis le 2026-11-05 :
 node6/node7 (alarm-3/alarm-4) etiquetes Izeron, non votants. Etat final du jour du demenagement : node1/node2
-retires, 5 noeuds, voteurs node3, node6, node7, passerelle d'Izeron alarm-3 (node6).
+retires, 5 noeuds, voteurs node3, node6, node7, deux passerelles d'Izeron alarm-3 (node6) et alarm-4 (node7),
+chacune avec modem et Arduino (INV-193).
 """
 import io
 import json
@@ -56,13 +57,13 @@ def user1_headers(client):
 
 @pytest.fixture
 def stale_gateway():
-    """alarm-3 (passerelle d'Izeron) vue il y a 125 s via report-state ; alarm-1 jamais vue."""
+    """alarm-3 (passerelle d'Izeron) vue il y a 125 s via report-state ; alarm-4 et alarm-1 jamais vues."""
     from backend.app.clock import now as clock_now
     from backend.app.database import SessionLocal
     from backend.app.models import GatewayState
     db = SessionLocal()
     try:
-        db.query(GatewayState).filter(GatewayState.gateway_id.in_(["alarm-3", "alarm-1"])).delete(
+        db.query(GatewayState).filter(GatewayState.gateway_id.in_(["alarm-3", "alarm-4", "alarm-1"])).delete(
             synchronize_session=False)
         db.add(GatewayState(gateway_id="alarm-3", state="closed", site="izeron",
                             last_seen=clock_now() - timedelta(seconds=125)))
@@ -98,27 +99,34 @@ def test_live_nodes_and_gateways(client, admin_headers, fake_cluster, stale_gate
     assert sorted(u for u in fake_cluster if u.endswith("/health")) == [
         f"http://10.99.0.{i}:8000/health" for i in range(3, 8)]
     gws = {g["gateway_id"]: g for g in live["gateways"]}
-    assert set(gws) == {"alarm-3", "alarm-1"}
+    assert list(gws) == ["alarm-3", "alarm-4", "alarm-1"]
     assert gws["alarm-3"]["site"] == "izeron" and gws["alarm-3"]["host"] == "node6"
     assert gws["alarm-3"]["registered"] is True and 120 <= gws["alarm-3"]["last_seen_s"] <= 130
+    assert gws["alarm-4"] == {"gateway_id": "alarm-4", "host": "node7", "site": "izeron",
+                              "registered": False, "last_seen_s": None}
     assert gws["alarm-1"] == {"gateway_id": "alarm-1", "host": "node4", "site": "beaufort",
                               "registered": False, "last_seen_s": None}
 
 
 def test_whatif_default_scenarios(client, admin_headers, fake_cluster):
     whatif = {w["scenario"]: w for w in client.get("/api/resilience", headers=admin_headers).json()["whatif"]}
+    # plus de « Legacy debranche » ; une cle par passerelle d'Izeron (deux sur le site)
     assert set(whatif) == {"izeron_one_node", "beaufort_one_node", "ovh_down", "izeron_both", "beaufort_both",
-                           "gateway_izeron", "gateway_beaufort"}  # plus de « Legacy debranche »
+                           "gateway_alarm-3", "gateway_alarm-4", "gateway_beaufort"}
     both = whatif["izeron_both"]
     assert both["untestable"] is True and both["leader_possible"] is False
     assert both["why"] == "1/3 voteurs etcd joignables"  # node3 seul voteur restant
     # INV-175 « Prévenu » (2026-11-10) : sans leader, chaque noeud debout envoie INV-170
     assert both["alerted_by"] == ["email INV-170 « aucun leader » par node3 + node4 + node5 après 3 min"]
-    assert whatif["izeron_one_node"]["alerted_by"] == [
-        "email INV-189 « nœud injoignable » node7 par le leader après 10 min"]
+    one = whatif["izeron_one_node"]  # node6 et node7 portent chacun une passerelle : le premier
+    assert one["label"] == "Un nœud à Izeron (node6)"
+    assert one["leader_possible"] is True and one["alarms_created"] == {"izeron": True, "beaufort": True}
+    assert one["alerted_by"] == ["email INV-172 « passerelle muette » alarm-3 par le leader après 10 min",
+                                 "email INV-189 « nœud injoignable » node6 par le leader après 10 min"]
     assert both["label"] == "Izeron entier (node6 + node7)"
-    assert whatif["izeron_one_node"]["label"] == "Un nœud à Izeron (node7)"  # node6 porte la passerelle
-    assert whatif["izeron_one_node"]["leader_possible"] is True
+    gw3 = whatif["gateway_alarm-3"]  # alarm-4 prend le relais : alarmes et SMS d'Izeron gardes
+    assert gw3["label"] == "Passerelle Izeron (alarm-3)" and gw3["alarms_created"] == {"izeron": True, "beaufort": True}
+    assert gw3["alerted_by"] == ["email INV-172 « passerelle muette » alarm-3 par le leader après 10 min"]
     beaufort = whatif["beaufort_both"]  # inchange avec 5 noeuds
     assert beaufort["label"] == "Beaufort entier (node4 + node5)" and beaufort["untestable"] is False
     assert beaufort["why"] == "3/3 voteurs etcd joignables"
@@ -144,9 +152,9 @@ def test_whatif_adhoc(client, admin_headers):
     assert o["leader_possible"] is True
     assert o["writable_from"]["beaufort"] is False and o["alarms_created"]["beaufort"] is False
     assert o["alarms_created"]["izeron"] is True
-    g = client.get("/api/resilience/whatif?gateways=alarm-3", headers=admin_headers).json()
+    g = client.get("/api/resilience/whatif?gateways=alarm-3,alarm-4", headers=admin_headers).json()
     assert g["alarms_created"] == {"izeron": False, "beaufort": True}
-    assert g["alerted_by"] == ["email INV-172 « passerelle muette » alarm-3 par le leader après 10 min",
+    assert g["alerted_by"] == ["email INV-172 « passerelle muette » alarm-3 + alarm-4 par le leader après 10 min",
                                "email INV-185 « site sans modem » Izeron par le leader après 10 min",
                                "email INV-144 « escalade sans appel » par le leader pendant une alarme"]
 

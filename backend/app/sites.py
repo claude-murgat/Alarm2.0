@@ -60,8 +60,8 @@ def retiring_nodes(db: Session) -> list[str]:
 # INV-175 : topologie du panneau resilience. Memes defauts sur une base deja en service.
 DEFAULT_ETCD_VOTERS = "node3,node6,node7"  # INV-090, jour du demenagement
 DEFAULT_RELAY_NODES = "node3"  # seul noeud qui relie les sites entre eux
-# passerelle:noeud qui l'heberge ; Izeron sur alarm-3 (node6) le jour J, alarm-4 -> « alarm-4:node7 »
-DEFAULT_GATEWAY_HOSTS = "alarm-3:node6,alarm-1:node4"
+# passerelle:noeud qui l'heberge ; jour J : alarm-3 et alarm-4 ont chacun modem et Arduino (INV-193)
+DEFAULT_GATEWAY_HOSTS = "alarm-3:node6,alarm-4:node7,alarm-1:node4"
 
 
 def etcd_voters(db: Session) -> list[str]:
