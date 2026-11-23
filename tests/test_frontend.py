@@ -11,6 +11,7 @@ Usage :
   python -m pytest tests/test_frontend.py -v             # headless (CI)
 """
 
+import json
 import os
 import re
 import time
@@ -761,10 +762,31 @@ class TestCluster:
         assert rows.count() >= 1, f"Attendu au moins 1 membre, got {rows.count()}"
 
 
+def _member(name, machine, group, role="replica", state="streaming", timeline=7):
+    location = {"Beaufort": "beaufort", "OVH": "ovh"}.get(group, "izeron")
+    return {"name": name, "machine": machine, "location": location, "group": group, "retiring": group == "Legacy (Izeron)",
+            "role": role, "state": state, "timeline": timeline, "lag": 0, "host": "10.99.0." + {"1": "2", "2": "3", "3": "1"}.get(name[-1], name[-1]), "port": 5432}
+
+
 class TestClusterTab:
-    """INV-161 (2026-11-05) — onglet Cluster : « machine · nœud », lieu, badge « bientôt obsolète », groupes
-    d'affichage (`group`, « Legacy (Izeron) » en dernier). /api/cluster simulé (page.route) : se teste sans
-    cluster. Hors CI : lancé localement (FRONTEND_URL)."""
+    """INV-161 (2026-11-05, amendé le 2026-11-06) — onglet Cluster : « machine · nœud », badge « bientôt
+    obsolète », une carte par groupe d'affichage (`group`) : ordre, couleur, résumé, point d'état, leader, note
+    Legacy. /api/cluster simulé (page.route) : se teste sans cluster. Hors CI : lancé localement (FRONTEND_URL)."""
+
+    # Les 7 nœuds de prod (2026-11-06), dans le désordre ; leader alarm-1 (Beaufort)
+    PROD = {"local_node": "node6", "local_machine": "alarm-3", "local_role": "secondary", "local_location": "izeron",
+            "cluster_writable": True, "quorum": {"total": 7, "healthy": 7, "has_quorum": True},
+            "members": [
+                _member("node2", "onsite-2", "Legacy (Izeron)"),
+                _member("node7", "alarm-4", "Izeron"),
+                _member("node3", "OVH", "OVH"),
+                _member("node5", "alarm-2", "Beaufort"),
+                _member("node1", "onsite-1", "Legacy (Izeron)"),
+                _member("node4", "alarm-1", "Beaufort", role="leader", state="running"),
+                _member("node6", "alarm-3", "Izeron"),
+            ]}
+    CARDS = {"Izeron": ["node6", "node7"], "Beaufort": ["node4", "node5"], "OVH": ["node3"],
+             "Legacy (Izeron)": ["node1", "node2"]}
 
     CLUSTER = {"local_node": "node6", "local_machine": "alarm-3", "local_role": "secondary", "local_location": "izeron",
                "cluster_writable": True, "quorum": {"total": 5, "healthy": 5, "has_quorum": True},
@@ -776,36 +798,115 @@ class TestClusterTab:
                    {"name": "node8", "machine": "<b>pc</b>", "retiring": False, "location": "beaufort", "group": "Beaufort", "role": "replica", "state": "streaming"},
                ]}
 
-    def _open(self, page: Page):
-        page.route("**/api/cluster", lambda route: route.fulfill(json=self.CLUSTER))
+    def _open(self, page: Page, data=None, versions=None, gateways=None):
+        """`versions` : réponse de /api/resilience (défaut : 1.9.1 partout) ou un handler de route.
+        `gateways` : réponse de /api/system/gateways (INV-192, défaut : aucune passerelle) ou un handler de route."""
+        data = data or self.CLUSTER
+        if not callable(versions):
+            body = versions or {"live": {"nodes": [{"name": m["name"], "reachable": True, "version": "1.9.1"} for m in data["members"]]}}
+            versions = lambda route: route.fulfill(json=body)
+        if not callable(gateways):
+            gw_body = gateways or []
+            gateways = lambda route: route.fulfill(json=gw_body)
+        page.route("**/api/resilience", versions)
+        page.route("**/api/system/gateways", gateways)
+        page.route("**/api/cluster", lambda route: route.fulfill(json=data))
         page.locator(".tab:text('Cluster')").click()
         page.evaluate("loadCluster()")  # charge une fois au login (loadAll), puis sur changement en direct
-        expect(page.locator("#clusterMembers tr[data-node]")).to_have_count(5)
+        expect(page.locator("#clusterMembers tr[data-node]")).to_have_count(len(data["members"]))
         return lambda name: page.locator(f"#clusterMembers tr[data-node='{name}']")
 
-    def test_members_show_machine_site_and_retiring_badge(self, dashboard: Page):
+    @staticmethod
+    def _card(page: Page, group):
+        return page.locator(f"#clusterMembers .site-card[data-group='{group}']")
+
+    def test_members_show_machine_and_retiring_badge(self, dashboard: Page):
         row = self._open(dashboard)
         node1 = row("node1").locator("td[data-label='Nœud']")
         expect(node1).to_contain_text("onsite-1 · node1")
         expect(node1.locator(".badge.retiring")).to_have_text("bientôt obsolète")
-        expect(row("node1").locator("td[data-label='Lieu']")).to_have_text("Izeron")
         node6 = row("node6").locator("td[data-label='Nœud']")
         expect(node6).to_have_text("alarm-3 · node6")
         expect(node6.locator(".badge")).to_have_count(0)
         expect(row("node9").locator("td[data-label='Nœud']")).to_have_text("node9")  # machine inconnue : le nom seul
-        expect(row("node9").locator("td[data-label='Lieu']")).to_have_text("-")
 
-    def test_members_grouped_with_legacy_last(self, dashboard: Page):
-        """Une ligne d'en-tête par groupe, ordre du contrat avec l'app Android (PR #297) : Izeron, Beaufort,
-        OVH, autres libellés, « Legacy (Izeron) » en dernier et séparé ; nœuds triés par nom dans leur groupe."""
+    def test_one_card_per_group_in_order_with_its_machines(self, dashboard: Page):
+        """Ordre du contrat avec l'app Android (PR #297) : Izeron, Beaufort, OVH, « Legacy (Izeron) » en
+        dernier ; titre de carte = le groupe ; chaque machine dans la carte de son groupe, triées par nom."""
+        self._open(dashboard, self.PROD)
+        cards = dashboard.locator("#clusterMembers .site-card")
+        expect(cards).to_have_count(4)
+        assert [c.get_attribute("data-group") for c in cards.all()] == list(self.CARDS)
+        for group, nodes in self.CARDS.items():
+            card = self._card(dashboard, group)
+            expect(card.locator(".site-chip")).to_have_text(group)
+            assert [r.get_attribute("data-node") for r in card.locator("tr[data-node]").all()] == nodes, group
+        expect(self._card(dashboard, "Izeron").locator("tr[data-node='node6'] td[data-label='Nœud']")).to_have_text("alarm-3 · node6")
+
+    def test_each_card_has_its_site_colour(self, dashboard: Page):
+        """Une classe de couleur par site ; couleurs de bordure toutes différentes ; Legacy en pointillés."""
+        self._open(dashboard, self.PROD)
+        classes = {"Izeron": "site-izeron", "Beaufort": "site-beaufort", "OVH": "site-ovh", "Legacy (Izeron)": "site-legacy"}
+        for group, cls in classes.items():
+            expect(self._card(dashboard, group)).to_have_class(re.compile(rf"\b{cls}\b"))
+        borders = {g: self._card(dashboard, g).evaluate("e => getComputedStyle(e).borderLeftColor") for g in classes}
+        assert len(set(borders.values())) == 4, borders
+        assert self._card(dashboard, "Legacy (Izeron)").evaluate("e => getComputedStyle(e).borderLeftStyle") == "dashed"
+        assert self._card(dashboard, "Izeron").evaluate("e => getComputedStyle(e).borderLeftStyle") == "solid"
+
+    def test_other_label_card_is_grey_before_legacy(self, dashboard: Page):
         self._open(dashboard)
-        rows = dashboard.locator("#clusterMembers tr")
-        expect(rows).to_have_count(9)
-        order = [rows.nth(i).get_attribute("data-node") or rows.nth(i).inner_text().strip() for i in range(9)]
-        assert order == ["Izeron", "node6", "Beaufort", "node8", "Lieu inconnu", "node9",
-                         "Legacy (Izeron)", "node1", "node2"], order
-        expect(dashboard.locator("#clusterMembers tr.group-row.legacy")).to_have_text("Legacy (Izeron)")
-        expect(dashboard.locator("#clusterMembers tr.group-row:not(.legacy)")).to_have_count(3)
+        cards = dashboard.locator("#clusterMembers .site-card")
+        assert [c.get_attribute("data-group") for c in cards.all()] == ["Izeron", "Beaufort", "Lieu inconnu", "Legacy (Izeron)"]
+        expect(self._card(dashboard, "Lieu inconnu")).to_have_class(re.compile(r"\bsite-other\b"))
+
+    def test_card_summary_says_leader_only_where_it_is(self, dashboard: Page):
+        self._open(dashboard, self.PROD)
+        expected = {"Izeron": "2 machines · 2 en flux", "Beaufort": "2 machines · 1 en flux · leader ici",
+                    "OVH": "1 machine · 1 en flux", "Legacy (Izeron)": "2 machines · 2 en flux"}
+        for group, text in expected.items():
+            expect(self._card(dashboard, group).locator(".site-sum")).to_have_text(text)
+
+    def test_leader_row_highlighted_in_its_card(self, dashboard: Page):
+        self._open(dashboard, self.PROD)
+        leader = dashboard.locator("#clusterMembers tr.leader")
+        expect(leader).to_have_count(1)
+        expect(self._card(dashboard, "Beaufort").locator("tr.leader")).to_have_attribute("data-node", "node4")
+        expect(leader.locator("td[data-label='Role'] .badge")).to_have_text("leader")
+        for label, value in {"Etat": "running", "Timeline": "7", "Lag": "0", "Host": "10.99.0.4"}.items():
+            expect(leader.locator(f"td[data-label='{label}']")).to_have_text(value)
+
+    def test_legacy_card_says_it_will_be_unplugged(self, dashboard: Page):
+        self._open(dashboard, self.PROD)
+        expect(self._card(dashboard, "Legacy (Izeron)").locator(".site-note")).to_have_text(
+            "bientôt obsolète — à débrancher le jour du déménagement")
+        expect(dashboard.locator("#clusterMembers .site-note")).to_have_count(1)
+
+    def test_status_dot_green_when_every_member_follows_the_leader(self, dashboard: Page):
+        self._open(dashboard, self.PROD)
+        for group in self.CARDS:
+            dot = self._card(dashboard, group).locator(".status-dot")
+            expect(dot).to_have_class(re.compile(r"\bonline\b"))
+            expect(dot).to_have_attribute("aria-label", re.compile(r"\S"))
+
+    def test_status_dot_red_when_a_member_is_off_the_leader_timeline(self, dashboard: Page):
+        """alarm-4 « running » sur une ancienne timeline (INV-168) ; onsite-2 « streaming » mais timeline 6."""
+        data = {**self.PROD, "members": [
+            {**m, "state": "running", "timeline": 6} if m["name"] == "node7" else
+            {**m, "timeline": 6} if m["name"] == "node2" else m for m in self.PROD["members"]]}
+        self._open(dashboard, data)
+        for group, state in {"Izeron": "offline", "Beaufort": "online", "OVH": "online", "Legacy (Izeron)": "offline"}.items():
+            expect(self._card(dashboard, group).locator(".status-dot")).to_have_class(re.compile(rf"\b{state}\b"))
+        expect(self._card(dashboard, "Izeron").locator(".site-sum")).to_have_text("2 machines · 1 en flux")
+
+    def test_cards_fit_a_phone_without_horizontal_scroll(self, dashboard: Page):
+        dashboard.set_viewport_size({"width": 375, "height": 800})
+        self._open(dashboard, self.PROD)
+        expect(dashboard.locator("#clusterMembers .site-card")).to_have_count(4)
+        assert dashboard.evaluate("document.documentElement.scrollWidth") <= 375
+        scrolling = dashboard.evaluate("""[...document.querySelectorAll('#clusterMembers .site-card, #clusterMembers table')]
+            .filter(e => e.scrollWidth > e.clientWidth).map(e => e.className || e.tagName)""")
+        assert not scrolling, f"Défilement horizontal dans : {scrolling}"
 
     def test_local_node_shows_machine_and_site(self, dashboard: Page):
         self._open(dashboard)
@@ -815,6 +916,213 @@ class TestClusterTab:
         cell = self._open(dashboard)("node8").locator("td[data-label='Nœud']")
         expect(cell).to_have_text("<b>pc</b> · node8")
         expect(cell.locator("b")).to_have_count(0)
+
+    @staticmethod
+    def _versions(row, names):
+        return {n: row(n).locator("td[data-label='Version']") for n in names}
+
+    def test_each_node_shows_its_version(self, dashboard: Page):
+        """Déploiement en cours : OVH en 1.9.1, les autres en 1.9.0, onsite-2 injoignable, alarm-4 sans version."""
+        nodes = [{"name": m["name"], "reachable": m["name"] != "node2",
+                  "version": {"node3": "1.9.1", "node7": None}.get(m["name"], "1.9.0")} for m in self.PROD["members"]]
+        row = self._open(dashboard, self.PROD, {"live": {"nodes": nodes}})
+        expected = {"node3": "1.9.1", "node4": "1.9.0", "node6": "1.9.0", "node2": "injoignable", "node7": "?"}
+        for name, cell in self._versions(row, expected).items():
+            expect(cell).to_have_text(expected[name])
+
+    def test_version_unknown_when_resilience_fails(self, dashboard: Page):
+        row = self._open(dashboard, self.PROD, lambda route: route.fulfill(status=503, json={"detail": "Patroni unreachable"}))
+        for cell in self._versions(row, ["node1", "node4"]).values():
+            expect(cell).to_have_text("?")
+
+    def test_cards_do_not_wait_for_versions(self, dashboard: Page):
+        """La sonde des nœuds prend jusqu'à quelques secondes : les cartes s'affichent avant, « … » en attendant."""
+        pending = []
+        row = self._open(dashboard, self.PROD, lambda route: pending.append(route))
+        cell = row("node5").locator("td[data-label='Version']")
+        expect(cell).to_have_text("…")
+        expect(dashboard.locator("#clusterMembers .site-card")).to_have_count(4)
+        for _ in range(100):  # le handler de route est appelé quand Playwright traite ses événements
+            if pending:
+                break
+            dashboard.wait_for_timeout(50)
+        pending[-1].fulfill(json={"live": {"nodes": [{"name": "node5", "reachable": True, "version": "1.9.1"}]}})
+        expect(cell).to_have_text("1.9.1")
+
+    # INV-192 : modem 4G et contact sec de la passerelle de chaque machine (gateway_id = nom de la machine).
+    # alarm-4 : modem et Arduino sans nouvelles (dates UTC : 13:32 et 13:20 = 14:32 et 14:20 à Paris en novembre).
+    GATEWAYS = [
+        {"gateway_id": "onsite-1", "modem": {"state": "ok", "bars": 2, "tech": None, "rsrp": None, "updated_at": "2026-11-10T13:31:00"},
+         "dry_contact": None},  # ni techno ni RSRP (pas de ligne +CPSI) : les barres seules
+        {"gateway_id": "onsite-2", "modem": {"state": "ok", "bars": 3, "tech": "LTE", "rsrp": -95, "updated_at": "2026-11-10T13:31:00"},
+         "dry_contact": {"state": "closed", "last_seen": None}},
+        {"gateway_id": "alarm-1", "modem": None, "dry_contact": {"state": "open", "last_seen": None}},
+        {"gateway_id": "ALARM-2", "modem": {"state": "ok", "bars": 2, "tech": "<u>WCDMA</u>", "rsrp": None, "updated_at": "2026-11-10T13:31:00"},
+         "dry_contact": {"state": "closed", "last_seen": None}},  # 3G : pas de RSRP ; `tech` est un texte libre du modem
+        {"gateway_id": "alarm-3", "modem": {"state": "no_network", "bars": 0, "tech": None, "rsrp": None, "updated_at": "2026-11-10T13:31:00"},
+         "dry_contact": None},
+        {"gateway_id": "alarm-4", "modem": {"state": "unknown", "bars": 0, "tech": None, "rsrp": None, "updated_at": "2026-11-10T13:32:00"},
+         "dry_contact": {"state": "silent", "last_seen": "2026-11-10T13:20:05"}},
+        {"gateway_id": "e2e-izeron", "modem": {"state": "ok", "bars": 4, "tech": "LTE", "rsrp": -80, "updated_at": "2026-11-10T13:31:00"},
+         "dry_contact": {"state": "open", "last_seen": None}},  # aucune machine de ce nom : n'apparaît nulle part
+    ]
+    COLUMNS = ["Nœud", "Role", "Etat", "Version", "Modem 4G", "Contact sec", "Timeline", "Lag", "Host"]
+
+    @staticmethod
+    def _hw(row, name):
+        return row(name).locator("td[data-label='Modem 4G']"), row(name).locator("td[data-label='Contact sec']")
+
+    def test_each_node_shows_its_modem_and_dry_contact(self, dashboard: Page):
+        """Casse ignorée dans les deux sens : passerelle « ALARM-2 » et machine « Alarm-3 » (node_machines saisi à la main)."""
+        prod = {**self.PROD, "members": [{**m, "machine": "Alarm-3"} if m["name"] == "node6" else m for m in self.PROD["members"]]}
+        row = self._open(dashboard, prod, gateways=self.GATEWAYS)
+        assert self._card(dashboard, "Beaufort").locator("thead th").all_text_contents() == self.COLUMNS
+        assert [td.get_attribute("data-label") for td in row("node4").locator("td").all()] == self.COLUMNS
+
+        modem, contact = self._hw(row, "node2")  # onsite-2 : LTE, 3 barres sur 4, Arduino au repos
+        expect(modem).to_have_attribute("data-state", "ok")
+        expect(modem.locator(".modem-signal")).to_have_attribute("data-bars", "3")
+        expect(modem.locator(".modem-signal i")).to_have_count(4)
+        expect(modem.locator(".modem-signal i.on")).to_have_count(3)
+        expect(modem).to_have_text("LTE -95 dBm")
+        expect(contact).to_have_attribute("data-state", "closed")
+        expect(contact.locator(".badge.online")).to_have_text("fermé")
+
+        modem, contact = self._hw(row, "node4")  # alarm-1 : Arduino seul, contact ouvert
+        expect(modem).to_have_attribute("data-state", "none")
+        expect(modem).to_have_text("-")
+        expect(contact).to_have_attribute("data-state", "open")
+        expect(contact.locator(".badge.offline")).to_have_text("ouvert")
+
+        modem, contact = self._hw(row, "node5")  # « ALARM-2 » : 3G sans RSRP, techno seule, échappée
+        expect(modem).to_have_attribute("data-state", "ok")
+        expect(modem).to_have_text("<u>WCDMA</u>")
+        expect(modem.locator("u")).to_have_count(0)
+        expect(contact).to_have_attribute("data-state", "closed")
+
+        modem, contact = self._hw(row, "node1")  # onsite-1 : ni techno ni RSRP, pas d'Arduino
+        expect(modem).to_have_attribute("data-state", "ok")
+        expect(modem.locator(".modem-signal i.on")).to_have_count(2)
+        expect(modem).to_have_text("")
+        expect(contact).to_have_attribute("data-state", "none")
+        expect(contact).to_have_text("-")
+
+        modem, contact = self._hw(row, "node6")  # machine « Alarm-3 » : modem sans réseau, pas d'Arduino
+        expect(modem).to_have_attribute("data-state", "no_network")
+        expect(modem.locator(".modem-signal")).to_have_attribute("data-state", "no_network")
+        expect(modem).to_have_text("sans réseau")
+        expect(contact).to_have_attribute("data-state", "none")
+        expect(contact).to_have_text("-")
+
+        modem, contact = self._hw(row, "node7")  # alarm-4 : modem et Arduino sans nouvelles
+        expect(modem).to_have_attribute("data-state", "unknown")
+        expect(modem).to_contain_text("sans nouvelles depuis")
+        expect(contact).to_have_attribute("data-state", "silent")
+        expect(contact.locator(".badge.waiting")).to_have_text("muet")
+        expect(contact).to_contain_text("depuis")
+
+        for cell in self._hw(row, "node3"):  # OVH : aucune passerelle
+            expect(cell).to_have_attribute("data-state", "none")
+            expect(cell).to_have_text("-")
+        expect(dashboard.locator("#clusterMembers td[data-label='Modem 4G'] .modem-signal[data-bars='4']")).to_have_count(0)  # e2e-izeron
+
+    def test_gateway_without_arduino_shows_sans_arduino(self, dashboard: Page):
+        """INV-194 : passerelle vivante sans Arduino lisible (`no_sensor`) → « sans Arduino », ni « muet » ni « - »."""
+        gateways = [{**g, "dry_contact": {"state": "no_sensor", "last_seen": None}} if g["gateway_id"] == "alarm-3" else g
+                    for g in self.GATEWAYS]
+        contact = self._hw(self._open(dashboard, self.PROD, gateways=gateways), "node6")[1]
+        expect(contact).to_have_attribute("data-state", "no_sensor")
+        expect(contact.locator(".badge")).to_have_text("sans Arduino")
+        expect(contact.locator(".badge.waiting")).to_have_count(0)
+
+    def test_silence_dates_in_local_time(self, browser, primary_url):
+        """INV-130 : `updated_at` et `last_seen` sont de l'UTC sans fuseau ; un navigateur à Paris lit l'heure de Paris.
+        L'année est affichée : sans purge, une date peut être ancienne."""
+        ctx = browser.new_context(timezone_id="Europe/Paris", locale="fr-FR")
+        page = ctx.new_page()
+        try:
+            _login(page, primary_url)
+            modem, contact = self._hw(self._open(page, self.PROD, gateways=self.GATEWAYS), "node7")
+            expect(modem).to_have_text("sans nouvelles depuis 10/11/2026 14:32")
+            expect(contact).to_have_text("muet depuis 10/11/2026 14:20")
+        finally:
+            ctx.close()
+
+    def test_hardware_cells_do_not_block_the_cards_and_show_unknown_on_error(self, page: Page, primary_url):
+        """Réponses retenues dès avant la connexion (aucun chargement antérieur ne remplit les cellules) : cartes
+        affichées avec « … » ; puis toutes les réponses en erreur → « ? »."""
+        held, hold = [], [True]
+        fail = lambda route: route.fulfill(status=503, json={"detail": "Service indisponible"})
+        handler = lambda route: held.append(route) if hold[0] else fail(route)
+        page.route("**/api/system/gateways", handler)
+        _login(page, primary_url)
+        cells = self._hw(self._open(page, self.PROD, gateways=handler), "node2")
+        for cell in cells:
+            expect(cell).to_have_text("…")
+        expect(page.locator("#clusterMembers .site-card")).to_have_count(4)
+        hold[0] = False
+        for route in held:
+            fail(route)
+        for cell in cells:
+            expect(cell).to_have_text("?")
+            expect(cell).not_to_have_attribute("data-state", re.compile(r"."))
+        hold[0] = True  # nouveau dessin après l'erreur : « … » est réservé à l'attente de la première réponse
+        page.evaluate("loadCluster()")
+        for cell in cells:
+            expect(cell).to_have_text("?")
+
+    def test_redraw_reuses_the_last_answer(self, dashboard: Page):
+        """En prod, /api/cluster change toutes les quelques secondes (`lsn` des replicas, Patroni 4) : un nouveau
+        dessin des cartes reprend la dernière réponse, sans « … », même si la suivante tarde."""
+        hold = [False]
+        handler = lambda route: None if hold[0] else route.fulfill(json=self.GATEWAYS)
+        modem, contact = self._hw(self._open(dashboard, self.PROD, gateways=handler), "node2")
+        expect(contact).to_have_attribute("data-state", "closed")
+        hold[0] = True  # les réponses suivantes ne viennent jamais
+        dashboard.evaluate("loadCluster()")
+        expect(modem).to_have_text("LTE -95 dBm")
+        expect(contact).to_have_attribute("data-state", "closed")
+        expect(contact).to_have_text("fermé")
+
+    def test_live_change_updates_the_cells_without_redrawing_the_cards(self, page: Page, primary_url):
+        """INV-135 : /api/system/gateways est parmi les chemins surveillés ; sa notification ne met à jour que les deux
+        cellules (même carte dans le DOM, sonde des versions /api/resilience non relancée). WebSocket simulé : aucune
+        notification du serveur (dont /api/cluster) ne peut s'intercaler."""
+        live, hello = [], []
+
+        def ws_handler(ws):
+            live.append(ws)
+            ws.on_message(lambda message: hello.append(json.loads(message)))
+        page.route_web_socket("**/api/ws", ws_handler)
+        _login(page, primary_url)
+        page.wait_for_function("liveWs && liveWs.readyState === WebSocket.OPEN", timeout=10000)
+        probes, body = [], {"gateways": self.GATEWAYS}
+        row = self._open(page, self.PROD,
+                         versions=lambda route: (probes.append(route.request.url), route.fulfill(json={"live": {"nodes": []}})),
+                         gateways=lambda route: route.fulfill(json=body["gateways"]))
+        assert hello and "/api/system/gateways" in hello[0]["paths"], [h.get("paths") for h in hello]  # pas le jeton
+        contact = self._hw(row, "node2")[1]
+        expect(contact).to_have_attribute("data-state", "closed")
+        page.evaluate("document.querySelector('#clusterMembers .site-card').dataset.mark = 'avant'")
+        before = len(probes)
+        body["gateways"] = [{**g, "dry_contact": {"state": "open", "last_seen": None}} if g["gateway_id"] == "onsite-2" else g
+                            for g in self.GATEWAYS]
+        live[0].send(json.dumps({"changed": "/api/system/gateways"}))
+        expect(contact).to_have_attribute("data-state", "open")
+        expect(contact.locator(".badge.offline")).to_have_text("ouvert")
+        expect(page.locator("#clusterMembers .site-card[data-mark='avant']")).to_have_count(1)  # pas redessinée
+        assert len(probes) == before, "la sonde des versions ne doit pas être relancée"
+
+    def test_hardware_cells_fit_a_phone(self, dashboard: Page):
+        dashboard.set_viewport_size({"width": 375, "height": 800})
+        row = self._open(dashboard, self.PROD, gateways=self.GATEWAYS)
+        for name, states in {"node2": ("ok", "closed"), "node7": ("unknown", "silent")}.items():  # textes les plus longs
+            for cell, state in zip(self._hw(row, name), states):
+                expect(cell).to_have_attribute("data-state", state)
+        assert dashboard.evaluate("document.documentElement.scrollWidth") <= 375
+        scrolling = dashboard.evaluate("""[...document.querySelectorAll('#clusterMembers .site-card, #clusterMembers table')]
+            .filter(e => e.scrollWidth > e.clientWidth).map(e => e.className || e.tagName)""")
+        assert not scrolling, f"Défilement horizontal dans : {scrolling}"
 
 
 # ---------------------------------------------------------------------------
@@ -872,34 +1180,86 @@ class TestConnectivityTab:
 
 # ---------------------------------------------------------------------------
 # INV-129 : indicateur de signal 4G du modem gateway (en-tete)
-# INV-158 : un indicateur par passerelle, nomme par son site
+# INV-158 (amende 2026-11-13) : un indicateur par site, meilleur modem + compteur ok/total
 # ---------------------------------------------------------------------------
 
+def _modem_gw(gateway_id, site, state, bars, tech=None, rsrp=None, updated_at="2026-11-13T14:44:00"):
+    return {"gateway_id": gateway_id, "site": site, "state": state, "bars": bars, "tech": tech, "rsrp": rsrp,
+            "updated_at": updated_at}
+
+
 class TestModemSignalIndicator:
+    """/api/system/modem-status simule (page.route) pour les cas de site ; navigateur a Paris (INV-130).
+    Le dernier test passe par un vrai rapport de passerelle."""
 
     GATEWAY_HEADERS = {"X-Gateway-Key": os.getenv("GATEWAY_KEY", "changeme-in-prod")}
+    BEAUFORT = [_modem_gw("alarm-1", "beaufort", "ok", 4, "LTE", -85.0), _modem_gw("alarm-2", "beaufort", "ok", 3, "LTE", -95.0)]
+    IZERON = [_modem_gw("alarm-3", "izeron", "ok", 2, "LTE", -110.0), _modem_gw("onsite-2", "izeron", "unknown", 0)]
+    STALE = _modem_gw("alarm-4", "izeron", "unknown", 0, updated_at="2026-11-12T15:38:00")
+    BODY = {**IZERON[1], "gateways": BEAUFORT + IZERON[:1] + [STALE] + IZERON[1:], "sites": [
+        {"site": "beaufort", "state": "ok", "bars": 4, "tech": "LTE", "rsrp": -85.0, "ok": 2, "total": 2, "gateways": BEAUFORT},
+        {"site": "izeron", "state": "ok", "bars": 2, "tech": "LTE", "rsrp": -110.0, "ok": 1, "total": 2, "gateways": IZERON}]}
 
-    def _report(self, primary_url, **status):
-        r = requests.post(f"{primary_url}/internal/alarms/modem-status",
-                          json=status, headers=self.GATEWAY_HEADERS, timeout=5)
+    def _open(self, browser, primary_url, body):
+        ctx = browser.new_context(timezone_id="Europe/Paris", locale="fr-FR")
+        page = ctx.new_page()
+        page.route("**/api/system/modem-status", lambda route: route.fulfill(json=body))
+        _login(page, primary_url)
+        return ctx, page.locator("#modemSignal .modem-signal")
+
+    def test_one_indicator_per_site_best_modem_and_counter(self, browser, primary_url):
+        ctx, icons = self._open(browser, primary_url, self.BODY)
+        try:
+            expect(icons).to_have_count(2, timeout=8000)
+            beaufort, izeron = icons.nth(0), icons.nth(1)
+            for icon, site, bars, ok in ((beaufort, "beaufort", 4, 2), (izeron, "izeron", 2, 1)):
+                expect(icon).to_have_attribute("data-site", site)
+                expect(icon).to_have_attribute("data-state", "ok")
+                expect(icon).to_have_attribute("data-bars", str(bars))
+                expect(icon).to_have_attribute("data-ok", str(ok))
+                expect(icon).to_have_attribute("data-total", "2")
+                expect(icon.locator("i.on")).to_have_count(bars)
+            expect(beaufort.locator("b")).to_have_text(["Beaufort", "2/2"])
+            expect(izeron.locator("b")).to_have_text(["Izeron", "1/2"])
+            detail = "Izeron 1/2 : alarm-3 : LTE -110 dBm ; onsite-2 : inconnu depuis 15:44"
+            expect(izeron).to_have_attribute("title", detail)
+            expect(izeron).to_have_attribute("aria-label", detail)
+            expect(beaufort).to_have_attribute("title", "Beaufort 2/2 : alarm-1 : LTE -85 dBm ; alarm-2 : LTE -95 dBm")
+        finally:
+            ctx.close()
+
+    def test_no_network_site_and_detail_without_rsrp(self, browser, primary_url):
+        gws = [_modem_gw("alarm-1", "beaufort", "no_network", 0), _modem_gw("alarm-2", "beaufort", "ok", 1, "WCDMA")]
+        nets = [_modem_gw("alarm-3", "izeron", "ok", 3)]
+        body = {**gws[0], "gateways": gws + nets, "sites": [
+            {"site": "beaufort", "state": "ok", "bars": 1, "tech": "WCDMA", "rsrp": None, "ok": 1, "total": 2, "gateways": gws},
+            {"site": "izeron", "state": "ok", "bars": 3, "tech": None, "rsrp": None, "ok": 1, "total": 1, "gateways": nets}]}
+        ctx, icons = self._open(browser, primary_url, body)
+        try:
+            expect(icons.nth(0)).to_have_attribute("title", "Beaufort 1/2 : alarm-1 : sans réseau ; alarm-2 : WCDMA", timeout=8000)
+            expect(icons.nth(1)).to_have_attribute("title", "Izeron 1/1 : alarm-3 : signal 3/4")
+        finally:
+            ctx.close()
+
+    def test_no_site_counted_shows_a_single_unknown(self, browser, primary_url):
+        body = {**self.STALE, "gateways": [self.STALE], "sites": []}
+        ctx, icons = self._open(browser, primary_url, body)
+        try:
+            expect(icons).to_have_count(1, timeout=8000)
+            expect(icons).to_have_attribute("data-state", "unknown")
+            expect(icons).to_have_attribute("data-bars", "0")
+            expect(icons.locator("b")).to_have_count(0)  # ni site ni compteur
+        finally:
+            ctx.close()
+
+    def test_real_gateway_report_shows_in_its_site(self, dashboard: Page, primary_url):
+        r = requests.post(f"{primary_url}/internal/alarms/modem-status", headers=self.GATEWAY_HEADERS, timeout=5,
+                          json={"gateway_id": "e2e-izeron", "site": "izeron", "registered": True, "tech": "LTE",
+                                "rsrp": -115.7, "csq": 15})
         assert r.status_code == 200, r.text
-
-    def test_shows_bars_from_gateway_report(self, dashboard: Page, primary_url):
-        self._report(primary_url, gateway_id="e2e-izeron", site="izeron",
-                     registered=True, tech="LTE", rsrp=-115.7, csq=15)
-        icon = dashboard.locator('#modemSignal .modem-signal[data-gateway="e2e-izeron"]')
-        expect(icon).to_have_attribute("data-state", "ok", timeout=8000)
-        expect(icon).to_have_attribute("data-bars", "1")
-        expect(icon).to_have_attribute("data-site", "izeron")
-        expect(icon).to_have_attribute("title", re.compile(r"Izeron.*-115\.7 dBm"))
-
-    def test_no_network_is_flagged(self, dashboard: Page, primary_url):
-        self._report(primary_url, gateway_id="e2e-beaufort", site="beaufort",
-                     registered=False, tech=None, rsrp=None, csq=0)
-        icon = dashboard.locator('#modemSignal .modem-signal[data-gateway="e2e-beaufort"]')
-        expect(icon).to_have_attribute("data-state", "no_network", timeout=8000)
-        expect(icon).to_have_attribute("data-bars", "0")
-        expect(icon).to_contain_text("Beaufort")
+        icon = dashboard.locator('#modemSignal .modem-signal[data-site="izeron"]')
+        expect(icon).to_have_attribute("title", re.compile(r"^Izeron \d+/\d+ : .*e2e-izeron : LTE -115\.7 dBm"), timeout=8000)
+        expect(icon).to_have_attribute("data-state", "ok")
 
 
 # ---------------------------------------------------------------------------
@@ -1067,6 +1427,50 @@ class TestRoleBasedUI:
         assert refused == []
         expect(page.locator("#loginOverlay")).to_be_hidden()
 
+    def test_non_admin_never_requests_cluster_admin_data(self, page: Page, primary_url, viewer):
+        """INV-192 / INV-165 : /api/cluster répond (cartes dessinées en arrière-plan, onglet masqué) ; ni l'état
+        des passerelles (/api/system/gateways) ni la sonde des versions (/api/resilience) ne sont demandés pour un
+        non-admin, même par le chargeur en direct, et /api/system/gateways n'est pas surveillé."""
+        urls, refused, ws_frames = [], [], []
+        page.route("**/api/cluster", lambda route: route.fulfill(json=TestClusterTab.PROD))
+        page.on("request", lambda r: urls.append(r.url))
+        page.on("response", lambda r: refused.append(f"{r.status} {r.url}") if r.status in (401, 403) else None)
+        page.on("websocket", lambda ws: ws.on("framesent", lambda payload: ws_frames.append(payload)))
+        _login(page, primary_url, self.NAME, self.PASSWORD)
+        page.wait_for_function("liveWs && liveWs.readyState === WebSocket.OPEN", timeout=10000)
+        page.evaluate("Promise.all([loadCluster(), ...(LIVE_WATCH['/api/system/gateways'] || []).map(fn => fn())])")
+        page.wait_for_timeout(1000)
+
+        assert not [u for u in urls if "/api/system/gateways" in u or "/api/resilience" in u], urls
+        assert ws_frames and "/api/system/gateways" not in ws_frames[0], ws_frames
+        assert refused == []
+
+    def test_non_admin_resync_requests_no_admin_only_get(self, page: Page, primary_url, viewer):
+        """INV-165 : la resynchro de sécurité (toutes les 60 s, INV-135) relance tous les chargeurs du direct ; pour un
+        non-admin, ni /api/chaos ni aucun 401/403. Vrai minuteur, avancé par l'horloge de Playwright. WebSocket simulé :
+        après la connexion, seule la resynchro peut déclencher un chargement."""
+        urls, refused = [], []
+        page.clock.install()
+        page.route_web_socket("**/api/ws", lambda ws: None)
+        page.route("**/api/cluster", lambda route: route.fulfill(json=TestClusterTab.PROD))
+        page.on("request", lambda r: urls.append(r.url))
+        page.on("response", lambda r: refused.append(f"{r.status} {r.url}") if r.status in (401, 403) else None)
+        _login(page, primary_url, self.NAME, self.PASSWORD)
+        page.wait_for_function("liveWs && liveWs.readyState === WebSocket.OPEN", timeout=10000)
+        page.wait_for_timeout(1000)  # fin du chargement initial
+        urls.clear()
+
+        page.clock.fast_forward(61000)
+        for _ in range(60):  # la resynchro relance les chargeurs : on attend qu'elle ait tourné
+            if any("/api/alarms/active/escalation" in u for u in urls):
+                break
+            page.wait_for_timeout(50)
+        page.wait_for_timeout(1000)
+
+        assert any("/api/alarms/active/escalation" in u for u in urls), urls  # la resynchro a bien tourné
+        assert not [u for u in urls if "/api/chaos" in u], urls
+        assert refused == []
+
     def test_403_shows_error_without_logging_out(self, page: Page, primary_url, viewer):
         """403 = droit manquant (routes admin de #274), pas session expiree : message, pas de deconnexion.
         Lecture refusee (stats) puis ecriture refusee (resolve, appelee comme le ferait le bouton)."""
@@ -1169,17 +1573,24 @@ class TestResiliencePanel:
              "why": "2/3 voteurs etcd joignables", "writable_from": {"izeron": True, "ovh": False, "beaufort": False},
              "escalation_running": True, "alarms_created": {"izeron": True, "beaufort": False},
              "sms_calls": {"izeron": True, "beaufort": False}, "app_4g_reachable": False, "app_izeron_lan": True,
-             "alerted_by": [], "sentence": "Leader : oui (2/3 voteurs etcd joignables). Beaufort : aveugle."},
+             "alerted_by": ["email INV-170 « aucun leader » par node4 + node5 après 3 min",
+                            "email INV-172 « passerelle muette » alarm-1 par le leader après 10 min",
+                            "email INV-185 « site sans modem » Beaufort par le leader après 10 min",
+                            "email INV-189 « nœud injoignable » node3 + node4 + node5 par le leader après 10 min",
+                            "email INV-144 « escalade sans appel » par le leader pendant une alarme"],
+             "sentence": "Leader : oui (2/3 voteurs etcd joignables). Beaufort : aveugle."},
             {"scenario": "izeron_both", "label": "Izeron entier (node1 + node2)", "untestable": True, "leader_possible": False,
              "why": "1/3 voteurs etcd joignables", "writable_from": {"izeron": False, "ovh": False, "beaufort": False},
              "escalation_running": False, "alarms_created": {"izeron": False, "beaufort": False},
              "sms_calls": {"izeron": False, "beaufort": False}, "app_4g_reachable": False, "app_izeron_lan": False,
-             "alerted_by": ["email INV-170 (après PR 1)"], "sentence": "Leader : non (1/3 voteurs etcd joignables)."},
+             "alerted_by": ["email INV-170 « aucun leader » par node3 + node4 + node5 après 3 min"],
+             "sentence": "Leader : non (1/3 voteurs etcd joignables). Pas d'email du leader (INV-053, INV-144, INV-172, INV-185, INV-189) : aucun leader."},
             {"scenario": "legacy_unplugged", "label": "Legacy débranché (node1 + node2) : ce que corrige le jour du déménagement",
              "untestable": True, "leader_possible": False, "why": "1/3 voteurs etcd joignables",
              "writable_from": {"izeron": False, "ovh": False, "beaufort": False}, "escalation_running": False,
              "alarms_created": {"izeron": False, "beaufort": False}, "sms_calls": {"izeron": False, "beaufort": False},
-             "app_4g_reachable": False, "app_izeron_lan": False, "alerted_by": ["email INV-170 (après PR 1)"],
+             "app_4g_reachable": False, "app_izeron_lan": False,
+             "alerted_by": ["email INV-170 « aucun leader » par node3 + node4 + node5 + node6 + node7 après 3 min"],
              "sentence": "Leader : non (1/3 voteurs etcd joignables)."},
         ],
     }
@@ -1228,12 +1639,16 @@ class TestResiliencePanel:
         expect(ovh).to_contain_text("OVH (node3)")
         expect(ovh.locator("td.ok")).to_have_count(4)   # leader, écriture Izeron, alarmes Izeron, LAN Izeron
         expect(ovh.locator("td.ko")).to_have_count(4)   # écriture OVH, écriture Beaufort, alarmes Beaufort, app 4G
-        expect(ovh).to_contain_text("personne")
+        # INV-175 « Prévenu » (2026-11-10) : qui envoie quoi, après combien de temps
+        expect(ovh.locator("td[data-label='Prévenu par']")).to_contain_text(
+            "email INV-189 « nœud injoignable » node3 + node4 + node5 par le leader après 10 min")
         expect(card.locator("#resilienceWhatif")).to_contain_text("Leader : oui (2/3 voteurs etcd joignables). Beaufort : aveugle.")
         both = card.locator("#resilienceWhatif tr[data-scenario='izeron_both']")
         expect(both).to_contain_text("non testable : arrêt total")
         expect(both).to_contain_text("2ᵉ voteur cloud à prévoir")
-        expect(both).to_contain_text("email INV-170 (après PR 1)")
+        expect(both.locator("td[data-label='Prévenu par']")).to_have_text(
+            "email INV-170 « aucun leader » par node3 + node4 + node5 après 3 min")
+        expect(card.locator("#resilienceWhatif")).to_contain_text("Pas d'email du leader (INV-053, INV-144, INV-172, INV-185, INV-189) : aucun leader.")
         expect(both.locator("td.ok")).to_have_count(0)
         expect(ovh).not_to_contain_text("non testable")
         # INV-175 (2026-11-05) : « Legacy débranché » sans leader aujourd'hui, corrigé le jour du déménagement

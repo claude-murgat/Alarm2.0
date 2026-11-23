@@ -9,7 +9,7 @@ Requires=docker.service
 Type=oneshot
 # root : installe dans /opt/alarm, /usr/local/bin et /etc/systemd/system, redemarre les units.
 User=root
-StateDirectory=alarm/cd
+# Pas de StateDirectory= : systemd rendrait /var/lib/alarm/cd a root a chaque demarrage (INV-141) ; le script fait mkdir -p.
 TimeoutStartSec=600
 ExecStart=/usr/local/bin/alarm-host-sync
 StandardOutput=journal

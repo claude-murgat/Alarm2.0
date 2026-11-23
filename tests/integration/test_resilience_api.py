@@ -1,5 +1,5 @@
 """
-Tier 2 integration : INV-175 — GET /api/resilience (admin) : etat reel des 7 noeuds et des
+Tier 2 integration : INV-175 — GET /api/resilience (admin) : etat reel des noeuds et des
 passerelles + scenarios de panne calcules ; GET /api/resilience/whatif pour un scenario libre.
 
 Patroni et les /health des autres noeuds sont simules par `urlopen` (motif de
@@ -112,15 +112,22 @@ def test_whatif_default_scenarios(client, admin_headers, fake_cluster):
     both = whatif["izeron_both"]
     assert both["untestable"] is True and both["leader_possible"] is False
     assert both["why"] == "1/3 voteurs etcd joignables"  # node3 seul voteur restant
-    assert both["alerted_by"] == ["email INV-170 (après PR 1)"]
+    # INV-175 « Prévenu » (2026-11-10) : sans leader, chaque noeud debout envoie INV-170
+    assert both["alerted_by"] == ["email INV-170 « aucun leader » par node3 + node4 + node5 après 3 min"]
+    assert whatif["izeron_one_node"]["alerted_by"] == [
+        "email INV-189 « nœud injoignable » node7 par le leader après 10 min"]
     assert both["label"] == "Izeron entier (node6 + node7)"
     assert whatif["izeron_one_node"]["label"] == "Un nœud à Izeron (node7)"  # node6 porte la passerelle
     assert whatif["izeron_one_node"]["leader_possible"] is True
-    beaufort = whatif["beaufort_both"]  # inchange avec 7 noeuds
+    beaufort = whatif["beaufort_both"]  # inchange avec 5 noeuds
     assert beaufort["label"] == "Beaufort entier (node4 + node5)" and beaufort["untestable"] is False
     assert beaufort["why"] == "3/3 voteurs etcd joignables"
     assert beaufort["alarms_created"] == {"izeron": True, "beaufort": False}
-    assert beaufort["alerted_by"] == ["email INV-144"]
+    assert beaufort["alerted_by"] == [
+        "email INV-172 « passerelle muette » alarm-1 par le leader après 10 min",
+        "email INV-185 « site sans modem » Beaufort par le leader après 10 min",
+        "email INV-189 « nœud injoignable » node4 + node5 par le leader après 10 min",
+        "email INV-144 « escalade sans appel » par le leader pendant une alarme"]
     ovh = whatif["ovh_down"]
     assert ovh["untestable"] is False and ovh["leader_possible"] is True
     assert ovh["why"] == "2/3 voteurs etcd joignables"
@@ -138,7 +145,10 @@ def test_whatif_adhoc(client, admin_headers):
     assert o["writable_from"]["beaufort"] is False and o["alarms_created"]["beaufort"] is False
     assert o["alarms_created"]["izeron"] is True
     g = client.get("/api/resilience/whatif?gateways=alarm-3", headers=admin_headers).json()
-    assert g["alarms_created"] == {"izeron": False, "beaufort": True} and g["alerted_by"] == ["email INV-144"]
+    assert g["alarms_created"] == {"izeron": False, "beaufort": True}
+    assert g["alerted_by"] == ["email INV-172 « passerelle muette » alarm-3 par le leader après 10 min",
+                               "email INV-185 « site sans modem » Izeron par le leader après 10 min",
+                               "email INV-144 « escalade sans appel » par le leader pendant une alarme"]
 
 
 def test_non_admin_forbidden(client, user1_headers, fake_cluster):

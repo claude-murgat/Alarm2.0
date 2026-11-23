@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- INV-ANDROID-706 : « Installer » de l'ecran Mise à jour, du style de « Mettre à jour » du bandeau -->
+<Button xmlns:android="http://schemas.android.com/apk/res/android"
+    style="@style/UpdateButton"
+    android:layout_width="match_parent"
+    android:layout_height="42dp" />

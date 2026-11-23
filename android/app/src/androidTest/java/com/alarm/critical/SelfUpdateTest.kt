@@ -8,18 +8,18 @@ import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
 import android.provider.Settings
+import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.espresso.Espresso.onView
 import androidx.test.espresso.action.ViewActions.click
 import androidx.test.espresso.action.ViewActions.scrollTo
-import androidx.test.espresso.assertion.ViewAssertions.doesNotExist
 import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.intent.Intents
 import androidx.test.espresso.intent.matcher.IntentMatchers.hasAction
 import androidx.test.espresso.intent.matcher.IntentMatchers.hasData
 import androidx.test.espresso.matcher.RootMatchers.isDialog
 import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
-import androidx.test.espresso.matcher.ViewMatchers.withSubstring
+import androidx.test.espresso.matcher.ViewMatchers.withId
 import androidx.test.espresso.matcher.ViewMatchers.withText
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -28,10 +28,12 @@ import com.alarm.critical.model.AlarmResponse
 import com.alarm.critical.model.HealthResponse
 import com.alarm.critical.service.AlarmPollingService
 import com.alarm.critical.service.AlarmSoundManager
+import com.alarm.critical.update.AppUpdate
 import com.alarm.critical.update.UpdateBackend
 import com.alarm.critical.update.UpdateProvider
 import com.alarm.critical.util.AppLogger
 import org.hamcrest.Matchers.allOf
+import org.hamcrest.Matchers.not
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -62,7 +64,7 @@ class SelfUpdateTest {
         val downloads = CopyOnWriteArrayList<String>()
         val installs = CopyOnWriteArrayList<File>()
 
-        override fun download(url: String, dest: File) {
+        override fun download(url: String, dest: File, onProgress: (Int) -> Unit) {
             // Format de `sha256sum` (android-release.yml) : « <hex>  <nom> »
             dest.writeBytes(if (url.endsWith(".sha256")) "$sha  ${url.substringAfterLast('/').removeSuffix(".sha256")}\n".toByteArray() else apk)
             downloads += url
@@ -149,7 +151,7 @@ class SelfUpdateTest {
     /** Rien n'est propose : ni telechargement, ni bandeau, ni installation. */
     private fun nothingOffered(case: String) {
         assertFalse("$case : rien ne doit etre telecharge", waitFor(3000) { fakeUpdate.downloads.isNotEmpty() })
-        onView(withSubstring("Mise à jour")).check(doesNotExist())
+        onView(withId(R.id.updateBanner)).check(matches(not(isDisplayed())))  // pas de bandeau (INV-ANDROID-705)
         assertTrue("$case : rien ne doit etre installe", fakeUpdate.installs.isEmpty())
     }
 
@@ -165,6 +167,21 @@ class SelfUpdateTest {
 
         assertTrue("installation lancee", waitFor { fakeUpdate.installs.size == 1 })
         assertArrayEquals("l'APK verifie est installe", fakeUpdate.apk, fakeUpdate.installs.single().readBytes())
+    }
+
+    @Test
+    fun serveur_mis_a_jour_pendant_que_l_app_est_ouverte_bandeau_au_retour_au_premier_plan() {
+        // 2026-11-06 : app ouverte avant le deploiement des serveurs -> rien pendant 6 h, sauf arret force
+        launch(server = "1.8.0")
+        nothingOffered("a l'ouverture, serveur a la meme version")
+
+        fakeApi.healthResponse = Response.success(HealthResponse("1.9.0"))  // serveurs deployes ensuite
+        scenario!!.moveToState(Lifecycle.State.CREATED)  // app en arriere-plan
+        scenario!!.moveToState(Lifecycle.State.RESUMED)  // rouverte depuis les applis recentes
+
+        assertTrue("bandeau « $BANNER » attendu au retour au premier plan", shown(BANNER))
+        assertEquals("verification de fond toutes les 15 min (reprise apres un 404 avant publication de la release)",
+            15 * 60_000L, AppUpdate.CHECK_INTERVAL_MS)
     }
 
     @Test
@@ -201,7 +218,7 @@ class SelfUpdateTest {
         assertTrue("echec trace dans les logs exportes",
             waitFor { AppLogger.exportLogs("user1", "test").contains("SHA-256 invalide") })
         assertTrue("APK supprime du cache", context.cacheDir.walk().none { it.name.endsWith(".apk") })
-        onView(withSubstring("Mise à jour")).check(doesNotExist())
+        onView(withId(R.id.updateBanner)).check(matches(not(isDisplayed())))  // pas de bandeau (INV-ANDROID-705)
         assertTrue("rien n'est installe", fakeUpdate.installs.isEmpty())
     }
 

@@ -71,6 +71,14 @@ local_changes_in_target() {
   return $ok
 }
 
+# INV-141 (NODE3) : jamais pendant un passage CD ni un test de panne (verrou de l'orchestrateur, INV-178),
+# tenu jusqu'a la fin. Ouvert en lecture : root ne cree jamais ce fichier (il doit rester a alarm). Absent sur le site.
+LOCK_FILE="${LOCK_FILE:-$STATE_DIR/orchestrate.lock}"
+if [[ -e "$LOCK_FILE" ]]; then
+  exec 9<"$LOCK_FILE"
+  flock -w "${LOCK_WAIT:-480}" 9 || { log "passage CD en cours ($LOCK_FILE) : rien n'est touche, nouvel essai au tick suivant"; exit 1; }
+fi
+
 log "commit promu ${SHA:0:7} : mise a jour de $REPO"
 as_owner fetch -q origin
 if ! local_changes_in_target; then
@@ -79,6 +87,10 @@ if ! local_changes_in_target; then
   exit 1
 fi
 as_owner checkout -q -f --detach "$SHA"
-bash "$REPO/infra/onsite/install.sh" --auto
+if [[ -n "${HOST_INSTALLER:-}" ]]; then
+  bash "$REPO/$HOST_INSTALLER" --auto  # NODE3 : infra/node3/install.sh, fixe par le drop-in node3.conf (INV-141)
+else
+  bash "$REPO/infra/onsite/install.sh" --auto
+fi
 echo "$SHA" > "$STATE_DIR/host-sha"
 log "partie hote deployee au commit ${SHA:0:7}"

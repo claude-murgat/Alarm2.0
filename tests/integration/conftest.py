@@ -57,7 +57,54 @@ def real_site_modem_check():
 
 
 @pytest.fixture(scope="session")
-def client(real_gateway_silence_check, real_site_modem_check):
+def real_site_dry_contact_check():
+    """INV-195 : meme raison qu'INV-172 (tick de fond, lignes gateway_states laissees par d'autres tests avec
+    l'horloge avancee). Neutralise pour la session ; renvoie le vrai controle (test_site_dry_contact_inv195)."""
+    from backend.app import quorum_monitor
+    real = quorum_monitor._run_site_dry_contact_check
+    quorum_monitor._run_site_dry_contact_check = lambda now: None
+    yield real
+    quorum_monitor._run_site_dry_contact_check = real
+
+
+@pytest.fixture(scope="session")
+def real_node_down_check():
+    """INV-189 : meme raison (tick de fond, faux Patroni d'autres tests : un episode ouvert par un
+    tick reel pourrait signaler un noeud plus tard). Neutralise pour la session ; renvoie le vrai
+    controle (test_node_down_inv189)."""
+    from backend.app import quorum_monitor
+    real = quorum_monitor._run_node_down_check
+    quorum_monitor._run_node_down_check = lambda now: None
+    yield real
+    quorum_monitor._run_node_down_check = real
+
+
+@pytest.fixture(scope="session")
+def real_etcd_space_check():
+    """INV-196 : meme raison (tick de fond, faux etcd d'autres tests via ETCD_HOSTS). Neutralise pour la
+    session ; renvoie le vrai controle (test_etcd_space_inv196)."""
+    from backend.app import quorum_monitor
+    real = quorum_monitor._run_etcd_space_check
+    quorum_monitor._run_etcd_space_check = lambda: None
+    yield real
+    quorum_monitor._run_etcd_space_check = real
+
+
+@pytest.fixture(scope="session")
+def real_replica_reinit_check():
+    """INV-168 : un tick de fond tombe entre l'installation du faux Patroni et le premier tick du
+    test notait node4 bloque depuis l'heure reelle ; le tick du test (2030) le voyait bloque depuis
+    ~3 ans et re-clonait aussitot. Neutralise pour la session ; renvoie le vrai controle."""
+    from backend.app import quorum_monitor
+    real = quorum_monitor._run_replica_reinit_check
+    quorum_monitor._run_replica_reinit_check = lambda now: None
+    yield real
+    quorum_monitor._run_replica_reinit_check = real
+
+
+@pytest.fixture(scope="session")
+def client(real_gateway_silence_check, real_site_modem_check, real_site_dry_contact_check, real_node_down_check,
+           real_replica_reinit_check, real_etcd_space_check):
     """TestClient FastAPI avec lifespan complet (tables crees + users seeded)."""
     # Import differe : garantit que DATABASE_URL est lu apres notre setenv.
     from backend.app.main import app

@@ -7,6 +7,16 @@
         <item name="colorSecondary">#FF5722</item>
         <item name="colorOnSecondary">#FFFFFF</item>
         <item name="android:statusBarColor">#B71C1C</item>
+        <!-- INV-ANDROID-708 : visible sous les barres systeme (Android 15+) ; sinon blanc, icones blanches invisibles -->
+        <item name="android:windowBackground">#1a1a2e</item>
+    </style>
+
+    <!-- INV-ANDROID-705/706 : bouton bleu, « Mettre à jour » du bandeau et « Installer » de l'ecran Mise à jour -->
+    <style name="UpdateButton">
+        <item name="android:backgroundTint">#00A2E5</item>
+        <item name="android:textColor">#FFFFFF</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:textStyle">bold</item>
     </style>
 
     <!-- INV-ANDROID-011 : entree du menu lateral -->

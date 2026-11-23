@@ -84,7 +84,7 @@ Ce script idempotent :
 - installe Docker CE + docker compose plugin (skip si déjà présent — repo Debian)
 - ajoute le user runner (créé si absent : `ghrunner`) au groupe `kvm` et `docker`
 - télécharge Android cmdline-tools + accepte les licenses + install
-  `platform-tools`, `emulator`, `platforms;android-30`, `build-tools;34.0.0`,
+  `platform-tools`, `emulator`, `platforms;android-30`, `platforms;android-36`, `build-tools;35.0.0`,
   `system-images;android-30;google_apis;x86_64`
 - exporte `ANDROID_HOME` dans `/etc/profile.d/android.sh`
 - télécharge actions/runner v2.333.1 dans `/opt/actions-runner-android/`

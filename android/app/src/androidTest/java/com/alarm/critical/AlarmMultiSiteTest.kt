@@ -213,15 +213,18 @@ class AlarmMultiSiteTest {
             Intent(context, DashboardActivity::class.java).putExtra("token", "fake-token")
         )
 
-        onView(withId(R.id.currentAlarmLine)).check(matches(allOf(
-            withSubstring("2 alarmes"), withSubstring("Izeron"), withSubstring("Beaufort")
-        )))
+        // La ligne du tableau de bord se rafraichit chaque seconde, pas a chaque poll
+        val line = allOf(withSubstring("2 alarmes"), withSubstring("Izeron"), withSubstring("Beaufort"))
+        waitFor { runCatching { onView(withId(R.id.currentAlarmLine)).check(matches(line)) }.isSuccess }
+        onView(withId(R.id.currentAlarmLine)).check(matches(line))
 
         val manager = context.getSystemService(NotificationManager::class.java)
         fun text(id: Int) = manager.activeNotifications.firstOrNull { it.id == id }?.notification?.extras
             ?.let { "${it.getCharSequence(Notification.EXTRA_TITLE)} ${it.getCharSequence(Notification.EXTRA_TEXT)}" }
             .orEmpty()
         for (id in listOf(AlarmPollingService.ALARM_NOTIFICATION_ID, AlarmPollingService.NOTIFICATION_ID)) {
+            // Android 12+ peut retarder jusqu'a 10 s la notification d'un service de premier plan
+            waitFor(15_000) { text(id).contains("2 alarmes") }
             val shown = text(id)
             assertTrue("notification $id : '$shown'",
                 shown.contains("2 alarmes") && shown.contains("Izeron") && shown.contains("Beaufort"))

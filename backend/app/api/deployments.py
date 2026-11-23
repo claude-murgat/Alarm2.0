@@ -56,6 +56,7 @@ _ALLOWED_KINDS = {
     "manual_override",
     "emergency_promote",
     "emergency_aborted_network",
+    "switchover",  # INV-187 : bascule Patroni avant de redemarrer le leader (pas d'email)
 }
 _ALLOWED_STATUS = {"success", "failure", "in_progress"}
 

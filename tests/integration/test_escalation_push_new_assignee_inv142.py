@@ -13,6 +13,8 @@ import time
 
 import pytest
 
+from _timing import wait_next_escalation_tick
+
 pytestmark = pytest.mark.integration
 
 
@@ -38,6 +40,8 @@ def setup(client):
     r = client.post("/api/config/system", headers=admin_h,
                     json={"key": "escalation_tick_seconds", "value": "1"})
     assert r.status_code == 200, r.text
+    # Sans cela, le budget du test absorbait aussi la fin du sommeil de 10 s en cours (flaky CI 2026-11-09).
+    wait_next_escalation_tick()
     yield admin_h, users
     client.post("/api/config/system", headers=admin_h, json={"key": "escalation_tick_seconds", "value": "10"})
     client.post("/api/test/reset-clock", params={"peer": "false"})
@@ -67,3 +71,27 @@ def test_loop_escalation_pushes_the_new_assignee(client, setup):
     pushed = {f["user_id"] for f in client.get("/api/test/last-fcm").json()}
     assert users["user2"] in pushed, f"le nouvel assigne n'a pas recu de push au tick de l'escalade : {pushed}"
     assert users["user1"] in pushed, "escalade cumulative : l'ancien assigne doit aussi etre relance"
+
+
+def test_loop_escalation_is_audited(client, setup):
+    """INV-100 : l'escalade par la vraie boucle laisse un `alarm_escalated` dans audit_events.
+
+    Flaky CI du 2026-11-09 (run 42604789507) : l'audit, ecrit dans sa propre session, attendait
+    5 s le verrou SQLite pris par le flush d'INV-142, boucle d'escalade figee, puis etait perdu.
+    """
+    admin_h, users = setup
+    sent = client.post("/api/alarms/send", headers=admin_h, json={
+        "site": "izeron", "title": "INV-100", "message": "audit de l'escalade", "severity": "critical",
+        "assigned_user_id": None,
+    })
+    assert sent.status_code == 200, sent.text
+    client.post("/api/test/advance-clock", params={"seconds": 16 * 60, "peer": "false"})
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        events = client.get("/api/audit/", headers=admin_h,
+                            params={"alarm_id": sent.json()["id"], "event_type": "alarm_escalated"}).json()
+        if events:
+            break
+        time.sleep(0.5)
+    assert [(e["details"]["from_user"], e["details"]["to_user"]) for e in events] == \
+        [(users["user1"], users["user2"])], f"escalade de la boucle absente de l'audit : {events}"

@@ -124,6 +124,8 @@ class SmsQueue(Base):
     error = Column(String, nullable=True)
     retries = Column(Integer, default=0)
     site = Column(String, nullable=True)  # INV-156 : modem (passerelle) qui l'envoie
+    claimed_by = Column(String, nullable=True)  # INV-193 : passerelle qui l'a reserve
+    claimed_until = Column(DateTime, nullable=True)  # INV-193 : fin du bail
 
 
 class CallQueue(Base):
@@ -138,6 +140,8 @@ class CallQueue(Base):
     result = Column(String, nullable=True)  # ack_dtmf|ack_sms|no_answer|busy|error|escalate
     retries = Column(Integer, default=0)
     site = Column(String, nullable=True)  # INV-156 : modem (passerelle) qui l'appelle
+    claimed_by = Column(String, nullable=True)  # INV-193 : passerelle qui l'a reserve
+    claimed_until = Column(DateTime, nullable=True)  # INV-193 : fin du bail
 
     alarm = relationship("Alarm")
     user = relationship("User")
@@ -164,7 +168,7 @@ class GatewayState(Base):
     """
     __tablename__ = "gateway_states"
     gateway_id = Column(String, primary_key=True)
-    state = Column(String, nullable=False)  # "open" | "closed"
+    state = Column(String, nullable=False)  # "open" | "closed" | "no_sensor" (INV-194)
     last_seen = Column(DateTime, nullable=False)
     site = Column(String, nullable=True)  # INV-157 : agregation par site (vide -> default_site)
 
@@ -214,7 +218,8 @@ class DeploymentEvent(Base):
     image = Column(String, nullable=False)
     kind = Column(String, nullable=False, index=True)
     # kind ∈ {'pull', 'canary_start', 'canary_promoted', 'rollback', 'abort',
-    #         'manual_override', 'emergency_promote', 'emergency_aborted_network'}
+    #         'manual_override', 'emergency_promote', 'emergency_aborted_network',
+    #         'switchover' (INV-187)}
     from_digest = Column(String, nullable=True)  # sha256:... avant
     to_digest = Column(String, nullable=True)    # sha256:... après
     status = Column(String, nullable=False)      # 'success' | 'failure' | 'in_progress'

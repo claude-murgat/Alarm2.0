@@ -48,7 +48,7 @@ StateDirectory=alarm/cd
 # overhead ~= 25 min. 1 h de marge avant kill brutal (couvre un SOAK plus long en override).
 TimeoutStartSec=3600
 ExecStart=/usr/local/bin/alarm-cd-orchestrate
-# Pas de Restart= (Type=oneshot). Le timer relance toutes les 15 min de toute
+# Pas de Restart= (Type=oneshot). Le timer relance toutes les 2 min de toute
 # facon, et un retry immediat sur fail risque la boucle (le cooldown 1 h dans
 # le script empeche ca, mais l'unit systemd doit aussi respecter cette logique).
 StandardOutput=journal

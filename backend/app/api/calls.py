@@ -8,6 +8,7 @@ from ..clock import now as clock_now
 from sqlalchemy import func
 from ..escalation import contact_is_obsolete
 from ..sites import default_site, requested_sites
+from ..queue_claim import CALL_LEASE, claim, release, unclaimed
 
 router = APIRouter(prefix="/internal", tags=["call-gateway"])
 
@@ -27,10 +28,11 @@ def get_pending_calls(
 ):
     """Retourne les appels en attente (non traites, retries < 3), sauf ceux d'une
     alarme deja acquittee ou resolue (INV-154). INV-156 : seulement ceux du ou des sites
-    demandes (`site` absent -> default_site ; ligne d'avant INV-156 sans site -> default_site)."""
+    demandes (`site` absent -> default_site ; ligne d'avant INV-156 sans site -> default_site).
+    INV-193 : ni ceux sous bail valide d'une passerelle."""
     rows = (
         db.query(CallQueue)
-        .filter(CallQueue.called_at == None, CallQueue.retries < 3,
+        .filter(CallQueue.called_at == None, CallQueue.retries < 3, unclaimed(CallQueue, clock_now()),
                 func.coalesce(CallQueue.site, default_site(db)).in_(requested_sites(db, site)))
         .order_by(CallQueue.created_at)
         .all()
@@ -53,6 +55,17 @@ def get_pending_calls(
     ]
 
 
+@router.post("/calls/{call_id}/claim")
+def claim_call(
+    call_id: int,
+    payload: Optional[dict] = None,
+    db: Session = Depends(get_db),
+    _: None = Depends(_check_gateway_key),
+):
+    """INV-193 : reserve l'appel pour `gateway_id` avant ATD ; `claimed: false` -> la passerelle le saute."""
+    return claim(db, CallQueue, call_id, payload, CALL_LEASE, CallQueue.called_at == None, CallQueue.retries < 3)
+
+
 @router.post("/calls/{call_id}/result")
 def post_call_result(
     call_id: int,
@@ -69,6 +82,7 @@ def post_call_result(
 
     result = payload.get("result", "unknown")
     row.result = result
+    release(row, payload)  # INV-193 : `gateway_id` facultatif (passerelle d'avant)
     # INV-144 : `error` = appel jamais emis (INV-127) -> reste en file, rejoue jusqu'a 3 echecs (INV-064)
     if result != "error":
         row.called_at = clock_now()

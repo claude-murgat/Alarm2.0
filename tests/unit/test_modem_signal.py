@@ -1,4 +1,4 @@
-"""Unit tests (tier 1) — backend/app/logic/modem_signal.py (INV-129).
+"""Unit tests (tier 1) — backend/app/logic/modem_signal.py (INV-129, INV-158 par site).
 
 Barres de signal affichees par l'app et le web a partir du dernier etat
 remonte par la gateway. Mesures reelles onsite-2 2026-10-13 : RSRP -116 dBm
@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from backend.app.logic.modem_signal import STALE_AFTER_SECONDS, modem_signal
+from backend.app.logic.modem_signal import STALE_AFTER_SECONDS, modem_signal, site_signals
 
 pytestmark = pytest.mark.unit
 
@@ -62,3 +62,68 @@ def test_csq_used_when_no_rsrp(csq, bars):
 def test_exposes_raw_values():
     r = modem_signal(_st(), NOW)
     assert r["tech"] == "LTE" and r["rsrp"] == -95.0 and r["updated_at"]
+
+
+# ── INV-158 (amende 2026-11-13) : un indicateur par site, meilleur modem + compteur ok/total ──
+
+DAY = 24 * 3600
+
+
+def _gw(gateway_id, site, age_s=10, **kw):
+    """Entree de `gateways` telle que /api/system/modem-status la construit."""
+    return {"gateway_id": gateway_id, "site": site, **modem_signal(_st(age_s, **kw), NOW)}
+
+
+def _summary(sites):
+    return [(s["site"], s["state"], s["bars"], s["ok"], s["total"], [g["gateway_id"] for g in s["gateways"]])
+            for s in sites]
+
+
+def test_sites_best_modem_and_counter():
+    weak = _gw("alarm-3", "izeron", rsrp=-110.0)        # 2 barres
+    silent = _gw("onsite-2", "izeron", age_s=600)        # inconnu depuis 10 min : compte, pas ok
+    sites = site_signals([_gw("alarm-1", "beaufort"), weak, silent], NOW)
+    assert _summary(sites) == [("beaufort", "ok", 3, 1, 1, ["alarm-1"]),
+                               ("izeron", "ok", 2, 1, 2, ["alarm-3", "onsite-2"])]
+    assert sites[1]["gateways"] == [weak, silent]
+    assert (sites[1]["tech"], sites[1]["rsrp"]) == ("LTE", -110.0)
+
+
+def test_best_is_the_most_bars_wherever_it_is():
+    sites = site_signals([_gw("alarm-1", "izeron", registered=False, tech=None, rsrp=None, csq=0),
+                          _gw("alarm-2", "izeron", rsrp=-120.0, tech="LTE"),
+                          _gw("alarm-3", "izeron", rsrp=-85.0, tech="LTE-B20")], NOW)
+    assert _summary(sites) == [("izeron", "ok", 4, 2, 3, ["alarm-1", "alarm-2", "alarm-3"])]
+    assert (sites[0]["tech"], sites[0]["rsrp"]) == ("LTE-B20", -85.0)
+
+
+def test_tie_takes_the_first_by_gateway_id():
+    sites = site_signals([_gw("alarm-1", "izeron", rsrp=-95.0, tech="LTE"),
+                          _gw("alarm-2", "izeron", rsrp=-92.0, tech="WCDMA")], NOW)
+    assert (sites[0]["bars"], sites[0]["tech"], sites[0]["rsrp"]) == (3, "LTE", -95.0)
+
+
+def test_all_unknown_site_shows_unknown_zero_ok():
+    sites = site_signals([_gw("alarm-1", "beaufort", age_s=181), _gw("alarm-2", "beaufort", age_s=3600)], NOW)
+    assert _summary(sites) == [("beaufort", "unknown", 0, 0, 2, ["alarm-1", "alarm-2"])]
+    assert (sites[0]["tech"], sites[0]["rsrp"]) == (None, None)
+
+
+def test_no_network_is_counted_but_not_ok():
+    sites = site_signals([_gw("alarm-1", "beaufort", registered=False, tech=None, rsrp=None, csq=0)], NOW)
+    assert _summary(sites) == [("beaufort", "no_network", 0, 0, 1, ["alarm-1"])]
+
+
+def test_counted_at_exactly_24h():
+    assert _summary(site_signals([_gw("alarm-2", "beaufort", age_s=DAY)], NOW)) == [
+        ("beaufort", "unknown", 0, 0, 1, ["alarm-2"])]
+
+
+def test_unplugged_after_24h_is_not_counted():
+    sites = site_signals([_gw("alarm-1", "beaufort"), _gw("alarm-2", "beaufort", age_s=DAY + 1),
+                          _gw("alarm-4", "izeron", age_s=DAY + 1)], NOW)
+    assert _summary(sites) == [("beaufort", "ok", 3, 1, 1, ["alarm-1"])]
+
+
+def test_no_gateway_no_site():
+    assert site_signals([], NOW) == []

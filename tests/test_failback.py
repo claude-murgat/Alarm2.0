@@ -21,8 +21,10 @@ proxy au leader (200), continuite des heartbeats a travers un failover") :
 - Patroni elit un nouveau leader parmi les 2 noeuds restants
 - Les backends survivants servent le heartbeat (le nouveau leader en direct,
   OU un replica qui forwarde au nouveau leader via WG -> 200)
-- Les heartbeats reprennent sur un noeud survivant (peu importe lequel : la
-  garantie est la CONTINUITE, plus l'atterrissage sur l'URL exacte du leader)
+- Le heartbeat de l'app DE GARDE reprend via un noeud survivant (peu importe
+  lequel : la garantie est la CONTINUITE, plus l'atterrissage sur l'URL exacte
+  du leader). Seule l'app de garde heartbeate : les autres attendent un push
+  (INV-ANDROID-600, INV-143), le test ne les attend donc pas.
 - L'app peut encore rotater si elle tape un noeud carrement down (connexion
   refusee) ou si aucun leader n'est joignable (panne cluster -> 503)
 
@@ -34,7 +36,8 @@ tier4-failback.yml) tourne sur un runner Linux dedie avec emulateurs.
 Prerequis (run manuel) :
 - Docker Compose 3-node Patroni up (cf CLAUDE.md "Lancer le cluster complet")
   Project names node1/node2/node3, ports 8000/8001/8002.
-- Au moins 2 emulateurs Android sur 3 (5552/5554/5556) avec l'app installee
+- Au moins 2 emulateurs Android sur 3 (5552/5554/5556) avec l'app installee,
+  dont emulator-5552 (user1, de garde apres /api/test/reset)
 - Variables env (toutes optionnelles, defaults sensibles) :
     ADB_PATH (defaut: 'adb' dans le PATH)
     ALARM_REPO_ROOT (defaut: cwd, racine repo Alarm2.0)
@@ -98,7 +101,7 @@ def login(name, pwd, base=None):
     r = requests.post(f"{base}/api/auth/login", json={"name": name, "password": pwd}, timeout=5)
     r.raise_for_status()
     d = r.json()
-    return d["access_token"], d["user"]["id"], d["user"]["name"]
+    return d["access_token"], d["user"]["id"], d["user"]["name"], d["is_oncall"]
 
 
 def inject_prefs(serial, token, name, uid):
@@ -158,26 +161,34 @@ def wait_unhealthy(base, timeout=10):
     return False
 
 
-def wait_users_heartbeating(base, expected_count, max_age_seconds=5.0, timeout=20.0):
-    """Polling sur /api/test/connected-users-detailed (chantier #21 step 0a).
-    Retourne le nombre d'users heartbeating sur `base` depuis < max_age_seconds."""
+def last_heartbeat(base, user_id):
+    """`last_heartbeat` (ISO) de `user_id` vu par `base`, None si illisible."""
+    try:
+        r = requests.get(f"{base}/api/test/connected-users-detailed",
+                         params={"user_id": user_id}, timeout=3)
+        return r.json()["users"][0]["last_heartbeat"]
+    except Exception:
+        return None
+
+
+def wait_new_heartbeats(base, user_ids, timeout):
+    """Polling sur le leader `base` : attend que le `last_heartbeat` de chaque user
+    de `user_ids` change par rapport a la premiere valeur lue ici, donc qu'un
+    heartbeat soit ecrit APRES l'appel (seul un heartbeat l'ecrit). Un age < N s ne
+    le prouve pas : /api/test/reset date tous les users de « maintenant », et le
+    dernier heartbeat d'avant la panne, replique, reste frais quelques secondes
+    apres l'election (run 44286889201 vert alors que 2 apps sur 3 ne heartbeataient
+    plus). Renvoie les users sans nouveau heartbeat a l'echeance (vide = succes)."""
+    first = {}
+    pending = set(user_ids)
     deadline = time.time() + timeout
-    last_count = 0
-    while time.time() < deadline:
-        try:
-            r = requests.get(f"{base}/api/test/connected-users-detailed", timeout=3)
-            users = r.json().get("users", [])
-            recent = [
-                u for u in users
-                if u.get("age_seconds") is not None and u["age_seconds"] < max_age_seconds
-            ]
-            last_count = len(recent)
-            if last_count >= expected_count:
-                return last_count
-        except Exception:
-            pass
+    while pending and time.time() < deadline:
+        for uid in list(pending):
+            hb = last_heartbeat(base, uid)
+            if hb is not None and hb != first.setdefault(uid, hb):
+                pending.discard(uid)
         time.sleep(0.5)
-    return last_count
+    return pending
 
 
 def check_emu_network(serial):
@@ -221,34 +232,6 @@ def node_for(url):
         if n["url"] == url:
             return n
     return None
-
-
-def wait_users_heartbeating_any(urls, expected_count, max_age_seconds=10.0, timeout=60.0):
-    """Polling sur N URLs en parallele : retourne (url, count) des qu'UN backend
-    voit `expected_count` users heartbeating. Utile post-failover quand on ne sait
-    pas encore quel noeud Patroni a elu leader.
-
-    Aucun sleep aveugle : on poll a 0.5Hz les endpoints observables, sortie
-    immediate des que la condition est remplie."""
-    deadline = time.time() + timeout
-    last = (None, 0)
-    while time.time() < deadline:
-        for url in urls:
-            try:
-                r = requests.get(f"{url}/api/test/connected-users-detailed", timeout=3)
-                users = r.json().get("users", [])
-                recent = [
-                    u for u in users
-                    if u.get("age_seconds") is not None and u["age_seconds"] < max_age_seconds
-                ]
-                if len(recent) >= expected_count:
-                    return (url, len(recent))
-                if len(recent) > last[1]:
-                    last = (url, len(recent))
-            except Exception:
-                pass
-        time.sleep(0.5)
-    return last
 
 
 def app_connected(serial):
@@ -340,14 +323,18 @@ def cluster_running():
 
 @pytest.fixture
 def emulators_connected(working_emulators, cluster_running):
-    """Apps Android logged in et confirmees heartbeating sur LE LEADER courant.
+    """Apps Android logged in ; celle(s) de garde confirmee(s) heartbeating sur
+    LE LEADER courant. Renvoie {user_id: serial} des apps de garde.
+
+    Seule l'app de garde (position 1 de la chaine : user1 apres /api/test/reset)
+    envoie des heartbeats ; les autres arretent leur service et attendent un push
+    (INV-ANDROID-600, INV-143). On n'attend donc que les apps de garde.
 
     En 3-node Patroni, le leader peut etre node1/node2/node3 selon l'ordre
     d'election au boot (souvent node1 mais pas garanti). L'ApiClient demarre
     sur PRIMARY_BACKEND_URL=8000 ; meme si node1 est replica, le heartbeat
-    aboutit (forwarde au leader via WG, cf INV-043 revise). On observe
-    l'arrivee des heartbeats sur N'IMPORTE QUEL des 3 backends via
-    wait_users_heartbeating_any.
+    aboutit (forwarde au leader via WG, cf INV-043 revise) et s'ecrit sur le
+    leader, ou on le lit (wait_new_heartbeats).
 
     Le `time.sleep(1)` apres `am force-stop` est un settling delay OS (plus
     de delais SQLite WAL pendant que Android nettoie le process), pas un
@@ -357,38 +344,41 @@ def emulators_connected(working_emulators, cluster_running):
     """
     leader_url = cluster_running["leader_initial"]
     print(f"\n[fixture] Setup apps (leader Patroni : {node_for(leader_url)['label']})...")
+    oncall = {}
     for serial in working_emulators:
         name, pwd = USERS_CREDS[serial]
         adb(serial, "shell", "am force-stop com.alarm.critical")
         time.sleep(1)
         # On login sur le leader, peu importe lequel — login va a la base
         # via le primaire de Patroni.
-        tok, uid, _uname = login(name, pwd, base=leader_url)
+        tok, uid, _uname, is_oncall = login(name, pwd, base=leader_url)
+        if is_oncall:
+            oncall[uid] = serial
         inject_prefs(serial, tok, name, uid)
         adb(serial, "shell", "am start -n com.alarm.critical/.MainActivity")
-        print(f"  {name} sur {serial}")
+        print(f"  {name} sur {serial}{' (de garde)' if is_oncall else ''}")
 
-    print("  Attente heartbeats (polling observable, n'importe quel noeud)...")
-    all_urls = [n["url"] for n in NODES]
-    url, n_hb = wait_users_heartbeating_any(
-        all_urls, expected_count=len(working_emulators),
-        max_age_seconds=5.0, timeout=30.0,
+    assert oncall, (
+        f"Aucune app de garde parmi {working_emulators} : emulator-5552 (user1, "
+        "position 1 apres reset) doit avoir le reseau, sinon rien ne heartbeate."
     )
-    assert n_hb >= len(working_emulators), (
-        f"Seulement {n_hb}/{len(working_emulators)} apps heartbeating apres 30s "
-        f"(meilleur observe sur {url}). Les apps ne se sont pas connectees au cluster."
+    print("  Attente heartbeats des apps de garde (polling observable sur le leader)...")
+    missing = wait_new_heartbeats(leader_url, oncall, timeout=30.0)
+    assert not missing, (
+        f"Apps de garde sans heartbeat apres 30s : {[oncall[u] for u in missing]}. "
+        "Les apps ne se sont pas connectees au cluster."
     )
-    print(f"  → {n_hb}/{len(working_emulators)} apps heartbeatent sur {node_for(url)['label']} ({url})")
+    print(f"  → apps de garde heartbeatent : {sorted(oncall.values())}")
 
-    return working_emulators
+    return oncall
 
 
 # --- Tests ---
 
 def test_failback_kill_leader(working_emulators, cluster_running, emulators_connected):
-    """Stop le projet du leader Patroni courant -> les apps doivent continuer
+    """Stop le projet du leader Patroni courant -> l'app de garde doit continuer
     a heartbeater (sur le nouveau leader, en direct ou via proxy depuis un
-    replica survivant).
+    replica survivant). Les apps hors garde ne heartbeatent pas (INV-ANDROID-600).
 
     Materialise INV-043 revise ("heartbeat sur replica -> proxy au leader,
     continuite a travers un failover") en condition Patroni 3-node reelle :
@@ -403,7 +393,7 @@ def test_failback_kill_leader(working_emulators, cluster_running, emulators_conn
        connexion refusee, consecutiveFailures>=3) mais des qu'elle atteint un
        noeud survivant, le heartbeat repasse 200 (direct ou proxifie).
     """
-    expected = len(working_emulators)
+    oncall = emulators_connected
     initial_leader = cluster_running["leader_initial"]
     leader_node = node_for(initial_leader)
     print(f"\n[1] Leader Patroni initial : {leader_node['label']} ({initial_leader})")
@@ -429,49 +419,32 @@ def test_failback_kill_leader(working_emulators, cluster_running, emulators_conn
     new_leader_node = node_for(new_leader)
     print(f"  → Nouveau leader : {new_leader_node['label']} ({new_leader})")
 
-    # --- Verifier que les apps rotatent vers le nouveau leader
-    # Note : selon que le nouveau leader est URL[1] (VPS2) ou URL[2] (VPS3),
-    # l'ApiClient passera par 1 ou 2 rotations. Les deux cas valident
-    # l'invariant : le test reste en succes des que les heartbeats sont
-    # observes sur le nouveau leader.
-    print(f"\n[4] Polling heartbeats sur {new_leader_node['label']} (apps doivent rotater)...")
-    all_urls = [n["url"] for n in NODES]
-    landed_url, n_hb = wait_users_heartbeating_any(
-        all_urls, expected_count=expected,
-        max_age_seconds=10.0, timeout=120.0,  # 120s : marge pour rotations multiples
-    )
+    # --- Verifier que l'app de garde heartbeate de nouveau. INV-043 (revise
+    # 2026-06-17) : un replica FORWARDE le heartbeat au leader, donc l'app peut
+    # atterrir sur N'IMPORTE quel noeud survivant (1 ou 2 rotations selon l'URL) ;
+    # la garantie est la CONTINUITE, observee la ou tout heartbeat s'ecrit : le
+    # nouveau leader. Une valeur qui change apres la 1re lecture ci-dessous vient
+    # forcement d'un heartbeat posterieur a la panne (l'ancien leader ne replique plus).
+    print(f"\n[4] Polling heartbeats de garde sur {new_leader_node['label']} (l'app doit rotater)...")
+    missing = wait_new_heartbeats(new_leader, oncall, timeout=120.0)  # 120s : marge pour rotations multiples
 
-    if n_hb < expected:
+    if missing:
         # Diagnostic detaille avant fail.
         print("\n  ECHEC: failover pas complet apres 120s")
-        print(f"  Meilleur observe : {n_hb}/{expected} sur {landed_url}")
         for n in NODES:
             print(f"  {n['label']} role: {get_role(n['url'])}")
-        print("  LOGCAT (extrait ApiClient + AlarmPollingService) :")
+        print("  LOGCAT (ApiClient + AlarmPollingService + AlarmWakeUpHandler) :")
         for serial in working_emulators:
             print(f"\n  === {serial} ===")
-            print(adb(serial, "logcat", "-d", "-t", "50",
-                      "-s", "ApiClient:*", "AlarmPollingService:*"))
+            print(adb(serial, "logcat", "-d",
+                      "-s", "ApiClient:*", "AlarmPollingService:*", "AlarmWakeUpHandler:*"))
         pytest.fail(
-            f"Failover incomplet : {n_hb}/{expected} apps seulement sur "
-            f"{landed_url} apres 120s. Nouveau leader Patroni : {new_leader}."
+            f"Failover incomplet : aucun heartbeat de l'app de garde "
+            f"{[oncall[u] for u in missing]} sur le nouveau leader {new_leader} apres 120s."
         )
 
-    print(f"\n  FAILOVER OK : {n_hb}/{expected} apps sur {landed_url} "
+    print(f"\n  FAILOVER OK : apps de garde {sorted(oncall.values())} heartbeatent "
           f"(leader Patroni : {new_leader})")
-    # INV-043 (revise 2026-06-17) : un replica FORWARDE le heartbeat au leader
-    # (via WG) et renvoie 200 — il ne renvoie plus 503. Donc apres le failover,
-    # les apps peuvent heartbeater avec succes sur N'IMPORTE quel noeud survivant
-    # (le nouveau leader en direct, OU un replica qui proxy vers lui). La
-    # garantie de failback est la CONTINUITE des heartbeats (deja verifiee par
-    # n_hb >= expected ci-dessus), pas le fait d'atterrir sur l'URL exacte du
-    # leader. On n'exige donc plus landed_url == new_leader (ce serait l'ancien
-    # modele 503-rotation). On verifie juste que le landing est un noeud encore
-    # debout (pas l'ancien leader qu'on a stoppe).
-    assert landed_url != initial_leader, (
-        f"Apps heartbeatent sur {landed_url} = ancien leader stoppe : impossible, "
-        "le failover n'a pas eu lieu."
-    )
 
 
 @pytest.mark.failover
@@ -490,18 +463,28 @@ def test_container_auto_recovery_after_crash(cluster_running, service):
 
     Comment on declenche le restart automatique :
 
-    On simule un crash inattendu via `docker exec --user root <c> kill -KILL 1`
-    (SIGKILL sur le process PID 1 = entrypoint = etcd ou patroni). Docker traite
-    ca comme un exit non-volontaire et applique la restart policy → le conteneur
-    redemarre seul.
+    On simule un crash inattendu : SIGKILL du processus principal du conteneur
+    (PID 1 du conteneur = etcd ou patroni) envoye DEPUIS l'espace PID de l'hote,
+    via un conteneur jetable `docker run --rm --pid=host postgres:16-alpine kill
+    -KILL <.State.Pid>` (image deja tiree par le workflow ; pas de sudo, le user
+    du runner est dans le groupe docker). Docker voit une sortie qu'il n'a pas
+    demandee (137) et applique la restart policy → le conteneur redemarre seul.
 
-    Pourquoi pas `docker stop` ou `docker kill` depuis l'exterieur (comme suggere
-    dans le body de l'issue) ? Verification empirique : ces deux gestes sont
-    traites comme STOP MANUEL par `unless-stopped` ; le conteneur reste down.
-    C'est d'ailleurs ce qu'on veut pour les tests failover tier3/tier4 qui font
-    `docker compose stop` et comptent dessus pour laisser le noeud stoppe.
-    Seul un exit interne (kill PID 1 depuis l'interieur, OOM, segfault, host
-    reboot) declenche la restart policy.
+    Pourquoi pas `docker exec <c> kill -KILL 1` (version d'origine, rouge a chaque
+    run) ? Le noyau ignore un SIGKILL envoye au PID 1 d'un espace PID depuis CE
+    meme espace (pid_namespaces(7) : seul un ancetre peut le forcer) : patroni
+    survivait, RestartCount restait a 0. Et l'image etcd (distroless) n'a meme
+    pas de binaire `kill`. Verifie le 2026-11-18 sur alarme-claude (Docker 29.9,
+    conteneur alpine `unless-stopped`) : kill depuis l'interieur → toujours
+    running, RestartCount=0 ; kill depuis l'hote → running, RestartCount=1.
+
+    Pourquoi pas `docker stop` ou `docker kill` (comme suggere dans le body de
+    l'issue) ? Docker les traite comme STOP MANUEL : avec `unless-stopped` le
+    conteneur reste `exited` (verifie le meme jour : `docker kill --signal KILL`
+    → exited 137, pas de restart). C'est d'ailleurs ce qu'on veut pour les tests
+    failover tier3/tier4 qui font `docker compose stop` et comptent dessus pour
+    laisser le noeud stoppe. Seule une sortie non demandee (crash, OOM, SIGKILL
+    venu de l'hote) declenche la restart policy.
 
     Pourquoi parametrer sur patroni + etcd : les deux ont recu le meme fix dans
     PR #184 (meme mecanisme), le bug initial portait sur patroni mais etcd avait
@@ -527,24 +510,25 @@ def test_container_auto_recovery_after_crash(cluster_running, service):
     print(f"\n[1] Cible : {container} (noeud non-leader)")
 
     r = subprocess.run(
-        ["docker", "inspect", "-f", "{{.State.Status}}|{{.RestartCount}}", container],
+        ["docker", "inspect", "-f", "{{.State.Status}}|{{.RestartCount}}|{{.State.Pid}}", container],
         capture_output=True, text=True, timeout=10,
     )
     assert r.returncode == 0, f"docker inspect echoue : {r.stderr.strip()}"
-    status, count_str = r.stdout.strip().split("|")
+    status, count_str, pid = r.stdout.strip().split("|")
     initial_count = int(count_str)
     assert status == "running", \
         f"{container} doit etre Running avant le test (actuel : {status!r})"
-    print(f"  Etat initial : Running, RestartCount={initial_count}")
+    print(f"  Etat initial : Running, RestartCount={initial_count}, PID hote={pid}")
 
-    # Crash simule : kill PID 1 depuis l'interieur via root. `docker exec` peut
-    # renvoyer non-zero (le conteneur meurt pendant la commande) — on n'asserte
-    # pas dessus, on verifie l'effet (auto-restart) plus bas.
-    print(f"\n[2] Simule crash : docker exec --user root {container} kill -KILL 1")
-    subprocess.run(
-        ["docker", "exec", "--user", "root", container, "kill", "-KILL", "1"],
-        capture_output=True, text=True, timeout=15,
+    # Crash simule : SIGKILL du processus principal depuis l'espace PID de l'hote
+    # (cf docstring : depuis l'interieur du conteneur, le noyau l'ignore).
+    print(f"\n[2] Simule crash : kill -KILL {pid} (processus principal de {container}, depuis l'hote)")
+    r = subprocess.run(
+        ["docker", "run", "--rm", "--pid=host", "--entrypoint", "kill",
+         "postgres:16-alpine", "-KILL", pid],
+        capture_output=True, text=True, timeout=60,
     )
+    assert r.returncode == 0, f"kill depuis l'hote echoue : {r.stderr.strip()}"
 
     # Attendre Running + RestartCount > initial (max 60s, couvre le backoff
     # exponentiel Docker meme si plusieurs restarts s'enchainent).
@@ -570,25 +554,29 @@ def test_container_auto_recovery_after_crash(cluster_running, service):
     )
     assert final_count > initial_count, (
         f"{container} status=running mais RestartCount={final_count} (initial={initial_count}). "
-        "Le kill -KILL 1 n'a pas declenche un restart par Docker — soit le kill n'a pas "
-        "atteint PID 1 (verifier l'entrypoint), soit la restart policy est inactive."
+        "Le SIGKILL du processus principal n'a pas declenche un restart par Docker — "
+        "la restart policy est inactive."
     )
     print(f"  → Auto-recovery OK : Running, RestartCount={final_count} (etait {initial_count})")
 
-    # Pour patroni : verifier le retour fonctionnel dans le cluster (role
-    # primary ou replica via /health du backend). Detecte un faux positif ou
-    # le conteneur tourne mais patroni n'arrive pas a se resync.
+    # Pour patroni : verifier le retour fonctionnel dans le cluster : /health du
+    # backend du noeud en 200 (sa base, servie par le Postgres que gere Patroni,
+    # repond) avec un role. /health renvoie « primary » ou « secondary », jamais
+    # « replica » (attendu ici jusqu'au 2026-11-18, etape jamais atteinte).
+    # Detecte un faux positif ou le conteneur tourne mais patroni n'arrive pas a se resync.
     if service == "patroni":
         print(f"\n[4] Verification role Patroni sur {target_node['label']} (max 60s)...")
         deadline = time.time() + 60.0
         role = None
         while time.time() < deadline:
             role = get_role(target_node["url"])
-            if role in ("primary", "replica"):
+            if role in ("primary", "secondary") and healthy(target_node["url"]):
                 break
             time.sleep(1)
-        assert role in ("primary", "replica"), (
-            f"Patroni sur {target_node['label']} n'a pas retrouve de role apres 60s "
-            f"(role={role!r}). Conteneur up mais Patroni n'a pas rejoint le cluster."
-        )
+        else:
+            pytest.fail(
+                f"Patroni sur {target_node['label']} n'a pas retrouve de role apres 60s "
+                f"(role={role!r}, /health 200 : {healthy(target_node['url'])}). "
+                "Conteneur up mais Patroni n'a pas rejoint le cluster."
+            )
         print(f"  → Patroni role={role}, cluster OK.")

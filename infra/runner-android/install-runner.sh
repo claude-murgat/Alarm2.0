@@ -35,7 +35,8 @@ SDK_PACKAGES=(
     "platform-tools"
     "emulator"
     "platforms;android-${ANDROID_API_LEVEL}"
-    "build-tools;34.0.0"
+    "platforms;android-36"   # compileSdk (INV-ANDROID-708)
+    "build-tools;35.0.0"     # defaut d'AGP 8.9
     "system-images;android-${ANDROID_API_LEVEL};${ANDROID_TARGET};${ANDROID_ARCH}"
 )
 

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- INV-ANDROID-706 : vues de l'ecran « Mise à jour », construit en code -->
+    <item name="updateInstalled" type="id" />
+    <item name="updateServer" type="id" />
+    <item name="updateState" type="id" />
+    <item name="updateProgress" type="id" />
+    <item name="updateLastCheck" type="id" />
+    <item name="updateCheckButton" type="id" />
+    <item name="updateInstallButton" type="id" />
+    <!-- INV-ANDROID-707 -->
+    <item name="updatePlayProtectButton" type="id" />
+</resources>

@@ -33,7 +33,10 @@ bootstrap:
         # seulement : sur le cluster live, `patronictl edit-config` (cf ci-dessus).
         max_wal_senders: 10
         max_replication_slots: 10
-        wal_keep_size: 64MB
+        # Memes valeurs que la prod (INV-188, 2026-11-09) : un cluster recree garde les memes WAL.
+        wal_keep_size: 128MB
+        # Un slot de replica mort ne retient jamais plus de 8 Go de WAL (disque du leader).
+        max_slot_wal_keep_size: 8GB
 
   initdb:
     - encoding: UTF8

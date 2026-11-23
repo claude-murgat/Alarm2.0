@@ -4,8 +4,8 @@ Patroni simule (seules les URL Patroni sont interceptees) : GET /cluster renvoie
 (timeline 256) et des replicas ; les POST /reinitialize sont enregistres. node4 est bloque comme
 a l'incident du 2026-10-29 : state « running », timeline 253.
 
-Date de test dans le futur : un tick de fond de quorum_monitor_loop (horloge reelle) qui
-passerait pendant le test ne peut rien declencher.
+Le controle de la boucle de fond est neutralise pour la session (conftest,
+`real_replica_reinit_check`) : seuls les ticks du test (`ticks`, date en 2030) touchent l'etat.
 """
 import io
 import json
@@ -58,10 +58,12 @@ def patroni(monkeypatch, client, admin_headers):
     return fake
 
 
-def _ticks(*minutes):
-    from backend.app.quorum_monitor import _run_replica_reinit_check
-    for m in minutes:
-        _run_replica_reinit_check(T0 + timedelta(minutes=m))
+@pytest.fixture
+def ticks(real_replica_reinit_check):
+    def run(*minutes):
+        for m in minutes:
+            real_replica_reinit_check(T0 + timedelta(minutes=m))
+    return run
 
 
 def _audits():
@@ -75,12 +77,12 @@ def _audits():
         db.close()
 
 
-def test_stuck_replica_reinitialized_once_audited_and_emailed(patroni):
+def test_stuck_replica_reinitialized_once_audited_and_emailed(patroni, ticks):
     before = len(_audits())
     with patch("backend.app.quorum_monitor.send_alert_email") as mail:
-        _ticks(0, 5, 9)
+        ticks(0, 5, 9)
         assert patroni["posts"] == [], "reinit avant 10 min de blocage continu"
-        _ticks(10, 11, 30)
+        ticks(10, 11, 30)
 
     assert patroni["posts"] == [("http://10.99.0.4:8008/reinitialize", "POST", {"force": True})]
     audits = _audits()[before:]
@@ -92,16 +94,16 @@ def test_stuck_replica_reinitialized_once_audited_and_emailed(patroni):
     assert "node4" in mail.call_args.kwargs["subject"]
 
 
-def test_no_healthy_replica_emails_without_reinit(patroni):
+def test_no_healthy_replica_emails_without_reinit(patroni, ticks):
     patroni["cluster"] = {"members": _members(1, 2, 4, 5)}
     with patch("backend.app.quorum_monitor.send_alert_email") as mail:
-        _ticks(0, 10, 11, 30)
+        ticks(0, 10, 11, 30)
     assert patroni["posts"] == []
     assert mail.call_count == 1, "une alerte, puis silence pendant le cooldown d'1 h"
     assert mail.call_args.kwargs["to"] == _ALERT_EMAIL
 
 
-def test_incident_2026_11_06_reinit_one_at_a_time(patroni):
+def test_incident_2026_11_06_reinit_one_at_a_time(patroni, ticks):
     """Beaufort redemarre pendant un failover : leader node2 (timeline 257), node1/node3 sains,
     node4/node6/node7 bloques (3 replicas sur 5), node5 absent. node4 a 10 min, rien tant
     qu'il est bloque, node6 des qu'il repasse streaming, puis node7."""
@@ -115,19 +117,19 @@ def test_incident_2026_11_06_reinit_one_at_a_time(patroni):
 
     patroni["cluster"] = cluster(4, 6, 7)
     with patch("backend.app.quorum_monitor.send_alert_email") as mail:
-        _ticks(0, 10, 11, 30)
+        ticks(0, 10, 11, 30)
         assert reinitialized() == ["10.99.0.4"], "un seul reinit tant que node4 est bloque"
         patroni["cluster"] = cluster(6, 7)
-        _ticks(31)
+        ticks(31)
         assert reinitialized() == ["10.99.0.4", "10.99.0.6"]
         patroni["cluster"] = cluster(7)
-        _ticks(32)
+        ticks(32)
     assert reinitialized() == ["10.99.0.4", "10.99.0.6", "10.99.0.7"]
     assert [c.kwargs["subject"] for c in mail.call_args_list] == [
         f"[Alarme Murgat] Replica node{n} re-cloné automatiquement" for n in (4, 6, 7)]
 
 
-def test_only_lagging_beaufort_replicas_streaming_still_reinit(patroni):
+def test_only_lagging_beaufort_replicas_streaming_still_reinit(patroni, ticks):
     """Lags mesures en prod le 2026-11-06 (Beaufort via OVH) : seuls node4/node7 suivent, avec
     64 Mo / 32 Mo de lag stable. Ils prouvent que le leader va bien : node1 re-clone."""
     lags = {4: 67_109_384, 7: 33_554_952}
@@ -135,31 +137,31 @@ def test_only_lagging_beaufort_replicas_streaming_still_reinit(patroni):
         _member(n, timeline=257, lag=lags[n]) if n in lags else _member(n, state="running", timeline=256)
         for n in (1, 3, 4, 6, 7)]}
     with patch("backend.app.quorum_monitor.send_alert_email") as mail:
-        _ticks(0, 10)
+        ticks(0, 10)
     assert patroni["posts"] == [("http://10.99.0.1:8008/reinitialize", "POST", {"force": True})]
     assert mail.call_args.kwargs["subject"] == "[Alarme Murgat] Replica node1 re-cloné automatiquement"
 
 
-def test_reinit_http_failure_is_audited_and_does_not_raise(patroni):
+def test_reinit_http_failure_is_audited_and_does_not_raise(patroni, ticks):
     patroni["fail_reinit"] = True
     before = len(_audits())
     with patch("backend.app.quorum_monitor.send_alert_email") as mail:
-        _ticks(0, 10, 11)
+        ticks(0, 10, 11)
     assert len(patroni["posts"]) == 1, "pas de nouvel essai avant 1 h"
     audits = _audits()[before:]
     assert len(audits) == 1 and audits[0]["ok"] is False
     assert mail.call_count == 1
 
 
-def test_delay_follows_system_config(patroni, client, admin_headers):
+def test_delay_follows_system_config(patroni, ticks, client, admin_headers):
     r = client.post("/api/config/system", json={"key": "replica_reinit_after_minutes", "value": "2"},
                     headers=admin_headers)
     assert r.status_code == 200
     try:
         with patch("backend.app.quorum_monitor.send_alert_email"):
-            _ticks(0, 1)
+            ticks(0, 1)
             assert patroni["posts"] == []
-            _ticks(2)
+            ticks(2)
         assert len(patroni["posts"]) == 1
     finally:
         client.post("/api/config/system", json={"key": "replica_reinit_after_minutes", "value": "10"},

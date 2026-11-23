@@ -154,7 +154,7 @@ jobs:
           pip install -r requirements-dev.txt requests
 
       - name: Setup JDK 17
-        # Android Gradle Plugin 8.2.0 (cf android/build.gradle.kts) requiert JDK 17.
+        # Android Gradle Plugin 8.9.3 (cf android/build.gradle.kts) requiert JDK 17.
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -168,7 +168,8 @@ jobs:
           packages: >-
             platform-tools
             platforms;android-${{ env.ANDROID_API_LEVEL }}
-            build-tools;34.0.0
+            platforms;android-36
+            build-tools;35.0.0
             emulator
             system-images;android-${{ env.ANDROID_API_LEVEL }};${{ env.ANDROID_TARGET }};${{ env.ANDROID_ARCH }}
 
@@ -347,6 +348,24 @@ jobs:
             docker pull "$img" || echo "::warning::pre-pull $img failed (will retry via buildx)"
           done
 
+      - name: Pause des conteneurs qui tiennent les ports du cluster
+        # L'hote du runner (alarme-claude) est une machine de dev partagee : d'autres projets y publient
+        # des ports du cluster de test (2026-11-16/17 : pile dev -p dev sur 2379/2380/5432/8008/8000, base
+        # du projet Chat sur 5433 -> « Bind for 0.0.0.0:<port> failed », runs 43845617929, 44065790762).
+        # Tout conteneur qui publie un port des .env.node{1,2,3} est arrete (docker stop, donnees gardees)
+        # pendant le run et relance par « Teardown cluster », meme en cas d'echec. docker port deplie les
+        # plages (2379-2380). Port 0 = port au hasard, jamais en conflit.
+        run: |
+          ports=$(grep -hoE '^[A-Z_]*PORT=[0-9]+' .env.node1 .env.node2 .env.node3 | cut -d= -f2 | grep -vx 0 | sort -u)
+          ids=""
+          for id in $(docker ps -q); do
+            for hp in $(docker port "$id" | grep -oE ':[0-9]+$' | tr -d :); do
+              if grep -qx "$hp" <<<"$ports"; then ids="$ids $id"; echo "pause : $(docker inspect -f '{{.Name}}' "$id") (port $hp)"; break; fi
+            done
+          done
+          echo "$ids" > "$RUNNER_TEMP/paused-containers"
+          if [ -n "${ids// /}" ]; then docker stop $ids; else echo "aucun conteneur sur les ports du cluster"; fi
+
       - name: Boot cluster (3 noeuds Patroni)
         # Stack de prod : 3 projets docker compose (node1/node2/node3), chacun
         # avec son .env.node{1,2,3}, montant etcd + Patroni + backend. Les 3
@@ -461,12 +480,16 @@ jobs:
           ALARM_VPS3_URL: http://localhost:8002
           PYTHONUNBUFFERED: "1"
         run: |
+          # pipefail : sans lui, le code de « | tee » (0) masquait l'echec de pytest (run 44089906858 vert
+          # alors que « pytest : commande introuvable »). python -m : le pytest deja present sur ce runner est
+          # dans ~/.local (pip le voit « deja installe »), dont le bin/ n'est pas dans le PATH.
+          set -o pipefail
           mkdir -p reports
           VERBOSE=""
           if [ "${{ github.event.inputs.verbose }}" = "true" ]; then
             VERBOSE="-vv"
           fi
-          pytest tests/test_failback.py -v -s $VERBOSE \
+          python -m pytest tests/test_failback.py -v -s $VERBOSE \
             --junitxml=reports/tier4-failback.xml \
             -p no:randomly \
             2>&1 | tee reports/tier4-pytest.log
@@ -483,8 +506,9 @@ jobs:
             # atteint. Resultat: process zombie qui maintient le runner busy
             # apres la fin du job (vu lors du smoke-test #4 attempt 2 : 19h de
             # zombie adb apres un job cancelled).
+            # AlarmWakeUpHandler : arret du heartbeat des apps hors garde (INV-ANDROID-601).
             timeout 10 adb -s "$serial" logcat -d -t 5000 \
-              -s ApiClient:* AlarmPollingService:* AndroidRuntime:E '*:F' \
+              -s ApiClient:* AlarmPollingService:* AlarmWakeUpHandler:* AndroidRuntime:E '*:F' \
               > "reports/logcat-${port}.txt" 2>&1 || true
           done
 
@@ -523,6 +547,9 @@ jobs:
           for proj in node1 node2 node3; do
             docker compose -p "$proj" down -v --remove-orphans 2>/dev/null || true
           done
+          # Relance les conteneurs mis en pause avant le boot (ports liberes par le down ci-dessus).
+          ids=$(cat "$RUNNER_TEMP/paused-containers" 2>/dev/null || true)
+          if [ -n "${ids// /}" ]; then docker start $ids || echo "::warning::conteneurs non relances : docker start $ids"; fi
           # Pas de docker network a virer : en 3-node-per-project, chaque
           # projet utilise son propre default network (auto-cree, auto-detruit
           # au down). Les projets communiquent via host.docker.internal sur

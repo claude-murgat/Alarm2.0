@@ -67,6 +67,12 @@ from .sites import node_locations
 from sqlalchemy import or_  # INV-185
 from .logic.site_modem import decide_site_modem  # INV-185
 from .sites import known_sites  # INV-185
+from .logic.node_down import decide_node_down  # INV-189
+from .logic.resilience import group_of  # INV-189 : libellé du lieu (« OVH »)
+from .sites import node_machines  # INV-189
+from .api.alarms_internal import _liveness_window_seconds  # INV-195 : fenetre de l'agregation (INV-122)
+from .logic.site_dry_contact import decide_site_dry_contact  # INV-195
+from .logic.etcd_space import ETCD_DB_SIZE_ALERT_BYTES, decide_etcd_space, etcd_level  # INV-196
 
 
 logger = logging.getLogger(__name__)
@@ -387,6 +393,10 @@ def _run_leader_loss_check(now: datetime) -> None:
     label, explanation = _CAUSES[cause]
     logger.critical("INV-170 : aucun leader vivant vu de %s depuis %s (%s)", node, since, cause)
     log_event("cluster_leader_lost", node=node, since=since, cause=cause)
+    # INV-196 : sous NOSPACE Patroni perd son leader et le controle leader-only ne tourne plus.
+    full = [h for h, s in _etcd_statuses().items() if s and etcd_level(s) == "nospace"]
+    etcd_full = (f"\n\netcd est plein (alarme NOSPACE sur {', '.join(full)}) : il refuse toute écriture, "
+                 f"Patroni ne peut plus tenir de leader. {_ETCD_PROCEDURE}") if full else ""
     send_alert_email(
         subject=f"[Alarme Murgat] Aucun leader vu de {where} — {label}",
         body=(
@@ -397,7 +407,7 @@ def _run_leader_loss_check(now: datetime) -> None:
             f"Chaque nœud qui constate la situation envoie son propre email (au plus un par heure) : "
             f"comparer les nœuds et les causes pour situer la panne.\n\n"
             f"À vérifier : patronictl list, et qu'une majorité des voteurs etcd est joignable "
-            f"(etcdctl endpoint health --cluster ; liste dans SystemConfig etcd_voters)."
+            f"(etcdctl endpoint health --cluster ; liste dans SystemConfig etcd_voters).{etcd_full}"
         ),
         to=alert_email or "direction_technique@charlesmurgat.com",
     )
@@ -465,6 +475,23 @@ async def quorum_monitor_loop() -> None:
             await asyncio.to_thread(_run_site_modem_check, datetime.now(timezone.utc).replace(tzinfo=None))
         except Exception:
             logger.exception("INV-185 : erreur dans le contrôle des modems par site (continue)")
+
+        # INV-195 : clock_now(), comme INV-172 — la vivacité se juge sur gateway_states.last_seen (clock_now()).
+        try:
+            await asyncio.to_thread(_run_site_dry_contact_check, clock_now())
+        except Exception:
+            logger.exception("INV-195 : erreur dans le contrôle du contact sec par site (continue)")
+
+        # INV-189 : horloge réelle (comme INV-185) — `advance-clock` des tests E2E ne doit pas l'émettre.
+        try:
+            await asyncio.to_thread(_run_node_down_check, datetime.now(timezone.utc).replace(tzinfo=None))
+        except Exception:
+            logger.exception("INV-189 : erreur dans le contrôle des nœuds (continue)")
+
+        try:
+            await asyncio.to_thread(_run_etcd_space_check)  # INV-196 : pas de délai, pas d'horloge
+        except Exception:
+            logger.exception("INV-196 : erreur dans le contrôle de la base etcd (continue)")
 
         # INV-168 : horloge réelle, pas clock_now() — `advance-clock` des tests E2E ne doit
         # pas pouvoir re-cloner un replica.
@@ -574,3 +601,202 @@ def _run_site_modem_check(now: datetime) -> None:
                 f"Un nouvel email partira si un modem revient puis se tait de nouveau."))
     finally:
         db.close()
+
+
+# INV-195 : site qui a deja eu un contact sec lisible et n'en a plus depuis plus de 10 min (Arduino
+# debranche, fige ou non programme sur chaque machine, ou passerelles muettes) -> un email + un audit par
+# episode, puis « retabli ». Depuis INV-194, `no_sensor` ne declenche plus INV-172. Episodes dans SystemConfig.
+_SITE_DRY_CONTACT_KEY = "site_dry_contact_alert"
+_DRY_CONTACT_LABELS = {"open": "contact ouvert", "closed": "contact fermé", "no_sensor": "sans Arduino (no_sensor)"}
+
+
+def _run_site_dry_contact_check(now: datetime) -> None:
+    """INV-195 : un tick (bloquant, via `asyncio.to_thread`, leader seul), horloge clock_now() comme INV-172."""
+    db = SessionLocal()
+    try:
+        fallback = default_site(db)
+        gateways = [(g.site or fallback, g.gateway_id, g.state, g.last_seen)
+                    for g in db.query(GatewayState).order_by(GatewayState.gateway_id)]
+        row = db.query(SystemConfig).filter(SystemConfig.key == _SITE_DRY_CONTACT_KEY).first()
+        state = {site: {"since": datetime.fromisoformat(e["since"]) if e["since"] else None, "emailed": e["emailed"]}
+                 for site, e in (json.loads(row.value) if row else {}).items()}
+        liveness = timedelta(seconds=_liveness_window_seconds())
+        lost, recovered, new_state = decide_site_dry_contact(
+            known_sites(db), [(site, st, at) for site, _, st, at in gateways], state, now, liveness)
+        if new_state != state:
+            if row is None:
+                row = SystemConfig(key=_SITE_DRY_CONTACT_KEY, value="{}")
+                db.add(row)
+            row.value = json.dumps({site: {"since": e["since"].isoformat() if e["since"] else None,
+                                           "emailed": e["emailed"]} for site, e in new_state.items()})
+            db.commit()
+        if not lost and not recovered:
+            return
+        alert_email = _get_alert_email(db)
+
+        def listing(site):  # comme la colonne « Contact sec » de l'onglet Cluster (INV-192)
+            return "\n".join(
+                f"  - {gid} : " + (f"muette depuis {at.isoformat()} UTC" if now - at >= liveness
+                                   else _DRY_CONTACT_LABELS.get(st, st))
+                for s, gid, st, at in gateways if s == site) or "  - aucune passerelle connue"
+        for site, since in lost:
+            minutes = int((now - since).total_seconds() // 60)
+            name = site.capitalize()
+            log_event("site_dry_contact_lost", site=site, since=since.isoformat(), minutes=minutes)
+            logger.error("INV-195 : site %s sans contact sec lisible depuis %s min", site, minutes)
+            _alert(alert_email, f"[Alarme Murgat] Site {name} sans contact sec", (
+                f"Aucune passerelle du site {name} ne lit de contact sec depuis {since.isoformat()} UTC "
+                f"({minutes} min).\n\nPasserelles du site :\n{listing(site)}\n\n"
+                f"Conséquence : le contact sec de ce site ne peut plus déclencher d'alarme.\n\n"
+                f"À vérifier sur les machines du site :\n"
+                f"  - Arduino branché en USB et programmé (journalctl -u alarm-sms-gateway -n 50)\n"
+                f"  - colonne « Contact sec » de l'onglet Cluster\n"
+                f"  - une passerelle muette : systemctl status alarm-sms-gateway, alimentation, réseau\n\n"
+                f"Un email « rétabli » partira quand un contact sec du site sera de nouveau lu."))
+        for site, since in recovered:
+            minutes = int((now - since).total_seconds() // 60)
+            name = site.capitalize()
+            log_event("site_dry_contact_recovered", site=site, since=since.isoformat(), minutes=minutes)
+            logger.warning("INV-195 : site %s, contact sec rétabli après %s min", site, minutes)
+            _alert(alert_email, f"[Alarme Murgat] Site {name} : contact sec rétabli", (
+                f"Le contact sec du site {name} est de nouveau lu. Il ne l'était plus depuis {since.isoformat()} "
+                f"UTC ({minutes} min).\n\nPasserelles du site :\n{listing(site)}"))
+    finally:
+        db.close()
+
+
+# INV-189 : noeud absent de /cluster, arrete ou qui ne suit plus le leader depuis plus de 10 min -> un
+# email + un audit par episode, puis « retabli » a son retour. Episodes dans SystemConfig, partages par
+# les leaders successifs : une bascule ne renvoie rien et ne remet pas le compteur a zero.
+_NODE_DOWN_KEY = "node_down_alert"
+
+
+def _run_node_down_check(now: datetime) -> None:
+    """INV-189 : un tick (bloquant, via `asyncio.to_thread`, leader seul), horloge reelle naive UTC."""
+    try:
+        cluster = _patroni_cluster()
+    except Exception as e:
+        logger.warning("INV-189 : Patroni injoignable, contrôle des nœuds sauté (%s)", e)
+        return
+    db = SessionLocal()
+    try:
+        locations, machines = node_locations(db), node_machines(db)
+        row = db.query(SystemConfig).filter(SystemConfig.key == _NODE_DOWN_KEY).first()
+        state = {name: {"since": datetime.fromisoformat(e["since"]), "emailed": e["emailed"]}
+                 for name, e in (json.loads(row.value) if row else {}).items()}
+        down, recovered, new_state = decide_node_down(cluster, list(locations), state, now)
+        if new_state != state:
+            if row is None:
+                row = SystemConfig(key=_NODE_DOWN_KEY, value="{}")
+                db.add(row)
+            row.value = json.dumps({name: {"since": e["since"].isoformat(), "emailed": e["emailed"]}
+                                    for name, e in new_state.items()})
+            db.commit()
+        if not down and not recovered:
+            return
+        alert_email = _get_alert_email(db)
+
+        def label(name):  # « alarm-2 · node5 (Beaufort) », comme l'onglet Cluster (INV-161)
+            return f"{machines.get(name, name)} · {name} ({group_of(locations.get(name), False)})"
+        leader = label(next(m["name"] for m in cluster["members"] if m.get("role") == "leader"))
+        for name, since, problem in down:
+            minutes = int((now - since).total_seconds() // 60)
+            log_event("node_down", node=name, machine=machines.get(name, name), location=locations.get(name),
+                      problem=problem, since=since.isoformat(), minutes=minutes)
+            logger.error("INV-189 : nœud %s pas sain depuis %s min (%s)", name, minutes, problem)
+            _alert(alert_email, f"[Alarme Murgat] Nœud injoignable : {label(name)}", (
+                f"Le nœud {label(name)} ne suit plus le leader depuis {since.isoformat()} UTC ({minutes} min).\n"
+                f"État vu par le leader : {problem}.\n\n"
+                f"Le reste du cluster a toujours un leader ({leader}) : les alarmes sont créées, escaladées et "
+                f"acquittées normalement, mais le cluster a un nœud de moins pour encaisser une autre panne.\n\n"
+                f"À vérifier sur {machines.get(name, name)} :\n"
+                f"  - alimentation, câble réseau et box du site\n"
+                f"  - tunnel WireGuard (sudo wg show : dernière poignée de main récente)\n"
+                f"  - conteneurs Patroni et backend (docker ps), puis patronictl list\n\n"
+                f"Un email « rétabli » partira quand il suivra de nouveau le leader."))
+        for name, since in recovered:
+            minutes = int((now - since).total_seconds() // 60)
+            log_event("node_recovered", node=name, machine=machines.get(name, name),
+                      location=locations.get(name), since=since.isoformat(), minutes=minutes)
+            logger.warning("INV-189 : nœud %s rétabli après %s min", name, minutes)
+            _alert(alert_email, f"[Alarme Murgat] Nœud rétabli : {label(name)}", (
+                f"Le nœud {label(name)} suit de nouveau le leader ({leader}). Il ne le suivait plus depuis "
+                f"{since.isoformat()} UTC ({minutes} min)."))
+    finally:
+        db.close()
+
+
+# INV-196 : base etcd d'un voteur >= 1 Gio (moitie du quota par defaut, 2 Gio : au-dela etcd refuse toute
+# ecriture) ou alarme NOSPACE -> un email + un audit par episode et par niveau. Niveau signale dans SystemConfig.
+_ETCD_SPACE_KEY = "etcd_space_alert"
+_ETCD_PROCEDURE = (
+    "Procédure (docs/CD_DESIGN.md §9sexies) : compaction (etcdctl compaction --physical, long "
+    "--command-timeout), puis défragmentation d'un voteur à la fois, le leader etcd en dernier ; "
+    "après une alarme NOSPACE : etcdctl alarm disarm.")
+
+
+def _etcd_status(endpoint: str) -> Optional[dict]:
+    """POST /v3/maintenance/status d'un voteur (`10.99.0.1:2379`). None : injoignable ou illisible."""
+    try:
+        req = urllib.request.Request(f"http://{endpoint}/v3/maintenance/status", data=b"{}", method="POST")
+        status = json.loads(urllib.request.urlopen(req, timeout=3).read().decode("utf-8"))
+        etcd_level(status)  # reponse illisible -> leve ici : jamais dans l'email INV-170 ni dans le controle
+        return status
+    except Exception as e:
+        logger.warning("INV-196 : etcd %s illisible (%s)", endpoint, e)
+        return None
+
+
+def _etcd_statuses() -> dict:
+    """{voteur: status ou None} pour chaque hôte de ETCD_HOSTS (ceux de Patroni) ; {} si absent."""
+    return {h: _etcd_status(h) for h in os.getenv("ETCD_HOSTS", "").split(",") if h}
+
+
+def _mb(value) -> int:
+    return int(value) // 1048576
+
+
+def _run_etcd_space_check() -> None:
+    """INV-196 : un tick (bloquant, via `asyncio.to_thread`, leader seul)."""
+    statuses = _etcd_statuses()
+    if not statuses:
+        return  # ETCD_HOSTS absent : tier 2, ou backend pas encore recree avec INV-196
+    db = SessionLocal()
+    try:
+        row = db.query(SystemConfig).filter(SystemConfig.key == _ETCD_SPACE_KEY).first()
+        alerted = (row.value if row else None) or None
+        level, new_state = decide_etcd_space(list(statuses.values()), alerted)
+        if new_state != alerted:
+            if row is None:
+                row = SystemConfig(key=_ETCD_SPACE_KEY, value="")
+                db.add(row)
+            row.value = new_state or ""
+            db.commit()
+        if level is None:
+            return
+        alert_email = _get_alert_email(db)
+    finally:
+        db.close()
+    log_event("etcd_space_alert", level=level,
+              db_size={h: int(s["dbSize"]) if s else None for h, s in statuses.items()})
+    voters = "\n".join(
+        f"  - {h} : injoignable" if s is None else
+        f"  - {h} : {_mb(s['dbSize'])} Mo ({_mb(s.get('dbSizeInUse', 0))} Mo utilisés)"
+        + (", alarme NOSPACE" if etcd_level(s) == "nospace" else "")
+        for h, s in statuses.items())
+    if level == "nospace":
+        subject = "[Alarme Murgat] etcd plein (NOSPACE) : écritures refusées"
+        intro = "etcd a l'alarme NOSPACE : il refuse déjà toute écriture."
+    else:
+        biggest = max(_mb(s["dbSize"]) for s in statuses.values() if s)
+        subject = f"[Alarme Murgat] etcd : base à {biggest} Mo sur 2048"
+        intro = (f"La base etcd d'au moins un voteur atteint {_mb(ETCD_DB_SIZE_ALERT_BYTES)} Mo, "
+                 f"la moitié du quota.")
+    logger.error("INV-196 : %s", subject)
+    _alert(alert_email, subject, (
+        f"{intro}\n\nVoteurs etcd :\n{voters}\n\n"
+        f"À 2048 Mo (quota par défaut), etcd refuse toute écriture (alarme NOSPACE) : Patroni ne peut plus "
+        f"tenir de leader et plus aucune alarme ne peut être créée, escaladée ni acquittée, sur aucun nœud.\n\n"
+        f"Si « utilisés » est proche de la taille, la compaction automatique ne tourne pas (vérifier "
+        f"ETCD_AUTO_COMPACTION_* : docker inspect <projet>-etcd-1) ; sinon il reste à défragmenter.\n\n"
+        f"{_ETCD_PROCEDURE}"))

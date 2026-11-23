@@ -6,7 +6,8 @@ Source : tests/INVARIANTS.md section 13 (INV-120 V2 + INV-122 + INV-123)
 
 Architecture : level-based reconciliation. Chaque gateway poll son contact
 sec NC à intervalle régulier (5 s par défaut côté gateway) et POST son état
-courant ("open" | "closed"). Le backend :
+courant ("open" | "closed", ou "no_sensor" sans Arduino lisible :
+vivante, hors agregation, INV-194). Le backend :
   1. UPSERT dans gateway_states (état courant par gateway).
   2. Compute should_be_active = any(g.state=="open" for g in alive_gateways)
      où alive = last_seen > now - GATEWAY_LIVENESS_WINDOW_SECONDS (défaut 15s)
@@ -40,6 +41,7 @@ from ..clock import now as clock_now
 from ..database import get_db
 from ..events import log_event
 from ..logic.alarm_creation import evaluate_alarm_creation_plan
+from ..logic.dry_contact import aggregate_dry_contact
 from ..logic.models import EscalationChainEntry, UserSnapshot
 from ..sites import default_site
 from ..models import (
@@ -71,7 +73,8 @@ DISSENSUS_EMAIL_THRESHOLD = timedelta(minutes=5)
 class ReportStateRequest(BaseModel):
     """Body du POST /report-state. La gateway envoie son état courant."""
     gateway_id: str = Field(..., min_length=1, max_length=128)
-    state: Literal["open", "closed"]
+    # INV-194 : "no_sensor" = passerelle vivante sans Arduino lisible (tient last_seen, hors agregation)
+    state: Literal["open", "closed", "no_sensor"]
     # INV-155 : site de la passerelle (GATEWAY_SITE). Absent/vide -> default_site.
     site: Optional[str] = Field(None, max_length=64)
 
@@ -97,7 +100,7 @@ def _alert_email(db: Session) -> str:
 def _create_gateway_alarm(db: Session, site: str) -> Alarm:
     """Crée une alarme `source="gateway_dry_contact"`. Logique alignée sur
     POST /api/alarms/send (assignation pos 1 chaîne, INV-080 chaîne vide,
-    FCM, audit log, INV-018, INV-066)."""
+    FCM, INV-018, INV-066). Audit `alarm_created` : par report_state, après le commit."""
     chain_orm = db.query(EscalationConfig).order_by(EscalationConfig.position).all()
     chain_snapshot = [
         EscalationChainEntry(position=ec.position, user_id=ec.user_id)
@@ -159,15 +162,6 @@ def _create_gateway_alarm(db: Session, site: str) -> Alarm:
             )
         )
 
-    log_event(
-        "alarm_created",
-        db=db,
-        alarm_id=alarm.id,
-        user_id=None,
-        source="gateway_dry_contact",
-        assigned_to=alarm.assigned_user_id,
-    )
-
     if plan.assigned_user_id is not None:
         try:
             from ..fcm_service import alarm_data, send_fcm_to_user
@@ -187,17 +181,10 @@ def _create_gateway_alarm(db: Session, site: str) -> Alarm:
 
 def _resolve_gateway_alarm(db: Session, alarm: Alarm) -> None:
     """RESOLVE auto d'une alarme `source="gateway_dry_contact"` quand toutes
-    les gateways alive reportent 'closed'."""
+    les gateways alive reportent 'closed'. Audit `alarm_resolved` : par report_state, après le commit."""
     _now = clock_now()
     alarm.status = "resolved"
     alarm.updated_at = _now
-    log_event(
-        "alarm_resolved",
-        db=db,
-        alarm_id=alarm.id,
-        user_id=None,
-        source="gateway_dry_contact_auto_resolve",
-    )
 
 
 def _send_dissensus_email(
@@ -278,8 +265,8 @@ def report_state(
         )
         .all()
     )
-    alive_states = [g.state for g in alive_gateways]
-    should_be_active = any(s == "open" for s in alive_states)
+    # INV-194 : les passerelles "no_sensor" ne comptent ni ouvertes ni fermees
+    should_be_active, should_resolve, divergent = aggregate_dry_contact([g.state for g in alive_gateways])
 
     # 3. Reconcile (touche UNIQUEMENT les alarmes source="gateway_dry_contact").
     # "acknowledged" est inclus avec "active"/"escalated" : tant que l'alarme
@@ -296,15 +283,15 @@ def report_state(
     if any_active_alarm is not None and any_active_alarm.source == "gateway_dry_contact":
         gateway_alarm = any_active_alarm
 
-    resolved_alarm = None
+    created_alarm = resolved_alarm = None
     if should_be_active:
         if any_active_alarm is None:
             # Pas d'alarme active → CREATE
-            gateway_alarm = _create_gateway_alarm(db, site)
+            gateway_alarm = created_alarm = _create_gateway_alarm(db, site)
         # Sinon : no-op (idempotence boucle si gateway_alarm, ou INV-001 si autre source)
-    else:
+    elif should_resolve:
         if gateway_alarm is not None:
-            # Toutes alive closed + alarme gateway existante → RESOLVE
+            # Toutes les alive avec capteur closed + alarme gateway existante → RESOLVE
             _resolve_gateway_alarm(db, gateway_alarm)
             resolved_alarm = gateway_alarm
             gateway_alarm = None  # plus en (active, escalated)
@@ -313,11 +300,7 @@ def report_state(
 
     db.flush()
 
-    # 4. INV-123 : détection dissensus (sur l'alarme gateway active si elle existe)
-    divergent = (len(alive_gateways) >= 2) and (
-        set(alive_states) == {"open", "closed"}
-    )
-
+    # 4. INV-123 : détection dissensus (`divergent`, sur l'alarme gateway active si elle existe)
     # Re-fetch l'alarme gateway active après la phase reconcile (peut avoir été
     # créée ou résolue dans le bloc précédent).
     gateway_alarm = (
@@ -356,7 +339,14 @@ def report_state(
                 gateway_alarm.sensor_dissensus_email_sent_at = None
 
     db.commit()
+    # INV-100 : audits après le commit (session dédiée). Avant, la FK audit_events.alarm_id
+    # visait une alarme encore invisible en PostgreSQL (audit perdu) ; SQLite : verrou, 5 s puis perdu.
+    if created_alarm is not None:
+        log_event("alarm_created", db=db, alarm_id=created_alarm.id, user_id=None,
+                  source="gateway_dry_contact", assigned_to=created_alarm.assigned_user_id)
     if resolved_alarm is not None:
+        log_event("alarm_resolved", db=db, alarm_id=resolved_alarm.id, user_id=None,
+                  source="gateway_dry_contact_auto_resolve")
         from ..fcm_service import push_alarm_resolved
         push_alarm_resolved(db, resolved_alarm)  # INV-147
 

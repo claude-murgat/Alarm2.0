@@ -78,6 +78,9 @@ def run_migrations(engine):
         # ── INV-179 : table chaos_requests (panne controlee)
         _migrate_chaos_requests(conn, is_sqlite)
 
+        # ── INV-193 : reservation des SMS / appels par une passerelle
+        _migrate_queue_claims(conn, is_sqlite)
+
 
 def _migrate_alarm_notifications(conn, is_sqlite: bool):
     """Crée la table alarm_notifications et migre les données CSV si nécessaire."""
@@ -362,6 +365,21 @@ def _migrate_site(conn, is_sqlite: bool):
     ))
     conn.commit()
     logger.info("Migration: colonnes site verifiees/ajoutees (INV-155/156/157)")
+
+
+def _migrate_queue_claims(conn, is_sqlite: bool):
+    """INV-193 : sms_queue / call_queue.claimed_by + claimed_until (nullables : lignes existantes
+    non reservees, aucune donnee touchee)."""
+    for table in ("sms_queue", "call_queue"):
+        cols = ([row[1] for row in conn.execute(text(f"PRAGMA table_info({table})")).fetchall()]
+                if is_sqlite else None)
+        for col, sql_type in (("claimed_by", "VARCHAR"), ("claimed_until", "TIMESTAMP")):
+            if not is_sqlite:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {sql_type}"))
+            elif col not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {sql_type}"))
+    conn.commit()
+    logger.info("Migration: colonnes claimed_by/claimed_until verifiees/ajoutees (INV-193)")
 
 
 def _migrate_connectivity_events(conn, is_sqlite: bool):

@@ -180,13 +180,13 @@ def _enqueue_sms_for_user(db: Session, user: User, alarm: Alarm):
     if not user.phone_number:
         return
     # INV-124 : instruire l'acquittement par reponse SMS "1" + lien supervision.
-    # Sans accent dans la partie statique → reste en GSM-7 (evite UCS-2 / 70 car.).
     # La gateway (SmsReceiverThread) acquitte sur reception d'un SMS "1"/"ok"/"oui"/"ack".
-    # INV-155 : le SMS commence par le site ; tiret long -> "-" pour rester en GSM-7.
+    # La gateway envoie en alphabet GSM 7 bits (gsm7.py, 160 car.) : é en fait partie, le tiret
+    # long du titre y devient "-". INV-155 : le SMS commence par le site.
     prefix = f"ALARME {alarm.site.capitalize()}:" if alarm.site else "ALARME:"
     body = (
-        f"{prefix} {alarm.title.replace('—', '-')}\n"
-        f"Repondez 1 pour acquitter ou https://supervision.charlesmurgat.com"
+        f"{prefix} {alarm.title}\n"
+        f"Répondez 1 pour acquitter ou https://supervision.charlesmurgat.com"
     )
     existing = (
         db.query(SmsQueue)
@@ -376,10 +376,6 @@ async def escalation_loop():
                         alarm.escalation_count += 1
                         # Reset timer pour le prochain palier
                         alarm.created_at = now
-                        notified_ids = _get_notified_user_ids(db, alarm.id)
-                        log_event("alarm_escalated", db=db, alarm_id=alarm.id,
-                                  from_user=decision.from_user_id, to_user=decision.to_user_id,
-                                  notified_user_ids=notified_ids)
 
                     # FCM cumulative : rappel aux notifies pour toutes les alarmes eligibles.
                     for alarm_id in alarm_ids_needing_reminder:
@@ -394,9 +390,13 @@ async def escalation_loop():
                             except Exception:
                                 pass  # FCM best-effort
                     db.commit()
-                    # INV-144 : apres le commit (l'audit a sa propre session ; SQLite verrouille
-                    # pendant la transaction) et seulement une fois l'escalade enregistree.
+                    # INV-100 / INV-144 : audits apres le commit (l'audit a sa propre session ; SQLite
+                    # verrouille depuis le flush d'INV-142 : avant, l'audit attendait 5 s, boucle figee,
+                    # puis etait perdu) et seulement une fois l'escalade enregistree.
                     for decision in actions.escalations:
+                        log_event("alarm_escalated", db=db, alarm_id=decision.alarm_id,
+                                  from_user=decision.from_user_id, to_user=decision.to_user_id,
+                                  notified_user_ids=_get_notified_user_ids(db, decision.alarm_id))
                         if decision.without_call:
                             _report_escalation_without_call(db, alarm_by_id[decision.alarm_id], decision)
 
@@ -591,6 +591,7 @@ def escalate_active_alarms_now(db: Session, by_user: Optional[int] = None) -> in
     if not chain:
         return 0
     escalated = 0
+    audits = []
     for alarm in db.query(Alarm).filter(Alarm.status.in_(["active", "escalated"])).all():
         current_position = next((ec.position for ec in chain if ec.user_id == alarm.assigned_user_id), -1)
         next_user = _find_next_user(db, chain, current_position, alarm.assigned_user_id)
@@ -613,12 +614,14 @@ def escalate_active_alarms_now(db: Session, by_user: Optional[int] = None) -> in
         notified_ids = [n[0] for n in db.query(AlarmNotification.user_id)
                         .filter(AlarmNotification.alarm_id == alarm.id).all()]
         extra = {"by_user": by_user} if by_user is not None else {}
-        log_event("alarm_escalated", db=db, alarm_id=alarm.id, from_user=prev_user,
-                  to_user=next_user.user_id, notified_user_ids=notified_ids, **extra)
+        audits.append(dict(alarm_id=alarm.id, from_user=prev_user, to_user=next_user.user_id,
+                           notified_user_ids=notified_ids, **extra))
         for uid in notified_ids:  # FCM a tous les notifies (escalade cumulative)
             try:
                 send_fcm_to_user(db, uid, alarm.title, alarm.message, alarm_data(alarm))
             except Exception:
                 pass
     db.commit()
+    for audit in audits:  # apres le commit, comme la boucle (INV-100)
+        log_event("alarm_escalated", db=db, **audit)
     return escalated

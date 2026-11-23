@@ -125,6 +125,8 @@ def test_harden_opens_ssh_and_backend_to_the_current_lan_only(h):
     assert "ufw allow from 172.16.0.0/16 to any port 22 proto tcp comment SSH LAN site" in c
     assert "ufw allow from 172.16.0.0/16 to any port 8000 proto tcp comment Backend LAN site (apps Android)" in c
     assert "ufw allow in on wg0 comment Wireguard mesh prod inter-noeuds" in c
+    # 2026-11-09 : Patroni (reseau Docker du projet) vers l'etcd local par l'IP WireGuard du plan (alarm-3)
+    assert "ufw allow from 172.18.0.0/16 to 10.99.0.6 port 2379 proto tcp comment Patroni (conteneur) -> etcd local" in c
     assert "ufw --force enable" in c
     assert "RuntimeWatchdogSec=30s" in (h / "root/etc/systemd/system.conf.d/watchdog.conf").read_text()
     assert (h / "root/etc/chrony/chrony.conf").read_text() == (REPO / "infra/onsite/chrony.conf").read_text()

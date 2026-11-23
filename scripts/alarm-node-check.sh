@@ -80,6 +80,34 @@ chk passerelle_cle "GATEWAY_KEY $kd" [ "$kd" = definie ]
 s=$(gv GATEWAY_SITE); chk passerelle_site "GATEWAY_SITE=${s:-absent} (attendu $site)" [ "$s" = "$site" ]
 c=$(gv DRY_CONTACT_SOURCE); chk passerelle_contact_sec "DRY_CONTACT_SOURCE=${c:-absent} (attendu host)" [ "$c" = host ]
 
+# Patroni (INV-188) : configuration dynamique (etcd), lue sur l'API du membre local. Le port 8008 est
+# lie a ADVERTISE_HOST (IP WireGuard), pas a 127.0.0.1. Un archive_timeout sans vrai archivage force
+# un segment WAL de 16 Mo toutes les N s (incident du 2026-11-06 : 6 Go/h vers les replicas).
+pc=$(curl -fsS --max-time 5 "http://$wg_ip:8008/config" 2>/dev/null | python3 -c '
+import json, sys
+p = json.load(sys.stdin).get("postgresql", {}).get("parameters", {})
+print(p.get("archive_timeout") or 0); print(p.get("archive_command") or "")' 2>/dev/null)
+if [ -z "$pc" ]; then
+  out INFO patroni_archive "API Patroni http://$wg_ip:8008/config injoignable ou illisible : non controle"
+else
+  { read -r at; IFS= read -r ac; } <<<"$pc"
+  forced=1; [[ "$at" =~ ^0+[a-z]*$ ]] && forced=0  # 0, 0s, 0min : aucune bascule forcee
+  case "$ac" in ""|true|/bin/true|/usr/bin/true|:) real=0 ;; *) real=1 ;; esac
+  chk patroni_archive "archive_timeout=$at archive_command='$ac' (attendu archive_timeout=0 sans vrai archivage : patronictl edit-config -p archive_timeout=0)" \
+    [ "$forced$real" != 10 ]
+fi
+
+# Copie des sauvegardes de la base (INV-191), sur la machine qui la recoit de NODE3 : temoin independant
+# de NODE3 (arrete, timer desactive : aucun email). Date de reception = mtime (renommee une fois complete).
+if [ "$node" = "${STD_DB_BACKUP_COPY_NODE:-}" ]; then
+  bt=$(find "$R$STD_DB_BACKUP_DIR" -maxdepth 1 -name 'alarm_db-*.dump' -printf '%T@\n' 2>/dev/null | sort -n | tail -1)
+  bt=${bt%.*}; [[ "$bt" =~ ^[0-9]+$ ]] || bt=0
+  bage=$(( $(date +%s) - bt )); fresh=0
+  (( bt > 0 && bage <= STD_DB_BACKUP_MAX_AGE_HOURS * 3600 )) && fresh=1
+  if (( bt > 0 )); then bd="copie la plus recente recue il y a $((bage / 3600)) h"; else bd="aucune copie dans $STD_DB_BACKUP_DIR"; fi
+  chk sauvegarde_base "$bd (max $STD_DB_BACKUP_MAX_AGE_HOURS h, INV-191)" [ "$fresh" = 1 ]
+fi
+
 for unit in $STD_UNITS; do
   e=$(systemctl is-enabled "$unit" 2>/dev/null); chk "unit:$unit" "${e:-absente}" [ "$e" = enabled ]
 done

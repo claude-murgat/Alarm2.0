@@ -128,11 +128,19 @@ Pas de build sur PR (les images preview ne servent pas à grand-chose tant qu'on
 
 **Prérequis vérifiés par le workflow avant la promo** :
 
-1. ✅ CI verte sur master @ sha (garanti par le trigger `workflow_run`)
+1. ✅ CI verte sur master @ sha (garanti par le trigger `workflow_run`), **ou** PR déjà testée sur le même arbre (job `decide`, ci-dessous)
 2. ✅ CD Build + CD Install Smoke verts sur le même sha (poll 5 min max)
 3. ✅ Le sha existe sur master (paranoia)
 4. ✅ Pas de revert de ce sha dans `git log master`
 5. ✅ Images `:sha-<short>` existent sur GHCR (cd-build a publié)
+
+**Promotion immédiate d'un commit déjà testé (2026-11-09, INV-190)** : le workflow se déclenche aussi à la fin de **CD Build** (push master). Un job `decide` (`.github/scripts/promote_decision.py`, testé par `tests/unit/test_promote_decision.py`) promeut **tout de suite**, sans attendre la CI master (~35 min), si :
+
+- le commit est le `merge_commit_sha` d'**exactement une** PR mergée (`GET /repos/{owner}/{repo}/commits/{sha}/pulls`) ;
+- il a **le même arbre** que la tête de cette PR (`<sha>^{tree}`, lu par l'API) — vrai pour nos squash/merge faits après `gh pr update-branch` ;
+- sur cette tête, les checks requis sont **tous** `completed/success` : `Tier 1 — Unit (logique pure)`, `Tier 1.5 — Mutation testing (logic pure, blocking)`, `Tier 2 — Integration (FastAPI TestClient + SQLite)`, `Tier 3 — E2E cluster (worker 1/2)` et `(worker 2/2)`, `Prod config check (INV-076 — /api/test/* disabled)` (noms des jobs de `pr.yml`, épinglés par le test).
+
+Le moindre doute (pas de PR, arbre différent, check absent, en échec ou en cours, API en erreur, révision de `:stable` illisible) → rien, la CI master promeut comme avant. **Jamais de retour arrière** (les deux déclencheurs) : un sha égal à la révision de `:stable` (label `org.opencontainers.image.revision`) ou ancêtre de celle-ci n'est pas (re)promu — sans cette garde, la CI master d'un commit précédent, finie après la promotion rapide du suivant, remettrait l'ancien code en `:stable`. Les autres vérifications du job `promote` (provenance, sha sur master, pas de revert, CD Build + CD Install Smoke verts, images présentes) restent identiques. Pourquoi : release 1.9.5, PR #321 (VERSION seul, CI verte sur sa tête, à jour de master) mergée à 14:37:03Z, CD Build fini à 14:37:32Z, puis ~35 min de CI master avant `:stable`, puis pull (5 min) et tick orchestrateur (15 min) : ~1 h avant que node3 annonce la version aux téléphones (INV-ANDROID-705).
 
 Si tous OK : re-tag :stable, POST `kind=manual_override` `actor=github-actions:auto-promote` dans `deployment_events` (si `vars.CD_API_BASE` configuré — V1 limitation : runner GH-hosted hors mesh WG, donc step skip aujourd'hui ; les events sont posés par les scripts canary depuis NODE3 ensuite).
 
@@ -203,6 +211,8 @@ sudo systemctl daemon-reload && sudo systemctl enable --now alarm-gateway-sync.t
 
 **Pourquoi 5 min et pas 1 min** : 1 min augmente la charge GHCR API et n'apporte rien (la promo `:stable` est manuelle, pas une course de seconde). 5 min est une fenêtre acceptable entre promo et propagation. Si plus rapide est demandé, le workflow de promo peut **trigger** le pull via webhook (à instrumenter en V2).
 
+**Gardé à 5 min le 2026-11-09** (accélération promo + tick orchestrateur 2 min) : seul le pull de NODE3 est sur le chemin critique (les canaries font leur propre `--pull` sur la cible) ; il coûte en moyenne 2,5 min, au pire 5,5 min, et l'objectif ~10-15 min est tenu sans y toucher. Passer à 2 min ferait 7 nœuds × 3 `imagetools inspect` × 30/h = 630 requêtes/h vers GHCR au lieu de 252, pour 1,5 min de gain moyen, et le timer est posé à la main sur chacun des 7 nœuds (pas par `install.sh`).
+
 ### Alternatives considérées
 
 - **Watchtower** : 3rd party qui pull + restart auto. Pas de canary order (tous les conteneurs du host updatent ensemble), pas de respect du quorum etcd, pas de logique d'auto-rollback compatible avec INV-091. **Rejeté** — incompatible avec un cluster Patroni.
@@ -257,7 +267,7 @@ L'orchestration tourne **depuis NODE3 cloud** (`alarm-cd-orchestrator.service` q
 
 ### Questions ouvertes
 
-- **Q4.1** Si NODE3 est **actuellement primary Patroni** quand on commence le canary, faut-il forcer un `failover` Patroni vers onsite-1 ou onsite-2 **avant** de redémarrer NODE3, pour éviter une bascule pendant le restart ? `patronictl switchover --master node3 --candidate node1` est explicite et < 5 s. **Forte recommandation**.
+- **Q4.1** Si NODE3 est **actuellement primary Patroni** quand on commence le canary, faut-il forcer un `failover` Patroni vers onsite-1 ou onsite-2 **avant** de redémarrer NODE3, pour éviter une bascule pendant le restart ? `patronictl switchover --master node3 --candidate node1` est explicite et < 5 s. **Forte recommandation**. **Tranché le 2026-11-06 (Q4.1 et Q4.3, tout nœud leader) : oui, cf « Bascule planifiée du leader » ci-dessous (INV-187).**
 - **Q4.2** Le replication lag < 100 ms est-il atteignable de façon fiable depuis NODE3 cloud (RTT 16.6 ms vers onsite) ? À mesurer une fois le cluster up. Si non, relâcher à 1 s pour NODE3 spécifiquement.
 - **Q4.3** Si onsite-2 est **simultanément** le primary Patroni au moment où on veut l'updater (étape 2/3), même question — switchover préventif ? Ou bien on fait confiance à INV-091 (failover < 60 s tolérable) ?
 - **Q4.4** Comment gérer un déploiement qui touche **uniquement le backend** vs un qui touche **patroni** (Postgres) ? Le restart patroni nécessite un pg_basebackup au boot du replica (cf compose `start_period: 60s`). Le canary doit tolérer cette fenêtre. Proposition : critère soak `replication lag` reporté de 90 s pour les déploiements qui touchent l'image patroni.
@@ -273,10 +283,44 @@ Sites (jour du déménagement) : node3 = OVH, node4 + node5 = Beaufort, node6 + 
 - **Nœud pas prêt** (canary `exit 3` : SSH coupé depuis le préflight, ou digest distant illisible depuis la cible, registre ou DNS injoignable ; rien n'est touché) → `WARN node<N> (site) pas prêt : reporté au prochain passage`, la chaîne **continue**, sans cooldown. Un votant reporté ainsi reporte les votants suivants (quorum). Cas du 2026-11-02 : alarm-1 en 4G de secours sans DNS bloquait Izeron 1 h à chaque passage.
 - **Quorum etcd** : un votant n'est redémarré que si **les 3 votants** répondent au préflight (redémarrer un votant pendant qu'un autre est absent perdrait le quorum, INV-090). Sinon aucun votant ce passage, mais les non votants 4 à 7 joignables sont déployés. Les votants sont le tableau `VOTERS` du script : `(3 6 7)` depuis le jour du déménagement (`docs/REPLACE_ONSITE_NODE.md`), `(1 2 3)` avant.
 - **Canary en échec** (health KO → rollback, ou tout exit ≠ 0 du canary) → halt, `failure`, cooldown 1 h, comme avant : une image cassée ne se propage pas.
-- **`orchestrate.state`** : `<digest>\t<outcome>\t<ts>`, outcome = `success` (7 nœuds à jour) | `partial` (nœuds en attente) | `failure`. `partial` **n'a pas de cooldown** : le tick suivant (15 min) reprend aussitôt les seuls nœuds en attente. Un nœud qui revient reçoit le digest **courant** (rattrapage), même s'il n'a pas changé depuis.
+- **`orchestrate.state`** : `<digest>\t<outcome>\t<ts>`, outcome = `success` (7 nœuds à jour) | `partial` (nœuds en attente) | `failure`. `partial` **n'a pas de cooldown** : le tick suivant (2 min, 15 min avant le 2026-11-09) reprend aussitôt les seuls nœuds en attente. Un nœud qui revient reçoit le digest **courant** (rattrapage), même s'il n'a pas changé depuis.
 - **Codes de sortie** : `0` rien à faire / cooldown / `success` / `partial` ; `1` erreur de config (`GATEWAY_KEY`, canary introuvable) ; `2` canary en échec.
+- **Tick 2 min** (2026-11-09, 15 min avant ; gigue 30 s au lieu de 2 min) : `OnUnitActiveSec=2min`. Un tick sans travail (7 nœuds au digest du cache NODE3) ne lit que ce cache et les `node<N>.digest` : **ni verrou, ni SSH, ni sonde `/health`, aucun log**. Le verrou partagé avec `alarm-chaos.sh` (INV-178) et la découverte du leader Patroni ne viennent qu'ensuite, quand il y a un passage à lancer. Avant, la découverte (7 `curl /health` + une ligne de log) tournait à chaque tick, avant même le verrou.
 - **Forcer le redéploiement d'un nœud** : `rm /var/lib/alarm/cd/node<N>.digest` puis `sudo systemctl start alarm-cd-orchestrate.service`. Un nœud retiré durablement doit sortir de `NODES_ORDER`, sinon chaque tick le signale injoignable.
 - **Couverture** : `tests/unit/test_cd_orchestrate.py` (vrai script, faux `ssh`/`docker`/canary).
+
+### Bascule planifiée du leader avant son redémarrage (2026-11-06, INV-187)
+
+**Constat** (prod 2026-11-05/06) : chaque étape canary relance Patroni + backend (`docker compose up -d`). Sur le **leader**, c'est une perte brutale : Patroni ne bascule qu'après son TTL (~15-35 s sans écriture), nouvelle timeline à chaque fois (285 → 290 en un jour), et les replicas hors ligne à ce moment reviennent sur l'ancienne timeline avec leurs WAL déjà supprimés (re-clonage, INV-168). Décision du propriétaire : des déploiements « doux ».
+
+`alarm-cd-canary.sh`, une fois établi que la cible doit être redémarrée et **avant** `canary_start` :
+
+1. Lit `GET :8008/cluster` (API Patroni de la cible, sinon d'un autre des 7 nœuds). Illisible → exit `3`, pas de redémarrage.
+2. Cible **pas leader** → rien de plus, comme avant.
+3. Cible **leader** → choisit un candidat : non leader, `streaming`, sur la timeline du leader, sans `nofailover` ; d'abord un nœud **qui n'est plus à redémarrer dans ce passage** (`--pending`, fourni par l'orchestrateur), puis un **votant etcd** (`--voters`, = `VOTERS` de l'orchestrateur), puis le **plus petit lag**. Aucun → event `switchover/failure` `no_candidate`, exit `3`.
+4. `POST http://<IP WG cible>:8008/switchover` `{"leader": "nodeN", "candidate": "nodeM"}` (Patroni répond de façon synchrone, ~20 s au plus ; sa réponse est journalisée), puis interroge `/cluster` toutes les 2 s jusqu'à ce qu'**un autre membre soit leader et la cible replica**, au plus `SWITCHOVER_TIMEOUT` = **60 s** depuis la demande. Dépassé → event `switchover/failure` `timeout`, exit `3`.
+5. Bascule faite → event `switchover/success` `{"from", "to"}`, puis `canary_start` et le redémarrage habituel (la cible est désormais un replica).
+
+Exit `3` = « pas prêt » pour l'orchestrateur : nœud reporté au prochain passage (tick 2 min), sans cooldown ; un votant reporté reporte les votants suivants. **Jamais** de redémarrage du leader sans bascule terminée. Les événements post-bascule suivent le nouveau leader grâce au re-discover de `post_event` (premier POST en 503 « replica » sur l'ancien leader).
+
+Depuis le 2026-11-13 (INV-197, ci-dessous), le leader passe avant-dernier du passage : une seule bascule par passage, vers un nœud déjà à jour. Avant, node3 leader au départ basculait vers node1 ou node2, tous deux encore sur l'ancienne image.
+
+**Non couvert** : `alarm-cd-rollback.sh` (retour arrière, cible déjà basculée par le canary dans le cas nominal) et les redémarrages manuels. **Couverture** : `tests/unit/test_cd_canary_switchover.py`, `tests/unit/test_cd_orchestrate.py` ; non vérifié sur un vrai Patroni.
+
+### Un backend primary après chaque bascule et chaque redémarrage (2026-11-13, INV-197)
+
+**Incident du 2026-11-13** (UTC) : passage `3 7 6 5 4 2 1` à 07:41:31, node3 leader. À 07:41:41 il bascule vers node1 (onsite-1), dernier du passage, donc encore sur l'**ancienne** image. Patroni a un leader (node1, timeline 324) mais **aucun backend ne se dit primary** jusqu'à 07:59:20, quand le canary de node1 le fait basculer vers node2 (déjà à jour, primary aussitôt). Entre-temps le passage a continué (une étape toutes les ~3 min) : ~18 min sans aucune écriture, « Aucun backend primary disponible » sur les passerelles, SMS INV-171 ; INV-170 muet (Patroni avait un leader). Cause côté backend non prouvée : logs du conteneur perdus à la recréation, `logging_collector` éteint.
+
+`alarm-cd-canary.sh` :
+
+1. **Attente d'un backend primary** après chaque bascule terminée (avant `switchover/success`) et après chaque redémarrage (avant le soak) : exactement un backend répond `/health` avec `role=primary` et `cluster_writable=true` (`discover_leader`, 7 sondes ; après une bascule, l'ancien leader ne compte pas), sondé toutes les 2 s, au plus `PRIMARY_TIMEOUT` = **60 s**. Normal attendu ~7 s (le backend lit `GET patroni:8008/primary` toutes les 5 s, timeout 2 s, et se dit primary avant ses migrations INV-152) ; un tour de sondes coûte jusqu'à 21 s si des nœuds ne répondent pas.
+2. **Cible replica** : même attente **avant** de la redémarrer ; aucun primary → exit `3`, rien touché, reportée. Le CD ne redémarre jamais un nœud tant qu'aucun backend n'écrit.
+3. **Aucun primary en 60 s** : logs du backend du leader sauvés, **seconde bascule** (`POST :8008/switchover` sur l'API du leader) vers un autre replica sain (règles INV-187 ; après une bascule, l'ancien leader compte comme pas encore à jour), nouvelle attente de 60 s, puis **arrêt du passage quoi qu'il arrive** : exit `2` (orchestrateur : `failure`, cooldown 1 h) et email `[ALARME-MURGAT] CD arrete : aucun backend primary apres …` par `/opt/alarm/send-alert-email.py` (SMTP de NODE3 : marche sans base inscriptible, comme §9quinquies). Event `switchover/failure` `no_primary` seulement si un primary est revenu. Une seule seconde bascule, jamais de boucle. Coupure due au CD bornée à ~3 min au pire.
+4. **Logs** : avant chaque recréation d'un backend (`start-prod-node.sh`), `docker logs --timestamps --tail 300 nodeN-backend-1` → `/var/lib/alarm/cd/logs/nodeN-<UTC>.log` sur la machine du nœud, 10 gardés.
+
+`alarm-cd-orchestrate.sh` : le nœud du backend primary (cherché à chaque passage, même avec `API_BASE` fixé) passe **avant-dernier** (node3 leader → `7 6 5 4 2 3 1`) ; node1 reste dernier (son `canary_promoted` = « Déploiement complet »). `--pending` compte aussi les nœuds reportés plus tôt dans le passage (ancienne image). Pourquoi l'ordre plutôt que le seul choix du candidat : INV-187 préfère déjà un nœud qui n'est plus à redémarrer, mais un leader premier du passage n'en a aucun.
+
+**Couverture** : `tests/unit/test_cd_canary_primary.py`, `tests/unit/test_cd_orchestrate.py`. Non vérifié sur un vrai Patroni. Scripts posés **à la main** sur NODE3 : réinstaller (§9bis, commandes au §12, 2026-11-13).
 
 ---
 
@@ -346,6 +390,7 @@ CREATE TABLE deployment_events (
   image        TEXT NOT NULL,                -- 'alarm-backend' | 'alarm-patroni'
   kind         TEXT NOT NULL,                -- 'pull' | 'canary_start' | 'canary_promoted'
                                              -- | 'rollback' | 'abort' | 'manual_override'
+                                             -- | 'switchover' (INV-187)
   from_digest  TEXT,                         -- digest de l'image avant action
   to_digest    TEXT,                         -- digest de l'image après action
   status       TEXT NOT NULL,                -- 'success' | 'failure' | 'in_progress'
@@ -738,7 +783,7 @@ ssh -p 50922 -i ~/.ssh/alarm_node3 alarm@51.210.105.102 '
 ssh -p 50922 -i ~/.ssh/alarm_node3 alarm@51.210.105.102 '
   sudo systemctl enable --now alarm-cd-orchestrate.timer
   sudo systemctl is-enabled alarm-cd-orchestrate.timer   # enabled
-  sudo systemctl list-timers alarm-cd-orchestrate.timer  # next fire dans < 15 min
+  sudo systemctl list-timers alarm-cd-orchestrate.timer  # next fire dans < 3 min
 '
 ```
 
@@ -761,6 +806,21 @@ curl -fsS http://10.99.0.1:8000/api/deployments/state -H "Authorization: Bearer 
 # Forcer un cycle (apres mise a jour du :stable sans attendre le tick timer) :
 sudo systemctl start alarm-cd-orchestrate.service
 ```
+
+**Réinstallation après modification de l'orchestrateur ou de son timer** (à la main : `install.sh`/`alarm-host-sync` ne posent pas ces units). **À faire après le merge du 2026-11-09** (tick 15 min → 2 min, no-op sans verrou ni sonde) :
+```bash
+ssh -p 50922 -i ~/.ssh/alarm_node3 alarm@51.210.105.102 '
+  cd /opt/alarm && git pull
+  sudo install -m 755 scripts/alarm-cd-orchestrate.sh /usr/local/bin/alarm-cd-orchestrate
+  sudo install -m 644 infra/onsite/systemd/alarm-cd-orchestrate.service /etc/systemd/system/
+  sudo install -m 644 infra/onsite/systemd/alarm-cd-orchestrate.timer   /etc/systemd/system/
+  sudo systemctl daemon-reload
+  sudo systemctl restart alarm-cd-orchestrate.timer
+  systemctl list-timers alarm-cd-orchestrate.timer   # next fire dans < 3 min
+  systemctl cat alarm-cd-orchestrate.timer | grep -E "^(OnUnitActiveSec|RandomizedDelaySec)="   # 2min / 30s
+'
+```
+Sans cette réinstallation, NODE3 garde le timer 15 min : la promotion rapide (§2) marche quand même, mais node3 n'annonce la version qu'au tick suivant (jusqu'à ~17 min).
 
 ---
 
@@ -792,6 +852,200 @@ ssh -p 50922 -i ~/.ssh/alarm_node3 alarm@51.210.105.102 '
 '
 ```
 Premier test conseillé : `stop node5` 2 min, puis `node4`, puis `node3` (= « OVH arrêté », un seul voteur) ; puis `netcut node5` 2 min (vérifier avant : `ssh alarm@10.99.0.5 sudo -n /usr/local/bin/alarm-chaos-net cut 1` doit répondre `usage` et exit 2, preuve que la sudoers et le helper sont posés). Désactivation : `sudo systemctl disable --now alarm-chaos.timer`. Couverture : `tests/unit/test_alarm_chaos.py` (vrai runner, faux `ssh`/`curl`), `tests/unit/test_alarm_chaos_net.py` (vrai helper, faux `systemd-run`/`systemctl`), `tests/integration/test_chaos_inv176.py`, job `smoke-install-chaos` de `cd-install-smoke.yml` (vrai `systemd-run` sur une unit factice : `AccuracySec=1s`, coupure puis restauration, refus si l'unit est inactive ; sudoers lint + `sudo -n`).
+
+---
+
+## 9quater. Configuration dynamique Patroni (etcd) (INV-188, 2026-11-06)
+
+`patroni/patroni.yml` (`bootstrap.dcs`) ne sert **qu'à la création** du cluster. Ensuite, la configuration qui fait foi est la configuration **dynamique**, stockée dans etcd et commune à tous les membres : la modifier sur un membre la change pour tous, et le dépôt ne la voit pas.
+
+Valeurs de la prod (relevées le 2026-11-09 : la configuration dynamique ne contient que les 4 paramètres `archive_*` / `max_slot_wal_keep_size`, plus `use_pg_rewind` depuis le 2026-11-09 ; le reste est la valeur par défaut de Patroni) :
+
+| Clé | Prod | Bootstrap (`patroni.yml`) | Application |
+|---|---|---|---|
+| `ttl` / `loop_wait` / `retry_timeout` | `30` / `10` / `10` (défaut) | `20` / `8` / `7` — écart assumé : la prod garde les défauts (décision du 2026-11-09), le bootstrap sert au cluster de la CI | Patroni, sans redémarrage |
+| `postgresql.use_pg_rewind` | `true` (depuis le 2026-11-09, après essai sur cluster jetable) | `true` | Patroni, sans redémarrage |
+| `maximum_lag_on_failover` | `1048576` (défaut) | `1048576` | Patroni, sans redémarrage |
+| `postgresql.parameters.max_wal_senders` | `10` (défaut Patroni) | `10` | **redémarrage** |
+| `postgresql.parameters.max_replication_slots` | `10` (défaut Patroni) | `10` | **redémarrage** |
+| `postgresql.parameters.wal_keep_size` | `128MB` (défaut Patroni) | `128MB` | reload |
+| `postgresql.parameters.max_slot_wal_keep_size` | `8GB` | `8GB` | reload |
+| `postgresql.parameters.archive_mode` / `archive_command` | `on` / `'true'` toléré (rien n'est archivé) | absents (pas d'archivage) | redémarrage / reload |
+| `postgresql.parameters.archive_timeout` | **`0`** tant qu'`archive_command` n'archive rien | absent | reload |
+
+```bash
+P="docker exec node3-patroni-1 patronictl -c /etc/patroni/patroni.yml"   # nodeN-patroni-1 sur nodeN
+$P show-config                                    # lire (ou : curl -s http://10.99.0.N:8008/config)
+$P edit-config -p archive_timeout=0 --force       # paramètre PostgreSQL (-p), sans éditeur
+$P edit-config -s loop_wait=8 --force             # clé Patroni (-s)
+$P list                                           # « Pending restart » = redémarrage nécessaire
+```
+
+- **Reload** (paramètre `sighup` : `archive_timeout`, `archive_command`, `wal_keep_size`, `max_slot_wal_keep_size`) : Patroni l'applique seul sur chaque membre en un `loop_wait`, aucune coupure.
+- **Redémarrage** (paramètre `postmaster` : `max_wal_senders`, `max_replication_slots`, `archive_mode`, `wal_level`) : `patronictl list` affiche « Pending restart » ; sans alarme active, `$P restart alarm-cluster <replica> --force` sur chaque replica, puis bascule planifiée (`$P switchover alarm-cluster --leader <leader> --candidate <replica> --force`, cf. INV-187) avant de redémarrer l'ancien leader.
+- **Contrôle** : `alarm-node-check` (INV-186) lit `GET http://<IP WireGuard>:8008/config` chaque jour sur alarm-1 à alarm-4 et passe KO `patroni_archive` si `archive_timeout` est non nul sans vraie `archive_command` (INV-188). Les autres valeurs ne sont pas contrôlées.
+- **Incident du 2026-11-06** : `archive_mode on`, `archive_command 'true'` et `archive_timeout '10'` dans la configuration dynamique. PostgreSQL forçait un segment WAL de 16 Mo toutes les 10 s : ~100 Mo/min (~6 Go/h) de WAL quasi vides vers les 6 replicas, 4,6 Go de `pg_wal` sur le leader, replicas de Beaufort (relais OVH) re-clonés après la moindre coupure (INV-168). Corrigé à chaud par `edit-config -p archive_timeout=0 --force` (reload) : ~6 Ko/min.
+- **Sauvegardes réelles** (pgBackRest) : projet séparé. Il posera une vraie `archive_command` (et `archive_timeout` s'il le faut) ; le contrôle l'accepte. Depuis le 2026-11-09, dump logique quotidien sans archivage des WAL (§9quinquies, INV-191) : rien ne change ici.
+- **Journaux PostgreSQL (suggestion du 2026-11-13, NON appliquée, à décider)** : `logging_collector` est éteint, les journaux de PostgreSQL ne vont qu'au conteneur Patroni et disparaissent à sa recréation (incident INV-197 : cause du blocage de node1 impossible à établir). Proposition : `$P edit-config -p logging_collector=on -p log_filename='postgresql-%a.log' -p log_truncate_on_rotation=on -p log_rotation_age=1d -p log_lock_waits=on --force`. Fichiers dans `log/` du répertoire de données (volume `pgdata`, gardé à la recréation), un par jour de la semaine, écrasés au bout de 7 jours : disque borné. `log_lock_waits` trace toute attente de verrou au-delà de `deadlock_timeout` (1 s), l'hypothèse de l'incident. `logging_collector` est un paramètre `postmaster` : redémarrage de chaque membre, replicas d'abord puis bascule planifiée (comme ci-dessus) ; les autres sont rechargés seuls. Lecture : `docker exec nodeN-patroni-1 ls /var/lib/postgresql/data/patroni/log`.
+
+---
+
+## 9quinquies. Sauvegardes de la base (INV-191, 2026-11-09)
+
+Décision du propriétaire du 2026-11-09 : la base `alarm_db` n'avait **aucune** sauvegarde (la réplication Patroni recopie aussi une suppression ou une migration ratée sur les 7 membres). Restauration à un instant donné (pgBackRest, archivage des WAL) : projet ultérieur.
+
+- **Chaque nuit** (`alarm-db-backup.timer`, 03:00 UTC + jusqu'à 30 min, NODE3 seulement) : `scripts/alarm-db-backup.sh` (`/usr/local/bin/alarm-db-backup`, en `alarm`) choisit dans `GET :8008/cluster` un replica sain (`streaming` sur la timeline du leader, node3 d'abord, lu dans son conteneur), sinon le leader ; `pg_dump -Fc` dans `node3-patroni-1` (PostgreSQL 16), vérifié par `pg_restore --list`, renommé `alarm_db-<AAAAMMJJTHHMMSSZ>-<nœud>.dump` dans `/var/lib/alarm/db-backup` (0700, fichiers 0600). 14 jours gardés (après une sauvegarde réussie seulement), copie sur **alarm-1** (`alarm@10.99.0.4:/var/lib/alarm/db-backup`, SSH dans WireGuard), même rétention. Une sauvegarde déjà en cours : tour sauté.
+- **Rattrapage** (2026-11-12) : chaque nuit, la copie envoie sur alarm-1 **toutes** les sauvegardes locales qu'il n'a pas (liste lue en un `ssh … ls`, même nom = déjà là, la plus ancienne d'abord, 14 jours au plus) ; après une panne d'alarm-1, les nuits manquées y arrivent à son retour sans geste à la main (`N sauvegardes rattrapées sur alarm-1` dans le journal). Une copie en échec : email qui nomme les sauvegardes non copiées, reprises la nuit suivante.
+- **Chaque mois** (`alarm-db-restore-test.timer`, le 1er à 05:00 UTC + jusqu'à 30 min) : la plus récente est restaurée dans un conteneur `postgres:16-alpine` jetable (`--network none`), `users`, `escalation_config` et `system_config` doivent avoir des lignes ; conteneur toujours supprimé.
+- **Échec** (sauvegarde, copie ou test de restauration) : email `[ALARME-MURGAT] … en echec (<machine>)` par `/opt/alarm/send-alert-email.py` (même voie SMTP que la supervision disque, secrets `/opt/alarm/.env.prod.*` : indépendante du cluster), unit `failed`. Témoin indépendant de NODE3 : `alarm-node-check` sur alarm-1, contrôle `sauvegarde_base` KO si la copie la plus récente a plus de 26 h (INV-186).
+- **Pas de chiffrement** : NODE3 et alarm-1 portent déjà la base en clair (membres du cluster) ; la clé devrait vivre sur NODE3 pour le test mensuel, et la perdre perdrait les sauvegardes. Fichiers 0600 `alarm`, transport SSH dans WireGuard.
+
+**Installation sur NODE3** (à la main comme l'orchestrateur §9bis, prérequis SSH identiques ; une fois le commit promu `:stable`), en `alarm` sur NODE3 (`ssh -p 50922 -i ~/.ssh/alarm_node3 alarm@51.210.105.102`) :
+```bash
+cd /opt/alarm && { test -f scripts/alarm-db-backup.sh || git pull --ff-only; }   # alarm-host-sync l'a normalement deja aligne
+sudo install -m 755 scripts/alarm-db-backup.sh /usr/local/bin/alarm-db-backup
+sudo install -m 755 scripts/send-alert-email.py /opt/alarm/send-alert-email.py   # deja pose par install.sh (supervision disque)
+sudo install -m 644 infra/onsite/systemd/alarm-db-backup.service infra/onsite/systemd/alarm-db-backup.timer \
+  infra/onsite/systemd/alarm-db-restore-test.service infra/onsite/systemd/alarm-db-restore-test.timer /etc/systemd/system/
+# Mot de passe de l'utilisateur PostgreSQL `alarm`, lu dans le backend en service, jamais affiche (root:alarm 640)
+sudo install -d -m 750 -o root -g alarm /etc/alarm
+sudo install -m 640 -o root -g alarm /dev/null /etc/alarm/db-backup.env
+docker inspect node3-backend-1 -f '{{range .Config.Env}}{{println .}}{{end}}' \
+  | sed -n 's|^DATABASE_URL=postgresql://alarm:\([^@]*\)@.*|PGPASSWORD=\1|p' | sudo tee /etc/alarm/db-backup.env >/dev/null
+sudo grep -c '^PGPASSWORD=.' /etc/alarm/db-backup.env                 # 1
+ssh -o BatchMode=yes alarm@10.99.0.4 'ls -ld /var/lib/alarm/db-backup'   # drwx------ alarm (pose par install.sh sur alarm-1)
+echo "Test de la voie d'alerte des sauvegardes" | /opt/alarm/send-alert-email.py "[ALARME-MURGAT] Test alerte sauvegarde (NODE3)"
+#   -> « email OK » attendu ; « SMTP incomplet » : /opt/alarm/.env.prod.secrets pas lisible par alarm (chown alarm, 600)
+docker pull postgres:16-alpine
+sudo systemctl daemon-reload
+sudo systemctl start alarm-db-backup.service && sudo journalctl -u alarm-db-backup -n 20 --no-pager   # Source, Sauvegarde OK, Copie OK
+sudo systemctl start alarm-db-restore-test.service && sudo journalctl -u alarm-db-restore-test -n 5 --no-pager   # Test de restauration OK
+sudo systemctl enable --now alarm-db-backup.timer alarm-db-restore-test.timer
+systemctl list-timers 'alarm-db-*'
+```
+**Sur alarm-1** : rien à la main en temps normal (`alarm-host-sync` applique `install.sh`, qui crée `/var/lib/alarm/db-backup` en `0700 alarm`, et le nouveau contrôle). Si la copie échoue avant ce passage : `sudo install -d -m 700 -o alarm -g alarm /var/lib/alarm/db-backup`. Contrôle : `sudo alarm-node-check | grep sauvegarde_base` (KO « aucune copie » jusqu'à la première sauvegarde, puis OK).
+
+**Restaurer** (perte ou corruption de données ; de préférence sans alarme en cours). La base restaurée est créée **à côté** (`alarm_db_restore`), vérifiée, puis échangée de nom avec `alarm_db`, gardée sous `alarm_db_avant_restauration` : retour arrière possible, coupure de quelques secondes. Tout se fait en `alarm` (propriétaire de `alarm_db`, droit `CREATEDB`), sans superutilisateur. Procédure essayée le 2026-11-09 sur un conteneur PostgreSQL 16 jetable, avec une session ouverte pendant l'échange (pas sur le cluster de prod).
+```bash
+# Sur NODE3 en alarm. NODE3 perdu : sur alarm-1, memes chemins, avec N=node4 IP=10.99.0.4
+N=node3 IP=10.99.0.1
+ls -l /var/lib/alarm/db-backup/                                  # choisir la sauvegarde
+F=/var/lib/alarm/db-backup/alarm_db-<AAAAMMJJTHHMMSSZ>-<noeud>.dump
+export PGPASSWORD=$(docker inspect $N-backend-1 -f '{{range .Config.Env}}{{println .}}{{end}}' \
+  | sed -n 's|^DATABASE_URL=postgresql://alarm:\([^@]*\)@.*|\1|p')
+read -r LN L < <(curl -fsS http://$IP:8008/cluster | python3 -c 'import json,sys; m=next(m for m in json.load(sys.stdin)["members"] if m["role"]=="leader"); print(m["name"], m["host"])')
+[ "$LN" = "$N" ] && L=127.0.0.1                                  # leader local : dans son conteneur (ufw)
+P="docker exec -i -e PGPASSWORD $N-patroni-1"
+$P pg_restore --list < "$F" | head -5                            # archive lisible
+$P psql -h "$L" -U alarm -d postgres -c 'CREATE DATABASE alarm_db_restore'
+$P pg_restore -h "$L" -U alarm -d alarm_db_restore --no-owner --exit-on-error < "$F"
+$P psql -h "$L" -U alarm -d alarm_db_restore -c 'SELECT count(*) FROM users' -c 'SELECT position, user_id FROM escalation_config ORDER BY 1'
+# Echange de nom : les sessions ouvertes sur alarm_db sont coupees
+$P psql -h "$L" -U alarm -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+ALTER DATABASE alarm_db WITH ALLOW_CONNECTIONS false;
+SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity WHERE datname = 'alarm_db';
+ALTER DATABASE alarm_db RENAME TO alarm_db_avant_restauration;
+ALTER DATABASE alarm_db_restore RENAME TO alarm_db;
+SQL
+# Redemarrer les 7 backends : ceux des replicas gardent sinon leurs connexions vers l'ancienne base ;
+# au demarrage, le backend applique ses migrations (sauvegarde d'une version plus ancienne). Depuis NODE3
+# (cle SSH de l'orchestrateur) ; depuis alarm-1 : `docker restart nodeN-backend-1` sur chaque noeud.
+for p in 3:1 1:2 2:3 4:4 5:5 6:6 7:7; do ssh -o BatchMode=yes alarm@10.99.0.${p#*:} "docker restart node${p%:*}-backend-1"; done
+```
+Retour arrière : même échange de noms dans l'autre sens (`ALTER DATABASE alarm_db_avant_restauration WITH ALLOW_CONNECTIONS true`, puis les deux `RENAME`), puis redémarrer les backends. Une fois la restauration validée : `DROP DATABASE alarm_db_avant_restauration`.
+
+**Diagnostic** :
+```bash
+sudo journalctl -u alarm-db-backup -n 50 --no-pager     # derniere sauvegarde : source, taille, copie, retention
+sudo journalctl -u alarm-db-restore-test -n 20 --no-pager # dernier test de restauration
+sudo ls -l /var/lib/alarm/db-backup/                     # NODE3 ; sur alarm-1 : meme chemin
+sudo -u alarm alarm-db-backup --restore-test             # test de restauration a la demande
+systemctl list-timers 'alarm-db-*'
+```
+Désactivation : `sudo systemctl disable --now alarm-db-backup.timer alarm-db-restore-test.timer` (le contrôle `sauvegarde_base` d'alarm-1 passe alors KO le lendemain). Couverture : `tests/unit/test_db_backup.py`, `tests/unit/test_node_check.py`.
+
+---
+
+## 9sexies. etcd : compaction, défragmentation, taille de la base (INV-196, 2026-11-13)
+
+**Constat du 2026-11-13** : ~1716 Mo par voteur, tout utilisé (`dbSizeInUse` = `dbSize`), 13 clés à la révision 4,69 millions. Aucune compaction n'était configurée : etcd gardait chaque révision des clés de Patroni. À 2 Gio (quota par défaut, `--quota-backend-bytes` non fixé), etcd lève l'alarme `NOSPACE` et refuse toute écriture : Patroni perd sa clé leader, plus aucune écriture dans le cluster.
+
+- **Compaction automatique** : `ETCD_AUTO_COMPACTION_MODE=periodic`, `ETCD_AUTO_COMPACTION_RETENTION=1h` sur le service `etcd` de `docker-compose.yml` (tous les projets qui lancent etcd : node1 à node3, dev, CI, node6/node7 après le déménagement). Compaction toutes les heures, une heure gardée.
+- **Elle ne défragmente pas** : le fichier garde sa taille, les pages libérées sont réutilisées, il cesse donc de grossir. Seule `etcdctl defrag` (ci-dessous) réduit le fichier.
+- **Surveillance** : le backend leader lit `POST /v3/maintenance/status` de chaque voteur de `ETCD_HOSTS` à chaque tick (60 s). `dbSize` d'un voteur à 1024 Mo ou plus → email « etcd : base à N Mo sur 2048 » ; alarme `NOSPACE` → email « etcd plein (NOSPACE) ». Un email par épisode et par niveau ; réarmé quand tous les voteurs sont sains. Sans leader (NOSPACE), l'email INV-170 de chaque nœud le dit.
+
+Variables communes (sur NODE3 ; `nodeN-…-1` sur nodeN) :
+```bash
+E="docker exec node3-etcd-1 etcdctl"
+ALL="--endpoints=http://10.99.0.2:2379,http://10.99.0.3:2379,http://10.99.0.1:2379"   # node1, node2, node3
+P="docker exec node3-patroni-1 patronictl -c /etc/patroni/patroni.yml"
+$E $ALL endpoint status -w table   # DB SIZE, IS LEADER, ERRORS (alarm:NOSPACE)
+$E $ALL endpoint health            # 3 sains
+$E $ALL alarm list                 # vide attendu
+```
+Ne pas répéter `--endpoints` (les valeurs s'ajoutent) : `$E $ALL` ou `$E --endpoints=<un voteur>`, jamais les deux.
+
+### Appliquer la compaction automatique (une fois, après le merge d'INV-196)
+
+etcd ne lit ces variables qu'au démarrage : il faut **recréer** son conteneur sur chaque voteur. **Le CD ne le garantit pas.** Sur un voteur, `start-prod-node.sh --pull` (lancé par le canary) fait `docker compose up -d` de tous les services, ce qui recrée etcd si sa configuration a changé. Mais il ne passe que quand l'image `:stable` change, et il lit le `docker-compose.yml` du checkout `/opt/alarm`, mis à jour à part par `alarm-host-sync` (INV-141) : rien ne garantit que ce checkout est à jour quand le canary passe. D'où la recréation à la main, **un voteur à la fois, jamais deux** (2 sur 3 pendant la recréation, marge 0, INV-090), les deux followers etcd d'abord, le leader etcd en dernier. Seul etcd est recréé (`--no-deps`) : Patroni et le backend ne bougent pas, aucune bascule Patroni (INV-187).
+
+```bash
+# 0. NODE3 : CD et panne contrôlée en pause
+systemctl is-active alarm-chaos.timer                    # noter : à relancer à la fin seulement s'il était actif
+sudo systemctl stop alarm-cd-orchestrate.timer alarm-chaos.timer
+systemctl is-active alarm-cd-orchestrate.service         # « inactive » (sinon attendre la fin du passage)
+$E $ALL endpoint status -w table                         # IS LEADER : ce voteur passe en dernier
+$E $ALL endpoint health && $P list                       # 3 sains, un leader, replicas streaming
+
+# 1. Sur la machine du voteur (onsite-1 = node1, onsite-2 = node2, NODE3 = node3), N = son numéro
+cd /opt/alarm
+grep -c ETCD_AUTO_COMPACTION docker-compose.yml          # 2 ; sinon checkout pas à jour (git log -1) : attendre alarm-host-sync
+docker inspect nodeN-etcd-1 --format '{{range .Config.Env}}{{println .}}{{end}}' | grep AUTO_COMPACTION
+#   déjà les 2 variables : le CD l'a recréé, rien à faire sur ce voteur
+set -a && . ./.env.prod.secrets && set +a                # sinon compose refuse (SECRET_KEY)
+docker compose --env-file .env.prod.nodeN -p nodeN up -d --no-deps etcd
+docker inspect -f '{{.State.Health.Status}}' nodeN-etcd-1   # répéter jusqu'à « healthy »
+docker logs --since 5m nodeN-etcd-1 2>&1 | grep -o '"auto-compaction-[a-z]*":"[^"]*"' | sort -u
+#   "auto-compaction-mode":"periodic", "auto-compaction-retention":"1h0m0s"
+
+# 2. NODE3, avant le voteur suivant
+$E $ALL endpoint health && $P list                       # 3 sains, un leader, replicas streaming
+
+# 3. Après les 3 voteurs (NODE3)
+sudo systemctl start alarm-cd-orchestrate.timer          # + alarm-chaos.timer s'il était actif à l'étape 0
+```
+Vérifier aussi, sur chaque nœud après le déploiement de cette version, que le backend a reçu les voteurs : `docker exec nodeN-backend-1 printenv ETCD_HOSTS` (vide → la surveillance est sautée sur ce nœud jusqu'à sa prochaine recréation ; pour la forcer : `docker compose --env-file .env.prod.nodeN -p nodeN up -d --no-deps backend`, secrets sourcés, Patroni intact). Une heure après, la compaction a tourné : `docker logs nodeN-etcd-1 2>&1 | grep -c "finished scheduled compaction"` ≥ 1.
+
+### Compacter et défragmenter à la main (procédure du 2026-11-13)
+
+À faire quand l'email INV-196 arrive, ou si `endpoint status` montre une base proche de 2048 Mo. Sans alarme active, et jamais pendant un déploiement (orchestrateur en pause, étape 0 ci-dessus).
+
+```bash
+# 1. Compaction de tout l'historique jusqu'à la révision courante : une seule fois, pour tout le cluster
+REV=$($E --endpoints=http://10.99.0.1:2379 endpoint status -w json \
+      | python3 -c 'import sys,json;print(json.load(sys.stdin)[0]["Status"]["header"]["revision"])')
+$E --endpoints=http://10.99.0.1:2379 --command-timeout=30m compaction --physical "$REV"
+#   plusieurs minutes sur ~4,7 M de révisions : le délai par défaut (5 s) ne suffit pas
+$E $ALL endpoint health && $P list
+
+# 2. Défragmentation, UN membre à la fois : les deux followers etcd, puis le leader etcd (IS LEADER)
+$E $ALL endpoint status -w table
+$E --endpoints=http://<follower 1>:2379 --command-timeout=10m defrag
+$E $ALL endpoint health && $P list                       # 3 sains, un leader Patroni, replicas streaming
+$E --endpoints=http://<follower 2>:2379 --command-timeout=10m defrag
+$E $ALL endpoint health && $P list
+$E --endpoints=http://<leader etcd>:2379 --command-timeout=10m defrag
+$E $ALL endpoint health && $P list
+$E $ALL endpoint status -w table                         # DB SIZE réduite sur les 3
+
+# 3. Seulement après une alarme NOSPACE : elle reste après compaction et défragmentation
+$E $ALL alarm list
+$E $ALL alarm disarm
+$E $ALL alarm list                                       # vide ; puis $P list : un leader
+```
+- La compaction n'est pas bloquée par NOSPACE ; la défragmentation non plus.
+- Un membre en défragmentation ne sert plus aucune requête : les deux autres tiennent le quorum. **Jamais** `defrag --cluster` ni deux membres à la fois.
+- Répété sur un etcd 3.5.17 jetable (quota 2 Mo) le 2026-11-13 : compaction, défragmentation (2,7 Mo → 324 ko), alarme NOSPACE présente jusqu'à `alarm disarm`, écritures acceptées ensuite.
 
 ---
 
@@ -928,3 +1182,10 @@ Dans ce flux, on a remplacé 8 h de service KO + nuit blanche pour l'humain par 
 - **2026-10-29** — **Déploiement indépendant par site** (§4, INV-167) après l'incident node4/5 hors ligne 2 jours (préflight `exit 1` → aucun déploiement, 4 versions bloquées). État par nœud `node<N>.digest`, nœud injoignable reporté sans bloquer les autres ni déclencher de cooldown (outcome `partial`), votants redémarrés seulement si les 3 répondent. Remplace la consigne du 2026-10-27 ci-dessus.
 - **2026-10-30** — **Panne contrôlée** (§9ter, INV-176..179) : `scripts/alarm-chaos.sh` + `alarm-chaos.{service,timer}` sur NODE3 (manuel, désactivé), API `/api/chaos` + `/internal/chaos/*`, carte « Panne contrôlée » dans l'onglet Tests. Verrou de l'orchestrateur déplacé de `/run/alarm-cd-orchestrate/lock` vers `/var/lib/alarm/cd/orchestrate.lock` pour être partagé avec le runner.
 - **2026-10-30 (suite)** — **Coupure réseau** (§9ter, INV-177/178 étendus) : mode `netcut` du runner, helper root `scripts/alarm-chaos-net.sh` → `/usr/local/bin/alarm-chaos-net` (timer systemd de restauration armé sur la cible avant la coupure), alias sudoers `ALARM_CHAOS`. `infra/onsite/install.sh` pose désormais la sudoers `alarm-cd` (après `visudo -c -q -f`) et le helper : plus de pose à la main (§3.3 de PROVISIONING_ONSITE). Coupure d'OVH refusée en V1.
+- **2026-11-06** — **Configuration dynamique Patroni** (§9quater, INV-188) : valeurs attendues, lecture et modification (`show-config`, `edit-config`, reload ou redémarrage) ; incident `archive_timeout '10'` sans archivage (~6 Go/h de WAL), corrigé à chaud ; contrôle quotidien `patroni_archive` dans `alarm-node-check`.
+- **2026-11-09** — **Sauvegardes de la base** (§9quinquies, INV-191, décision du propriétaire) : `scripts/alarm-db-backup.sh` + `alarm-db-backup.{service,timer}` (chaque nuit : `pg_dump -Fc` depuis un replica sain, sinon le leader, vérifié, 14 jours sur NODE3, copie sur alarm-1) et `alarm-db-restore-test.{service,timer}` (chaque mois : restauration dans un conteneur jetable) sur NODE3, posés à la main ; échec → email (`send-alert-email.py`) ; contrôle `sauvegarde_base` sur alarm-1 (INV-186) ; procédure de restauration à côté puis échange de noms. Pas de chiffrement (justifié §9quinquies). pgBackRest reste un projet ultérieur.
+- **2026-11-09** — **Version annoncée ~10 min après le merge au lieu d'~1 h** (choix du propriétaire : l'app attend toujours que le serveur annonce la version, INV-ANDROID-705 ; c'est le pipeline qui accélère). Mesure release 1.9.5 : merge PR #321 14:37:03Z, CD Build fini 14:37:32Z, puis ~35 min de CI master avant `:stable`, pull 5 min, tick orchestrateur 15 min ± 2. (1) **Promotion immédiate** d'un commit au même arbre que sa PR verte (§2, INV-190, `.github/scripts/promote_decision.py`), garde anti-retour-arrière de `:stable` ; (2) **tick orchestrateur 2 min** (gigue 30 s), no-op sans verrou ni réseau ni log (§4, INV-167) ; pull gardé à 5 min (§3). **Réinstaller à la main `alarm-cd-orchestrate.{sh,service,timer}` sur NODE3** (§9bis).
+- **2026-11-12** — **Rattrapage de la copie des sauvegardes sur alarm-1** (§9quinquies, INV-191, demande du propriétaire) après alarm-1 éteint 2 jours (copies du 11-11 et du 11-12 jamais arrivées, recopiées à la main) : chaque nuit, `alarm-db-backup` copie toutes les sauvegardes locales absentes d'alarm-1, la plus ancienne d'abord. **Réinstaller à la main sur NODE3** : `ssh -p 50922 -i ~/.ssh/alarm_node3 alarm@51.210.105.102 'cd /opt/alarm && git pull --ff-only && sudo install -m 755 scripts/alarm-db-backup.sh /usr/local/bin/alarm-db-backup'`.
+- **2026-11-13** — **etcd : compaction automatique et surveillance de la base** (§9sexies, INV-196, demande du propriétaire) après le constat de ~1716 Mo par voteur (révision 4,69 M, aucune compaction ; quota 2 Gio) : `ETCD_AUTO_COMPACTION_MODE=periodic` / `RETENTION=1h` sur le service `etcd`, email du leader quand une base atteint 1024 Mo ou qu'une alarme NOSPACE est active. **Recréer etcd à la main, un voteur à la fois** (le CD ne le garantit pas) ; procédure de compaction et de défragmentation à la main.
+- **2026-11-13** — **Un backend primary après chaque bascule et chaque redémarrage** (§4, INV-197, demande du propriétaire) après ~18 min sans écriture (bascule de node3 vers node1, encore sur l'ancienne image). Canary : attente 60 s d'un backend primary, sinon seconde bascule, arrêt du passage (exit 2) et email par `send-alert-email.py` ; jamais de redémarrage sans primary ; logs du backend sauvés avant chaque recréation (`/var/lib/alarm/cd/logs`, 10 gardés). Orchestrateur : leader Patroni avant-dernier, nœuds reportés comptés dans `--pending`. Suggestion `logging_collector` (§9quater), non appliquée. **Réinstaller à la main sur NODE3**, hors d'un passage en cours (`systemctl is-active alarm-cd-orchestrate.service` → `inactive`) : `ssh -p 50922 -i ~/.ssh/alarm_node3 alarm@51.210.105.102 'cd /opt/alarm && git pull --ff-only && sudo install -m 755 scripts/alarm-cd-orchestrate.sh /usr/local/bin/alarm-cd-orchestrate && sudo install -m 755 scripts/alarm-cd-canary.sh /usr/local/bin/alarm-cd-canary.sh && test -x /opt/alarm/send-alert-email.py && echo "Test de la voie d alerte du CD" | /opt/alarm/send-alert-email.py "[ALARME-MURGAT] Test alerte CD (NODE3)"'`.
+- **2026-11-13** — **NODE3 mis à jour par `alarm-host-sync`** (INV-141 étendu, décision du propriétaire) après le constat d'`/opt/alarm` figé au 27/10 sur NODE3 (97 commits). Drop-in `alarm-host-sync.service.d/node3.conf` (`HOST_INSTALLER=infra/node3/install.sh`) : checkout au commit promu, puis seuls les fichiers de NODE3 qui ont changé (orchestrateur, canary, rollback, `alarm-cd-pull`, `alarm-db-backup`, `send-alert-email.py`, leurs units, `alarm-host-sync`) ; jamais la pile modem ni la sudoers du site. `--auto` ne démarre jamais un timer arrêté (maintenance) et ne relance qu'un timer actif dont l'unit a changé. Verrou de l'orchestrateur pris avant le checkout : jamais pendant un passage CD ni un test de panne. **Fin des « réinstaller à la main sur NODE3 »** pour ces fichiers ; `alarm-chaos` reste manuel. Bootstrap, une fois, après le merge : `ssh -p 50922 -i ~/.ssh/alarm_node3 alarm@51.210.105.102 'cd /opt/alarm && git fetch -q origin && git checkout -q --detach origin/master && sudo bash infra/node3/install.sh && sudo systemctl start alarm-host-sync.service'`.

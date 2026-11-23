@@ -20,6 +20,7 @@ import com.alarm.critical.model.FcmTokenRequest
 import com.alarm.critical.model.LoginRequest
 import com.alarm.critical.service.AlarmPollingService
 import com.alarm.critical.util.AppLogger
+import com.alarm.critical.util.padForSystemBars
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
@@ -31,6 +32,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        findViewById<android.view.ViewGroup>(android.R.id.content).getChildAt(0).padForSystemBars()  // INV-ANDROID-708
 
         prefs = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
 

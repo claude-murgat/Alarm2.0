@@ -17,8 +17,11 @@ import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
+import androidx.core.view.GravityCompat
 import androidx.drawerlayout.widget.DrawerLayout
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -27,6 +30,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import android.util.Log
 import com.alarm.critical.api.ApiProvider
+import com.alarm.critical.api.Auth
 import com.alarm.critical.model.AlarmResponse
 import com.alarm.critical.model.FcmTokenRequest
 import com.alarm.critical.model.FcmTokenDeleteRequest
@@ -34,19 +38,19 @@ import com.alarm.critical.model.sitesLabel
 import com.alarm.critical.service.AlarmPollingService
 import com.alarm.critical.service.AlarmSoundManager
 import com.alarm.critical.update.AppUpdate
-import com.alarm.critical.update.UpdateProvider
+import com.alarm.critical.update.UpdateState
+import com.alarm.critical.update.showDownload
 import com.alarm.critical.util.AppLogger
+import com.alarm.critical.util.padForSystemBars
 import com.alarm.critical.view.ArcTimerView
 import com.alarm.critical.view.SignalBarsView
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.*
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 
 class DashboardActivity : AppCompatActivity() {
-    private var token: String? = null
     private var statusUpdateJob: Job? = null
     private var historyJob: Job? = null
     private var soundManager: AlarmSoundManager? = null
@@ -63,15 +67,14 @@ class DashboardActivity : AppCompatActivity() {
     private var lastBandeauCase: String? = null
 
     // INV-ANDROID-705 : mise a jour integree
-    private var nextUpdateCheck = 0L
-    private var readyUpdate: Pair<String, File>? = null
-    private var updatePostponed = false
+    private var nextUpdateCheck = Long.MAX_VALUE  // INV-ANDROID-705 : premiere verification a onResume
+    private var fsiBannerShown = false  // INV-ANDROID-709 : log au changement seulement
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_dashboard)
-
-        token = intent.getStringExtra("token")
+        // INV-ANDROID-708 : le contenu, car DrawerLayout ignore sa propre marge ; le menu lateral a fitsSystemWindows
+        findViewById<DrawerLayout>(R.id.drawerLayout).getChildAt(0).padForSystemBars()
 
         // Permission notification Android 13+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -109,6 +112,15 @@ class DashboardActivity : AppCompatActivity() {
 
         // Navigation Drawer
         val drawerLayout = findViewById<DrawerLayout>(R.id.drawerLayout)
+        // INV-ANDROID-708 : le retour ferme le menu ouvert, pas le tableau de bord (DrawerLayout ne le fait pas sans focus)
+        val closeDrawerOnBack = object : OnBackPressedCallback(false) {
+            override fun handleOnBackPressed() = drawerLayout.closeDrawer(GravityCompat.START)
+        }
+        onBackPressedDispatcher.addCallback(this, closeDrawerOnBack)
+        drawerLayout.addDrawerListener(object : DrawerLayout.SimpleDrawerListener() {
+            override fun onDrawerOpened(drawerView: View) { closeDrawerOnBack.isEnabled = true }
+            override fun onDrawerClosed(drawerView: View) { closeDrawerOnBack.isEnabled = false }
+        })
         findViewById<TextView>(R.id.drawerInitial).text = userName.take(1).uppercase()
         findViewById<TextView>(R.id.drawerUserName).text = userName
         updateDrawerGuardStatus()
@@ -118,10 +130,9 @@ class DashboardActivity : AppCompatActivity() {
             try {
                 val fcmToken = FirebaseMessaging.getInstance().token.await()
                 val deviceId = prefs.getString("device_token", "unknown") ?: "unknown"
-                ApiProvider.service.registerFcmToken(
-                    "Bearer $token",
-                    FcmTokenRequest(token = fcmToken, device_id = deviceId)
-                )
+                Auth.call(this@DashboardActivity) {
+                    registerFcmToken(it, FcmTokenRequest(token = fcmToken, device_id = deviceId))
+                }
                 Log.d("Dashboard", "FCM token registered: ${fcmToken.take(20)}...")
             } catch (e: Exception) {
                 Log.e("Dashboard", "FCM token registration failed: ${e.message}")
@@ -152,6 +163,7 @@ class DashboardActivity : AppCompatActivity() {
             R.id.drawerAlarms to AlarmsActivity::class.java,
             R.id.drawerEscalation to EscalationActivity::class.java,
             R.id.drawerModems to ModemsActivity::class.java,
+            R.id.drawerUpdate to UpdateActivity::class.java,
             R.id.drawerTeam to TeamActivity::class.java,
             R.id.drawerChain to ChainActivity::class.java,
             R.id.drawerSupervision to SupervisionActivity::class.java,
@@ -191,14 +203,16 @@ class DashboardActivity : AppCompatActivity() {
             acknowledgeCurrentAlarm()
         }
 
-        findViewById<Button>(R.id.updateButton).setOnClickListener { installUpdate() }
+        findViewById<Button>(R.id.fsiBannerButton).setOnClickListener { openFullScreenIntentSettings() }  // INV-ANDROID-709
+        findViewById<Button>(R.id.updateButton).setOnClickListener { AppUpdate.install(this) }
+        lifecycleScope.launch { AppUpdate.state.collect { showUpdate(it) } }
 
         // Mise a jour du statut toutes les secondes
         statusUpdateJob = lifecycleScope.launch {
             while (isActive) {
                 updateStatus()
                 checkUpdateIfDue()
-                if (updatePostponed && !alarmInProgress()) installUpdate()
+                if (AppUpdate.state.value.postponed) AppUpdate.install(this@DashboardActivity)  // reportee : relance a la fin de l'alarme
                 delay(1000)
             }
         }
@@ -260,7 +274,7 @@ class DashboardActivity : AppCompatActivity() {
     private fun refreshAdminRole() {
         lifecycleScope.launch {
             try {
-                val me = ApiProvider.service.getMe("Bearer $token").body() ?: return@launch
+                val me = Auth.call(this@DashboardActivity) { getMe(it) }.body() ?: return@launch
                 getSharedPreferences("alarm_prefs", MODE_PRIVATE).edit()
                     .putBoolean("is_admin", me.is_admin).apply()
                 updateAdminMenu()
@@ -281,66 +295,30 @@ class DashboardActivity : AppCompatActivity() {
         }
     }
 
-    /** INV-ANDROID-705 : a l'ouverture puis toutes les 6 h ; bandeau quand un APK verifie est pret. */
+    /** INV-ANDROID-705 : a chaque retour au premier plan puis toutes les 15 min (une verification deja en cours : seconde suivante). */
     private fun checkUpdateIfDue() {
         val now = android.os.SystemClock.elapsedRealtime()
-        if (now < nextUpdateCheck) return
-        nextUpdateCheck = now + AppUpdate.CHECK_INTERVAL_MS
-        lifecycleScope.launch {
-            val update = AppUpdate.findVerifiedUpdate(this@DashboardActivity) ?: return@launch
-            readyUpdate = update
-            if (!updatePostponed) showUpdate("Mise à jour disponible : ${update.first}")
-        }
+        if (now >= nextUpdateCheck && AppUpdate.check(this)) nextUpdateCheck = now + AppUpdate.CHECK_INTERVAL_MS
     }
 
-    private fun showUpdate(text: String) {
-        findViewById<TextView>(R.id.updateBannerText).text = text
-        findViewById<View>(R.id.updateBanner).visibility = View.VISIBLE
-    }
-
-    /** Alarme en cours (acquittee ou non) ou sonnerie : jamais d'installation (telephone d'astreinte). */
-    private fun alarmInProgress() = AlarmPollingService.alarms.isNotEmpty() || AlarmSoundManager(this).isPlaying()
-
-    /** Bouton « Mettre a jour », relance a la fin de l'alarme si elle a ete reportee. */
-    private fun installUpdate() {
-        val (version, apk) = readyUpdate ?: return
-        if (alarmInProgress()) {
-            if (!updatePostponed) AppLogger.log("MiseAJour", "installation de $version reportee : alarme en cours")
-            updatePostponed = true
-            showUpdate("Mise à jour $version reportée : alarme en cours")
-            return
+    /** INV-ANDROID-705/706 : bandeau pendant le telechargement (progression), puis APK pret ; cache sinon. */
+    private fun showUpdate(s: UpdateState) {
+        val text = when (s.phase) {
+            UpdateState.Phase.DOWNLOADING -> "Mise à jour ${s.version} : téléchargement…${s.percentText}"
+            UpdateState.Phase.READY -> if (s.postponed) "Mise à jour ${s.version} reportée : alarme en cours"
+                                       else "Mise à jour disponible : ${s.version}"
+            else -> null
         }
-        updatePostponed = false
-        showUpdate("Mise à jour disponible : $version")
-        val backend = UpdateProvider.backend
-        if (!backend.canInstall(this)) {
-            AppLogger.log("MiseAJour", "autorisation « applis inconnues » absente : invite affichee")
-            AlertDialog.Builder(this)
-                .setTitle("Autorisation nécessaire")
-                .setMessage("Pour installer la mise à jour, Android doit autoriser Alarme Murgat à installer " +
-                    "des applications (une seule fois). Activez « Autoriser cette source », puis revenez " +
-                    "appuyer sur « Mettre à jour ».")
-                .setPositiveButton("Ouvrir les réglages") { _, _ ->
-                    startActivity(Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                        android.net.Uri.parse("package:$packageName")))
-                }
-                .setNegativeButton("Annuler", null)
-                .show()
-            return
-        }
-        AppLogger.log("MiseAJour", "installation de $version lancee")
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                backend.install(this@DashboardActivity, apk)
-            } catch (e: Exception) {
-                AppLogger.log("MiseAJour", "installation de $version impossible : ${e.message}")
-            }
-        }
+        findViewById<TextView>(R.id.updateBannerText).text = text.orEmpty()
+        findViewById<View>(R.id.updateBanner).visibility = if (text == null) View.GONE else View.VISIBLE
+        findViewById<ProgressBar>(R.id.updateBannerProgress).showDownload(s)
+        findViewById<View>(R.id.updateButton).visibility =
+            if (s.phase == UpdateState.Phase.READY) View.VISIBLE else View.GONE
     }
 
     private fun performLogout() {
         val prefs = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
-        val t = token
+        val t = prefs.getString("token", null)
         val deviceId = prefs.getString("device_token", null)
 
         // Supprimer le token FCM cote backend avant de partir. Hors lifecycleScope :
@@ -373,30 +351,48 @@ class DashboardActivity : AppCompatActivity() {
 
     private fun startPollingService() {
         val intent = Intent(this, AlarmPollingService::class.java)
-        intent.putExtra(AlarmPollingService.EXTRA_TOKEN, token)
         ContextCompat.startForegroundService(this, intent)
     }
 
     override fun onResume() {
         super.onResume()
+        nextUpdateCheck = 0L  // INV-ANDROID-705 : app rouverte, les serveurs ont pu etre mis a jour entre-temps
         syncOncallFromChain()
-        askBatteryOptimizationExemptionOnce()
-        askFullScreenIntentPermissionOnce()
+        showFullScreenIntentBanner()
+        // INV-ANDROID-707 : une demande « une fois » par retour au premier plan, jamais deux ecrans de reglages a la fois
+        askBatteryOptimizationExemptionOnce() || askFullScreenIntentPermissionOnce()
     }
 
     /** Android 14+ : sans cette autorisation, l'ecran d'alarme n'apparait pas sur l'ecran verrouille (simple notif). */
-    private fun askFullScreenIntentPermissionOnce() {
-        if (android.os.Build.VERSION.SDK_INT < 34) return
+    private fun canUseFullScreenIntent() = Build.VERSION.SDK_INT < 34 ||
+        getSystemService(android.app.NotificationManager::class.java).canUseFullScreenIntent()
+
+    /** INV-ANDROID-709 : a chaque retour au premier plan (l'autorisation peut etre retiree a tout moment) ; log au changement. */
+    private fun showFullScreenIntentBanner() {
+        val missing = !canUseFullScreenIntent()
+        findViewById<View>(R.id.fsiBanner).visibility = if (missing) View.VISIBLE else View.GONE
+        if (missing != fsiBannerShown) AppLogger.log("PleinEcran",
+            if (missing) "bandeau « Alarme plein écran désactivée » affiché : Android refuse l'écran d'alarme plein écran"
+            else "autorisation plein écran accordée : bandeau retiré")
+        fsiBannerShown = missing
+    }
+
+    private fun askFullScreenIntentPermissionOnce(): Boolean {
         val prefs = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
-        val nm = getSystemService(android.app.NotificationManager::class.java)
-        if (prefs.getBoolean("fsi_permission_asked", false) || nm.canUseFullScreenIntent()) return
+        if (prefs.getBoolean("fsi_permission_asked", false) || canUseFullScreenIntent()) return false
         prefs.edit().putBoolean("fsi_permission_asked", true).apply()
-        try {
-            startActivity(Intent(android.provider.Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
-                android.net.Uri.parse("package:$packageName")))
-        } catch (e: Exception) {
-            Log.w("Dashboard", "Reglage plein ecran indisponible : ${e.message}")
-        }
+        return openFullScreenIntentSettings()
+    }
+
+    /** Reglage d'Android « plein écran » de l'app ; false s'il est introuvable. */
+    private fun openFullScreenIntentSettings(): Boolean = try {
+        startActivity(Intent(android.provider.Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
+            android.net.Uri.parse("package:$packageName")))
+        AppLogger.log("PleinEcran", "réglage « plein écran » ouvert")
+        true
+    } catch (e: Exception) {
+        AppLogger.log("PleinEcran", "réglage « plein écran » indisponible (${e.javaClass.simpleName})")
+        false
     }
 
     /**
@@ -421,16 +417,18 @@ class DashboardActivity : AppCompatActivity() {
     }
 
     /** INV-ANDROID-309 : sans exemption, Doze coupe le reseau malgre le service. Demande une fois. */
-    private fun askBatteryOptimizationExemptionOnce() {
+    private fun askBatteryOptimizationExemptionOnce(): Boolean {
         val prefs = getSharedPreferences("alarm_prefs", MODE_PRIVATE)
         val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
-        if (prefs.getBoolean("battery_optimization_asked", false) || pm.isIgnoringBatteryOptimizations(packageName)) return
+        if (prefs.getBoolean("battery_optimization_asked", false) || pm.isIgnoringBatteryOptimizations(packageName)) return false
         prefs.edit().putBoolean("battery_optimization_asked", true).apply()
-        try {
+        return try {
             startActivity(Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
                 android.net.Uri.parse("package:$packageName")))
+            true
         } catch (e: Exception) {
             Log.w("Dashboard", "Dialogue batterie indisponible : ${e.message}")
+            false
         }
     }
 
@@ -608,7 +606,6 @@ class DashboardActivity : AppCompatActivity() {
             // INV-ANDROID-009 : site(s) et nombre d'alarmes en cours, ex. "2 alarmes : Izeron, Beaufort"
             val sites = AlarmPollingService.alarms.sitesLabel()
             val alarmCard = findViewById<LinearLayout>(R.id.alarmCard)
-            val alarmDot = findViewById<View>(R.id.alarmDot)
             val alarmLine = findViewById<TextView>(R.id.currentAlarmLine)
             val titleView = findViewById<TextView>(R.id.alarmTitle)
             val messageView = findViewById<TextView>(R.id.alarmMessage)
@@ -640,7 +637,7 @@ class DashboardActivity : AppCompatActivity() {
 
             if (alarm != null && alarm.status == "acknowledged" && !isAcknowledged) {
                 // Alarme acquittee par quelqu'un d'autre
-                setCardState(alarmCard, alarmDot, "acked")
+                setCardState(alarmCard, "acked")
                 currentAlarm = alarm
                 val ackerName = alarm.acknowledged_by_name ?: "?"
                 alarmLine.text = "Alarme active \u00b7 $sites"
@@ -656,7 +653,7 @@ class DashboardActivity : AppCompatActivity() {
                 durationView.visibility = View.VISIBLE
 
                 ackButton.visibility = View.GONE
-                ackStatus.text = "Acquittee par $ackerName"
+                ackStatus.text = "Acquittée par $ackerName"  // INV-ANDROID-205
                 ackStatus.visibility = View.VISIBLE
 
                 val remaining = alarm.ack_remaining_seconds ?: 0
@@ -667,9 +664,9 @@ class DashboardActivity : AppCompatActivity() {
 
             } else if (alarm != null && !isAcknowledged) {
                 // Alarme active non acquittee
-                setCardState(alarmCard, alarmDot, "active")
+                setCardState(alarmCard, "active")
                 currentAlarm = alarm
-                alarmLine.text = "Alarme active \u00b7 $sites"
+                alarmLine.text = "\ud83d\udd34 Alarme active \u00b7 $sites"  // INV-ANDROID-100
                 alarmLine.setTextColor(Color.parseColor("#ef4444"))
 
                 titleView.text = alarm.title
@@ -692,9 +689,9 @@ class DashboardActivity : AppCompatActivity() {
 
             } else if (alarm != null && isAcknowledged) {
                 // Alarme acquittee par nous
-                setCardState(alarmCard, alarmDot, "acked")
+                setCardState(alarmCard, "acked")
                 currentAlarm = alarm
-                alarmLine.text = "Acquittee \u00b7 $sites"
+                alarmLine.text = "\ud83d\udfe2 Acquitt\u00e9e \u00b7 $sites"  // INV-ANDROID-100
                 alarmLine.setTextColor(Color.parseColor("#22c55e"))
 
                 titleView.text = alarm.title
@@ -714,9 +711,9 @@ class DashboardActivity : AppCompatActivity() {
 
             } else if (alarm == null && isAcknowledged) {
                 // Alarme disparue pendant ack
-                setCardState(alarmCard, alarmDot, "calm")
+                setCardState(alarmCard, "calm")
                 alarmGoneDuringAck = true
-                alarmLine.text = "Tout est calme"
+                alarmLine.text = "⚪ Tout est calme"  // INV-ANDROID-100
                 alarmLine.setTextColor(Color.parseColor("#94a3b8"))
                 titleView.visibility = View.GONE
                 messageView.visibility = View.GONE
@@ -728,10 +725,10 @@ class DashboardActivity : AppCompatActivity() {
 
             } else {
                 // Pas d'alarme
-                setCardState(alarmCard, alarmDot, "calm")
+                setCardState(alarmCard, "calm")
                 currentAlarm = null
                 isAcknowledged = false
-                alarmLine.text = "Tout est calme"
+                alarmLine.text = "⚪ Tout est calme"  // INV-ANDROID-100
                 alarmLine.setTextColor(Color.parseColor("#94a3b8"))
 
                 titleView.visibility = View.GONE
@@ -760,7 +757,7 @@ class DashboardActivity : AppCompatActivity() {
         }
     }
 
-    private fun setCardState(card: LinearLayout, dot: View, state: String) {
+    private fun setCardState(card: LinearLayout, state: String) {
         if (state == lastCardState) return
         lastCardState = state
 
@@ -768,13 +765,9 @@ class DashboardActivity : AppCompatActivity() {
         pulseAnimator = null
 
         when (state) {
-            "calm" -> {
-                card.setBackgroundResource(R.drawable.card_calm)
-                dot.setBackgroundResource(R.drawable.dot_green)
-            }
+            "calm" -> card.setBackgroundResource(R.drawable.card_calm)
             "active" -> {
                 card.setBackgroundResource(R.drawable.card_alarm_active)
-                dot.setBackgroundResource(R.drawable.dot_red)
                 pulseAnimator = ObjectAnimator.ofFloat(card, "alpha", 1f, 0.85f).apply {
                     duration = 800
                     repeatMode = ValueAnimator.REVERSE
@@ -783,20 +776,16 @@ class DashboardActivity : AppCompatActivity() {
                     start()
                 }
             }
-            "acked" -> {
-                card.setBackgroundResource(R.drawable.card_alarm_acked)
-                dot.setBackgroundResource(R.drawable.dot_green)
-            }
+            "acked" -> card.setBackgroundResource(R.drawable.card_alarm_acked)
         }
     }
 
     private fun acknowledgeCurrentAlarm() {
         val alarm = currentAlarm ?: return
-        val t = token ?: return
 
         lifecycleScope.launch {
             try {
-                val response = ApiProvider.service.acknowledgeAlarm("Bearer $t", alarm.id)
+                val response = Auth.call(this@DashboardActivity) { acknowledgeAlarm(it, alarm.id) }
                 if (response.isSuccessful) {
                     AlarmPollingService.onAckSucceeded(response.body())
                     // INV-ANDROID-009 : une alarme d'un autre site reste a acquitter -> on continue de sonner
@@ -809,7 +798,7 @@ class DashboardActivity : AppCompatActivity() {
                         findViewById<Button>(R.id.dashboardAckButton).visibility = View.GONE
 
                         val statusText = findViewById<TextView>(R.id.ackStatusText)
-                        statusText.text = "Acquittee"
+                        statusText.text = "Acquittée"  // INV-ANDROID-202
                         statusText.visibility = View.VISIBLE
 
                         val remaining = response.body()?.ack_remaining_seconds ?: 1800
@@ -835,10 +824,9 @@ class DashboardActivity : AppCompatActivity() {
     }
 
     private fun loadHistory() {
-        val t = token ?: return
         lifecycleScope.launch {
             try {
-                val response = ApiProvider.service.getAlarmHistory("Bearer $t")
+                val response = Auth.call(this@DashboardActivity) { getAlarmHistory(it) }
                 if (response.isSuccessful) {
                     val allAlarms = response.body() ?: emptyList()
                     val pastAlarms = allAlarms.filter { it.status in listOf("resolved", "acknowledged") }

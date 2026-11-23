@@ -151,6 +151,47 @@
                 </LinearLayout>
             </LinearLayout>
 
+            <!-- ============ AUTORISATION PLEIN ECRAN REFUSEE (INV-ANDROID-709) ============ -->
+            <LinearLayout
+                android:id="@+id/fsiBanner"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:background="@drawable/card_alert"
+                android:padding="16dp"
+                android:visibility="gone"
+                android:layout_marginBottom="12dp">
+
+                <TextView
+                    android:id="@+id/fsiBannerTitle"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Alarme plein écran désactivée"
+                    android:textSize="16sp"
+                    android:textColor="#fca5a5"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="Téléphone verrouillé, l'alarme ne s'affichera pas : vous n'aurez qu'une notification."
+                    android:textSize="13sp"
+                    android:textColor="#fca5a5" />
+
+                <Button
+                    android:id="@+id/fsiBannerButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="42dp"
+                    android:text="Autoriser le plein écran"
+                    android:contentDescription="Autoriser le plein écran : ouvre le réglage d'Android"
+                    android:backgroundTint="#ef4444"
+                    android:textColor="#FFFFFF"
+                    android:textSize="14sp"
+                    android:textStyle="bold"
+                    android:layout_marginTop="10dp" />
+            </LinearLayout>
+
             <!-- ==================== ALERTE CONNEXION / AUTH ==================== -->
             <LinearLayout
                 android:id="@+id/connectionLostContainer"
@@ -236,15 +277,25 @@
                     android:textColor="#f1f5f9"
                     android:textStyle="bold" />
 
+                <!-- INV-ANDROID-706 : progression du telechargement de l'APK -->
+                <ProgressBar
+                    android:id="@+id/updateBannerProgress"
+                    style="?android:attr/progressBarStyleHorizontal"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:max="100"
+                    android:progressTint="#00A2E5"
+                    android:contentDescription="Progression du téléchargement de la mise à jour"
+                    android:visibility="gone"
+                    android:layout_marginTop="10dp" />
+
                 <Button
                     android:id="@+id/updateButton"
+                    style="@style/UpdateButton"
                     android:layout_width="match_parent"
                     android:layout_height="42dp"
                     android:text="Mettre à jour"
-                    android:backgroundTint="#00A2E5"
-                    android:textColor="#FFFFFF"
-                    android:textSize="14sp"
-                    android:textStyle="bold"
+                    android:contentDescription="Mettre à jour l'application"
                     android:layout_marginTop="10dp" />
             </LinearLayout>
 
@@ -267,29 +318,15 @@
                     android:textStyle="bold"
                     android:layout_marginBottom="10dp" />
 
-                <!-- Indicateur etat alarme -->
-                <LinearLayout
-                    android:layout_width="match_parent"
+                <!-- Indicateur etat alarme : la pastille du texte, seule (INV-ANDROID-100) -->
+                <TextView
+                    android:id="@+id/currentAlarmLine"
+                    android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical"
-                    android:layout_marginBottom="12dp">
-
-                    <View
-                        android:id="@+id/alarmDot"
-                        android:layout_width="10dp"
-                        android:layout_height="10dp"
-                        android:background="@drawable/dot_green"
-                        android:layout_marginEnd="10dp" />
-
-                    <TextView
-                        android:id="@+id/currentAlarmLine"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Tout est calme"
-                        android:textSize="15sp"
-                        android:textColor="#94a3b8" />
-                </LinearLayout>
+                    android:text="Tout est calme"
+                    android:textSize="15sp"
+                    android:textColor="#94a3b8"
+                    android:layout_marginBottom="12dp" />
 
                 <!-- Titre alarme -->
                 <TextView
@@ -527,6 +564,8 @@
                     android:text="Escalade" android:drawableStart="@android:drawable/ic_menu_call" />
                 <TextView android:id="@+id/drawerModems" style="@style/DrawerItem"
                     android:text="Sites et modems" android:drawableStart="@android:drawable/ic_menu_mapmode" />
+                <TextView android:id="@+id/drawerUpdate" style="@style/DrawerItem"
+                    android:text="Mise à jour" android:drawableStart="@android:drawable/ic_menu_rotate" />
 
                 <!-- Entrees admin : GONE pour les autres (le serveur reste le vrai garde, 403) -->
                 <LinearLayout

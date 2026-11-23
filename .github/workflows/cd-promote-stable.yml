@@ -1,13 +1,17 @@
 # CD Promote Stable — promotion AUTOMATIQUE d'une image :sha-<short> vers :stable.
 #
-# Cf docs/CD_DESIGN.md §2 (Promotion). Trigger : automatique au passage CI verte
-# sur master. Philosophie "tout ce qui a passé CI est safe pour prod" : le canary
+# Cf docs/CD_DESIGN.md §2 (Promotion) et INV-190. Deux declencheurs sur master :
+#   - CI verte (comme avant) ;
+#   - CD Build fini : promotion TOUT DE SUITE si le commit a le meme arbre que la tete de sa PR et
+#     que les checks requis de cette tete sont verts (deja teste), sinon rien (la CI master promouvra).
+# Decision + garde anti-retour-arriere : .github/scripts/promote_decision.py (job `decide`).
+# Philosophie "tout ce qui a passé CI est safe pour prod" : le canary
 # auto + soak 10 min + rollback auto (cf §4-5 doc) absorbent le residual risk.
 # Le gate manuel V1.0 (workflow_dispatch + input PROMOTE) avait du sens quand
 # canary était lui-même manuel ; il devient redondant depuis V1.5 (PR #126).
 #
 # Sequence :
-#   1. Triggered par `workflow_run: ["CI"]` quand CI termine sur master avec success.
+#   1. Triggered par `workflow_run: ["CI", "CD Build"]` (succes, push master), job `decide`.
 #   2. Verifs prerequis (sha sur master, pas de revert recent, CD Build + CD Install
 #      Smoke verts aussi, images :sha-<short> existent sur GHCR).
 #   3. Re-tag GHCR via `docker buildx imagetools create` (atomique cote registry,
@@ -18,7 +22,7 @@
 #
 # Apres ce workflow, le timer pull sur les 3 noeuds (PR 3) detectera le nouveau
 # digest distant dans les 5 min et fera le pull. L'orchestrateur (PR 9, V1.5)
-# lance auto le canary 3 -> 2 -> 1 dans les 15 min suivants.
+# lance auto le canary 3 -> 7 -> 6 -> 5 -> 4 -> 2 -> 1 dans les 2 min suivantes.
 #
 # Securite (garde provenance) : §2 du doc dit "tout merger sur master peut
 # promouvoir". Le bot IA `alarm-murgat-bot[bot]` ne merge JAMAIS sans `ai:approved`
@@ -37,11 +41,12 @@ name: CD Promote Stable
 
 on:
   workflow_run:
-    workflows: ["CI"]
+    workflows: ["CI", "CD Build"]
     branches: [master]
     types: [completed]
 
-# Concurrency : serialise les promotes pour eviter race conditions sur le retag GHCR.
+# Concurrency : serialise les promotes pour eviter race conditions sur le retag GHCR (et rend sure
+# la garde anti-retour-arriere de `decide` : un sha deja depasse par :stable n'est jamais repromu).
 # `cancel-in-progress: false` car on veut promouvoir CHAQUE sha qui passe CI (pas
 # uniquement le dernier — sinon on saute des etats intermediaires).
 concurrency:
@@ -53,13 +58,48 @@ env:
   IMAGE_OWNER: claude-murgat
 
 jobs:
+  decide:
+    name: Decide (${{ github.event.workflow_run.name }} ${{ github.event.workflow_run.head_sha }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Filtre : run declencheur vert, push sur master (pas une PR depuis une branche `master` de fork,
+    # pas un CD Build relance a la main sur un autre sha que head_sha).
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'master' && github.event.workflow_run.event == 'push'
+    permissions:
+      contents: read
+      pull-requests: read   # PR qui a introduit le commit
+      checks: read          # checks requis de la tete de cette PR
+      packages: read        # revision de :stable
+    outputs:
+      promote: ${{ steps.decide.outputs.promote }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0    # git merge-base --is-ancestor <sha> <revision de :stable>
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promouvoir maintenant ?
+        id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TRIGGER: ${{ github.event.workflow_run.name }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: python3 .github/scripts/promote_decision.py "$TRIGGER" "$SHA" "${{ github.repository }}"
+
   promote:
     name: Auto-promote ${{ github.event.workflow_run.head_sha }} to :stable
+    needs: decide
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Filtre : on ne promeut que si CI verte ET branche master (workflow_run
-    # peut declencher sur d'autres branches si le workflow CI tourne ailleurs).
-    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'master'
+    if: needs.decide.outputs.promote == 'true'
     permissions:
       contents: read
       packages: write
@@ -139,10 +179,11 @@ jobs:
           echo "Pas de revert detecte."
 
       - name: Verify CD Build + CD Install Smoke green on this sha
-        # CI est deja verte (garanti par le trigger workflow_run). On verifie les
-        # 2 autres workflows requis. Ils tournent en parallele avec CI sur push
+        # CI verte sur master, ou PR deja testee sur le meme arbre (job `decide`). On verifie
+        # les 2 autres workflows requis. Ils tournent en parallele avec CI sur push
         # master, donc generalement deja finis quand CI termine (CD Build = 30s,
-        # CD Install Smoke = 1-2 min, CI = 10 min). On wait jusqu'a 5 min.
+        # CD Install Smoke = 1-2 min, CI = 35 min). Declencheur CD Build : CD Install
+        # Smoke peut encore tourner, on wait jusqu'a 5 min.
         # Tier 4 nightly est exempt (peut ne pas avoir tourne sur ce sha).
         #
         # Cas "workflow non declenche" : CD Install Smoke a des paths: filter
@@ -260,7 +301,7 @@ jobs:
             echo "## Auto-promoted to :stable"
             echo ""
             echo "- **Sha** : \`$SHORT\`"
-            echo "- **Triggered by CI run** : ${{ github.event.workflow_run.html_url }}"
+            echo "- **Triggered by ${{ github.event.workflow_run.name }} run** : ${{ github.event.workflow_run.html_url }}"
             echo "- **Triggering actor** : ${{ github.event.workflow_run.actor.login }}"
             echo ""
             echo "### Images re-taggees"
@@ -270,8 +311,8 @@ jobs:
             echo ""
             echo "### Etape suivante (automatique V1.5)"
             echo "- Timer pull (5 min) sur les 3 noeuds detecte le nouveau digest et pull"
-            echo "- Timer orchestrate (15 min) sur NODE3 lance canary 3 -> 2 -> 1 (soak 10 min/noeud)"
+            echo "- Timer orchestrate (2 min) sur NODE3 lance canary 3 -> 7 -> 6 -> 5 -> 4 -> 2 -> 1 (soak 2 min/noeud)"
             echo "- Auto-rollback (cf §5 doc) si soak rouge sur n'importe quel noeud"
             echo ""
-            echo "ETA convergence complete : ~30-45 min apres ce workflow."
+            echo "ETA : node3 annonce la version ~2-9 min apres ce workflow (pull 5 min, tick 2 min), les 7 noeuds ~20-30 min."
           } >> "$GITHUB_STEP_SUMMARY"

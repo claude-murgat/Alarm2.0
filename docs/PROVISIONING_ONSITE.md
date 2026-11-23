@@ -500,6 +500,10 @@ Tous les containers, volumes et networks de l'essai ont été supprimés.
 
 ## 16. Backup PostgreSQL — préparation
 
+> **2026-11-09** : en place, sous une autre forme : dump logique quotidien depuis NODE3, 14 jours,
+> copie sur alarm-1, test de restauration mensuel (INV-191, [`CD_DESIGN.md`](CD_DESIGN.md) §9quinquies).
+> Le plan pgBackRest ci-dessous (restauration à un instant donné) reste un projet ultérieur.
+
 > Activation différée jusqu'à formation du quorum cluster. Configuration documentée ici
 > pour cohérence.
 
@@ -664,6 +668,26 @@ scripts/smoketest-4g.sh`. Runbook complet : [`FAILOVER_4G.md`](FAILOVER_4G.md).
 > la même file et enverraient chaque SMS et chaque appel deux fois (pas d'arbitrage, INV-182). Les
 > passerelles sans modem ne lisent pas cette file. Plusieurs Arduino sur un même site, en revanche,
 > sont prévus (agrégation OR, INV-122).
+
+**Arduino du contact sec : prêt à brancher (INV-198, 2026-11-13).** Un Arduino UNO R4 Minima se branche
+tel quel, neuf ou déjà programmé, sur n'importe quelle machine.
+- **Programmation** : muet 15 s (non programmé), ou présent seulement comme bootloader DFU, il est programmé
+  par la passerelle avec le firmware du dépôt (`gateway/firmware/dry_contact_r4/dry_contact_r4.ino.bin.b64`, décodé
+  en `/opt/alarm-gateway/firmware/dry_contact_r4/dry_contact_r4.ino.bin`). L'outil est le `dfu-util`
+  d'Arduino, posé par `install.sh` en `/usr/local/lib/alarm-gateway/dfu-util` (**pas** le paquet Debian).
+  Au plus un essai par 30 min ; un Arduino qui envoie déjà des lignes `DC:` n'est jamais reprogrammé.
+  Journal : `journalctl -u alarm-sms-gateway | grep -i programm`.
+- **Armement** : un Arduino n'alarme qu'**après avoir lu son contact fermé une fois**. Avant, un contact lu
+  ouvert donne `no_sensor` (« sans Arduino » dans l'onglet Cluster, avec un avertissement « pas encore armé »
+  dans le journal) : on peut le brancher avant de câbler le contact, sans déclencher d'appels.
+  Les Arduinos armés (numéro de série USB) sont retenus dans `/var/lib/alarm-gateway/armed-arduinos`. Pour en
+  désarmer un : retirer sa ligne, puis `sudo systemctl restart alarm-sms-gateway`.
+- **Modifier le firmware** : modifier le `.ino`, puis recompiler hors des machines
+  (`arduino-cli compile --fqbn arduino:renesas_uno:minima --output-dir <dossier> gateway/firmware/dry_contact_r4`).
+  Dans le dossier du `.ino`, lancer `base64 -w0 <dossier>/dry_contact_r4.ino.bin > dry_contact_r4.ino.bin.b64`
+  puis `sha256sum dry_contact_r4.ino > dry_contact_r4.ino.sha256`. **Ne jamais versionner le `.bin`** (ignoré par
+  git) : GitHub n'a pas pu fusionner les PR qui l'ajoutaient (#352, #353). Un test unitaire le vérifie.
+  Un Arduino déjà en service n'est pas mis à jour automatiquement.
 
 **Alertes** : un site dont aucun modem n'a donné de nouvelles depuis 10 min reçoit l'email
 `[Alarme Murgat] Site <Site> sans modem depuis N min` (INV-185, envoyé par le leader, une fois par
