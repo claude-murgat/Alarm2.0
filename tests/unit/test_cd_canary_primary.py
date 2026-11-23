@@ -24,8 +24,8 @@ import pytest
 pytestmark = [pytest.mark.unit, pytest.mark.no_mutation]
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "alarm-cd-canary.sh"
-IP = {"node1": "10.99.0.2", "node2": "10.99.0.3", "node3": "10.99.0.1", "node4": "10.99.0.4",
-      "node5": "10.99.0.5", "node6": "10.99.0.6", "node7": "10.99.0.7"}
+# Jour du demenagement (INV-090) : node1/node2 retires, voteurs par defaut du canary 3, 6, 7.
+IP = {"node3": "10.99.0.1", "node4": "10.99.0.4", "node5": "10.99.0.5", "node6": "10.99.0.6", "node7": "10.99.0.7"}
 
 SSH = r"""#!/usr/bin/env bash
 for a in "$@"; do case "$a" in alarm@*) ip=${a#alarm@} ;; esac; done
@@ -133,41 +133,41 @@ def mail(h):
 
 def test_primary_soon_after_switchover_continues_as_before(h):
     """Cas normal : le backend du nouveau leader se dit primary au tour suivant -> etape inchangee."""
-    rc, calls, err = run(h, 3, [leader("node3"), member("node1", lag=10), member("node2"), member("node4")])
+    rc, calls, err = run(h, 3, [leader("node3"), member("node6", lag=10), member("node7"), member("node4")])
     assert rc == 0, err
-    assert switchovers(calls) == [("10.99.0.1", {"leader": "node3", "candidate": "node2"})]
+    assert switchovers(calls) == [("10.99.0.1", {"leader": "node3", "candidate": "node7"})]
     assert idx(calls, "start-prod-node.sh --pull 3")
     assert events(calls) == [("switchover", "success"), ("canary_start", "in_progress"),
                              ("canary_promoted", "success")]
-    # Les events vont au nouveau primary (node2), pas a l'ancien leader.
-    assert all(c.startswith("curl http://10.99.0.3:8000/") for c in calls if "/api/deployments/events" in c)
+    # Les events vont au nouveau primary (node7), pas a l'ancien leader.
+    assert all(c.startswith("curl http://10.99.0.7:8000/") for c in calls if "/api/deployments/events" in c)
     assert mail(h) == ""
 
 
 def test_no_primary_after_switchover_second_switchover_to_new_image_then_stop(h):
-    """Rejeu du 2026-11-13 : le nouveau leader (node2) ne devient jamais primary. Seconde bascule vers un
+    """Rejeu du 2026-11-13 : le nouveau leader (node7) ne devient jamais primary. Seconde bascule vers un
     noeud deja sur la nouvelle image (node4, non votant) plutot que l'ancien leader node3 (pas redemarre)
-    ou node1 (encore a redemarrer) ; primary retrouve, mais le passage s'arrete quand meme."""
-    rc, calls, err = run(h, 3, [leader("node3"), member("node1"), member("node2"), member("node4")],
-                         pending="1", stuck=("node2",))
+    ou node6 (encore a redemarrer) ; primary retrouve, mais le passage s'arrete quand meme."""
+    rc, calls, err = run(h, 3, [leader("node3"), member("node6"), member("node7"), member("node4")],
+                         pending="6", stuck=("node7",))
     assert rc == 2, err
-    assert switchovers(calls) == [("10.99.0.1", {"leader": "node3", "candidate": "node2"}),
-                                  ("10.99.0.3", {"leader": "node2", "candidate": "node4"})]
+    assert switchovers(calls) == [("10.99.0.1", {"leader": "node3", "candidate": "node7"}),
+                                  ("10.99.0.7", {"leader": "node7", "candidate": "node4"})]
     assert not idx(calls, "start-prod-node"), calls
     # Logs du backend bloque sauves sur sa machine avant la seconde bascule.
-    snap = idx(calls, "ssh 10.99.0.3 mkdir")
-    assert snap and "docker logs --timestamps --tail 300 node2-backend-1" in calls[snap[0]]
+    snap = idx(calls, "ssh 10.99.0.7 mkdir")
+    assert snap and "docker logs --timestamps --tail 300 node7-backend-1" in calls[snap[0]]
     assert snap[0] < idx(calls, ":8008/switchover")[1]
     m = mail(h)
-    assert m.startswith("[ALARME-MURGAT] CD arrete : aucun backend primary apres la bascule de node3 vers node2")
-    assert "node2 -> node4" in m and "backend primary retrouve : http://10.99.0.4:8000" in m
+    assert m.startswith("[ALARME-MURGAT] CD arrete : aucun backend primary apres la bascule de node3 vers node7")
+    assert "node7 -> node4" in m and "backend primary retrouve : http://10.99.0.4:8000" in m
     assert events(calls) == [("switchover", "failure")]
     assert idx(calls, "mail ")[0] < idx(calls, "/api/deployments/events")[0]
 
 
 def test_no_primary_even_after_second_switchover_stop_and_email(h):
-    rc, calls, err = run(h, 3, [leader("node3"), member("node1"), member("node2"), member("node4")],
-                         pending="1", stuck=("node2", "node4"))
+    rc, calls, err = run(h, 3, [leader("node3"), member("node6"), member("node7"), member("node4")],
+                         pending="6", stuck=("node7", "node4"))
     assert rc == 2, err
     assert len(switchovers(calls)) == 2  # jamais de boucle
     assert not idx(calls, "start-prod-node") and not idx(calls, "compose"), calls
@@ -176,22 +176,22 @@ def test_no_primary_even_after_second_switchover_stop_and_email(h):
 
 
 def test_no_primary_after_restart_second_switchover_then_stop(h):
-    """Cible replica : le redemarrage fait perdre son primary au leader node1 -> bascule vers node2, arret."""
-    rc, calls, err = run(h, 4, [leader("node1"), member("node2"), member("node3", lag=10), member("node4")],
-                         breaks=("node1",))
+    """Cible replica : le redemarrage fait perdre son primary au leader node6 -> bascule vers node7, arret."""
+    rc, calls, err = run(h, 4, [leader("node6"), member("node7"), member("node3", lag=10), member("node4")],
+                         breaks=("node6",))
     assert rc == 2, err
     assert len(idx(calls, "start-prod-node")) == 1
-    assert switchovers(calls) == [("10.99.0.2", {"leader": "node1", "candidate": "node2"})]
+    assert switchovers(calls) == [("10.99.0.6", {"leader": "node6", "candidate": "node7"})]
     assert idx(calls, "start-prod-node")[0] < idx(calls, ":8008/switchover")[0]
     m = mail(h)
     assert "aucun backend primary apres le redemarrage de node4" in m
-    assert "backend primary retrouve : http://10.99.0.3:8000" in m
+    assert "backend primary retrouve : http://10.99.0.7:8000" in m
     assert ("canary_promoted", "success") not in events(calls)
 
 
 def test_no_primary_before_restart_target_untouched(h):
     """Jamais de redemarrage tant qu'aucun backend n'ecrit : pas pret (exit 3), rien n'est touche."""
-    rc, calls, err = run(h, 4, [leader("node1"), member("node2"), member("node4")], stuck=("node1",))
+    rc, calls, err = run(h, 4, [leader("node6"), member("node7"), member("node4")], stuck=("node6",))
     assert rc == 3, err
     assert "aucun backend primary" in err
     assert not idx(calls, "start-prod-node") and not idx(calls, "docker logs") and not switchovers(calls)
@@ -205,7 +205,7 @@ def test_backend_logs_saved_before_recreate_last_10_kept(h):
         f = logs / f"node4-202610{i + 1:02d}T000000Z.log"
         f.write_text("ancien")
         os.utime(f, (1_000_000 + i, 1_000_000 + i))
-    rc, calls, err = run(h, 4, [leader("node1"), member("node2"), member("node4")])
+    rc, calls, err = run(h, 4, [leader("node6"), member("node7"), member("node4")])
     assert rc == 0, err
     snap = idx(calls, "ssh 10.99.0.4 mkdir")
     assert snap and "docker logs --timestamps --tail 300 node4-backend-1" in calls[snap[0]]

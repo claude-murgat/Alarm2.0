@@ -59,3 +59,11 @@ def test_node6_node7_target_their_wireguard_ip(h, node):
     rc, _, err = run(h, node)
     assert rc == 3, err
     assert f"SSH vers alarm@10.99.0.{node} echoue" in err
+
+
+@pytest.mark.parametrize("node", [1, 2])
+def test_onsite_nodes_refused_after_move_day(h, node):
+    """Jour du demenagement (INV-090) : onsite-1/2 retires, le canary refuse sans aucun SSH."""
+    rc, log, err = run(h, node)
+    assert rc == 1, err
+    assert log == []

@@ -41,7 +41,7 @@ case "$url" in
   *:8000/health) f=$H/cluster.json; [[ -f "$H/switched" ]] && f=$H/after.json
     python3 -c 'import json, sys
 l = next(m["name"] for m in json.load(open(sys.argv[1]))["members"] if m["role"] == "leader")
-ip = {"node1": "10.99.0.2", "node2": "10.99.0.3", "node3": "10.99.0.1"}.get(l, "10.99.0." + l[4:])
+ip = {"node3": "10.99.0.1"}.get(l, "10.99.0." + l[4:])
 print(json.dumps({"role": "primary" if "//%s:" % ip in sys.argv[2] else "replica", "cluster_writable": True}))' "$f" "$url" ;;
 esac
 exit 0
@@ -100,19 +100,19 @@ def switchovers(calls):
 
 
 def test_leader_target_switches_over_then_restarts(h):
-    rc, calls, err = run(h, 1, [leader("node1"), member("node2"), member("node3", lag=10), member("node4")],
-                         after=[member("node1"), leader("node2"), member("node3"), member("node4")])
+    rc, calls, err = run(h, 6, [leader("node6"), member("node7"), member("node3", lag=10), member("node4")],
+                         after=[member("node6"), leader("node7"), member("node3"), member("node4")])
     assert rc == 0, err
-    assert switchovers(calls) == [{"leader": "node1", "candidate": "node2"}]
-    assert idx(calls, "http://10.99.0.2:8008/switchover")  # l'API Patroni du leader (node1)
-    restart = idx(calls, "start-prod-node.sh --pull 1")
+    assert switchovers(calls) == [{"leader": "node6", "candidate": "node7"}]
+    assert idx(calls, "http://10.99.0.6:8008/switchover")  # l'API Patroni du leader (node6)
+    restart = idx(calls, "start-prod-node.sh --pull 6")
     assert restart and idx(calls, ":8008/switchover")[0] < restart[0]
     assert events(calls) == [("switchover", "success"), ("canary_start", "in_progress"),
                              ("canary_promoted", "success")]
 
 
 def test_replica_target_restarts_without_switchover(h):
-    rc, calls, err = run(h, 4, [leader("node1"), member("node2"), member("node4")])
+    rc, calls, err = run(h, 4, [leader("node6"), member("node7"), member("node4")])
     assert rc == 0, err
     assert switchovers(calls) == []
     assert idx(calls, "start-prod-node.sh --pull 4")
@@ -121,14 +121,14 @@ def test_replica_target_restarts_without_switchover(h):
 
 @pytest.mark.parametrize("case, cluster, posted, msg", [
     # Aucun replica sain : pas streaming, ancienne timeline, `nofailover`.
-    ("no_candidate", [leader("node1"), member("node2", state="running"), member("node3", tl=289),
+    ("no_candidate", [leader("node6"), member("node7", state="running"), member("node3", tl=289),
                       member("node4", tags={"nofailover": True})], 0, "aucun replica sain"),
-    # Bascule demandee, mais node1 reste leader (pas d'after.json).
-    ("timeout", [leader("node1"), member("node2")], 1, "non terminee"),
+    # Bascule demandee, mais node6 reste leader (pas d'after.json).
+    ("timeout", [leader("node6"), member("node7")], 1, "non terminee"),
     ("unreadable", None, 0, "illisible"),
 ])
 def test_leader_without_completed_switchover_is_not_restarted(h, case, cluster, posted, msg):
-    rc, calls, err = run(h, 1, cluster)
+    rc, calls, err = run(h, 6, cluster)
     assert rc == 3, err  # pas pret : reporte au prochain passage (INV-167)
     assert msg in err
     assert len(switchovers(calls)) == posted
@@ -139,19 +139,19 @@ def test_leader_without_completed_switchover_is_not_restarted(h, case, cluster, 
 
 
 @pytest.mark.parametrize("replicas, pending, chosen", [
-    # Un votant etcd (1, 2, 3) avant un non votant, meme mieux synchronise.
-    ([member("node2", lag=5_000_000), member("node4", lag=0)], None, "node2"),
+    # Un votant etcd (3, 6, 7 par defaut, jour du demenagement) avant un non votant, meme mieux synchronise.
+    ([member("node7", lag=5_000_000), member("node4", lag=0)], None, "node7"),
     # Entre votants : le plus petit lag.
-    ([member("node2", lag=900), member("node3", lag=10)], None, "node3"),
+    ([member("node7", lag=900), member("node3", lag=10)], None, "node3"),
     # Jamais un replica en retard d'une timeline.
-    ([member("node2", tl=289), member("node3", lag=50)], None, "node3"),
+    ([member("node7", tl=289), member("node3", lag=50)], None, "node3"),
     # Pas un noeud encore a redemarrer dans ce passage, s'il y a mieux (meme un non votant).
-    ([member("node2"), member("node4")], "2", "node4"),
+    ([member("node7"), member("node4")], "7", "node4"),
     # Tous a redemarrer : on en prend un quand meme (le plus petit lag).
-    ([member("node2", lag=10), member("node3", lag=0)], "2 3", "node3"),
+    ([member("node7", lag=10), member("node3", lag=0)], "7 3", "node3"),
 ], ids=["voter-first", "lag", "timeline", "not-pending", "all-pending"])
 def test_candidate_choice(h, replicas, pending, chosen):
-    rc, calls, err = run(h, 1, [leader("node1"), *replicas], pending=pending,
-                         after=[member("node1"), leader(chosen)])
+    rc, calls, err = run(h, 6, [leader("node6"), *replicas], pending=pending,
+                         after=[member("node6"), leader(chosen)])
     assert rc == 0, err
-    assert switchovers(calls) == [{"leader": "node1", "candidate": chosen}]
+    assert switchovers(calls) == [{"leader": "node6", "candidate": chosen}]

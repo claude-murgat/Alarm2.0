@@ -46,7 +46,7 @@ def test_compose_passes_etcd_hosts_to_the_backend_and_every_node_env_defines_it(
     env = _compose()["services"]["backend"]["environment"]
     assert "ETCD_HOSTS=${ETCD_HOSTS}" in env
     env_files = [*ROOT.glob(".env.prod.node*"), *ROOT.glob(".env.node*"), *ROOT.glob(".env.ci-w*"), ROOT / ".env.dev"]
-    assert len(env_files) == 13
+    assert len(env_files) == 11  # .env.prod.node3 a 7 (node1/node2 retires le jour du demenagement), 3 .env.node*, 2 ci, dev
     for path in env_files:
         hosts = [line.split("=", 1)[1] for line in path.read_text().splitlines() if line.startswith("ETCD_HOSTS=")]
         assert hosts and hosts[0].strip(), f"{path.name} sans ETCD_HOSTS"

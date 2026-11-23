@@ -1,13 +1,13 @@
 #!/bin/bash
-# alarm-cd-orchestrate.sh — chaine canary 3 -> 7 -> 6 -> 5 -> 4 -> 2 -> 1 automatique (V1.5).
+# alarm-cd-orchestrate.sh — chaine canary 3 -> 5 -> 4 -> 7 -> 6 automatique (V1.5).
 #
 # Cf docs/CD_DESIGN.md §4 (ordre canary) et §8 (plan PR 9 — "promotion canary
-# auto apres soak vert"). Wraps alarm-cd-canary.sh pour les 7 noeuds en sequence,
+# auto apres soak vert"). Wraps alarm-cd-canary.sh pour les 5 noeuds en sequence,
 # halt immediat sur le premier echec (l'auto-rollback du noeud cible est gere
 # par alarm-cd-canary.sh -> alarm-cd-rollback.sh).
 #
 # Tourne via timer systemd `alarm-cd-orchestrate.timer` sur NODE3 cloud
-# (le seul noeud qui voit les 7 cibles via le mesh WG). Le timer est livre
+# (le seul noeud qui voit les 5 cibles via le mesh WG). Le timer est livre
 # **disable** par defaut — l'operateur l'active explicitement apres avoir
 # valide 5 cycles canary manuels (cf §4 doc "V1.5 a activer apres 5
 # deploiements clean").
@@ -16,17 +16,17 @@
 #   - Etat par noeud : /var/lib/alarm/cd/node<N>.digest = digest deploye avec
 #     succes sur node<N> (ecrit apres son canary OK). Un noeud deja au digest
 #     courant de :stable (cache local NODE3) est saute.
-#   - Les 7 noeuds au digest courant -> no-op silencieux (95 % des ticks) : ni verrou,
+#   - Les 5 noeuds au digest courant -> no-op silencieux (95 % des ticks) : ni verrou,
 #     ni SSH, ni sonde /health, aucun log (tick 2 min depuis le 2026-11-09).
 #   - Noeud injoignable (SSH) -> WARN, reporte au prochain passage, la chaine
-#     CONTINUE avec les suivants. Un votant etcd (VOTERS = 1 2 3) n'est redemarre que
+#     CONTINUE avec les suivants. Un votant etcd (VOTERS = 3 6 7) n'est redemarre que
 #     si TOUS les votants repondent (quorum) ; sinon seuls les non votants sont deployes.
 #   - Canary exit 3 (prerequis KO : SSH, registre/DNS injoignable depuis la cible,
 #     rien n'est touche ; ou cible leader Patroni sans bascule terminee, INV-187)
 #     -> reporte comme un injoignable ; un votant reporte
 #     reporte aussi les votants suivants du passage.
 #   - Etat global /var/lib/alarm/cd/orchestrate.state : <digest>\t<outcome>\t<ts>,
-#     outcome = success (7 noeuds a jour) | partial (noeuds en attente, repris
+#     outcome = success (5 noeuds a jour) | partial (noeuds en attente, repris
 #     au tick suivant, SANS cooldown) | failure (un canary a fail).
 #   - Meme digest + outcome=failure + cooldown < 1 h -> skip (anti-boucle si
 #     :stable est casse).
@@ -34,9 +34,9 @@
 #     passage tout de suite, au plus MAX_PASSES par tick (2026-11-09).
 #
 # Pre-requis (cf docs/CD_DESIGN.md §3 + §4) :
-#   - alarm-cd-pull.timer actif sur les 7 noeuds (pour que les images soient
+#   - alarm-cd-pull.timer actif sur les 5 noeuds (pour que les images soient
 #     en cache local AVANT l'orchestration).
-#   - Cle SSH alarm@10.99.0.{1..7} fonctionnelle depuis NODE3 (un noeud
+#   - Cle SSH alarm@10.99.0.{1,4,5,6,7} fonctionnelle depuis NODE3 (un noeud
 #     injoignable est reporte, il ne bloque plus les autres).
 #   - GATEWAY_KEY definie via /etc/alarm/cd.env (lu par le unit systemd).
 #
@@ -71,33 +71,31 @@ MAX_PASSES=3
 # Soak entre etapes (override possible via env). 120 s depuis le 2026-10-20 (choix proprietaire :
 # ~10 min de deploiement au lieu de ~35) ; toujours un noeud a la fois, rollback auto conserve.
 SOAK="${SOAK:-120}"
-# Ordre canary fige (INV-167) : NODE3 (cloud, le moins critique) -> les non votants
-# etcd du plus recent au plus ancien, node7 alarm-4, node6 alarm-3, node5 alarm-2,
-# node4 alarm-1 (un echec n'entame pas le quorum) -> onsite-2 (Celeron, maillon
-# faible) -> onsite-1 (i5, le plus puissant et souvent primary). node1 reste le
-# dernier (son canary_promoted = fin de chaine, cf backend/app/api/deployments.py).
+# Ordre canary fige (INV-167, jour du demenagement), du moins critique au plus critique :
+# NODE3 (cloud) -> les non votants node5 alarm-2, node4 alarm-1 (passerelle Beaufort ; un echec
+# n'entame pas le quorum) -> les voteurs d'Izeron node7 alarm-4, node6 alarm-3 (passerelle
+# d'Izeron). node6 est le dernier : son canary_promoted = fin de chaine (backend/app/api/deployments.py).
+# onsite-1/onsite-2 (1 et 2) : retires le jour du demenagement (INV-090), plus deployes.
 # Cf §4 doc — justification de l'ordre. Le leader Patroni passe avant-dernier (INV-197, plus bas).
-NODES_ORDER=(3 7 6 5 4 2 1)
-# Votants etcd (INV-090) : node1, node2, node3 ; non votants : 4 a 7. Le jour du demenagement,
-# seules NODES_ORDER et VOTERS changent ici (docs/REPLACE_ONSITE_NODE.md).
-VOTERS=(1 2 3)
+NODES_ORDER=(3 5 4 7 6)
+# Votants etcd (INV-090) : node3, node6, node7 ; non votants : 4 et 5.
+VOTERS=(3 6 7)
 is_voter() { [[ " ${VOTERS[*]} " == *" $1 "* ]]; }
-# IP WG (cf alarm-cd-canary.sh) et site (logs seulement, node6/7 = futurs noeuds
-# d'Izeron, INV-161).
-NODE_IP=([1]=10.99.0.2 [2]=10.99.0.3 [3]=10.99.0.1 [4]=10.99.0.4 [5]=10.99.0.5 [6]=10.99.0.6 [7]=10.99.0.7)
-NODE_SITE=([1]=Izeron [2]=Izeron [3]=OVH [4]=Beaufort [5]=Beaufort [6]=Izeron [7]=Izeron)
+# IP WG (cf alarm-cd-canary.sh) et site (logs seulement, INV-161).
+NODE_IP=([3]=10.99.0.1 [4]=10.99.0.4 [5]=10.99.0.5 [6]=10.99.0.6 [7]=10.99.0.7)
+NODE_SITE=([3]=OVH [4]=Beaufort [5]=Beaufort [6]=Izeron [7]=Izeron)
 
 log() {
   # stderr seul -> systemd capture via StandardError=journal (cf unit file).
   echo "[alarm-cd-orchestrate] $*" >&2
 }
 
-# Decouvre le leader Patroni via GET /health role=primary sur les 7 IPs WG.
+# Decouvre le leader Patroni via GET /health role=primary sur les 5 IPs WG.
 # POST /api/deployments/events (par canary) requiert le leader (replicas -> 503).
 # Sans ce bloc, --api-base default = 10.99.0.1 = NODE3 souvent replica.
 discover_leader() {
   local ip role
-  for ip in 10.99.0.1 10.99.0.2 10.99.0.3 10.99.0.4 10.99.0.5 10.99.0.6 10.99.0.7; do
+  for ip in 10.99.0.1 10.99.0.4 10.99.0.5 10.99.0.6 10.99.0.7; do
     role=$(curl -fsS --max-time 3 "http://${ip}:8000/health" 2>/dev/null \
       | python3 -c "import sys,json;print(json.load(sys.stdin).get('role',''))" 2>/dev/null \
       || echo "")
@@ -135,7 +133,7 @@ for NODE in "${NODES_ORDER[@]}"; do
 done
 is_todo() { [[ " ${TODO[*]} " == *" $1 "* ]]; }
 
-# No-op : les 7 noeuds sont deja au digest courant.
+# No-op : les 5 noeuds sont deja au digest courant.
 if (( ${#TODO[@]} == 0 )); then
   # Pas de log par tour (idem Q6.1 doc — 95 % des tours sont des no-op).
   exit 0
@@ -198,7 +196,7 @@ if [[ -z "$API_BASE" ]]; then
 fi
 
 # Leader Patroni deploye en avant-dernier (INV-197) : a son tour, les autres noeuds tournent deja la nouvelle
-# image et sa bascule (INV-187) va vers l'un d'eux. Le dernier (node1) reste la fin de chaine (canary_promoted
+# image et sa bascule (INV-187) va vers l'un d'eux. Le dernier (node6) reste la fin de chaine (canary_promoted
 # = deploiement complet). 2026-11-13 : node3 leader, premier, avait bascule vers node1 encore sur l'ancienne image.
 for i in "${!TODO[@]}"; do
   if [[ "${NODE_IP[${TODO[i]}]}" == "$LEADER_IP" ]] && (( i < ${#TODO[@]} - 2 )); then
@@ -314,7 +312,7 @@ if (( ${#PENDING[@]} > 0 )); then
   log "Chaine canary partielle : $LOCAL_DIGEST deploye, en attente : ${PENDING[*]} (repris au prochain passage, sans cooldown)"
   printf '%s\t%s\t%s\n' "$LOCAL_DIGEST" "partial" "$NOW" > "$STATE_FILE"
 else
-  log "Chaine canary complete : $LOCAL_DIGEST deploye sur les 7 noeuds"
+  log "Chaine canary complete : $LOCAL_DIGEST deploye sur les 5 noeuds"
   printf '%s\t%s\t%s\n' "$LOCAL_DIGEST" "success" "$NOW" > "$STATE_FILE"
 fi
 

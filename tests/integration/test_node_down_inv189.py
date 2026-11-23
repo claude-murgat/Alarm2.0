@@ -2,8 +2,8 @@
 → un email + un audit par épisode, puis un email « rétabli ».
 
 Incident du 2026-11-09 : alarm-2 (node5, Beaufort) sans câble réseau ~45 min, personne prévenu.
-Patroni simulé (seul GET /cluster est intercepté) : node2 leader `running` (timeline 290), les autres
-`streaming`. Le vrai contrôle (`_run_node_down_check`) est appelé avec un `now` choisi (2030) ; le tick
+Patroni simulé (seul GET /cluster est intercepté) : node6 leader `running` (timeline 290), les autres
+`streaming` ; node3 à node7 (jour du déménagement, INV-090 : node1/node2 retirés). Le vrai contrôle (`_run_node_down_check`) est appelé avec un `now` choisi (2030) ; le tick
 de fond est neutralisé par `tests/integration/conftest.py` (fixture `real_node_down_check`).
 """
 import io
@@ -27,8 +27,8 @@ def _member(n, role="replica", state="streaming", timeline=290):
             "api_url": f"http://10.99.0.{n}:8008/patroni", "timeline": timeline, "lag": 0}
 
 
-def _healthy(leader=2):
-    return [_member(n, role="leader", state="running") if n == leader else _member(n) for n in range(1, 8)]
+def _healthy(leader=6):
+    return [_member(n, role="leader", state="running") if n == leader else _member(n) for n in range(3, 8)]
 
 
 def _without(members, name):
@@ -104,7 +104,7 @@ def test_node_absent_for_more_than_10_min_is_emailed_and_audited_once(patroni):
         assert kw["subject"] == "[Alarme Murgat] Nœud injoignable : alarm-2 · node5 (Beaufort)"
         assert "absent de /cluster" in kw["body"]
         assert f"{T0.isoformat()} UTC" in kw["body"] and "11 min" in kw["body"]
-        assert "onsite-2 · node2" in kw["body"], "le reste du cluster a toujours un leader"
+        assert "alarm-3 · node6" in kw["body"], "le reste du cluster a toujours un leader"
         patroni["tick"](12)
         patroni["members"] = _without(_healthy(leader=3), "node5")  # bascule : node3 devient leader
         patroni["tick"](13)

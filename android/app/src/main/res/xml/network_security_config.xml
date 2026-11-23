@@ -7,10 +7,11 @@
         <domain includeSubdomains="true">localhost</domain>
         <domain includeSubdomains="true">127.0.0.1</domain>
         <domain includeSubdomains="true">172.16.2.191</domain>
-        <!-- Prod : cluster 3 nœuds (cf .env.prod.node{1,2,3}). -->
+        <!-- Prod : cluster 5 nœuds (cf .env.prod.node{3..7} ; IP LAN dans build.gradle.kts BACKEND_URLS).
+             base-config autorise deja le clair partout : cette liste n'est qu'indicative. -->
         <!-- NODE3 cloud OVH (Internet) — primary release. -->
         <domain includeSubdomains="true">51.210.105.102</domain>
-        <!-- onsite-1 / onsite-2 (LAN site 172.16.0.0/16). -->
+        <!-- alarm-3 / alarm-4 sur le LAN de Beaufort (172.16.0.0/16) jusqu'au jour du déménagement. -->
         <domain includeSubdomains="true">172.16.1.121</domain>
         <domain includeSubdomains="true">172.16.1.120</domain>
     </domain-config>

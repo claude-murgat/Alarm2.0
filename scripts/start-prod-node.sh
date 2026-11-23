@@ -1,18 +1,17 @@
 #!/bin/bash
 # Wrapper de bring-up cluster Patroni en mode PROD cross-machine.
 #
-# Usage : ./scripts/start-prod-node.sh <1|2|3|4|5|6|7>
-#   sur onsite-1 (192.168.1.50) : ./scripts/start-prod-node.sh 1
-#   sur onsite-2 (192.168.1.51) : ./scripts/start-prod-node.sh 2
+# Usage : ./scripts/start-prod-node.sh <3|4|5|6|7>
+#   (onsite-1/onsite-2, noeuds 1 et 2 : retires le jour du demenagement, INV-090)
 #   sur NODE3 cloud (10.99.0.1) : ./scripts/start-prod-node.sh 3
 #   sur alarm-1 (10.99.0.4)     : ./scripts/start-prod-node.sh 4   (non votant)
 #   sur alarm-2 (10.99.0.5)     : ./scripts/start-prod-node.sh 5   (non votant)
-#   sur alarm-3 (10.99.0.6)     : ./scripts/start-prod-node.sh 6   (non votant, futur Izeron)
-#   sur alarm-4 (10.99.0.7)     : ./scripts/start-prod-node.sh 7   (non votant, futur Izeron)
+#   sur alarm-3 (10.99.0.6)     : ./scripts/start-prod-node.sh 6   (voteur, Izeron)
+#   sur alarm-4 (10.99.0.7)     : ./scripts/start-prod-node.sh 7   (voteur, Izeron)
 #
-# Nœuds 4 a 7 NON VOTANTS etcd : Patroni + backend seulement, AUCUN conteneur etcd
-# local (`up --no-deps patroni backend`). Ils utilisent les 3 etcd votants
-# (10.99.0.1/.2/.3) via WG, cf ETCD_HOSTS de .env.prod.node4 a 7.
+# Voteurs etcd (INV-090) : 3, 6, 7 -> etcd + Patroni + backend.
+# Nœuds 4 et 5 NON VOTANTS : Patroni + backend seulement, AUCUN conteneur etcd local
+# (`up --no-deps patroni backend`). Ils utilisent les 3 etcd voteurs via WG, cf ETCD_HOSTS.
 #
 # Pourquoi ce wrapper :
 # - Evite la confusion entre .env.node1 (DEV/CI mono-host) et .env.prod.node1
@@ -38,15 +37,15 @@ for arg in "$@"; do
     --build)
       MODE="build"  # explicite, meme si c'est le defaut
       ;;
-    [1-7])
+    [3-7])
       NODE="$arg"
       ;;
     *)
       echo "Argument inconnu : $arg"
-      echo "Usage : $0 [--pull|--build] <1|2|3|4|5|6|7>"
-      echo "  1 = onsite-1 (10.99.0.2), 2 = onsite-2 (10.99.0.3), 3 = NODE3 cloud (10.99.0.1)"
-      echo "  4 = alarm-1 (10.99.0.4), 5 = alarm-2 (10.99.0.5), 6 = alarm-3 (10.99.0.6),"
-      echo "  7 = alarm-4 (10.99.0.7) : non votants, sans etcd local"
+      echo "Usage : $0 [--pull|--build] <3|4|5|6|7>"
+      echo "  3 = NODE3 cloud (10.99.0.1), 6 = alarm-3 (10.99.0.6), 7 = alarm-4 (10.99.0.7) : voteurs etcd"
+      echo "  4 = alarm-1 (10.99.0.4), 5 = alarm-2 (10.99.0.5) : non votants, sans etcd local"
+      echo "  (1 et 2 = onsite-1/onsite-2 : retires le jour du demenagement)"
       echo "  --pull  : pull l'image depuis GHCR (PROD V1+, cf docs/CD_DESIGN.md §3)"
       echo "  --build : build l'image localement (defaut, retro-compat avant CD V1)"
       exit 1
@@ -54,19 +53,19 @@ for arg in "$@"; do
   esac
 done
 
-if [[ -z "${NODE:-}" || ! "$NODE" =~ ^[1-7]$ ]]; then
-  echo "Usage : $0 [--pull|--build] <1|2|3|4|5|6|7>"
+if [[ -z "${NODE:-}" || ! "$NODE" =~ ^[3-7]$ ]]; then
+  echo "Usage : $0 [--pull|--build] <3|4|5|6|7>"
   exit 1
 fi
 
 ENV_FILE=".env.prod.node${NODE}"
 PROJECT="node${NODE}"
 
-# Votants 1-3 : tous les services (etcd inclus), commande inchangee (tableaux vides).
-# Non votants 4 a 7 : Patroni + backend seuls, --no-deps -> jamais de conteneur etcd.
+# Voteurs 3, 6, 7 : tous les services (etcd inclus), commande inchangee (tableaux vides).
+# Non votants 4 et 5 : Patroni + backend seuls, --no-deps -> jamais de conteneur etcd.
 SERVICES=()
 NO_DEPS=()
-if [[ "$NODE" =~ ^[4-7]$ ]]; then
+if [[ "$NODE" =~ ^[45]$ ]]; then
   SERVICES=(patroni backend)
   NO_DEPS=(--no-deps)
 fi

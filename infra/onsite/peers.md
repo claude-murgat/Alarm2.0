@@ -8,12 +8,12 @@ restent sur leurs machines respectives uniquement (`/etc/wireguard/privatekey` m
 | IP Wireguard | Rôle | Hostname | Endpoint réseau |
 |---|---|---|---|
 | `10.99.0.1` | NODE3 cloud (hors-site) | _hostname OVH_ | `51.210.105.102:51820` |
-| `10.99.0.2` | NODE1 onsite-1 (1ère baie) | onsite-1.alarm.local | `192.168.1.50:51820` |
-| `10.99.0.3` | NODE2 onsite-2 (2ème baie) | onsite-2.alarm.local | `192.168.1.51:51820` |
+| `10.99.0.2` | NODE1 onsite-1 — **retiré le jour du déménagement** (plus membre etcd ni déployé) | onsite-1.alarm.local | `192.168.1.50:51820` |
+| `10.99.0.3` | NODE2 onsite-2 — **retiré le jour du déménagement** | onsite-2.alarm.local | `192.168.1.51:51820` |
 | `10.99.0.4` | node4 alarm-1 (site beaufort, gateway) — **non votant etcd** | alarm-1 | derrière NAT `92.103.41.246`, relayé par NODE3 |
 | `10.99.0.5` | node5 alarm-2 (site beaufort) — **non votant etcd** | alarm-2 | derrière NAT `92.103.41.246`, relayé par NODE3 |
-| `10.99.0.6` | node6 alarm-3 (futur nœud d'Izeron, affiché site izeron) — **non votant etcd** | alarm-3 | à Beaufort jusqu'au déménagement (derrière NAT `92.103.41.246`), relayé par NODE3 |
-| `10.99.0.7` | node7 alarm-4 (futur nœud d'Izeron, affiché site izeron) — **non votant etcd** | alarm-4 | à Beaufort jusqu'au déménagement (derrière NAT `92.103.41.246`), relayé par NODE3 |
+| `10.99.0.6` | node6 alarm-3 (Izeron, passerelle d'Izeron) — **voteur etcd** depuis le jour du déménagement | alarm-3 | `192.168.1.X:51820` (LAN Izeron, IP à fixer ; `172.16.1.120` à Beaufort avant) ; relayé par NODE3, **pair LAN direct avec alarm-4** |
+| `10.99.0.7` | node7 alarm-4 (Izeron, passerelle d'Izeron) — **voteur etcd** depuis le jour du déménagement | alarm-4 | `192.168.1.Y:51820` (idem ; `172.16.1.121` avant) ; relayé par NODE3, **pair LAN direct avec alarm-3** |
 
 > **Relais NODE3 (nœuds 4/5, 2026-10-27)** : le site beaufort ne joint pas directement le
 > LAN des onsite. Tout le trafic inter-sites passe par NODE3 en étoile : NODE3 route
@@ -22,6 +22,16 @@ restent sur leurs machines respectives uniquement (`/etc/wireguard/privatekey` m
 > Seul NODE3 déclare les peers `10.99.0.4/32` à `10.99.0.7/32` (pas d'`Endpoint =`,
 > apprentissage par `PersistentKeepalive` depuis le site NAT'd). Un peer plus spécifique
 > (`/32`, ex. lien LAN direct onsite-1 ↔ onsite-2) reste prioritaire sur le `/24` du relais.
+
+> **Exception : pair LAN alarm-3 ↔ alarm-4 (décision du propriétaire du 2026-11-23)** : les deux
+> voteurs etcd d'Izeron (INV-090) se déclarent l'un l'autre (`AllowedIPs = 10.99.0.7/32` sur alarm-3,
+> `10.99.0.6/32` sur alarm-4, `Endpoint = <IP LAN de l'autre>:51820`, sans `PersistentKeepalive`).
+> Sans lui, node6 ↔ node7 passe par NODE3 : OVH en panne = 1 voteur sur 3 de chaque côté, plus de
+> leader. Posé à Beaufort sur leurs IP `172.16.1.120/.121` ; le jour du déménagement, après le
+> changement d'IP, repointer les **deux** `Endpoint =` sur les IP d'Izeron puis
+> `sudo bash -c 'wg syncconf wg0 <(wg-quick strip wg0)'` sur chacun (`docs/STANDARD_MACHINE.md` §9.3 : quand
+> les deux changent d'IP, WireGuard ne retrouve pas seul le chemin direct ; un `/32` périmé ne retombe
+> pas sur le relais).
 
 > **Déménagement de site (2026-06)** : les onsite sont passés du LAN `172.16.0.0/16`
 > (endpoints `172.16.1.120/.121`) au LAN `192.168.1.0/24`. IP désormais **statiques et
@@ -63,6 +73,7 @@ restent sur leurs machines respectives uniquement (`/etc/wireguard/privatekey` m
 | 2026-05-09 | NODE3 (10.99.0.1) | onsite-2 (10.99.0.3) | 16.6 ms | retour bidirectionnel OK |
 | 2026-06-19 | onsite-1 (10.99.0.2) | onsite-2 (10.99.0.3) | 0.75 ms | LAN direct **rétabli** après déménagement — endpoints repointés `172.16.1.x` → `192.168.1.5x` |
 | 2026-06-19 | onsite-2 (10.99.0.3) | onsite-1 (10.99.0.2) | 0.99 ms | retour bidirectionnel OK (nouveau LAN) |
+| _jour J_ | alarm-3 (10.99.0.6) | alarm-4 (10.99.0.7) | _à mesurer_ (< 1 ms attendu) | LAN direct à Izeron, endpoints repointés `172.16.1.12x` → `192.168.1.X/Y` ; `sudo wg show wg0 latest-handshakes` + `ping -c3 10.99.0.7` |
 
 ## Procédure d'ajout d'un peer
 
@@ -95,6 +106,10 @@ survit au déménagement de site).
 Template : [`wg1-facade.conf.example`](wg1-facade.conf.example).
 Setup reproductible : `sudo bash scripts/wg-facade-setup.sh <10.200.0.X/24>`
 (crée `wg1` **sans jamais toucher `wg0`**).
+
+> **Question ouverte (jour du déménagement)** : `wg1` n'existe que sur onsite-1/onsite-2, retirés le jour du
+> déménagement. Si le VPS façade sert encore l'UI, il perd ses deux backends : le repointer (nouvelles clés
+> `wg1` sur alarm-3/alarm-4, ou proxy vers NODE3) ou le retirer. À trancher par le propriétaire.
 
 ### Plan d'adressage façade
 | IP wg1 | Rôle | Hostname |

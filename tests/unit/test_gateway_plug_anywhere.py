@@ -527,3 +527,12 @@ def test_dfu_util_and_armed_arduinos_are_where_the_machine_provides_them():
     assert mg.DRY_CONTACT_ARMED_FILE == "/var/lib/alarm-gateway/armed-arduinos"
     unit = (GW.parent / "infra" / "onsite" / "systemd" / "alarm-sms-gateway.service").read_text().splitlines()
     assert "StateDirectory=alarm-gateway" in unit
+
+
+def test_install_sh_gateway_urls_are_the_5_nodes_and_retired_slots_stay_empty():
+    """INV-182, jour du demenagement (INV-090) : onsite-1/2 (10.99.0.2/.3) retires. install.sh pose NODE2_URL et
+    NODE3_URL vides (ignores par config.py ; absents, la passerelle prendrait son defaut localhost:8001/8002)."""
+    install = (GW.parent / "infra" / "onsite" / "install.sh").read_text().splitlines()
+    urls = dict(line.split()[1:3] for line in install if line.startswith("add_env NODE"))
+    assert urls == {"NODE1_URL": "http://10.99.0.1:8000", "NODE2_URL": '""', "NODE3_URL": '""',
+                    **{f"NODE{n}_URL": f"http://10.99.0.{n}:8000" for n in range(4, 8)}}

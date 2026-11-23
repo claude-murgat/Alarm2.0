@@ -57,9 +57,9 @@ def run(h, node):
     return p.returncode, calls, p.stderr
 
 
-# node6/node7 (alarm-3/alarm-4, 2026-11-05) : non votants comme node4, jamais de conteneur etcd.
+# Jour du demenagement (INV-090) : node6/node7 voteurs, relances comme node3 ; node4/node5 non votants.
 @pytest.mark.parametrize("node, services", [(3, ""), (4, " --no-deps patroni backend"),
-                                            (6, " --no-deps patroni backend"), (7, " --no-deps patroni backend")])
+                                            (5, " --no-deps patroni backend"), (6, ""), (7, "")])
 def test_compose_up_receives_secret_key_from_env_prod_secrets(cd, node, services):
     rc, calls, err = run(cd, node)
     assert rc == 0, err
@@ -67,3 +67,12 @@ def test_compose_up_receives_secret_key_from_env_prod_secrets(cd, node, services
     assert ups == [(f"compose --env-file .env.prod.node{node} -p node{node} up -d{services}", SECRET)]
     # Semantique du rollback conservee : l'image re-taguee :stable, ni pull ni build.
     assert not any(" pull" in args or "--build" in args for args, _ in calls)
+
+
+@pytest.mark.parametrize("node", [1, 2])
+def test_onsite_nodes_refused_after_move_day(cd, node):
+    env = {**os.environ, "H": str(cd), "PATH": f"{cd / 'bin'}:{os.environ['PATH']}",
+           "REMOTE_REPO": str(cd / "remote"), "API_BASE": "http://test", "GATEWAY_KEY": "k"}
+    p = subprocess.run(["bash", str(SCRIPT), "--node", str(node)], env=env, capture_output=True, text=True, timeout=30)
+    assert p.returncode == 1, p.stderr
+    assert not (cd / "ssh.log").exists() and not (cd / "docker.log").exists()

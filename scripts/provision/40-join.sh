@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# 40-join.sh — (root, sur la nouvelle machine) entree dans le cluster de prod comme nœud non votant
-# (docs/REPLACE_ONSITE_NODE.md, « Ajouter un nœud non votant ») : images :stable et partie hote a
+# 40-join.sh — (root, sur la nouvelle machine) entree dans le cluster de prod comme nœud non votant (4, 5)
+# (docs/REPLACE_ONSITE_NODE.md, « Ajouter un nœud non votant ») ou comme voteur remplace (3, 6, 7 depuis le
+# jour du demenagement : etcd lance aussi, apres `etcdctl member add`, ci-dessous) : images :stable et partie hote a
 # jour, puis start-prod-node.sh --pull N (Patroni se clone depuis le leader), puis attente de
 # l'etat « streaming » vu par NODE3 (Patroni 10.99.0.1:8008). Prerequis : 20, 21 et 30 faits, et le
 # commit qui declare ce nœud (.env.prod.nodeN) promu :stable.

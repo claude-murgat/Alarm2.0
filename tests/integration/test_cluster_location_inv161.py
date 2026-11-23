@@ -14,8 +14,10 @@ import pytest
 
 pytestmark = pytest.mark.integration
 
+# Jour du demenagement : node1/node2 (onsite-1/2) retires du cluster ; node2 encore liste par Patroni
+# (TTL pas ecoule) pour verifier qu'il n'a plus ni lieu ni machine par defaut.
 MEMBERS = [{"name": f"node{i}", "role": "replica", "state": "streaming", "host": f"10.99.0.{i}"}
-           for i in range(1, 8)] + [{"name": "node9", "role": "replica", "state": "streaming"}]
+           for i in range(2, 8)] + [{"name": "node9", "role": "replica", "state": "streaming"}]
 
 
 @pytest.fixture
@@ -66,21 +68,21 @@ def _by_name(data, field):
 def test_default_locations(client, patroni_cluster, no_stored_keys, monkeypatch):
     monkeypatch.setenv("NODE_NAME", "node3")
     data = client.get("/api/cluster").json()
-    assert _by_name(data, "location") == {"node1": "izeron", "node2": "izeron", "node3": "ovh",
+    assert _by_name(data, "location") == {"node2": None, "node3": "ovh",
                                           "node4": "beaufort", "node5": "beaufort",
                                           "node6": "izeron", "node7": "izeron", "node9": None}
     assert data["local_location"] == "ovh"
 
 
 def test_default_machines_and_retiring(client, patroni_cluster, no_stored_keys, monkeypatch):
-    """2026-11-05 : machine de chaque noeud ; onsite-1/onsite-2 bientot obsoletes. node9 inconnu :
-    son nom Patroni, jamais null (contrat de l'app Android)."""
+    """Jour du demenagement : plus aucun noeud « bientot obsolete » ; onsite-2 (node2) et node9 inconnus :
+    leur nom Patroni, jamais null (contrat de l'app Android)."""
     monkeypatch.setenv("NODE_NAME", "node6")
     data = client.get("/api/cluster").json()
-    assert _by_name(data, "machine") == {"node1": "onsite-1", "node2": "onsite-2", "node3": "OVH",
+    assert _by_name(data, "machine") == {"node2": "node2", "node3": "OVH",
                                          "node4": "alarm-1", "node5": "alarm-2", "node6": "alarm-3",
                                          "node7": "alarm-4", "node9": "node9"}
-    assert _by_name(data, "retiring") == {"node1": True, "node2": True, "node3": False, "node4": False,
+    assert _by_name(data, "retiring") == {"node2": False, "node3": False, "node4": False,
                                           "node5": False, "node6": False, "node7": False, "node9": False}
     assert (data["local_node"], data["local_machine"], data["local_location"]) == ("node6", "alarm-3", "izeron")
 
@@ -98,7 +100,7 @@ def test_locations_follow_system_config(client, patroni_cluster, monkeypatch):
         data = client.get("/api/cluster").json()
         loc = _by_name(data, "location")
         assert loc["node4"] == "izeron" and loc["node5"] == "izeron" and loc["node3"] == "ovh"
-        assert loc["node1"] is None and loc["node6"] is None  # absents de la liste configuree
+        assert loc["node2"] is None and loc["node6"] is None  # absents de la liste configuree
         assert data["local_location"] == "izeron"
     finally:
         _set_locations(None)
@@ -106,17 +108,17 @@ def test_locations_follow_system_config(client, patroni_cluster, monkeypatch):
 
 def test_machines_and_retiring_follow_system_config(client, patroni_cluster, monkeypatch):
     """Une cle enregistree remplace son defaut entierement (pas de fusion)."""
-    _set("node_machines", "node6:alarm-3-izeron,node1:vieux-pc")
+    _set("node_machines", "node6:alarm-3-izeron,node2:vieux-pc")
     _set("retiring_nodes", "node4")
     try:
-        monkeypatch.setenv("NODE_NAME", "node1")
+        monkeypatch.setenv("NODE_NAME", "node2")
         data = client.get("/api/cluster").json()
         machine, retiring = _by_name(data, "machine"), _by_name(data, "retiring")
-        assert machine["node6"] == "alarm-3-izeron" and machine["node1"] == "vieux-pc"
+        assert machine["node6"] == "alarm-3-izeron" and machine["node2"] == "vieux-pc"
         assert machine["node4"] == "node4"  # absent de la cle enregistree -> nom Patroni
-        assert retiring["node4"] is True and retiring["node1"] is False and retiring["node2"] is False
+        assert retiring["node4"] is True and retiring["node2"] is False and retiring["node6"] is False
         group = _by_name(data, "group")  # le groupe suit retiring_nodes ; retiring -> toujours « Legacy (Izeron) »
-        assert (group["node4"], group["node1"]) == ("Legacy (Izeron)", "Izeron")
+        assert (group["node4"], group["node6"]) == ("Legacy (Izeron)", "Izeron")
         assert data["local_machine"] == "vieux-pc"
     finally:
         _set("node_machines", None)
@@ -128,6 +130,6 @@ def test_default_groups(client, patroni_cluster, no_stored_keys, monkeypatch):
     « Izeron », « Beaufort », « OVH », « Legacy (Izeron) » ; lieu inconnu -> « Lieu inconnu »."""
     monkeypatch.setenv("NODE_NAME", "node3")
     data = client.get("/api/cluster").json()
-    assert _by_name(data, "group") == {"node1": "Legacy (Izeron)", "node2": "Legacy (Izeron)", "node3": "OVH",
+    assert _by_name(data, "group") == {"node2": "Lieu inconnu", "node3": "OVH",
                                        "node4": "Beaufort", "node5": "Beaufort", "node6": "Izeron",
                                        "node7": "Izeron", "node9": "Lieu inconnu"}

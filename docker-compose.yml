@@ -6,8 +6,8 @@
 #   docker compose --env-file .env.node3 -p node3 up --build -d
 #
 # PROD cross-machine (1 nœud par machine, peers via Wireguard 10.99.0.x) :
-#   sur onsite-1 : docker compose --env-file .env.prod.node1 -p node1 up -d
-#   sur onsite-2 : docker compose --env-file .env.prod.node2 -p node2 up -d
+#   sur alarm-3  : ./scripts/start-prod-node.sh --pull 6   (voteur ; alarm-4 = 7 ; alarm-1/2 = 4/5, sans etcd)
+#   (onsite-1/onsite-2 = node1/node2 : retires le jour du demenagement)
 #   sur NODE3    : docker compose --env-file .env.prod.node3 -p node3 up -d
 #
 # Bascule controlee par la variable ADVERTISE_HOST :

@@ -17,16 +17,15 @@
 #   Prerequis KO (SSH, digest distant illisible), rien n'est touche -> exit 3 (reporte par l'orchestrateur).
 #   Cible leader Patroni sans bascule terminee (INV-187) -> exit 3, cible pas redemarree.
 #
-# Designe pour tourner sur NODE3 cloud OVH (le seul qui voit les 7 noeuds via WG).
-# L'humain enchaine les 7 commandes manuellement V1 (ordre de alarm-cd-orchestrate.sh) :
+# Designe pour tourner sur NODE3 cloud OVH (le seul qui voit les 5 noeuds via WG).
+# L'humain enchaine les 5 commandes manuellement V1 (ordre de alarm-cd-orchestrate.sh) :
 #   ./scripts/alarm-cd-canary.sh --node 3   # NODE3 d'abord
-#   ./scripts/alarm-cd-canary.sh --node 7   # alarm-4 (non votant, futur Izeron)
-#   ./scripts/alarm-cd-canary.sh --node 6   # alarm-3 (non votant, futur Izeron)
 #   ./scripts/alarm-cd-canary.sh --node 5   # alarm-2 (non votant)
 #   ./scripts/alarm-cd-canary.sh --node 4   # alarm-1 (non votant)
-#   ./scripts/alarm-cd-canary.sh --node 2   # onsite-2 ensuite
-#   ./scripts/alarm-cd-canary.sh --node 1   # onsite-1 en dernier (le plus critique)
-# Noeuds 4 a 7 : start-prod-node.sh ne relance que Patroni + backend (pas d'etcd local).
+#   ./scripts/alarm-cd-canary.sh --node 7   # alarm-4 (voteur, Izeron)
+#   ./scripts/alarm-cd-canary.sh --node 6   # alarm-3 (voteur, Izeron) en dernier
+# Noeuds 4 et 5 : start-prod-node.sh ne relance que Patroni + backend (pas d'etcd local).
+# onsite-1/onsite-2 (1 et 2) : retires le jour du demenagement (INV-090), refuses.
 #
 # V1.5 (cf doc) : promotion auto entre etapes apres 5 deploiements clean.
 #
@@ -51,7 +50,7 @@ REMOTE_REPO="${REMOTE_REPO:-/opt/alarm}"
 DRY_RUN=0
 GATEWAY_KEY="${GATEWAY_KEY:-}"
 PENDING=""                 # noeuds encore a redemarrer dans ce passage (orchestrateur)
-VOTERS="1 2 3"             # votants etcd (INV-090), passes par l'orchestrateur
+VOTERS="3 6 7"             # votants etcd (INV-090, jour du demenagement), passes par l'orchestrateur
 SWITCHOVER_TIMEOUT="${SWITCHOVER_TIMEOUT:-60}"  # bascule Patroni (INV-187), env pour les tests
 # Backend primary apres une bascule ou un redemarrage (INV-197) : ~7 s attendus (boucle de 5 s du backend).
 PRIMARY_TIMEOUT="${PRIMARY_TIMEOUT:-60}"
@@ -70,16 +69,16 @@ while [[ $# -gt 0 ]]; do
     --dry-run)     DRY_RUN=1; shift ;;
     -h|--help)
       cat <<'HELP'
-Usage : alarm-cd-canary.sh --node <1-7> [options]
+Usage : alarm-cd-canary.sh --node <3-7> [options]
 
 Options :
-  --node <1-7>       Numero du noeud cible (requis).
+  --node <3-7>       Numero du noeud cible (requis).
   --soak <secs>      Duree du soak post-restart (default: 600 = 10 min).
   --api-base <url>   API backend pour POST events (default: http://10.99.0.1:8000).
   --gateway-key <k>  X-Gateway-Key pour POST events (sinon lit env GATEWAY_KEY).
   --pending "<N..>"  Noeuds encore a redemarrer dans ce passage : evites comme nouveau
                      leader si la cible est le leader Patroni (default: aucun).
-  --voters "<N..>"   Votants etcd, preferes comme nouveau leader (default: "1 2 3").
+  --voters "<N..>"   Votants etcd, preferes comme nouveau leader (default: "3 6 7").
   --dry-run          Affiche les actions sans les executer.
 HELP
       exit 0
@@ -88,8 +87,8 @@ HELP
   esac
 done
 
-if [[ -z "$NODE" || ! "$NODE" =~ ^[1-7]$ ]]; then
-  echo "ERREUR : --node <1-7> requis" >&2
+if [[ -z "$NODE" || ! "$NODE" =~ ^[3-7]$ ]]; then
+  echo "ERREUR : --node <3-7> requis" >&2
   exit 1
 fi
 
@@ -98,16 +97,15 @@ if [[ -z "$GATEWAY_KEY" ]]; then
   exit 1
 fi
 
-# Mapping node -> IP WG. Cohérent avec .env.prod.node{1..7} :
-#   node1 -> onsite-1 -> 10.99.0.2
-#   node2 -> onsite-2 -> 10.99.0.3
+# Mapping node -> IP WG. Cohérent avec .env.prod.node{3..7} :
 #   node3 -> NODE3 cloud -> 10.99.0.1
 #   node4 -> alarm-1 -> 10.99.0.4 (non votant)
 #   node5 -> alarm-2 -> 10.99.0.5 (non votant)
-#   node6 -> alarm-3 -> 10.99.0.6 (non votant, futur Izeron)
-#   node7 -> alarm-4 -> 10.99.0.7 (non votant, futur Izeron)
+#   node6 -> alarm-3 -> 10.99.0.6 (voteur, Izeron)
+#   node7 -> alarm-4 -> 10.99.0.7 (voteur, Izeron)
+# onsite-1/onsite-2 (node1/node2) : retires le jour du demenagement (INV-090), plus membres Patroni.
 node_ip() {
-  case "$1" in node1) echo 10.99.0.2 ;; node2) echo 10.99.0.3 ;; node3) echo 10.99.0.1 ;; *) echo "10.99.0.${1#node}" ;; esac
+  case "$1" in node3) echo 10.99.0.1 ;; *) echo "10.99.0.${1#node}" ;; esac
 }
 NODE_NAME="node$NODE"
 WG_IP=$(node_ip "$NODE_NAME")
@@ -133,11 +131,11 @@ ssh_to() {
 }
 ssh_target() { ssh_to "$WG_IP" "$@"; }
 
-# IP du backend primary via GET /health des 7 IPs WG : role=primary et cluster_writable, et un seul
+# IP du backend primary via GET /health des 5 IPs WG : role=primary et cluster_writable, et un seul
 # (deux primary = aucun, INV-197). POST /api/deployments/events requiert le leader (replicas -> 503 'replica').
 discover_leader() {
   local ip found=""
-  for ip in 10.99.0.1 10.99.0.2 10.99.0.3 10.99.0.4 10.99.0.5 10.99.0.6 10.99.0.7; do
+  for ip in 10.99.0.1 10.99.0.4 10.99.0.5 10.99.0.6 10.99.0.7; do
     if curl -fsS --max-time 3 "http://${ip}:8000/health" 2>/dev/null | python3 -c \
         "import sys,json;h=json.load(sys.stdin);sys.exit(not(h.get('role')=='primary' and h.get('cluster_writable') is True))" \
         2>/dev/null; then
@@ -315,7 +313,7 @@ print(leader.get("name", "-"), role, ok[0]["name"] if ok else "-")
 # Lu sur la cible, sinon sur un autre noeud (meme etat : il vient d'etcd).
 cluster_view() {
   local ip
-  for ip in "$WG_IP" 10.99.0.1 10.99.0.2 10.99.0.3 10.99.0.4 10.99.0.5 10.99.0.6 10.99.0.7; do
+  for ip in "$WG_IP" 10.99.0.1 10.99.0.4 10.99.0.5 10.99.0.6 10.99.0.7; do
     curl -fsS --max-time 5 "http://${ip}:8008/cluster" 2>/dev/null \
       | python3 -c "$CLUSTER_VIEW_PY" "$NODE_NAME" "$PENDING" "$VOTERS" 2>/dev/null && return 0
   done
@@ -379,7 +377,7 @@ no_primary() {  # <ce qui vient d'etre fait>
     "Seconde bascule : $retry" \
     "Resultat : $result" "" \
     "Passage arrete : aucun autre noeud redemarre (repris apres le cooldown de 1 h, ou a la prochaine image)." \
-    "A regarder : journalctl -u alarm-cd-orchestrate -n 200 sur NODE3, /health des 7 backends, docker logs ${leader}-backend-1." \
+    "A regarder : journalctl -u alarm-cd-orchestrate -n 200 sur NODE3, /health des 5 backends, docker logs ${leader}-backend-1." \
     "Cf INV-197 (tests/INVARIANTS.md), docs/CD_DESIGN.md §4." \
     | "$MAILER" "[ALARME-MURGAT] CD arrete : aucun backend primary apres $1" >&2 \
     || log "WARN : email d'alerte NON envoye ($MAILER)"

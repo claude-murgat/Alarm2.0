@@ -327,3 +327,14 @@ def test_nothing_down_nobody_alerted():
     o = evaluate(PROD, _down())
     assert o.alerted_by == ()
     assert o.sentence.endswith("Prévenu : personne.")
+
+
+def test_two_gateways_on_a_site_each_have_their_own_scenario():
+    """Jour du demenagement : alarm-3 et alarm-4 ont chacun modem et Arduino (INV-193) -> une cle de scenario
+    par passerelle (`gateway_<id>`), plus deux `gateway_izeron` ; seule sur son site, `gateway_<site>`."""
+    two = dataclasses.replace(PROD, gateways=GATEWAYS + (Gateway("alarm-2", "beaufort", "node5"),))
+    keys = [s.key for s in default_scenarios(two) if s.key.startswith("gateway_")]
+    assert keys == ["gateway_izeron", "gateway_alarm-1", "gateway_alarm-2"]
+    gw = scen(topo=two)
+    assert [gw[k].down_gateways for k in keys] == [{"onsite-2"}, {"alarm-1"}, {"alarm-2"}]
+    assert gw["gateway_alarm-2"].label == "Passerelle Beaufort (alarm-2)"

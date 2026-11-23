@@ -1,10 +1,10 @@
 """Logique pure : panneau resilience (INV-175) — ce que le systeme fait encore quand des noeuds
 ou des passerelles tombent.
 
-Topologie de prod : node1/node2 Izeron (« Legacy », bientot retires), node3 OVH, node4/node5
-Beaufort, node6/node7 Izeron ; voteurs etcd node1-3 (node3, node6, node7 apres le demenagement) ;
-node3 seul relais entre les sites et facade publique de l'app ; passerelles onsite-2 (sur node2) et
-alarm-1 (sur node4). Tout vient de SystemConfig (sites.py), rien n'est fige ici.
+Topologie de prod (jour du demenagement, INV-090) : node3 OVH, node4/node5 Beaufort, node6/node7
+Izeron ; voteurs etcd node3, node6, node7 ; node3 seul relais entre les sites et facade publique de
+l'app ; passerelles alarm-3 (node6) et alarm-4 (node7) a Izeron, alarm-1 (node4) a Beaufort. Tout vient
+de SystemConfig (sites.py), rien n'est fige ici.
 `alerted_by` (« Prevenu », 2026-11-10) : les emails que le code envoie aujourd'hui, qui les envoie et
 apres combien de temps. Sans leader, seul INV-170 part (de chaque noeud debout) ; le relais SMTP (Gmail,
 joint par l'acces Internet de chaque noeud) n'est coupe par aucun scenario.
@@ -150,6 +150,8 @@ def default_scenarios(topo: Topology) -> list:
         out.append(Scenario("legacy_unplugged", f"Legacy débranché ({' + '.join(legacy)}) : ce que corrige le jour du déménagement",
                             frozenset(legacy)))
     for g in topo.gateways:
-        out.append(Scenario(f"gateway_{g.site}", f"Passerelle {_place(g.site)} ({g.gateway_id})",
+        alone = sum(h.site == g.site for h in topo.gateways) == 1  # sinon une cle par passerelle (INV-193)
+        key = f"gateway_{g.site if alone else g.gateway_id}"
+        out.append(Scenario(key, f"Passerelle {_place(g.site)} ({g.gateway_id})",
                             frozenset(), frozenset({g.gateway_id})))
     return [replace(s, untestable=not evaluate(topo, s).leader_possible) for s in out]

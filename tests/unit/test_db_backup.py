@@ -370,7 +370,7 @@ def test_nothing_to_dump_alerts(h, case):
     assert dumps(h / "backup") == []
     assert "SUJET [ALARME-MURGAT] Sauvegarde" in read(h, "mail")
     if case == "vue_illisible":
-        assert len(read(h, "curl.log").split()) == 7  # les 7 noeuds essayes
+        assert len(read(h, "curl.log").split()) == 5  # les 5 noeuds essayes (node1/node2 retires, jour J)
 
 
 def containers_run(h):

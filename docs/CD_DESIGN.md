@@ -232,7 +232,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now alarm-gateway-sync.t
 
 ### Recommandation
 
-**Ordre** : **NODE3 (cloud)** → **alarm-4 (node7)** → **alarm-3 (node6)** → **alarm-2 (node5)** → **alarm-1 (node4)** → **onsite-2** → **onsite-1** (`NODES_ORDER=(3 7 6 5 4 2 1)`, 7 nœuds depuis le 2026-11-05 ; 5 depuis le 2026-10-27).
+**Ordre** : **NODE3 (cloud)** → **alarm-2 (node5)** → **alarm-1 (node4)** → **alarm-4 (node7)** → **alarm-3 (node6)** (`NODES_ORDER=(3 5 4 7 6)` depuis le jour du déménagement : onsite-1/onsite-2 retirés, node6/node7 voteurs ; `(3 7 6 5 4 2 1)` avant). node6 est le dernier : son `canary_promoted` déclenche l'email « Déploiement complet ».
 
 Justification :
 - **NODE3 d'abord** : seul nœud hors-site, le moins critique pour les apps Android (qui ont 2 backends LAN restants en cas de souci). Si la nouvelle image plante, l'impact métier est minimal.
@@ -276,16 +276,16 @@ L'orchestration tourne **depuis NODE3 cloud** (`alarm-cd-orchestrator.service` q
 
 **Incident** : node4/node5 (site Beaufort, non votants) hors ligne ~2 jours. Le préflight SSH de l'orchestrateur faisait `exit 1` sur 10.99.0.4 : **aucun** nœud de prod mis à jour pendant 2 jours (4 versions promues jamais déployées), plus 1 h de cooldown à chaque tour. Exigence du propriétaire : « On doit pouvoir déployer sur les deux sites indépendamment sans être bloqué ».
 
-Sites : node1 + node2 = Izeron, node3 = OVH, node4 + node5 = Beaufort, node6 + node7 = Izeron (2026-11-05, physiquement à Beaufort jusqu'au déménagement). Votants etcd : node1, node2, node3.
+Sites (jour du déménagement) : node3 = OVH, node4 + node5 = Beaufort, node6 + node7 = Izeron ; node1/node2 (onsite-1/2) retirés. Votants etcd : `VOTERS=(3 6 7)`.
 
 - **État par nœud** : `/var/lib/alarm/cd/node<N>.digest` = digest déployé avec succès sur node N (écrit après son canary OK). Chaque tick, un nœud déjà au digest courant est sauté. Les 5 à jour → no-op silencieux.
 - **Nœud injoignable** (SSH, mêmes options qu'avant) → `WARN node<N> (site) injoignable : reporté au prochain passage`, la chaîne **continue** avec les suivants.
 - **Nœud pas prêt** (canary `exit 3` : SSH coupé depuis le préflight, ou digest distant illisible depuis la cible, registre ou DNS injoignable ; rien n'est touché) → `WARN node<N> (site) pas prêt : reporté au prochain passage`, la chaîne **continue**, sans cooldown. Un votant reporté ainsi reporte les votants suivants (quorum). Cas du 2026-11-02 : alarm-1 en 4G de secours sans DNS bloquait Izeron 1 h à chaque passage.
-- **Quorum etcd** : un votant n'est redémarré que si **les 3 votants** répondent au préflight (redémarrer un votant pendant qu'un autre est absent perdrait le quorum, INV-090). Sinon aucun votant ce passage, mais les non votants 4 à 7 joignables sont déployés. Les votants sont le tableau `VOTERS=(1 2 3)` du script : le jour du déménagement, seuls `VOTERS` et `NODES_ORDER` changent (`docs/REPLACE_ONSITE_NODE.md`).
+- **Quorum etcd** : un votant n'est redémarré que si **les 3 votants** répondent au préflight (redémarrer un votant pendant qu'un autre est absent perdrait le quorum, INV-090). Sinon aucun votant ce passage, mais les non votants 4 à 7 joignables sont déployés. Les votants sont le tableau `VOTERS` du script : `(3 6 7)` depuis le jour du déménagement (`docs/REPLACE_ONSITE_NODE.md`), `(1 2 3)` avant.
 - **Canary en échec** (health KO → rollback, ou tout exit ≠ 0 du canary) → halt, `failure`, cooldown 1 h, comme avant : une image cassée ne se propage pas.
-- **`orchestrate.state`** : `<digest>\t<outcome>\t<ts>`, outcome = `success` (7 nœuds à jour) | `partial` (nœuds en attente) | `failure`. `partial` **n'a pas de cooldown** : le tick suivant (2 min, 15 min avant le 2026-11-09) reprend aussitôt les seuls nœuds en attente. Un nœud qui revient reçoit le digest **courant** (rattrapage), même s'il n'a pas changé depuis.
+- **`orchestrate.state`** : `<digest>\t<outcome>\t<ts>`, outcome = `success` (5 nœuds à jour) | `partial` (nœuds en attente) | `failure`. `partial` **n'a pas de cooldown** : le tick suivant (2 min, 15 min avant le 2026-11-09) reprend aussitôt les seuls nœuds en attente. Un nœud qui revient reçoit le digest **courant** (rattrapage), même s'il n'a pas changé depuis.
 - **Codes de sortie** : `0` rien à faire / cooldown / `success` / `partial` ; `1` erreur de config (`GATEWAY_KEY`, canary introuvable) ; `2` canary en échec.
-- **Tick 2 min** (2026-11-09, 15 min avant ; gigue 30 s au lieu de 2 min) : `OnUnitActiveSec=2min`. Un tick sans travail (7 nœuds au digest du cache NODE3) ne lit que ce cache et les `node<N>.digest` : **ni verrou, ni SSH, ni sonde `/health`, aucun log**. Le verrou partagé avec `alarm-chaos.sh` (INV-178) et la découverte du leader Patroni ne viennent qu'ensuite, quand il y a un passage à lancer. Avant, la découverte (7 `curl /health` + une ligne de log) tournait à chaque tick, avant même le verrou.
+- **Tick 2 min** (2026-11-09, 15 min avant ; gigue 30 s au lieu de 2 min) : `OnUnitActiveSec=2min`. Un tick sans travail (5 nœuds au digest du cache NODE3) ne lit que ce cache et les `node<N>.digest` : **ni verrou, ni SSH, ni sonde `/health`, aucun log**. Le verrou partagé avec `alarm-chaos.sh` (INV-178) et la découverte du leader Patroni ne viennent qu'ensuite, quand il y a un passage à lancer. Avant, la découverte (un `curl /health` par nœud + une ligne de log) tournait à chaque tick, avant même le verrou.
 - **Forcer le redéploiement d'un nœud** : `rm /var/lib/alarm/cd/node<N>.digest` puis `sudo systemctl start alarm-cd-orchestrate.service`. Un nœud retiré durablement doit sortir de `NODES_ORDER`, sinon chaque tick le signale injoignable.
 - **Couverture** : `tests/unit/test_cd_orchestrate.py` (vrai script, faux `ssh`/`docker`/canary).
 
@@ -295,7 +295,7 @@ Sites : node1 + node2 = Izeron, node3 = OVH, node4 + node5 = Beaufort, node6 + n
 
 `alarm-cd-canary.sh`, une fois établi que la cible doit être redémarrée et **avant** `canary_start` :
 
-1. Lit `GET :8008/cluster` (API Patroni de la cible, sinon d'un autre des 7 nœuds). Illisible → exit `3`, pas de redémarrage.
+1. Lit `GET :8008/cluster` (API Patroni de la cible, sinon d'un autre des 5 nœuds). Illisible → exit `3`, pas de redémarrage.
 2. Cible **pas leader** → rien de plus, comme avant.
 3. Cible **leader** → choisit un candidat : non leader, `streaming`, sur la timeline du leader, sans `nofailover` ; d'abord un nœud **qui n'est plus à redémarrer dans ce passage** (`--pending`, fourni par l'orchestrateur), puis un **votant etcd** (`--voters`, = `VOTERS` de l'orchestrateur), puis le **plus petit lag**. Aucun → event `switchover/failure` `no_candidate`, exit `3`.
 4. `POST http://<IP WG cible>:8008/switchover` `{"leader": "nodeN", "candidate": "nodeM"}` (Patroni répond de façon synchrone, ~20 s au plus ; sa réponse est journalisée), puis interroge `/cluster` toutes les 2 s jusqu'à ce qu'**un autre membre soit leader et la cible replica**, au plus `SWITCHOVER_TIMEOUT` = **60 s** depuis la demande. Dépassé → event `switchover/failure` `timeout`, exit `3`.
@@ -977,7 +977,7 @@ Désactivation : `sudo systemctl disable --now alarm-db-backup.timer alarm-db-re
 Variables communes (sur NODE3 ; `nodeN-…-1` sur nodeN) :
 ```bash
 E="docker exec node3-etcd-1 etcdctl"
-ALL="--endpoints=http://10.99.0.2:2379,http://10.99.0.3:2379,http://10.99.0.1:2379"   # node1, node2, node3
+ALL="--endpoints=http://10.99.0.6:2379,http://10.99.0.7:2379,http://10.99.0.1:2379"   # node6, node7, node3 (jour J ; .2/.3 avant)
 P="docker exec node3-patroni-1 patronictl -c /etc/patroni/patroni.yml"
 $E $ALL endpoint status -w table   # DB SIZE, IS LEADER, ERRORS (alarm:NOSPACE)
 $E $ALL endpoint health            # 3 sains
@@ -997,7 +997,7 @@ systemctl is-active alarm-cd-orchestrate.service         # « inactive » (sinon
 $E $ALL endpoint status -w table                         # IS LEADER : ce voteur passe en dernier
 $E $ALL endpoint health && $P list                       # 3 sains, un leader, replicas streaming
 
-# 1. Sur la machine du voteur (onsite-1 = node1, onsite-2 = node2, NODE3 = node3), N = son numéro
+# 1. Sur la machine du voteur (alarm-3 = node6, alarm-4 = node7, NODE3 = node3), N = son numéro
 cd /opt/alarm
 grep -c ETCD_AUTO_COMPACTION docker-compose.yml          # 2 ; sinon checkout pas à jour (git log -1) : attendre alarm-host-sync
 docker inspect nodeN-etcd-1 --format '{{range .Config.Env}}{{println .}}{{end}}' | grep AUTO_COMPACTION
@@ -1177,6 +1177,7 @@ Dans ce flux, on a remplacé 8 h de service KO + nuit blanche pour l'humain par 
 - **2026-05-22** — **CD V1.5 livré (PR 9 §8)** : `scripts/alarm-cd-orchestrate.sh` + units systemd `alarm-cd-orchestrate.{service,timer}` chaînent automatiquement `alarm-cd-canary.sh` pour les 3 nœuds dans l'ordre §4. Idempotence par state file + cooldown 1 h post-fail. Patch couplé sur `alarm-cd-canary.sh` (check du container en cours d'exécution, pas seulement du cache vs registry — sinon no-op silencieux après pull-timer). Timer `alarm-cd-orchestrate.timer` livré **disable**, à activer explicitement par l'opérateur après 5 cycles canary manuels validés (`sudo systemctl enable --now alarm-cd-orchestrate.timer` sur NODE3). Sudoers `infra/onsite/sudoers/alarm-cd` étendu en miroir (`ALARM_CD_INSTALL`, `ALARM_CD_SYSTEMCTL`, `ALARM_CD_JOURNAL`). Smoke test `cd-install-smoke.yml` étend le job au nouvel orchestrateur (RuntimeDirectory/StateDirectory/EnvironmentFile présents, timer disable par défaut, pas de Permission denied, pas de duplication logs).
 - **2026-05-22 (vérif live)** — état prod inspecté par SSH avant merge de PR 9. **Constat** : les 3 nœuds tournent `:stable` sha-de1131ac (promu 2026-05-19) depuis 3 jours, `alarm-cd-pull.timer` enabled + active partout, cluster Patroni sain (leader `node1`=onsite-1, replicas sync lag=0). **Pré-requis SSH-from-NODE3 manquants** : (a) `ufw` onsite n'autorise SSH que depuis LAN 172.16.0.0/16 — ajouter règle `from 10.99.0.0/24` ; (b) `/home/alarm/.ssh/` sur NODE3 n'a pas de keypair outbound ; (c) sshd NODE3 écoute `Port 50922` (adaptation cloud), nécessite `~/.ssh/config` pour le self-loop canary `--node 3`. Ces 3 prérequis ajoutés au runbook §9bis. Sans eux, l'orchestrate `Preflight SSH` exit 1 proprement (pas de risque de chaîne incomplète).
 - **2026-10-27** — **5 nœuds** : ajout de node4 (alarm-1, 10.99.0.4) et node5 (alarm-2, 10.99.0.5), **non votants** etcd (Patroni + backend, pas d'etcd local). Ordre canary §4 `(3 5 4 2 1)`. `alarm-cd-canary.sh`, `alarm-cd-rollback.sh` et `start-prod-node.sh` acceptent les nœuds 1 à 5. Pour 4/5, ils lancent `up --no-deps patroni backend`. Le preflight SSH de l'orchestrateur couvre les 5 IP : n'installer cette version sur NODE3 qu'une fois node4/5 en service.
+- **Jour du déménagement** — **onsite-1/2 retirés, node6/node7 voteurs** (INV-090) : 3 voteurs node3, node6, node7 ; `NODES_ORDER=(3 5 4 7 6)`, `VOTERS=(3 6 7)` ; canary, rollback et `start-prod-node.sh` refusent `--node 1`/`2` ; `.env.prod.node1/2` supprimés ; email de fin de chaîne sur node6. Orchestrateur, canary et rollback de NODE3 posés par `alarm-host-sync` (INV-141, depuis le 2026-11-13) ; `alarm-chaos.sh` reste à réinstaller à la main (§9ter). Runbook : `docs/REPLACE_ONSITE_NODE.md`, « Jour du déménagement ».
 - **2026-11-05** — **7 nœuds** : node6 (alarm-3, 10.99.0.6) et node7 (alarm-4, 10.99.0.7), **non votants**, futurs nœuds d'Izeron (affichés Izeron, physiquement à Beaufort jusqu'au déménagement). Ordre canary §4 `(3 7 6 5 4 2 1)`. `alarm-cd-canary.sh`, `alarm-cd-rollback.sh`, `alarm-cd-orchestrate.sh`, `alarm-chaos.sh`, `start-prod-node.sh` acceptent node6/node7 : **réinstaller à la main sur NODE3** les scripts posés en `/usr/local/bin` (§9bis, §9ter). Web : `machine · nœud` et badge « bientôt obsolète » (onsite-1/onsite-2), INV-161.
 - **2026-10-29** — **Déploiement indépendant par site** (§4, INV-167) après l'incident node4/5 hors ligne 2 jours (préflight `exit 1` → aucun déploiement, 4 versions bloquées). État par nœud `node<N>.digest`, nœud injoignable reporté sans bloquer les autres ni déclencher de cooldown (outcome `partial`), votants redémarrés seulement si les 3 répondent. Remplace la consigne du 2026-10-27 ci-dessus.
 - **2026-10-30** — **Panne contrôlée** (§9ter, INV-176..179) : `scripts/alarm-chaos.sh` + `alarm-chaos.{service,timer}` sur NODE3 (manuel, désactivé), API `/api/chaos` + `/internal/chaos/*`, carte « Panne contrôlée » dans l'onglet Tests. Verrou de l'orchestrateur déplacé de `/run/alarm-cd-orchestrate/lock` vers `/var/lib/alarm/cd/orchestrate.lock` pour être partagé avec le runner.

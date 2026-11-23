@@ -7,7 +7,8 @@ aucun site, pendant 2 jours (4 versions jamais deployees), plus 1 h de cooldown 
 Le vrai script tourne (copie dans un dossier temporaire, a cote d'un faux `alarm-cd-canary.sh`
 resolu via son SCRIPT_DIR) contre de faux `docker` / `ssh` (PATH) qui journalisent leurs appels.
 
-7 noeuds depuis le 2026-11-05 (node6/node7 = alarm-3/alarm-4, non votants) : ordre `3 7 6 5 4 2 1`.
+Etat final du jour du demenagement (INV-090) : node1/node2 (onsite-1/2) retires, 5 noeuds node3 a node7,
+voteurs etcd 3, 6, 7 (VOTERS), non votants 4, 5 ; ordre `3 5 4 7 6`.
 """
 import fcntl
 import os
@@ -21,7 +22,7 @@ import pytest
 pytestmark = [pytest.mark.unit, pytest.mark.no_mutation]
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "alarm-cd-orchestrate.sh"
-IP = {1: "10.99.0.2", 2: "10.99.0.3", 3: "10.99.0.1", 4: "10.99.0.4", 5: "10.99.0.5", 6: "10.99.0.6", 7: "10.99.0.7"}
+IP = {3: "10.99.0.1", 4: "10.99.0.4", 5: "10.99.0.5", 6: "10.99.0.6", 7: "10.99.0.7"}
 DIGEST = "sha256:" + "b" * 64
 
 DOCKER = '#!/usr/bin/env bash\necho "ghcr.io/claude-murgat/alarm-backend@$(cat "$H/digest")"\n'
@@ -30,7 +31,7 @@ for a in "$@"; do case "$a" in alarm@*) ip=${a#alarm@} ;; esac; done
 echo "$ip" >> "$H/ssh.log"
 case " $(cat "$H/down" 2>/dev/null) " in *" $ip "*) exit 255 ;; esac
 """
-# Decouverte du leader Patroni (GET /health des 7 noeuds) : journalisee ; seule l'IP de `primary` repond.
+# Decouverte du leader Patroni (GET /health des 5 noeuds) : journalisee ; seule l'IP de `primary` repond.
 CURL = r"""#!/usr/bin/env bash
 echo "$*" >> "$H/curl.log"
 p=$(cat "$H/primary" 2>/dev/null)
@@ -96,37 +97,42 @@ def at_digest(h):
 def test_beaufort_down_does_not_block_other_sites_then_catches_up(cd):
     rc, deployed, err = run(cd, down=(4, 5))
     assert rc == 0, err
-    assert deployed == [3, 7, 6, 2, 1]
+    assert deployed == [3, 7, 6]
     assert outcome(cd) == "partial"
-    assert at_digest(cd) == [1, 2, 3, 6, 7]
+    assert at_digest(cd) == [3, 6, 7]
     assert "node4 (Beaufort) injoignable : reporte au prochain passage" in err
 
-    # Tick suivant, Beaufort revenu : seuls 4 et 5, tout de suite (pas de cooldown).
+    # Tick suivant, Beaufort revenu : seuls 5 et 4, tout de suite (pas de cooldown).
     rc, deployed, err = run(cd)
     assert rc == 0, err
     assert deployed == [5, 4]
     assert outcome(cd) == "success"
-    assert at_digest(cd) == [1, 2, 3, 4, 5, 6, 7]
+    assert at_digest(cd) == [3, 4, 5, 6, 7]
 
 
-def test_node6_node7_not_yet_installed_do_not_block_the_others(cd):
-    """2026-11-05 : alarm-3/alarm-4 annonces avant leur installation : reportes a chaque passage."""
-    rc, deployed, err = run(cd, down=(6, 7))
-    assert rc == 0, err
-    assert deployed == [3, 5, 4, 2, 1]
-    assert outcome(cd) == "partial"
-    assert "node7 (Izeron) injoignable : reporte au prochain passage" in err
-    assert "node6 (Izeron) injoignable : reporte au prochain passage" in err
-
-    rc, deployed, err = run(cd)  # installes : deployes au tick suivant, les autres sautes
-    assert (rc, deployed) == (0, [7, 6]), err
+def test_first_pass_deploys_the_5_nodes_and_never_node1_node2(cd):
+    """Jour du demenagement : onsite-1/2 retires, jamais sondes ni deployes (aucun node1.digest)."""
+    rc, deployed, err = run(cd)
+    assert (rc, deployed) == (0, [3, 5, 4, 7, 6]), err
     assert outcome(cd) == "success"
+    assert not {"10.99.0.2", "10.99.0.3"} & set((cd / "ssh.log").read_text().split())
 
 
-def test_voter_down_no_voter_restarted_non_voters_deployed(cd):
-    rc, deployed, err = run(cd, down=(2,))
+@pytest.mark.parametrize("voter", [3, 6, 7])
+def test_voter_down_no_voter_restarted_non_voters_deployed(cd, voter):
+    rc, deployed, err = run(cd, down=(voter,))
     assert rc == 0, err
-    assert deployed == [7, 6, 5, 4]
+    assert deployed == [5, 4]
+    assert outcome(cd) == "partial"
+    assert "quorum" in err
+
+
+def test_voter_at_digest_but_unreachable_blocks_the_other_voters(cd):
+    """Le preflight couvre TOUS les voteurs des qu'un voteur est a deployer, meme ceux deja a jour."""
+    for n in IP:
+        (cd / "state" / f"node{n}.digest").write_text(DIGEST if n != 6 else "sha256:old")
+    rc, deployed, err = run(cd, down=(7,))
+    assert (rc, deployed) == (0, []), err
     assert outcome(cd) == "partial"
     assert "quorum" in err
 
@@ -145,7 +151,7 @@ def test_canary_failure_halts_chain_and_cooldown_holds(cd):
     # Cooldown (1 h) expire : la chaine est retentee.
     (cd / "state" / "orchestrate.state").write_text(f"{DIGEST}\tfailure\t{int(time.time()) - 3601}\n")
     rc, deployed, err = run(cd)
-    assert (rc, deployed) == (0, [3, 7, 6, 5, 4, 2, 1]), err
+    assert (rc, deployed) == (0, [3, 5, 4, 7, 6]), err
     assert outcome(cd) == "success"
 
 
@@ -218,9 +224,9 @@ def test_unready_beaufort_node_is_deferred_without_halting_izeron(cd):
     """2026-11-02 : alarm-1 sur sa 4G de secours, DNS mort, registre illisible -> canary exit 3."""
     rc, deployed, err = run(cd, unready=(4,))
     assert rc == 0, err
-    assert deployed == [3, 7, 6, 5, 4, 2, 1]  # 4 tente, reporte ; 2 et 1 deployes quand meme
+    assert deployed == [3, 5, 4, 7, 6]  # 4 tente, reporte ; les voteurs d'Izeron deployes quand meme
     assert outcome(cd) == "partial"
-    assert at_digest(cd) == [1, 2, 3, 5, 6, 7]
+    assert at_digest(cd) == [3, 5, 6, 7]
     assert "node4 (Beaufort) pas pret : reporte au prochain passage" in err
 
     rc, deployed, err = run(cd)  # pas de cooldown : node4 repris au tick suivant
@@ -229,16 +235,16 @@ def test_unready_beaufort_node_is_deferred_without_halting_izeron(cd):
 
 
 def test_unready_voter_defers_the_following_voters(cd):
-    """Un votant pas pret est peut-etre tombe : redemarrer un autre votant perdrait le quorum."""
+    """Un voteur pas pret est peut-etre tombe : redemarrer un autre voteur perdrait le quorum."""
     rc, deployed, err = run(cd, unready=(3,))
     assert rc == 0, err
-    assert deployed == [3, 7, 6, 5, 4]  # 2 et 1 (votants) reportes sans etre touches
+    assert deployed == [3, 5, 4]  # 7 et 6 (voteurs) reportes sans etre touches
     assert outcome(cd) == "partial"
-    assert at_digest(cd) == [4, 5, 6, 7]
-    assert "node2 (Izeron, votant) reporte" in err
+    assert at_digest(cd) == [4, 5]
+    assert "node7 (Izeron, votant) reporte" in err
 
     rc, deployed, err = run(cd)
-    assert (rc, deployed) == (0, [3, 2, 1]), err
+    assert (rc, deployed) == (0, [3, 7, 6]), err
     assert outcome(cd) == "success"
 
 
@@ -252,18 +258,17 @@ def test_canary_told_the_nodes_still_to_restart_and_the_voters(cd):
     def opt(n, name):
         return args[n][args[n].index(name) + 1]
 
-    assert [opt(n, "--pending") for n in deployed] == [
-        "7 6 5 4 2 1", "6 5 4 2 1", "5 4 2 1", "4 2 1", "2 1", "1", ""]
-    assert {opt(n, "--voters") for n in deployed} == {"1 2 3"}
+    assert [opt(n, "--pending") for n in deployed] == ["5 4 7 6", "4 7 6", "7 6", "6", ""]
+    assert {opt(n, "--voters") for n in deployed} == {"3 6 7"}
 
 
-ORDER = [3, 7, 6, 5, 4, 2, 1]
+ORDER = [3, 5, 4, 7, 6]
 
 
 def test_image_promoted_during_a_pass_triggers_a_new_pass_right_away(cd):
     """2026-11-09 : 1.9.3 promue a 08:25Z pendant un passage commence a 08:20Z ; node3 (OVH), node7 et
-    node6 sont restes un passage de plus sur l'ancienne version. Promotion au canary node6 (3e appel)."""
-    rc, deployed, err = run(cd, promote=(6,))
+    node6 sont restes un passage de plus sur l'ancienne version. Promotion au canary node4 (3e appel)."""
+    rc, deployed, err = run(cd, promote=(4,))
     assert rc == 0, err
     assert deployed == ORDER + ORDER  # 2e passage : le vrai canary sort aussitot sur un noeud deja a jour
     new = (cd / "digest").read_text().strip()
@@ -274,8 +279,8 @@ def test_image_promoted_during_a_pass_triggers_a_new_pass_right_away(cd):
 
 
 def test_new_pass_bounded_to_three_per_tick(cd):
-    """Garde-fou : une image promue a chaque passage (node1 = dernier canary) -> 3 passages, puis le tick suivant."""
-    rc, deployed, err = run(cd, promote=(1, 1, 1, 1))
+    """Garde-fou : une image promue a chaque passage (node6 = dernier canary) -> 3 passages, puis le tick suivant."""
+    rc, deployed, err = run(cd, promote=(6, 6, 6, 6))
     assert rc == 0, err
     assert deployed == ORDER * 3
     assert "3 passages faits, repris au prochain tick" in err
@@ -286,20 +291,22 @@ def pending_of(h, node):
     return args[args.index("--pending") + 1]
 
 
-@pytest.mark.parametrize("primary, order", [(3, [7, 6, 5, 4, 2, 3, 1]), (2, ORDER), (1, ORDER), (None, ORDER)])
+@pytest.mark.parametrize("primary, order", [(3, [5, 4, 7, 3, 6]), (7, ORDER), (6, ORDER), (None, ORDER)])
 def test_patroni_leader_deployed_next_to_last(cd, primary, order):
     """INV-197 : 2026-11-13, node3 leader et premier du passage -> sa bascule (INV-187) ne pouvait aller que
     vers un noeud encore sur l'ancienne image (node1), dont le backend n'est jamais devenu primary. Le leader
-    passe avant-dernier : node1 reste la fin de chaine, sa bascule va vers un noeud deja a jour."""
+    passe avant-dernier : node6 (node1 avant le demenagement) reste la fin de chaine, sa bascule va vers un
+    noeud deja a jour."""
     rc, deployed, err = run(cd, primary=primary)
     assert (rc, deployed) == (0, order), err
     if primary == 3:
-        assert pending_of(cd, 3) == "1"
+        assert pending_of(cd, 3) == "6"
 
 
 def test_deferred_node_still_counts_as_old_image_for_the_next_canaries(cd):
     """INV-197 : un noeud reporte (pas pret, injoignable) tourne encore l'ancienne image : pas un candidat prefere."""
-    rc, deployed, err = run(cd, unready=(7,))
+    # node5 (non votant) : un votant reporte reporterait aussi les votants suivants (INV-167).
+    rc, deployed, err = run(cd, unready=(5,))
     assert rc == 0, err
-    assert pending_of(cd, 6) == "7 5 4 2 1"
-    assert pending_of(cd, 1) == "7"
+    assert pending_of(cd, 4) == "5 7 6"
+    assert pending_of(cd, 6) == "5"
