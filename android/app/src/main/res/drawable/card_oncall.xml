@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- INV-ANDROID-114 : carte de la personne de garde (ecran Equipe), orange comme le web (INV-201) -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#2a1408" />
+    <corners android:radius="12dp" />
+    <stroke android:width="2dp" android:color="#f97316" />
+</shape>

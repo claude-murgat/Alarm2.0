@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- INV-ANDROID-114 : badge « DE GARDE » orange (choix du proprietaire 2026-11-24), comme le web (INV-201) -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#431407" />
+    <corners android:radius="12dp" />
+</shape>

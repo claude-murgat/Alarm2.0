@@ -221,6 +221,7 @@ class DashboardActivity : AppCompatActivity() {
         historyJob = lifecycleScope.launch {
             while (isActive) {
                 loadHistory()
+                loadOncallPerson()
                 delay(10000)
             }
         }
@@ -833,6 +834,21 @@ class DashboardActivity : AppCompatActivity() {
                     runOnUiThread { displayHistory(pastAlarms) }
                 }
             } catch (_: Exception) { }
+        }
+    }
+
+    /** INV-ANDROID-114 : qui est de garde (etape de position 1), pour tous ; masque si inconnu, sans erreur. */
+    private fun loadOncallPerson() {
+        lifecycleScope.launch {
+            val name = try {
+                Auth.call(this@DashboardActivity) { getActiveEscalation(it) }.body()
+                    ?.steps?.firstOrNull { it.position == 1 }?.name
+            } catch (_: Exception) { null }
+            findViewById<TextView>(R.id.oncallPersonName).text = name
+            findViewById<View>(R.id.oncallPerson).apply {
+                contentDescription = "De garde : $name"
+                visibility = if (name == null) View.GONE else View.VISIBLE
+            }
         }
     }
 

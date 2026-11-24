@@ -248,6 +248,18 @@ Le build type Gradle `clustertest` (app `com.alarm.critical.test` pointée sur `
 - **Pourquoi** : le cluster de test n'existe plus — ces deux adresses sont désormais les nœuds de **prod** de Beaufort (alarm-1/alarm-2, node4/node5, cf INV-ANDROID-402). Une app nommée TEST qui joint la prod était dangereuse (décision du propriétaire 2026-10-30).
 - **Ce qui reste vrai** : jamais de sélecteur de cluster dans l'app de prod ; l'app `release` n'embarque que des backends de prod.
 
+---
+
+### INV-ANDROID-114 [M] ✅ La personne de garde est repérée d'un coup d'œil : tableau de bord et écran « Équipe » (2026-11-24)
+La personne **de garde** est l'utilisateur en **position 1** de la chaîne d'escalade : même règle que le web (INV-201) et qu'INV-ANDROID-102/606.
+- **Écran « Équipe »** (admin, INV-ANDROID-011) : la carte de la personne de garde est **la première** ; les autres gardent leur ordre (par nom). Elle porte le badge texte **« DE GARDE »** (lu « De garde » par TalkBack) et elle est **mise en évidence** (fond vert foncé, bordure verte). Chaîne lue par `GET /api/config/escalation` (public) à chaque ouverture de l'écran.
+- **Tableau de bord** (tout utilisateur) : dans la carte « Statut », une ligne avec le badge **« DE GARDE »** et le **nom** de la personne de garde, que ce soit soi ou un autre (TalkBack : « De garde : `<nom>` »). Nom lu par `GET /api/alarms/active/escalation` (étape de position 1, INV-136) à l'ouverture puis toutes les 10 s, avec l'historique : un changement de la chaîne s'y voit en 10 s au plus.
+- **Pas de personne de garde** (chaîne vide, réponse en erreur, serveur injoignable) : aucun badge ni mise en évidence, ordre par nom, ligne du tableau de bord masquée, **aucun message d'erreur** (la liste de l'équipe s'affiche quand même).
+- Le libellé « ACTUELLEMENT DE GARDE » (c'est soi, INV-ANDROID-102) et le badge « ESCALADE n°N » (INV-ANDROID-101) ne changent pas.
+- Badge et couleurs du web : texte orange `#fb923c` sur orange très foncé `#431407` (contraste 6,9:1), bordure `#f97316` (orange, choix du propriétaire du 2026-11-24 : le vert se confondait avec la pastille « En ligne »).
+- **Pourquoi** : demande du propriétaire du 2026-11-24 : « dans la liste d'utilisateur ainsi que homepage du tableau de bord il faut mieux identifier l'user qui est de garde », sur le web et dans l'app. L'écran « Équipe » ne disait pas qui est de garde ; le tableau de bord ne le disait qu'à la personne de garde elle-même.
+- **Couverture** : Espresso `OncallHighlightTest` : `equipe_personne_de_garde_en_tete_badge_et_mise_en_evidence`, `equipe_sans_personne_de_garde_rien_en_evidence` (chaîne vide, HTTP 500), `tableau_de_bord_affiche_qui_est_de_garde`, `tableau_de_bord_sans_chaine_n_affiche_personne`.
+
 ## 3. Acquittement
 
 ### INV-ANDROID-200 [C] ⚠️ Bouton ACK visible UNIQUEMENT quand alarme active et user notifié
