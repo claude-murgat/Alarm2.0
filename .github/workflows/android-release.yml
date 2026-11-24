@@ -195,11 +195,16 @@ jobs:
             printf 'Empreinte SHA-256 : `%s.sha256`, que l app verifie avant d installer.\n\n' "$APK"
             printf '### Backends joints par cette version\n\n'
             printf 'Dans l ordre d essai, avec failover circulaire (INV-ANDROID-402) :\n\n'
-            printf '1. `51.210.105.102:8000` — noeud cloud OVH, le seul joignable hors des LAN des sites\n'
-            printf '2. `192.168.1.50:8000` — onsite-1, LAN Izeron\n'
-            printf '3. `192.168.1.51:8000` — onsite-2, LAN Izeron\n'
-            printf '4. `172.16.1.120:8000` — alarm-1, LAN Beaufort\n'
-            printf '5. `172.16.1.121:8000` — alarm-2, LAN Beaufort\n'
+            # Meme liste, meme ordre que BACKEND_URLS (release) de android/app/build.gradle.kts
+            # (tests/unit/test_android_backend_urls.py).
+            printf '1. `https://alarme.charlesmurgat.com/` — facade : n importe quel noeud sain (INV-199)\n'
+            printf '2. `http://51.210.105.102:8000/` — noeud cloud OVH en direct, si la facade est en panne\n'
+            printf '3. `http://192.168.1.50:8000/` — onsite-1, LAN Izeron\n'
+            printf '4. `http://192.168.1.51:8000/` — onsite-2, LAN Izeron\n'
+            printf '5. `http://172.16.1.118:8000/` — alarm-1, LAN Beaufort\n'
+            printf '6. `http://172.16.1.119:8000/` — alarm-2, LAN Beaufort\n'
+            printf '7. `http://172.16.1.120:8000/` — alarm-3, LAN Beaufort (futur noeud d Izeron)\n'
+            printf '8. `http://172.16.1.121:8000/` — alarm-4, LAN Beaufort (futur noeud d Izeron)\n'
           } > release-notes.md
           cat release-notes.md
           # Idempotent : un re-run du workflow sur le meme tag remplace l APK
