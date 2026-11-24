@@ -260,6 +260,75 @@ class TestWaitingStatus:
         expect(row("user1").locator(".badge.offline")).to_have_text("Hors ligne", timeout=8000)
 
 
+
+class TestOncallHighlight:
+    """INV-201 : la personne de garde (position 1 de la chaine) est la premiere ligne des listes
+    d'utilisateurs (onglet Utilisateurs, tableau de bord), mise en evidence, badge « DE GARDE » ;
+    les autres lignes gardent l'ordre de /api/users/."""
+
+    # onglet -> (tableau, colonne du nom)
+    LISTS = {"Utilisateurs": ("#usersTable", 1), "Tableau de bord": ("#devicesTable", 0)}
+
+    @staticmethod
+    def _set_chain(primary_url, *names):
+        hdr = _admin_headers(primary_url)
+        ids = {u["name"]: u["id"] for u in requests.get(f"{primary_url}/api/users/", headers=hdr, timeout=5).json()}
+        r = requests.post(f"{primary_url}/api/config/escalation/bulk", headers=hdr, timeout=5,
+                          json={"user_ids": [ids[n] for n in names]})
+        assert r.status_code == 200, r.text
+
+    @staticmethod
+    def _api_order(primary_url):
+        return [u["name"] for u in requests.get(f"{primary_url}/api/users/", headers=_admin_headers(primary_url),
+                                                timeout=5).json()]
+
+    def _names(self, page, tab):
+        table, col = self.LISTS[tab]
+        # le nom est le 1er mot de sa cellule (le badge le suit)
+        return [r.locator("td").nth(col).inner_text().split()[0] for r in page.locator(f"{table} tr").all()]
+
+    def _assert_oncall_first(self, page, primary_url, tab, oncall):
+        table, _ = self.LISTS[tab]
+        page.locator(f".tab:text-is('{tab}')").click()
+        first = page.locator(f"{table} tr").first
+        expect(first).to_contain_text(oncall, timeout=10000)  # rafraichissement live : jusqu'a ~3 s (INV-135)
+        expect(first.locator(".badge.oncall")).to_have_text("DE GARDE")
+        expect(first).to_have_class(re.compile(r"\boncall\b"))
+        expect(page.locator(f"{table} .badge.oncall")).to_have_count(1)
+        expect(page.locator(f"{table} tr.oncall")).to_have_count(1)
+        others = [n for n in self._api_order(primary_url) if n != oncall]
+        assert self._names(page, tab) == [oncall] + others
+
+    @pytest.mark.parametrize("tab", ["Utilisateurs", "Tableau de bord"])
+    def test_oncall_row_first_highlighted_with_badge(self, page: Page, primary_url, tab):
+        # user2 de garde, admin avant user1 dans /api/users/ : l'ordre de la chaine ne doit pas fuiter
+        self._set_chain(primary_url, "user2", "user1", "admin")
+        _login(page, primary_url)
+        self._assert_oncall_first(page, primary_url, tab, "user2")
+
+    def test_highlight_follows_a_live_chain_change(self, page: Page, primary_url):
+        _login(page, primary_url)
+        self._assert_oncall_first(page, primary_url, "Utilisateurs", "user1")
+        self._set_chain(primary_url, "user2", "user1", "admin")  # sans recharger la page (WebSocket INV-135)
+        self._assert_oncall_first(page, primary_url, "Utilisateurs", "user2")
+        self._assert_oncall_first(page, primary_url, "Tableau de bord", "user2")
+
+    @pytest.mark.parametrize("chain", ["vide", "en erreur"])
+    def test_no_oncall_highlights_nothing(self, page: Page, primary_url, chain):
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.route("**/api/config/escalation", lambda route: route.fulfill(
+            status=200, content_type="application/json", body="[]") if chain == "vide" else route.fulfill(status=500))
+        _login(page, primary_url)
+        for tab, (table, _) in self.LISTS.items():
+            page.locator(f".tab:text-is('{tab}')").click()
+            expect(page.locator(f"{table} tr")).to_have_count(len(self._api_order(primary_url)), timeout=10000)
+            expect(page.locator(f"{table} .badge.oncall")).to_have_count(0)
+            expect(page.locator(f"{table} tr.oncall")).to_have_count(0)
+            assert self._names(page, tab) == self._api_order(primary_url)
+        assert not errors, errors
+
+
 class TestTimesShownInLocalTime:
     """Le backend envoie de l'UTC sans suffixe. Un navigateur a Paris doit voir
     l'heure de Paris (incident 2026-10-14 : contact sec 15:32 affiche 13:32)."""
