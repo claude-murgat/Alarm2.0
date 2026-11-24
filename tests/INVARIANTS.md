@@ -658,6 +658,15 @@ Chaque onglet affiche en pied de page `Version <version> · nœud <local_node> (
 - **Pourquoi** : plan du 2026-10-29. Savoir d'un coup d'œil quelle version tourne et quel nœud répond, sans ouvrir l'onglet Cluster (réservé aux admins, INV-165).
 - **Couverture** : Playwright `test_frontend.py::TestFooter` (joué en local, hors CI).
 
+### INV-200 [M] ✅ Web : le primary n'est cherché sur les ports 8000 à 8002 que sur le cluster de dev (2026-11-24)
+Au chargement, le web lit `/health` du nœud qui sert la page. Les écritures (`POST`/`PUT`/`PATCH`/`DELETE`, login compris) partent vers cette même origine, sauf dans un cas :
+- **Cluster de dev sur un seul hôte** (page servie par `localhost` ou `127.0.0.1`, sur le port 8000, 8001 ou 8002) dont le nœud n'est pas `primary` : le web demande `/health` aux ports 8000, 8001 et 8002 du même hôte (2 s au plus chacun) et envoie les écritures au premier `primary`. Les simulations `/api/test/*`, que le replica ne relaie pas (INV-044), atteignent ainsi le leader.
+- **Partout ailleurs** (façade `https://alarme.charlesmurgat.com`, nœud de prod ouvert en direct sur son `:8000`, uvicorn local sur un autre port) : **aucune requête vers un autre port de l'hôte**. La détection est finie dès la réponse de `/health` ; le replica relaie les écritures au leader (INV-044).
+- Une écriture en erreur `500` relance la détection puis réessaie une fois : même règle, donc aucune attente en plus hors du dev.
+- **Pourquoi** : depuis le 2026-11-24, l'UI est publique sur un seul domaine (INV-199), derrière un balancer qui envoie chaque requête à l'un des 7 nœuds, dont 6 replicas. Sur un replica, le navigateur appelait `https://alarme.charlesmurgat.com:8000`, `:8001` et `:8002`, qui ne répondent jamais : jusqu'à 3 × 2 s perdues à chaque chargement, puis à chaque écriture en erreur 500. Un nœud de prod n'écoute que sur son `:8000` : y sonder 8001 et 8002 n'avait pas de sens non plus. Demande du propriétaire du 2026-11-24 : « corrige le chargement ».
+- **Limite** : un cluster de dev ouvert depuis une autre machine (par son IP) ne sonde pas les ports ; ses écritures `/api/test/*` sur un replica échouent. L'ouvrir sur `localhost`, ou sur le primary.
+- **Couverture** : Playwright `test_frontend.py::TestPrimaryDetection` (joué en local, hors CI ; l'hôte est simulé dans le navigateur, le vrai backend derrière, rien ne sort) : façade, nœud de prod en direct sur `:8000` et uvicorn local sur `127.0.0.1:8765`, `/health` à `secondary`, les autres ports ne répondent jamais → aucune requête vers un autre port, détection en moins de 1 s, écritures sur la même origine ; cluster de dev (page sur `localhost:8001` replica, primary sur 8002) → écritures vers `http://localhost:8002`.
+
 ### INV-124 [H] ✅ Corps du SMS d'alarme : instruction d'acquittement + lien supervision
 Le corps du SMS d'alarme métier (escalade, `_enqueue_sms_for_user`) doit (a) instruire
 l'opérateur d'acquitter en **répondant `1`** au SMS, et (b) contenir le **lien de supervision

@@ -15,6 +15,7 @@ import json
 import os
 import re
 import time
+from urllib.parse import urlsplit
 import pytest
 import requests
 from playwright.sync_api import Page, expect
@@ -1610,6 +1611,56 @@ class TestFooter:
             tab.click()
             expect(page.locator("#footer")).to_be_visible()
             expect(page.locator("#footer")).to_contain_text("Version ")
+
+
+# ---------------------------------------------------------------------------
+# INV-200 : recherche du primary (ports 8000-8002) seulement sur le cluster de dev
+# ---------------------------------------------------------------------------
+
+class TestPrimaryDetection:
+    """L'hôte de la page est simulé dans le navigateur (page.route), le vrai backend derrière :
+    aucune requête ne sort vers la façade ni vers un nœud."""
+
+    @pytest.fixture(autouse=True)
+    def _finish_routes(self, page: Page):
+        yield
+        page.unroute_all(behavior="ignoreErrors")  # /api/cluster du pied de page encore en vol à la fin du test
+
+    def _open(self, page: Page, primary_url, origin, roles):
+        """Sert l'UI sous `origin`. `roles` : rôle donné par /health de chaque origine du même hôte ;
+        une origine absente ne répond jamais (la façade sur :8000). Renvoie les URLs restées sans réponse."""
+        host = urlsplit(origin).hostname
+        unanswered = []
+
+        def handler(route):
+            u = urlsplit(route.request.url)
+            if f"{u.scheme}://{u.netloc}" not in roles:
+                unanswered.append(route.request.url)
+                return
+            resp = route.fetch(url=primary_url + u.path + (f"?{u.query}" if u.query else ""))
+            if u.path == "/health":
+                route.fulfill(response=resp, json={**resp.json(), "role": roles[f"{u.scheme}://{u.netloc}"]})
+            else:
+                route.fulfill(response=resp)
+
+        page.route(lambda url: urlsplit(url).hostname == host, handler)
+        page.goto(origin + "/", wait_until="domcontentloaded", timeout=15000)
+        return unanswered
+
+    @pytest.mark.parametrize("origin", ["https://alarme.test", "http://192.0.2.10:8000", "http://127.0.0.1:8765"])
+    def test_outside_dev_cluster_no_other_port_is_probed(self, page: Page, primary_url, origin):
+        unanswered = self._open(page, primary_url, origin, {origin: "secondary"})
+        ms = page.evaluate("(async () => { const t = performance.now(); await detectPrimary(); return performance.now() - t; })()")
+        assert unanswered == []
+        assert ms < 1000, f"détection en {ms:.0f} ms"
+        assert page.evaluate("PRIMARY_API") == ""  # écritures sur la même origine
+
+    def test_dev_cluster_writes_go_to_the_primary_port(self, page: Page, primary_url):
+        self._open(page, primary_url, "http://localhost:8001", {
+            "http://localhost:8000": "secondary", "http://localhost:8001": "secondary",
+            "http://localhost:8002": "primary"})
+        page.evaluate("detectPrimary()")
+        assert page.evaluate("PRIMARY_API") == "http://localhost:8002"
 
 
 # ---------------------------------------------------------------------------
