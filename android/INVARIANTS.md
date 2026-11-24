@@ -534,12 +534,30 @@ Tant que `AlarmPollingService` tourne, il tient un `PARTIAL_WAKE_LOCK` et un `Wi
 Dans `ApiClient.switchToNextUrl()` : `consecutiveFailures=0`, `connectionPool.evictAll()`.
 - **Pourquoi** : éviter les `Connection reset` sur sockets obsolètes vers l'ancienne URL (caché par OkHttp pool).
 
-### INV-ANDROID-402 [H] ⚠️ Rotation circulaire sur la liste `BACKEND_URLS` : `(currentUrlIndex + 1) % BACKEND_URLS.size` — révisé 2026-11-05
-`ApiClient.BACKEND_URLS` = `BuildConfig.BACKEND_URLS` (une chaîne séparée par des virgules dans `build.gradle.kts`) découpée au démarrage. En `release`, 7 URL dans cet ordre d'essai : cloud OVH `51.210.105.102` (node3) ; LAN Izeron `192.168.1.50` / `.51` (onsite-1/-2, node1/node2, bientôt obsolètes) ; LAN Beaufort `172.16.1.118` / `.119` (alarm-1/-2, node4/node5) ; LAN Beaufort `172.16.1.120` / `.121` (alarm-3/-4, node6/node7 : futurs nœuds d'Izeron, sur le LAN de Beaufort tant qu'ils n'ont pas déménagé — leur déménagement changera leur IP, donc un nouvel APK). En `debug` : `10.0.2.2:8000/8001/8002`. Après la dernière URL, la rotation revient à l'index 0. Aucun code ne suppose 3 URL : les boucles de recherche (login INV-ANDROID-405, `findPrimaryUrl`) itèrent sur `BACKEND_URLS.size`.
-- **Pourquoi** : un téléphone sur le LAN d'un site doit joindre ses nœuds locaux quand le cloud est en panne (décision du propriétaire 2026-10-30 : ajout des nœuds de Beaufort, pas de façade OVH ; 2026-11-05 : cluster à 7 nœuds, alarm-1/-2 passent en `.118` / `.119`, alarm-3/-4 ajoutés en `.120` / `.121`). Si tout est injoignable, l'app continue de tourner sur la liste.
-- **Coût d'une URL morte** : 3 polls espacés de 3 s (INV-ANDROID-400) → ≤ 9 s si la connexion est refusée, ≤ 18 s si elle expire (connect timeout 3 s, cas d'une IP LAN vue depuis la 4G).
-- **Compromis accepté** : en 4G, seul le cloud répond ; cloud en panne, l'app parcourt jusqu'à 6 URL LAN mortes (≈ 54 s, jusqu'à ≈ 108 s sur timeout) avant de réessayer le cloud. Sur le LAN de Beaufort, cloud en panne, les 2 URL d'Izeron coûtent ≤ 36 s avant alarm-1. Un tour complet reste très en dessous des 5 min de la sonnerie « hors connexion » (INV-ANDROID-308).
-- **Couverture** : test22 (3 × 503 → index 0 → 1), test34 (liste = entrées de `BuildConfig.BACKEND_URLS`, retour à 0 après la dernière).
+### INV-ANDROID-402 [H] ⚠️ Rotation circulaire sur la liste `BACKEND_URLS` : `(currentUrlIndex + 1) % BACKEND_URLS.size` — révisé 2026-11-24
+`ApiClient.BACKEND_URLS` = `BuildConfig.BACKEND_URLS` (une chaîne séparée par des virgules dans `build.gradle.kts`) découpée au démarrage. En `release`, **8 URL** dans cet ordre d'essai :
+1. **façade `https://alarme.charlesmurgat.com/`** : n'importe quel nœud sain du cluster, derrière le VPS façade (INV-199) ;
+2. cloud OVH `http://51.210.105.102:8000/` (node3, en direct) ;
+3. LAN Izeron `192.168.1.50` / `.51` (onsite-1/-2, node1/node2, bientôt obsolètes) ;
+4. LAN Beaufort `172.16.1.118` / `.119` (alarm-1/-2, node4/node5) ;
+5. LAN Beaufort `172.16.1.120` / `.121` (alarm-3/-4, node6/node7 : futurs nœuds d'Izeron, sur le LAN de Beaufort tant qu'ils n'ont pas déménagé ; leur déménagement change leur IP LAN, que seul un nouvel APK corrige, mais la façade les sert sans attendre).
+
+Les URL LAN sont inchangées. En `debug` : `10.0.2.2:8000/8001/8002`, **inchangé** (cluster de dev local de l'émulateur ; une app de test ne joint jamais la prod, cf. INV-ANDROID-113). Après la dernière URL, la rotation revient à l'index 0. Aucun code ne suppose 3 URL : les boucles de recherche (login INV-ANDROID-405, `findPrimaryUrl`) itèrent sur `BACKEND_URLS.size`. HTTPS ne demande rien à `network_security_config.xml` : il ne règle que le trafic en clair, et le certificat Let's Encrypt est reconnu par les autorités du système (minSdk 26).
+- **Pourquoi** : décision du propriétaire du **2026-11-24**, qui renverse « pas de façade OVH » du 2026-10-30 : un seul domaine, servi 24 h/24 par n'importe quel nœud, « pareil depuis l'app et l'apk ».
+  - **Façade en tête** : en 4G comme sur un LAN, elle répond tant qu'un nœud est sain (Izeron, Beaufort ou OVH).
+  - **NODE3 en direct ensuite** : le secours quand le VPS façade est en panne.
+  - **LAN en dernier** : un téléphone sur le LAN d'un site joint ses nœuds locaux quand Internet est coupé (décisions du 2026-10-30 et du 2026-11-05 : nœuds de Beaufort, cluster à 7 nœuds).
+  - Un 503 relayé par la façade (le nœud servi ne voit aucun leader, INV-043) fait basculer comme un replica (INV-ANDROID-304), donc vers NODE3 en direct.
+  - Si tout est injoignable, l'app continue de tourner sur la liste.
+- **Coût d'une URL morte** : 3 polls espacés de 3 s (INV-ANDROID-400) → ≤ 9 s si la connexion est refusée ou le nom introuvable, ≤ 18 s si elle expire (connect timeout 3 s, cas d'une IP LAN vue depuis la 4G).
+- **Compromis accepté** :
+  - en 4G, la façade et NODE3 répondent. Façade seule en panne : ≤ 18 s avant NODE3. Façade et NODE3 en panne : l'app parcourt les 6 URL LAN mortes (≈ 54 s, jusqu'à ≈ 108 s sur timeout) avant de réessayer la façade ;
+  - sur le LAN de Beaufort sans Internet : façade, NODE3 et les 2 URL d'Izeron coûtent ≤ 72 s avant alarm-1 (≤ 54 s avant le 2026-11-24, une URL morte de plus en tête) ;
+  - un tour complet (8 URL, ≤ 144 s) reste très en dessous des 5 min de la sonnerie « hors connexion » (INV-ANDROID-308).
+- **Couverture** :
+  - test22 (3 × 503 → index 0 → 1) ;
+  - test34 (liste = entrées de `BuildConfig.BACKEND_URLS`, retour à 0 après la dernière). Espresso tourne sur `debug` et ne voit pas la liste `release` ;
+  - unit `tests/unit/test_android_backend_urls.py` (lit `build.gradle.kts`) : liste `release` = façade en HTTPS, puis NODE3 en direct, puis les 6 URL LAN inchangées ; liste `debug` inchangée ; notes de la release GitHub (`android-release.yml`) = même liste, même ordre.
 
 ### INV-ANDROID-403 [M] ⚠️ Succès 2xx (poll ou heartbeat) → consecutiveFailures reset à 0
 Le compteur se remet à 0 dès qu'un appel réussit. Un pattern `fail fail success fail fail` ne déclenche pas switch.
@@ -550,7 +568,7 @@ Le compteur se remet à 0 dès qu'un appel réussit. Un pattern `fail fail succe
 - **Manque** : aucun test ne vérifie ce reset (test22 reset manuellement dans le @Test).
 
 ### INV-ANDROID-405 [M] ⚠️ Login tente toutes les URLs de `BACKEND_URLS` avant d'abandonner
-MainActivity : si le 1er login échoue, boucle `for (i in 0 until BACKEND_URLS.size) { switchToNextUrl(); login(); break if success }` — un tour complet de la liste (7 URL en release, cf INV-ANDROID-402), l'index revient donc à 0 si tout échoue.
+MainActivity : si le 1er login échoue, boucle `for (i in 0 until BACKEND_URLS.size) { switchToNextUrl(); login(); break if success }` — un tour complet de la liste (8 URL en release, cf INV-ANDROID-402), l'index revient donc à 0 si tout échoue.
 - **Pourquoi** : cluster peut être partiellement down au moment du login. L'utilisateur ne doit pas avoir à taper manuellement sur "réessayer".
 
 ---

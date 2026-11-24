@@ -92,12 +92,11 @@ android {
             // null si les variables d'env ne sont pas la (build local) -> unsigned.
             signingConfig = signingConfigs.findByName("release")
             // Cluster prod a 7 noeuds (cf .env.prod.node* + docs/PROVISIONING_ONSITE.md §22bis).
-            // Ordre cloud-first : NODE3 OVH est le seul backend joignable hors des LAN
-            // des sites (UFW limite l'accès aux LAN). En 4G ou WiFi externe, les LAN ne
-            // répondent pas — donc cloud en tête évite des timeouts au démarrage. Sur le
-            // LAN d'un site, le failover circulaire (INV-ANDROID-402) bascule sur ses
-            // noeuds si le cloud devient injoignable. Compromis : en 4G avec le cloud
-            // en panne, l'app parcourt les 6 URL LAN mortes avant de réessayer le cloud.
+            // 2026-11-24 (decision proprietaire, INV-199 / INV-ANDROID-402) : facade en tete,
+            // https://alarme.charlesmurgat.com = n'importe quel noeud sain, en 4G comme sur un
+            // LAN. Puis NODE3 en direct (secours si le VPS facade tombe), puis les LAN (Internet
+            // coupe sur un site). Compromis : en 4G, facade et NODE3 en panne, l'app parcourt
+            // les 6 URL LAN mortes avant de reessayer la facade.
             // IP LAN Izeron mises a jour 2026-10-12 (demenagement de juin :
             // 172.16.1.120/.121 -> 192.168.1.50/.51). Beaufort ajoute 2026-10-30
             // (decision proprietaire) : 172.16.1.120/.121 sont desormais alarm-1/-2,
@@ -106,7 +105,8 @@ android {
             // 2026-11-05 (decision proprietaire) : 7 noeuds. alarm-1/-2 passent en .118/.119 ;
             // alarm-3/-4 (node6/node7) prennent .120/.121.
             buildConfigField("String", "BACKEND_URLS", "\"" + listOf(
-                "http://51.210.105.102:8000/",                              // NODE3 cloud OVH
+                "https://alarme.charlesmurgat.com/",                        // facade (tout noeud sain)
+                "http://51.210.105.102:8000/",                              // NODE3 cloud OVH, en direct
                 // onsite-1/-2 Izeron (node1/node2) : bientôt obsolètes
                 "http://192.168.1.50:8000/", "http://192.168.1.51:8000/",
                 "http://172.16.1.118:8000/", "http://172.16.1.119:8000/",   // alarm-1/-2 Beaufort (node4/node5)

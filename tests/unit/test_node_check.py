@@ -4,6 +4,7 @@
 redemarrait pas seule (Boot List Option Legacy). Le vrai script tourne contre un faux /sys et /etc
 (ALARM_ROOT) et de fausses commandes (PATH), avec le vrai infra/onsite/standard.env.
 INV-188 : configuration dynamique Patroni (faux curl) sans archive_timeout inutile.
+INV-199 : wg1 vers la facade publique (VPS 51.77.222.190), sans regle ufw en entree.
 """
 import json
 import os
@@ -21,6 +22,7 @@ REPO = pathlib.Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "scripts" / "alarm-node-check.sh"
 STANDARD = REPO / "infra" / "onsite" / "standard.env"
 N3 = "GDN64aY60tBSWKN4qA6GBd/JhistmDP2oF1qN0Xj9gw="
+FACADE = "EO723NGhs9D1ZR7xPTVNUl+ZLAYYKxoQPNmXzuOWdz8="  # VPS facade (infra/onsite/peers.md)
 SECUREBOOT = "sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
 KEY = "cle-passerelle-de-test-ne-doit-pas-sortir"
 
@@ -34,10 +36,12 @@ FAKES = {
     "dpkg": '[ "$1" = --audit ] && cat "$H/dpkg_audit"',
     "ufw": 'cat "$H/ufw"',
     "chronyc": 'cat "$H/chronyc"',
-    "ip": 'cat "$H/ip_wg0"',
+    "ip": 'cat "$H/ip_${@: -1}"',  # ip -4 -o addr show dev <interface> : ip_wg0, ip_wg1
     # INV-188 : API Patroni du membre local (GET :8008/config) ; exit 7 = connexion refusee
     "curl": '[ -f "$H/patroni_down" ] && exit 7; echo "$*" > "$H/curl_args"; cat "$H/patroni_config"',
-    "wg": '[ -f "$H/wg_down" ] && { echo "Unable to access interface: No such device" >&2; exit 1; }; cat "$H/wg"',
+    # wg show <interface> latest-handshakes : fichier wg (wg0) ou wg1
+    "wg": 'f="$H/wg"; [ "$2" = wg1 ] && f="$H/wg1"; '
+          '[ -f "${f}_down" ] && { echo "Unable to access interface: No such device" >&2; exit 1; }; cat "$f"',
     "systemctl": r'''case "$1" in
   show) cat "$H/watchdog" ;;
   is-enabled) cat "$H/enabled/$2" 2>/dev/null || echo enabled ;;
@@ -66,8 +70,18 @@ def write(p, content):
     (p.write_bytes if isinstance(content, bytes) else p.write_text)(content)
 
 
-def handshake(age):
-    return f"OtherPeerKeyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=\t0\n{N3}\t{int(time.time()) - age}\n"
+def handshake(age, key=N3):
+    return f"OtherPeerKeyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=\t0\n{key}\t{int(time.time()) - age}\n"
+
+
+# `ufw status` d'une machine standard (10-harden.sh) : tout wg0, rien en entree sur wg1 (INV-199)
+UFW_OK = ("Status: active\n\nTo                         Action      From\n--                         ------      ----\n"
+          "22/tcp                     ALLOW       172.16.0.0/16\n8000/tcp                   ALLOW       172.16.0.0/16\n"
+          "Anywhere on wg0            ALLOW       Anywhere\n51820/udp                  ALLOW       Anywhere\n"
+          "Anywhere (v6) on wg0       ALLOW       Anywhere (v6)\n"
+          "Anywhere                   ALLOW OUT   Anywhere on wg1\n")  # sortie : sans effet sur l'exposition
+# ce qu'ajoutait `ufw allow in on wg1` (scripts/wg-facade-setup.sh jusqu'au 2026-11-24)
+UFW_WG1 = UFW_OK + "Anywhere on wg1            ALLOW       Anywhere\nAnywhere (v6) on wg1       ALLOW       Anywhere (v6)\n"
 
 
 @pytest.fixture
@@ -85,10 +99,13 @@ def h(tmp_path):
     (r / "var/log/journal").mkdir(parents=True)
     write(r / "etc/alarm-gateway.env", f"DRY_CONTACT_SOURCE=host\nDRY_CONTACT_NORMAL_VALUE=0\n"
                                        f"GATEWAY_ID=alarm-3\nGATEWAY_KEY={KEY}\nGATEWAY_SITE=izeron\n")
-    for f, v in (("hostname", "alarm-3\n"), ("efibootmgr", EFI_OK), ("dpkg_audit", ""), ("ufw", "Status: active\n"),
+    for f, v in (("hostname", "alarm-3\n"), ("efibootmgr", EFI_OK), ("dpkg_audit", ""), ("ufw", UFW_OK),
                  ("chronyc", "Reference ID    : 4D4D4D4D (ntp)\nStratum         : 3\nLeap status     : Normal\n"),
                  ("watchdog", "30s\n"), ("wg", handshake(30)), ("patroni_config", patroni_config()),
                  ("ip_wg0", "5: wg0    inet 10.99.0.6/24 scope global wg0\\       valid_lft forever\n"),
+                 # INV-199 : alarm-3 = 10.200.0.9 sur la facade
+                 ("ip_wg1", "6: wg1    inet 10.200.0.9/24 scope global wg1\\       valid_lft forever\n"),
+                 ("wg1", handshake(30, FACADE)),
                  ("enabled/ModemManager", "masked\n")):
         write(tmp_path / f, v)
     return tmp_path
@@ -108,7 +125,7 @@ def checks(lines, status):
 
 FAMILIES = {"modele", "bios", "demarrage", "entrees_legacy", "secure_boot", "premier_demarrage", "os",
             "dpkg_audit", "dns_secours", "ufw", "chrony", "watchdog", "journald", "modemmanager", "docker",
-            "wg0", "wg0_node3", "passerelle_cle", "passerelle_site", "passerelle_contact_sec", "patroni_archive"}
+            "wg0", "wg0_node3", "wg1", "wg1_facade", "wg1_ufw", "passerelle_cle", "passerelle_site", "passerelle_contact_sec", "patroni_archive"}
 
 
 def test_conforming_machine_is_all_ok_and_never_prints_the_gateway_key(h):
@@ -119,6 +136,7 @@ def test_conforming_machine_is_all_ok_and_never_prints_the_gateway_key(h):
     units = re.search(r'STD_UNITS="([^"]+)"', STANDARD.read_text()).group(1).split()
     assert {f"unit:{u}" for u in units} <= set(checks(lines, "OK"))
     assert "unit:alarm-node-check.timer" in checks(lines, "OK")  # le controle se surveille lui-meme
+    assert "unit:wg-quick@wg1" in checks(lines, "OK")  # INV-199 : wg1 remonte au redemarrage
     assert KEY not in out
 
 
@@ -158,6 +176,16 @@ DEVIATIONS = {
     "wg0_vieille_poignee": (lambda h: write(h / "wg", handshake(900)), ["wg0_node3"]),
     "wg0_jamais": (lambda h: write(h / "wg", f"{N3}\t0\n"), ["wg0_node3"]),
     "wg0_absent": (lambda h: (write(h / "ip_wg0", ""), write(h / "wg_down", "")), ["wg0", "wg0_node3"]),
+    # INV-199 : facade publique (wg1) ; .6 = onsite-2, pas alarm-3
+    "wg1_adresse": (lambda h: write(h / "ip_wg1", "6: wg1    inet 10.200.0.6/24 scope global wg1\n"), ["wg1"]),
+    "wg1_vieille_poignee": (lambda h: write(h / "wg1", handshake(900, FACADE)), ["wg1_facade"]),
+    "wg1_jamais": (lambda h: write(h / "wg1", f"{FACADE}\t0\n"), ["wg1_facade"]),
+    # poignee de main recente, mais avec un autre pair que le VPS
+    "wg1_autre_pair": (lambda h: write(h / "wg1", handshake(30)), ["wg1_facade"]),
+    "wg1_absent": (lambda h: (write(h / "ip_wg1", ""), write(h / "wg1_down", "")), ["wg1", "wg1_facade"]),
+    "wg1_ufw": (lambda h: write(h / "ufw", UFW_WG1), ["wg1_ufw"]),
+    "wg1_ufw_ssh": (lambda h: write(h / "ufw", UFW_OK + "22/tcp on wg1              ALLOW       Anywhere\n"),
+                    ["wg1_ufw"]),
     "cle_par_defaut": (lambda h: write(h / "root/etc/alarm-gateway.env",
                                        "DRY_CONTACT_SOURCE=host\nGATEWAY_KEY=changeme-in-prod\nGATEWAY_SITE=izeron\n"),
                        ["passerelle_cle"]),
@@ -256,6 +284,7 @@ def alarm1(h):
     """alarm-1 (node4, Beaufort) : la machine qui recoit de NODE3 la copie des sauvegardes de la base (INV-191)."""
     (h / "hostname").write_text("alarm-1\n")
     write(h / "ip_wg0", "5: wg0    inet 10.99.0.4/24 scope global wg0\n")
+    write(h / "ip_wg1", "6: wg1    inet 10.200.0.7/24 scope global wg1\n")
     write(h / "root/etc/alarm-gateway.env", f"DRY_CONTACT_SOURCE=host\nGATEWAY_KEY={KEY}\nGATEWAY_SITE=beaufort\n")
     d = h / "root/var/lib/alarm/db-backup"
     d.mkdir(parents=True)
@@ -314,3 +343,28 @@ def test_unreachable_patroni_is_info_not_ko(h, broken):
     assert rc == 0, out
     assert "patroni_archive" in checks(lines, "INFO"), out
     assert "patroni_archive" not in checks(lines, "OK") + checks(lines, "KO"), out
+
+
+def std_var(name):
+    return re.search(rf'^{name}="?([^"\n]*)"?$', STANDARD.read_text(), re.M).group(1)
+
+
+def test_facade_plan_gives_each_planned_machine_its_own_free_address():
+    """INV-199 : .1 = VPS, .2-.4 = autres clients du VPS (supervision.*), .5/.6 = onsite-1/2, jamais reattribues."""
+    machines = [e.split("=")[0] for e in std_var("STD_PLAN").split()]
+    facade = dict(e.split("=") for e in std_var("STD_FACADE_PLAN").split())
+    assert sorted(facade) == sorted(machines)
+    assert (facade["alarm-1"], facade["alarm-4"]) == ("10.200.0.7", "10.200.0.10")  # posees en prod le 2026-11-24
+    ips = list(facade.values())
+    assert len(set(ips)) == len(ips), ips
+    for ip in ips:
+        net, last = ip.rsplit(".", 1)
+        assert net == "10.200.0" and 7 <= int(last) <= 254, ip
+
+
+def test_wg_facade_setup_uses_the_standard_vps_key_and_opens_nothing_in_ufw():
+    """INV-199 : le VPS relaie entre tous ses clients ; `ufw allow in on wg1` leur ouvrait SSH."""
+    setup = (REPO / "scripts/wg-facade-setup.sh").read_text()
+    assert std_var("STD_FACADE_PUBKEY") == FACADE
+    assert f'OVH_PUBKEY="{FACADE}"' in setup
+    assert not re.search(r"^[^#\n]*\bufw\b[^#\n]*\ballow\b", setup, re.M), "regle ufw posee par wg-facade-setup.sh"
