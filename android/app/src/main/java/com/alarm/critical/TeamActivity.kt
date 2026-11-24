@@ -40,8 +40,8 @@ class TeamActivity : MenuScreenActivity("Équipe") {
     }
 
     /** Badge texte (pas seulement une couleur), memes couleurs que le web (INV-201). */
-    private fun oncallBadge() = label("DE GARDE", 11f, "#4ade80", bold = true).apply {
-        setBackgroundResource(R.drawable.badge_on_call_green)
+    private fun oncallBadge() = label("DE GARDE", 11f, "#fb923c", bold = true).apply {
+        setBackgroundResource(R.drawable.badge_oncall_orange)
         setPadding(10.dp, 4.dp, 10.dp, 4.dp)
         contentDescription = "De garde"
     }
