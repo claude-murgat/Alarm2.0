@@ -63,15 +63,26 @@ chk modemmanager "${mm:-absent} (attendu masked)" [ "$mm" = masked ]
 d=$(systemctl is-active docker 2>/dev/null)
 chk docker "docker ${d:-absent}" [ "$d" = active ]
 
-# WireGuard : adresse du plan, NODE3 (relais) vu recemment
-addr=$(ip -4 -o addr show dev "$STD_WG_IFACE" 2>/dev/null | awk '{print $4; exit}')
-chk wg0 "${addr:-interface absente} (attendu $wg_ip/24)" [ "$addr" = "$wg_ip/24" ]
-ts=$(wg show "$STD_WG_IFACE" latest-handshakes 2>/dev/null | awk -v k="$STD_NODE3_PUBKEY" '$1 == k {print $2}')
-[[ "$ts" =~ ^[0-9]+$ ]] || ts=0
-age=$(( $(date +%s) - ts )); fresh=0
-(( ts > 0 && age <= STD_WG_HANDSHAKE_MAX_AGE )) && fresh=1
-if (( ts > 0 )); then hd="NODE3 il y a $age s"; else hd="aucune poignee de main avec NODE3"; fi
-chk wg0_node3 "$hd (max $STD_WG_HANDSHAKE_MAX_AGE s)" [ "$fresh" = 1 ]
+# WireGuard : <interface> a l'adresse attendue, <pair> vu recemment.
+# wgchk <interface> <adresse/24> <cle du pair> <nom du pair> <controle poignee de main>
+wgchk(){
+  local addr ts age fresh=0 hd
+  addr=$(ip -4 -o addr show dev "$1" 2>/dev/null | awk '{print $4; exit}')
+  chk "$1" "${addr:-interface absente} (attendu $2)" [ "$addr" = "$2" ]
+  ts=$(wg show "$1" latest-handshakes 2>/dev/null | awk -v k="$3" '$1 == k {print $2}')
+  [[ "$ts" =~ ^[0-9]+$ ]] || ts=0
+  age=$(( $(date +%s) - ts ))
+  (( ts > 0 && age <= STD_WG_HANDSHAKE_MAX_AGE )) && fresh=1
+  if (( ts > 0 )); then hd="$4 il y a $age s"; else hd="aucune poignee de main avec $4"; fi
+  chk "$5" "$hd (max $STD_WG_HANDSHAKE_MAX_AGE s)" [ "$fresh" = 1 ]
+}
+wgchk "$STD_WG_IFACE" "$wg_ip/24" "$STD_NODE3_PUBKEY" NODE3 wg0_node3
+# Facade publique (INV-199) : wg1 a l'adresse du plan facade, VPS vu recemment, rien d'ouvert en entree sur
+# wg1 (le VPS relaie entre tous ses clients ; le backend 8000 reste joignable, publie par Docker).
+fip="?"; for e in $STD_FACADE_PLAN; do [ "${e%%=*}" = "$host" ] && fip=${e#*=}; done
+wgchk "$STD_FACADE_IFACE" "$fip/24" "$STD_FACADE_PUBKEY" "la facade" wg1_facade
+n=$(ufw status 2>&1 | grep -cE " on $STD_FACADE_IFACE +(ALLOW|LIMIT)")
+chk wg1_ufw "$n regle(s) ufw en entree sur $STD_FACADE_IFACE (attendu 0, INV-199)" [ "$n" = 0 ]
 
 # Passerelle (INV-182) : la cle n'est jamais affichee
 gv(){ sed -n "s/^$1=//p" "$R/etc/alarm-gateway.env" 2>/dev/null | tail -1 | tr -d '"'; }

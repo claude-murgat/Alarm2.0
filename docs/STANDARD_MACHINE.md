@@ -150,6 +150,14 @@ changent avec le site (déménagement) : elles ne sont qu'ici et dans `/etc/netw
   [`infra/onsite/peers.md`](../infra/onsite/peers.md).
 - **ufw** actif, entrée refusée par défaut ; ouverts : SSH (22) et backend (8000) depuis le LAN du
   site, SSH depuis `10.99.0.0/24` (orchestrateur CD), WireGuard 51820/udp, tout sur `wg0`.
+- **WireGuard `wg1`** (façade publique `https://alarme.charlesmurgat.com`, INV-199, depuis le
+  2026-11-24) : adresse du plan façade (`STD_FACADE_PLAN` de `standard.env` : alarm-1 à alarm-4 =
+  `10.200.0.7` à `.10` ; une nouvelle machine prend la prochaine adresse libre), MTU 1280, clé
+  `/etc/wireguard/wg1-privatekey`, **VPS façade seul pair** (`51.77.222.190:51820`,
+  `AllowedIPs = 10.200.0.0/24`, `PersistentKeepalive = 25`), posé par `scripts/wg-facade-setup.sh`
+  (§8). **Aucune règle ufw sur `wg1`** : le VPS relaie entre tous ses clients WireGuard, dont
+  d'autres applications ; le backend reste joignable (Docker publie `8000` sur `0.0.0.0`). Côté VPS :
+  [`infra/facade/`](../infra/facade/README.md).
 
 ### 5.3. Utilisateurs
 
@@ -196,7 +204,9 @@ un KO laisse `alarm-node-check.service` en `failed`. Lecture seule : il ne corri
 
 Contrôlé : modèle et BIOS, UEFI, entrées legacy, Secure Boot, première entrée de démarrage, Debian 13,
 `dpkg --audit`, DNS de secours, ufw, chrony, watchdog systemd, journal persistant, ModemManager,
-Docker, `wg0` (adresse du plan, poignée de main NODE3 < 5 min), clé/site/contact sec de la
+Docker, `wg0` (adresse du plan, poignée de main NODE3 < 5 min), `wg1` (adresse du plan façade,
+poignée de main avec le VPS façade < 5 min, aucune règle ufw en entrée : `wg1`, `wg1_facade`,
+`wg1_ufw`, INV-199), clé/site/contact sec de la
 passerelle (la clé n'est jamais affichée), units `enabled`, `archive_timeout` de la configuration
 dynamique Patroni (§9.6, INV-188 ; INFO si Patroni ne répond pas) ; **sur alarm-1 seulement**
 (`STD_DB_BACKUP_COPY_NODE`), copie des sauvegardes de la base envoyée chaque nuit par NODE3 reçue
@@ -212,11 +222,13 @@ KO attendus au premier passage (inventaire du 2026-11-06) : `bios` sur alarm-1 e
 
 Ordre standard (détail, et où chaque script tourne : [`scripts/provision/README.md`](../scripts/provision/README.md)) :
 
-1. Ajouter la machine au plan (`STD_PLAN` de `standard.env`) et ses `.env.prod.nodeN` (PR).
+1. Ajouter la machine au plan (`STD_PLAN` et `STD_FACADE_PLAN` de `standard.env`) et ses `.env.prod.nodeN` (PR).
 2. BIOS : flash A19 si besoin (§2), réglages (§3).
 3. Debian 13 (§4) ; déposer la clé SSH du poste (`ssh-copy-id`), cloner `/opt/alarm`.
 4. `00-base.sh`, `10-harden.sh`, `sudo bash infra/onsite/install.sh`.
-5. WireGuard : `20-wireguard-node.sh` (machine), `21-wireguard-node3.sh` (NODE3), `20` à nouveau.
+5. WireGuard : `20-wireguard-node.sh` (machine), `21-wireguard-node3.sh` (NODE3), `20` à nouveau ;
+   façade : `wg-facade-setup.sh 10.200.0.N/24` (machine), puis pair et `BalancerMember` sur le VPS
+   ([`infra/facade/README.md`](../infra/facade/README.md) « Ajouter un nœud »).
 6. `30-secrets.sh` (poste), `40-join.sh`, `50-gateway.sh`, `10-harden.sh --ssh`.
 7. `sudo alarm-node-check` : **que des OK** avant de déclarer la machine en service.
 
@@ -301,3 +313,6 @@ n'a de sens qu'avec de vraies sauvegardes (pgBackRest, projet à venir).
 - **2026-11-06 (suite)** : incident `archive_timeout` (§9.6) ; contrôle `patroni_archive` (INV-188).
 - **2026-11-09** : sauvegardes de la base (INV-191) : copie reçue sur alarm-1 dans `/var/lib/alarm/db-backup`
   (créé `0700 alarm` par `install.sh`), contrôle `sauvegarde_base` (moins de 26 h).
+- **2026-11-24** : façade publique `https://alarme.charlesmurgat.com` (INV-199, décision du
+  propriétaire) : `wg1` fait partie du standard (alarm-1 à alarm-4 = `10.200.0.7` à `.10`, posé ce jour,
+  règle `ufw allow in on wg1` retirée), contrôles `wg1`, `wg1_facade`, `wg1_ufw`, unit `wg-quick@wg1`.
