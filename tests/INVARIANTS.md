@@ -148,6 +148,17 @@ L'API expose `has_device` (au moins un jeton FCM enregistré) dans `/api/users/`
 - **Pourquoi** : les utilisateurs hors garde n'envoient pas de heartbeat par design (INV-ANDROID-600), ils sont réveillés par push. Le web les affichait « Hors ligne » alors que leur téléphone était allumé et joignable ; le propriétaire a cru, le 2026-10-20, qu'ils ne seraient pas appelés.
 - **Couverture** : Integration `test_waiting_status_inv143.py` ; Playwright `test_frontend.py::TestWaitingStatus` (joué en local, hors CI).
 
+### INV-201 [M] ✅ Web : la personne de garde est repérée d'un coup d'œil dans les listes d'utilisateurs (2026-11-24)
+La personne **de garde** est l'utilisateur en **position 1** de la chaîne d'escalade (`GET /api/config/escalation`, `chain[0].user_id`) : même règle que la carte « Actuellement de garde » du tableau de bord et qu'INV-143. Dans l'onglet **Utilisateurs** (`#usersTable`) et dans la liste des utilisateurs du **Tableau de bord** (`#devicesTable`) :
+- sa ligne porte, à côté du nom, le badge texte **« DE GARDE »** (`.badge.oncall`) : l'information ne passe pas que par la couleur ;
+- sa ligne est **mise en évidence** (`tr.oncall` : fond orange léger et liseré orange `#f97316` ; sous 700 px, la carte de la ligne a une bordure orange, INV-150) ;
+- sa ligne est **la première** de la liste ; les autres gardent leur ordre (celui de `/api/users/`).
+- Une seule ligne au plus est mise en évidence. Chaîne vide, chaîne illisible (erreur) ou personne de garde absente de la liste : aucune ligne mise en évidence, ordre de `/api/users/`, aucune erreur.
+- **Temps réel** : un changement de la chaîne (WebSocket INV-135, `/api/config/escalation`) redessine les deux listes. Un numéro de téléphone en cours de saisie dans l'onglet Utilisateurs n'est pas écrasé (comme pour tout rafraîchissement) : ce tableau est redessiné une fois le numéro enregistré.
+- La carte « Actuellement de garde » du tableau de bord ne change pas. Badge et couleurs sont ceux de l'app (INV-ANDROID-114) : texte orange `#fb923c` sur orange très foncé `#431407`, contraste 6,9:1 (orange, choix du propriétaire du 2026-11-24 : le vert se confondait avec la pastille « En ligne »).
+- **Pourquoi** : demande du propriétaire du 2026-11-24 : « dans la liste d'utilisateur ainsi que homepage du tableau de bord il faut mieux identifier l'user qui est de garde ». Seul le statut (INV-143) distinguait la personne de garde, au milieu de la liste.
+- **Couverture** : Playwright `test_frontend.py::TestOncallHighlight` (joué en local, hors CI) : onglet Utilisateurs et tableau de bord (badge, mise en évidence, première ligne, ordre des autres), changement de la chaîne en direct, chaîne vide.
+
 ### INV-144 [C] ✅ Escalade : le SMS et l'appel de l'assigné passent avant l'escalade au suivant
 La boucle d'escalade n'escalade une alarme de A vers B qu'une fois l'appel de A **passé** pour cette alarme (`call_queue.called_at` renseigné : sans réponse, occupé, acquitté) **et** le SMS de A **parti** (aucun SMS vers son numéro encore en file : `sent_at` vide et `retries < 3`). Ne concerne que les assignés ayant un `phone_number`. Un SMS ou un appel abandonné après 3 échecs (INV-064) compte comme passé.
 - **Appel `error`** (jamais émis, INV-127) : ne compte pas comme passé. `called_at` reste vide, l'appel reste dans `/internal/calls/pending` et la gateway le rejoue (`retries` +1, au plus 3 essais).
