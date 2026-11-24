@@ -50,6 +50,8 @@ $E member add nodeN --peer-urls=http://10.99.0.X:2380
 ```
 etcd tourne alors à 2 membres actifs sur 3 déclarés : le quorum (2) est tenu. Patroni garde son leader ou en élit un sur les 2 nœuds restants.
 
+Façade publique (INV-199) : sur le VPS, retirer le `BalancerMember` puis le pair `wg0` de l'ancien nœud ([`infra/facade/README.md`](../infra/facade/README.md) « Retirer un nœud ») ; **le jour du déménagement : `10.200.0.5` et `.6` (onsite-1, onsite-2)**.
+
 ## 2. Mettre la nouvelle machine dans le mesh
 1. Monter `wg0` prod avec l'IP 10.99.0.X et la **nouvelle** clé (`infra/onsite/wg0.conf.example`).
 2. Sur NODE3 et sur l'autre nœud sur site, remplacer la clé publique de l'ancien peer par la nouvelle (`infra/onsite/peers.md` §Procédure d'ajout d'un peer), puis `wg syncconf`.
