@@ -83,17 +83,17 @@ Seuils et chemins surchargeables par variables d'env (`DISK_WARN_PCENT`, `DISK_C
 
 ## Exposition publique via VPS OVH (tunnel façade `wg1`)
 
-En plus du mesh cluster (`wg0`, 10.99.0.x), chaque onsite monte un **2ᵉ tunnel
+En plus du mesh cluster (`wg0`, 10.99.0.x), chaque nœud sur site monte un **2ᵉ tunnel
 WireGuard `wg1`** (sous-réseau `10.200.0.0/24`) vers un **VPS OVH à IP fixe** qui
-reverse-proxy l'UI alarme (port `8000`) vers l'extérieur. Interface **séparée** —
-`wg0` n'est jamais touché. Roaming complet (survit au déménagement de site).
+sert `https://alarme.charlesmurgat.com` (backends port `8000`, INV-199,
+[`infra/facade/`](../facade/README.md)). Interface **séparée** — `wg0` n'est jamais
+touché. Roaming complet (survit au déménagement de site). Aucune règle ufw sur `wg1`.
 
 ```bash
-sudo bash scripts/wg-facade-setup.sh 10.200.0.5/24   # alarme1 (onsite-1)
-sudo bash scripts/wg-facade-setup.sh 10.200.0.6/24   # alarme2 (onsite-2)
+sudo bash /opt/alarm/scripts/wg-facade-setup.sh 10.200.0.7/24   # alarm-1 (.8 alarm-2, .9 alarm-3, .10 alarm-4 : STD_FACADE_PLAN)
 ```
 
-Détails (adressage, clés publiques à déclarer côté OVH, MTU 1280, ufw) :
+Détails (adressage, clés publiques à déclarer côté OVH, MTU 1280, pas de règle ufw) :
 [`peers.md` § Tunnel façade OVH](peers.md). Template : [`wg1-facade.conf.example`](wg1-facade.conf.example).
 
 ## Maintenance

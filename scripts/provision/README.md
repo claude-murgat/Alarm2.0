@@ -25,6 +25,7 @@ pour alarm-3 et alarm-4 (2026-11-05), rendus réutilisables :
 | 5 | `infra/onsite/install.sh` | machine | root | passerelle, pile modem, DNS de secours, timers (`alarm-host-sync`, `alarm-node-check`…) |
 | 6 | `20-wireguard-node.sh` | machine | root | clé WireGuard, `wg0` à l'IP du plan, NODE3 seul pair ; affiche la commande de l'étape 7 |
 | 7 | `21-wireguard-node3.sh <10.99.0.X> <clé> <nom>` | **NODE3** | root | déclare le pair (relayé, sans `Endpoint`) ; puis relancer l'étape 6 : « OK poignée de main » |
+| 7bis | `scripts/wg-facade-setup.sh <10.200.0.X/24>` | machine, puis **VPS façade** | root | `wg1` vers la façade publique (INV-199), adresse de `STD_FACADE_PLAN`, sans règle ufw ; affiche la clé à déclarer sur le VPS : pair + `BalancerMember` ([`infra/facade/README.md`](../../infra/facade/README.md) « Ajouter un nœud ») |
 | 8 | `30-secrets.sh alarm@<IP>` | **poste** | opérateur | `.env.prod.secrets` + clé Firebase en flux NODE3 → machine, clé SSH de l'orchestrateur CD, empreintes comparées |
 | 9 | `40-join.sh` | machine | root | `start-prod-node.sh --pull N`, attente `streaming` |
 | 10 | `50-gateway.sh` | machine | root | `GATEWAY_KEY`, `GATEWAY_SITE` du plan, `DRY_CONTACT_SOURCE=host` |

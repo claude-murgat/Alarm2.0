@@ -7,9 +7,10 @@
 # le casserait). Les deux tunnels coexistent sans conflit (sous-réseaux disjoints
 # 10.99.0.0/24 vs 10.200.0.0/24).
 #
-# Adresses internes façade :
-#   10.200.0.5 = alarme1 (onsite-1)
-#   10.200.0.6 = alarme2 (onsite-2, cette machine)
+# Adresses internes façade (plan complet : peers.md, STD_FACADE_PLAN de standard.env) :
+#   10.200.0.5 / .6 = onsite-1 / onsite-2 (cet exemple : onsite-2)
+#   10.200.0.7 à .10 = alarm-1 à alarm-4
+# Sert https://alarme.charlesmurgat.com (INV-199, infra/facade/).
 #
 # Roaming : aucun Endpoint déclaré côté OVH pour les onsite → le tunnel se
 # rétablit tout seul depuis une nouvelle IP publique (déménagement de site).
@@ -17,7 +18,8 @@
 #
 # Setup reproductible : scripts/wg-facade-setup.sh <10.200.0.X/24>
 # (génère la clé dans /etc/wireguard/wg1-privatekey, écrit ce fichier, active
-#  wg-quick@wg1, pose la règle ufw — sans jamais toucher wg0).
+#  wg-quick@wg1 — sans jamais toucher wg0). AUCUNE règle ufw sur wg1 : le VPS
+#  relaie entre tous ses clients (cf. le script).
 
 [Interface]
 # Contenu de /etc/wireguard/wg1-privatekey (mode 600, jamais commit)
