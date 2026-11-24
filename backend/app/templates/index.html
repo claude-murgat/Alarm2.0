@@ -40,6 +40,10 @@
         .badge.offline { background: #ef444433; color: #ef4444; }
         .badge.waiting { background: #f59e0b33; color: #f59e0b; }
         .badge.retiring { background: #f59e0b33; color: #f59e0b; }
+        /* INV-201 : personne de garde, memes couleurs que l'app (contraste 5,2:1) */
+        .badge.oncall { background: #14532d; color: #4ade80; margin-left: 6px; letter-spacing: .03em; }
+        tr.oncall { background: #22c55e1a; }
+        tr.oncall td:first-child { box-shadow: inset 3px 0 0 #22c55e; }
         /* INV-161 : en-tete de groupe (Izeron, Beaufort, OVH, Legacy (Izeron) separe en dernier) */
         tr.group-row td { font-weight: 600; color: #94a3b8; background: #33415533; }
         tr.group-row.legacy td { color: #f59e0b; border-top: 2px solid #f59e0b; }
@@ -216,6 +220,8 @@
             table.cards tr { border: 1px solid #334155; border-radius: 6px; padding: 4px 10px; margin-bottom: 8px; }
             table.cards td { border: none; padding: 5px 0; max-width: none !important; overflow-wrap: anywhere; }
             table.cards tr.group-row { border: none; padding: 8px 0 0; margin-bottom: 4px; }
+            table.cards tr.oncall { border-color: #22c55e; }
+            table.cards tr.oncall td:first-child { box-shadow: none; }
             table.cards td[data-label]::before { content: attr(data-label); display: inline-block; min-width: 8em; margin-right: 8px;
                 color: #94a3b8; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; }
         }
@@ -874,6 +880,11 @@
             const [cls, label, tip] = presence(u, oncallId);
             return `<span class="badge ${cls}" title="${tip}">${label}</span>`;
         }
+        // INV-201 : la personne de garde en tete (les autres dans l'ordre recu), ligne mise en evidence, badge texte
+        const oncallFirst = (list, id) => [...list.filter(u => u.id === id), ...list.filter(u => u.id !== id)];
+        const oncallRow = (u, id) => u.id === id ? ' class="oncall"' : '';
+        const oncallBadge = (u, id) => u.id === id
+            ? ' <span class="badge oncall" title="Position 1 de la chaîne d\'escalade : appelé en premier">DE GARDE</span>' : '';
 
         async function loadUsers() {
             users = await api('/api/users/');
@@ -881,8 +892,8 @@
             // Re-rendre le tableau detruirait les champs tel en cours de saisie.
             if ([...document.querySelectorAll('#usersTable input.user-phone')].some(isEditing)) return;
             // Assignation alarme supprimee (toujours auto-escalade)
-            document.getElementById('usersTable').innerHTML = users.map(u => `
-                <tr><td data-label="ID">${u.id}</td><td data-label="Nom">${u.name}</td>
+            document.getElementById('usersTable').innerHTML = oncallFirst(users, oncall).map(u => `
+                <tr${oncallRow(u, oncall)}><td data-label="ID">${u.id}</td><td data-label="Nom">${u.name}${oncallBadge(u, oncall)}</td>
                 <td data-label="Admin">${u.is_admin ? 'Oui' : 'Non'}</td>
                 <td data-label="Test" class="user-test">${u.is_test ? 'Oui' : 'Non'}</td>
                 <td data-label="Statut">${presenceBadge(u, oncall)}</td>
@@ -961,8 +972,8 @@
         async function loadDevices() {
             const usersList = await api('/api/users/');
             const oncall = await oncallUserId();
-            document.getElementById('devicesTable').innerHTML = usersList.map(u => `
-                <tr><td>${u.name}</td>
+            document.getElementById('devicesTable').innerHTML = oncallFirst(usersList, oncall).map(u => `
+                <tr${oncallRow(u, oncall)}><td>${u.name}${oncallBadge(u, oncall)}</td>
                 <td>${presenceBadge(u, oncall)}</td>
                 <td>${timeAgo(u.last_heartbeat)}</td></tr>`).join('') || '<tr><td colspan="3" style="text-align:center;color:#94a3b8">Aucun utilisateur</td></tr>';
         }
@@ -1896,7 +1907,7 @@
         const LIVE_WATCH = {
             '/api/alarms/?days=90': [loadStatus, loadAlarms, loadStats],
             '/api/users/': [loadUsers, loadDevices, loadStatus],
-            '/api/config/escalation': [loadEscalation, loadStatus],
+            '/api/config/escalation': [loadEscalation, loadStatus, loadUsers, loadDevices],  // INV-143/201 : statut et « DE GARDE »
             '/api/alarms/active/escalation': [loadEscalationLive],
             '/api/config/escalation-delay': [loadEscalation],
             '/api/config/system': [loadAlertEmail],
