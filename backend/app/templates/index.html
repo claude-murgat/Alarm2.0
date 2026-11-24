@@ -682,8 +682,9 @@
                 loadFooter(h);
                 if (h.role === 'primary') { PRIMARY_API = ''; return; }
             } catch(e) {}
-            // Sinon chercher parmi les backends connus
-            const ports = [8000, 8001, 8002];
+            // INV-200 : sinon chercher le primary sur les autres ports, seulement sur le cluster de dev mono-hôte.
+            // Ailleurs (façade, nœud de prod) ces ports ne répondent jamais ; le replica relaie l'écriture (INV-044).
+            const ports = /^(localhost|127\.0\.0\.1):800[0-2]$/.test(location.host) ? [8000, 8001, 8002] : [];
             for (const port of ports) {
                 try {
                     const url = `${location.protocol}//${location.hostname}:${port}`;
