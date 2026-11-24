@@ -7,29 +7,43 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import androidx.appcompat.app.AlertDialog
 import androidx.lifecycle.lifecycleScope
+import com.alarm.critical.api.ApiProvider
 import com.alarm.critical.model.PhoneUpdate
 import com.alarm.critical.model.UserCreateRequest
 import com.alarm.critical.model.UserResponse
 import kotlinx.coroutines.launch
 
-/** INV-ANDROID-011 (admin) : comptes de l'equipe — liste, creation, suppression, telephone. */
+/** INV-ANDROID-011 (admin) : comptes de l'equipe — liste, creation, suppression, telephone.
+ *  INV-ANDROID-114 : la personne de garde (position 1 de la chaine) en tete, mise en evidence. */
 class TeamActivity : MenuScreenActivity("Équipe") {
 
     override suspend fun load() {
         val users = api { getUsers(it) } ?: return
+        // Chaine publique, hors api() : illisible -> personne de garde inconnue, sans toast
+        val oncallId = runCatching { ApiProvider.service.getEscalationChain().body() }.getOrNull()
+            ?.firstOrNull { it.position == 1 }?.user_id
         content.removeAllViews()
         button("Ajouter un utilisateur") { createDialog() }
-        users.sortedBy { it.name }.forEach { u ->
+        users.sortedWith(compareBy({ it.id != oncallId }, { it.name })).forEach { u ->
+            val oncall = u.id == oncallId
             val details = listOfNotNull(
                 u.phone_number ?: "pas de téléphone",
                 "admin".takeIf { u.is_admin },
                 "compte test".takeIf { u.is_test },
             )
-            row(u.name, details.joinToString(" · "), listOf(
+            row(u.name, details.joinToString(" · "), listOfNotNull(
+                if (oncall) oncallBadge() else null,
                 action("☎", "Modifier le téléphone de ${u.name}") { phoneDialog(u) },
                 action("✕", "Supprimer ${u.name}") { confirmDelete(u) },
-            ))
+            )).apply { if (oncall) setBackgroundResource(R.drawable.card_oncall) }
         }
+    }
+
+    /** Badge texte (pas seulement une couleur), memes couleurs que le web (INV-201). */
+    private fun oncallBadge() = label("DE GARDE", 11f, "#4ade80", bold = true).apply {
+        setBackgroundResource(R.drawable.badge_on_call_green)
+        setPadding(10.dp, 4.dp, 10.dp, 4.dp)
+        contentDescription = "De garde"
     }
 
     /** Lance [block] puis recharge la liste s'il a reussi. */
